@@ -1,0 +1,21 @@
+# Traefik configuration (T4, §5.2, D-010) — CONFIGURE the BUNDLED k3s/k3d
+# Traefik; do NOT install a second copy. k3s ships Traefik as a `traefik`
+# HelmChart in kube-system (helm-controller managed). We layer two things:
+#   - a default TLSStore pointing at the cert-manager wildcard secret, so every
+#     *.${PLATFORM_DOMAIN} HTTPS request is served the wildcard cert without
+#     per-Ingress cert config (§5.2);
+#   - a HelmChartConfig that asserts the websecure entrypoint + ports (additive
+#     to k3s defaults — does not replace the bundled chart).
+#
+# Managed by the platform-services-appset (T3).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - tlsstore.yaml
+  - helmchartconfig.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false

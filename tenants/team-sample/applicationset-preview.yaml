@@ -1,0 +1,85 @@
+# ============================================================================
+# Ephemeral PREVIEW ApplicationSet (§2.4, D-009) — Phase-1 GIT-BRANCH STAND-IN.
+# Tokens: sample, 2026-fall.
+#
+# D-009: Phase 1 proves ephemeral preview namespaces WITHOUT a live GitHub org.
+# The PRODUCTION trigger is the ArgoCD pullRequest generator (commented seam at
+# the bottom); until GITHUB_ORG previews are wired we use a LIST generator seeded
+# with the known feature branch + preview number. This exercises the SAME
+# primitive (one App per "PR" -> ephemeral <team>-pr-<n> ns -> auto-pruned when
+# the element is removed) so the swap to the live PR generator is one config edit
+# in promotion.yaml — nothing else changes.
+#
+# Each preview App ALSO needs its namespace guardrails (quota/limitrange/netpol/
+# RBAC from namespaces/preview.yaml). The orchestrating tenant applies those with
+# 1 substituted; see namespaces/preview.yaml header.
+# ============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: sample-preview
+  namespace: argocd
+  labels:
+    platform.capstone/team: sample
+    platform.capstone/semester: 2026-fall
+    platform.capstone/component: tenant
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    # ---- PHASE-1 STAND-IN: list generator over known feature branch(es) -------
+    # Add an element to "open" a preview; remove it to tear the preview down
+    # (the ApplicationSet prunes the App, whose prune policy deletes the ns).
+    # Ephemeral-by-construction, exactly like the PR generator — just triggered
+    # by editing this list instead of by GitHub PR events.
+    - list:
+        elements:
+          - number: "1"               # stand-in "PR number" -> sample-pr-1
+            branch: preview-demo       # the feature branch to deploy
+  template:
+    metadata:
+      name: 'sample-pr-{{.number}}'
+      labels:
+        platform.capstone/team: sample
+        platform.capstone/semester: 2026-fall
+        platform.capstone/env: preview
+    spec:
+      project: sample
+      source:
+        repoURL: https://github.com/UA-MIS/sample-app
+        targetRevision: '{{.branch}}'
+        path: .devops/chart/overlays/preview
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: 'sample-pr-{{.number}}'
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true        # preview ns is created on demand
+        retry:
+          limit: 5
+          backoff: { duration: 5s, factor: 2, maxDuration: 3m }
+
+# ============================================================================
+# PRODUCTION SEAM (swap in when GITHUB_ORG previews are wired — D-007/D-009).
+# Replace the `list` generator above with the pullRequest generator below. The
+# template is otherwise unchanged: {{.number}} and {{.head_sha}} come from the
+# generator instead of the hand-maintained list. This is the SINGLE configured
+# place for the PR->preview trigger (promotion.yaml references it).
+#
+#  generators:
+#    - pullRequest:
+#        github:
+#          owner: UA-MIS
+#          repo: sample-app
+#          # tokenRef: { secretName: github-token, key: token }   # via SealedSecret
+#        requeueAfterSeconds: 30
+#  # template.spec.source.targetRevision: '{{.head_sha}}'
+#  # template.spec.source.path: .devops/chart/overlays/preview
+#
+# The pullRequest generator's native lifecycle deletes the Application when the
+# PR closes/merges; `prune: true` then tears down the namespace. No custom
+# teardown controller needed (§2.4).
+# ============================================================================

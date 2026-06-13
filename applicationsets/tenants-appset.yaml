@@ -1,0 +1,57 @@
+# tenants ApplicationSet (§2.1, ADR-006). A git DIRECTORY generator over
+# tenants/*/ — each TEAM directory becomes one "team bootstrap" Application that
+# renders that team's tenancy objects (AppProject, namespaces+quota+limitrange+
+# netpol+rbac, env ApplicationSet, preview ApplicationSet). Onboarding a team =
+# add tenants/team-<name>/ and commit; this generator detects the dir and ArgoCD
+# reconciles the whole tenant (no imperative kubectl).
+#
+# The `_template` directory is EXCLUDED — it is the canonical blueprint copied to
+# onboard a team, not itself a live tenant.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: tenants
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - git:
+        repoURL: https://github.com/UA-MIS/platform-infra
+        revision: HEAD
+        directories:
+          - path: tenants/*
+          - path: tenants/_template
+            exclude: true        # the blueprint is not a live tenant
+  template:
+    metadata:
+      name: 'tenant-{{.path.basename}}'
+      labels:
+        platform.capstone/component: platform
+    spec:
+      # The team BOOTSTRAP app runs in the privileged platform project because it
+      # creates the team's AppProject (a cluster-namespaced argocd object). The
+      # team's WORKLOADS, by contrast, run in the team's OWN project (the env /
+      # preview ApplicationSets pin project: <team>) — that is the tenancy fence.
+      project: platform
+      source:
+        repoURL: https://github.com/UA-MIS/platform-infra
+        targetRevision: HEAD
+        path: '{{.path.path}}'
+        directory:
+          recurse: true          # tenant dir has namespaces/ subdir
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: argocd        # AppProject + ApplicationSets are argocd-ns objects
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=false
+          - ServerSideApply=true
+        retry:
+          limit: 5
+          backoff: { duration: 5s, factor: 2, maxDuration: 3m }

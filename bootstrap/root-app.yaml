@@ -1,0 +1,43 @@
+# app-of-apps ROOT (§2.1). A human (or `make bootstrap`) applies this ONCE to a
+# fresh cluster after ArgoCD is installed. It points ArgoCD at platform-infra's
+# `applicationsets/` directory; everything else (platform-services, tenants)
+# fans in from there. ArgoCD is the only writer of desired state from here on.
+#
+# Lives in the cluster-scoped `platform` AppProject (bootstrap/platform-appproject.yaml).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    # REPO SEAM: this and every other repoURL is the real UA-MIS home. For a
+    # local run, `make set-repo-base` rewrites them all from GIT_BASE_URL in one
+    # shot (see bootstrap/REPO-SEAM.md). Single swappable value, like PLATFORM_DOMAIN.
+    repoURL: https://github.com/UA-MIS/platform-infra
+    targetRevision: HEAD
+    # Directory recurse over applicationsets/ — picks up both child appsets.
+    path: applicationsets
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false   # argocd ns already exists from the install
+      - ApplyOutOfSyncOnly=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m

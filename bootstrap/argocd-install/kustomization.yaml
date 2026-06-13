@@ -1,0 +1,43 @@
+# ArgoCD install (T3) — pinned to a specific release for reproducibility.
+#
+# We layer the upstream stable install manifest (pinned by git tag) into the
+# `argocd` namespace via kustomize. `make bootstrap` applies this once to a fresh
+# cluster, then applies bootstrap/root-app.yaml so ArgoCD manages everything else.
+#
+# Pinning: the remote base is pinned to tag v3.4.3 (no :latest, no HEAD). Bump
+# the ref deliberately. Phase 1 is single-replica (the non-HA `install.yaml`);
+# HA / multi-replica is a Phase-3 concern per the T3 spec (see values-notes.md).
+#
+# Why the upstream raw manifest rather than the Helm chart: it is the canonical,
+# self-contained install ArgoCD itself publishes; it needs no Helm at apply time
+# (kubectl/kustomize only), keeping `make bootstrap` dependency-light.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: argocd
+
+resources:
+  # Pinned upstream non-HA install (CRDs + controller + repo-server + server +
+  # redis + applicationset controller). Pinned by the ?ref=v3.4.3 git tag.
+  - https://raw.githubusercontent.com/argoproj/argo-cd/v3.4.3/manifests/install.yaml
+
+# Phase-1 server config: run the API server in HTTP mode behind Traefik (the
+# wildcard TLS cert from cert-manager terminates at the ingress, T4). This is a
+# strategic-merge patch so it ADDS the data block without touching the rest of
+# the upstream ConfigMap.
+patches:
+  - patch: |
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: argocd-cmd-params-cm
+      data:
+        server.insecure: "true"
+    target:
+      kind: ConfigMap
+      name: argocd-cmd-params-cm
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false

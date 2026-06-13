@@ -1,0 +1,59 @@
+# Self-signed local-CA issuer chain (§5.1, Phase 1 — NO ACME).
+#
+# Pattern: a self-signed ClusterIssuer mints a CA Certificate; a second
+# ClusterIssuer (ca-issuer) then signs leaf certs FROM that CA. This gives one
+# stable CA the browser/client can trust once, instead of N independently
+# self-signed leaf certs. Phase 3 replaces `ca-issuer` with an ACME DNS-01
+# ClusterIssuer against Cloudflare — the wildcard Certificate's issuerRef name
+# stays the same, so nothing downstream changes.
+#
+# Sync waves: these are wave 2 (after the cert-manager install/CRDs at wave 0).
+---
+# 1) bootstrap self-signed issuer — signs the CA cert itself.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned-bootstrap
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  selfSigned: {}
+---
+# 2) the platform CA certificate, signed by the self-signed issuer above. Stored
+#    as a Secret in cert-manager's namespace; ca-issuer references it.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: platform-ca
+  namespace: cert-manager
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  isCA: true
+  commonName: capstone-platform-ca
+  secretName: platform-ca-keypair       # the CA keypair ca-issuer signs with
+  duration: 87600h                       # 10y — local dev CA
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: selfsigned-bootstrap
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+# 3) the CA issuer — signs all platform leaf certs (the wildcard) from the CA.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: platform-ca-issuer
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
+spec:
+  ca:
+    secretName: platform-ca-keypair

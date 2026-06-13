@@ -1,0 +1,24 @@
+# Sealed Secrets controller (T4, §5.3, ADR-003, D-006) — pinned install.
+#
+# Pins the upstream controller manifest to v0.37.0 (matches the kubeseal CLIENT
+# version used by `make seal`, so there is no client/controller skew). The
+# upstream manifest deploys into kube-system with controller name
+# `sealed-secrets-controller` — that is what `make seal` targets.
+#
+# Managed by the platform-services-appset (T3): the child Application for this
+# dir syncs these manifests. Because the upstream objects hard-code
+# `namespace: kube-system`, this service lives in kube-system regardless of the
+# appset's namespace param (an explicit namespace in a manifest wins). That is
+# intentional — sealed-secrets is a cluster controller, co-located with the other
+# k3d system components.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  # Pinned upstream controller (Deployment + CRD + RBAC + Services) in kube-system.
+  - https://github.com/bitnami-labs/sealed-secrets/releases/download/v0.37.0/controller.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false

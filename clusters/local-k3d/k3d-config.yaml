@@ -1,0 +1,61 @@
+# k3d cluster shape for Phase 1 (D-002, ADR-001).
+# Apply with:  k3d cluster create --config clusters/local-k3d/k3d-config.yaml
+# The Makefile `cluster-up` target wraps this and is the supported entrypoint.
+#
+# Design notes (see phase-1-architecture.md §1.1 / §6):
+#   - 1 server + 1 agent: exercises real scheduling across >1 node while staying
+#     laptop-friendly. Agents are the portability seam to multi-node real-k3s.
+#   - Built-in registry `k3d-registry.localhost:5000`: the D-005 image-bump target.
+#     k3d wires the registry into containerd's registries.yaml on every node, so
+#     `k3d-registry.localhost:5000/<img>` is pullable cluster-internally with no
+#     extra config. Host-side pushes use the same name via the hosts-file entry
+#     `make cluster-up` ensures (127.0.0.1 k3d-registry.localhost).
+#   - LB port maps 80/443 -> host: makes the bundled Traefik (D-010) reachable at
+#     http(s)://<anything>.127.0.0.1.sslip.io (D-003) from the host browser.
+#   - Traefik is NOT disabled here: D-010 says configure the bundled Traefik, so we
+#     keep k3s's default Traefik and layer wildcard-TLS config on it in T4.
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: capstone        # cluster name -> containers are k3d-capstone-*
+
+servers: 1
+agents: 1
+
+# k3s/k3d ship Traefik by default (D-010). We deliberately do NOT pass
+# --disable=traefik; T4 configures this bundled instance.
+image: rancher/k3s:v1.31.5-k3s1   # pinned for reproducibility (no :latest)
+
+# Built-in container registry the local CI loop (T8 / D-005) pushes to.
+registries:
+  create:
+    name: k3d-registry.localhost
+    host: "0.0.0.0"
+    hostPort: "5000"
+
+# Map the k3d loadbalancer (which fronts the bundled Traefik) to host 80/443
+# so *.127.0.0.1.sslip.io resolves to the ingress from the host.
+ports:
+  - port: 80:80
+    nodeFilters:
+      - loadbalancer
+  - port: 443:443
+    nodeFilters:
+      - loadbalancer
+
+options:
+  k3d:
+    wait: true
+    timeout: "300s"
+    disableLoadbalancer: false
+    disableImageVolume: false
+  k3s:
+    nodeLabels:
+      # Mark nodes so platform-vs-tenant scheduling policy can target them later.
+      - label: platform.capstone/node=shared
+        nodeFilters:
+          - server:*
+          - agent:*
+  kubeconfig:
+    updateDefaultKubeconfig: true
+    switchCurrentContext: true

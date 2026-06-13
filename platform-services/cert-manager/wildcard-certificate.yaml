@@ -1,0 +1,37 @@
+# Wildcard TLS Certificate for *.${PLATFORM_DOMAIN} (§5.1/§5.2).
+#
+# Signed by the platform CA issuer (clusterissuer.yaml). Stored as a TLS Secret
+# in kube-system — the namespace where the BUNDLED Traefik runs (D-010) — so
+# Traefik can serve it as the default cert for every <app>.<team>.<domain> host
+# (the traefik/ service wires it as the default TLS store).
+#
+# PLATFORM_DOMAIN seam (§6): the dnsNames below are the Phase-1 literal
+# 127.0.0.1.sslip.io (D-003). On the real cluster (Phase 4) this becomes the
+# Cloudflare zone — a one-line change here, mirrored from clusters/<target>/
+# values.env. Both the wildcard and the apex are listed so the domain itself and
+# any single-label subdomain resolve. (sslip.io makes *.127.0.0.1.sslip.io ->
+# 127.0.0.1 with no DNS config.)
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: wildcard-platform-tls
+  namespace: kube-system
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "5"   # after the CA issuer (wave 4)
+spec:
+  secretName: wildcard-platform-tls       # the TLS Secret Traefik serves
+  duration: 2160h                          # 90d, auto-renewed by cert-manager
+  renewBefore: 360h                        # renew 15d before expiry
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  dnsNames:
+    # --- PLATFORM_DOMAIN seam: Phase-1 sslip.io literal (D-003) ---
+    - "*.127.0.0.1.sslip.io"               # <app>.<team>.<domain> + argocd.<domain>
+    - "127.0.0.1.sslip.io"                 # apex
+  issuerRef:
+    name: platform-ca-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io

@@ -1,0 +1,51 @@
+# platform-services ApplicationSet (§2.1). A git DIRECTORY generator over
+# platform-services/*/ — each service directory (cert-manager, traefik,
+# sealed-secrets — wired in T4) becomes one Application in the `platform`
+# project. Adding a platform service = adding a directory under platform-services/.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: platform-services
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - git:
+        repoURL: https://github.com/UA-MIS/platform-infra
+        revision: HEAD
+        directories:
+          - path: platform-services/*
+  template:
+    metadata:
+      name: 'platform-svc-{{.path.basename}}'
+      labels:
+        platform.capstone/component: platform
+    spec:
+      project: platform
+      source:
+        repoURL: https://github.com/UA-MIS/platform-infra
+        targetRevision: HEAD
+        path: '{{.path.path}}'
+      destination:
+        server: https://kubernetes.default.svc
+        # Neutral default namespace. Each platform service pins its OWN namespace
+        # inside its manifests (cert-manager -> cert-manager ns + its own
+        # Namespace object; sealed-secrets + traefik -> kube-system), which
+        # overrides this for namespaced objects; cluster-scoped objects
+        # (CRDs, ClusterIssuers) ignore it. Using kube-system (always present)
+        # avoids creating empty, unused per-service namespaces.
+        namespace: kube-system
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          # No CreateNamespace: services that need a namespace ship their own
+          # Namespace object (cert-manager); the rest target kube-system.
+          - ServerSideApply=true   # large CRDs (cert-manager) need SSA
+        retry:
+          limit: 5
+          backoff: { duration: 5s, factor: 2, maxDuration: 3m }

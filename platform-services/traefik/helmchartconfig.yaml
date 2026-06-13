@@ -1,0 +1,40 @@
+# HelmChartConfig for the BUNDLED Traefik (D-010). k3s/k3d deploy Traefik via a
+# `traefik` HelmChart (helm-controller); a HelmChartConfig of the SAME name +
+# namespace MERGES valuesContent into that chart WITHOUT replacing it — the
+# supported way to customize the bundled ingress (no second Traefik installed).
+#
+# Phase-1 intent: assert the web (:80) and websecure (:443) entrypoints exist
+# and that the k3d loadbalancer port-maps (80/443 -> host) reach them. These are
+# already k3s defaults; declaring them makes the contract explicit and survives
+# a chart-version bump. TLS default cert is handled by the TLSStore (tlsstore.yaml),
+# not here, so this stays minimal and version-stable.
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: traefik
+  namespace: kube-system
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "6"
+spec:
+  valuesContent: |-
+    # Entrypoints (k3s defaults; asserted for explicitness/parity).
+    ports:
+      web:
+        port: 8000
+        expose:
+          default: true
+        exposedPort: 80
+        protocol: TCP
+      websecure:
+        port: 8443
+        expose:
+          default: true
+        exposedPort: 443
+        protocol: TCP
+        tls:
+          enabled: true
+    # Keep the bundled Traefik a single replica in Phase 1 (laptop).
+    deployment:
+      replicas: 1

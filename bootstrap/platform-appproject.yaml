@@ -1,0 +1,39 @@
+# The "platform" AppProject — the cluster-scoped fence for platform-engineer-owned
+# Applications ONLY (the root app, platform-services, and the per-team bootstrap
+# Apps the tenants-appset emits). This is the privileged project: it MAY create
+# cluster-scoped resources (CRDs, ClusterRoles, the sealed-secrets controller,
+# cert-manager, etc.). NO team workload ever lands here — teams get their own
+# per-team AppProject (tenants/_template/appproject.yaml), which whitelists only
+# their namespaces and forbids cluster-scoped resources (§2.1 boundary rule).
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: platform
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  # Keep the project from being pruned if its parent app is ever removed.
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: Platform-engineer-owned cluster services and tenant bootstrap apps.
+
+  # Only the platform-infra repo feeds this project. Team app repos are NOT here
+  # — they are whitelisted per-team in each team's own AppProject.
+  sourceRepos:
+    - https://github.com/UA-MIS/platform-infra
+    - https://github.com/UA-MIS/platform-infra.git
+
+  # Platform services are cluster-wide; allow any namespace on the in-cluster API.
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: '*'
+
+  # The platform project is privileged BY DESIGN: it installs CRDs and
+  # cluster-scoped controllers. This is the ONE project allowed to do so.
+  clusterResourceWhitelist:
+    - group: '*'
+      kind: '*'
+  namespaceResourceWhitelist:
+    - group: '*'
+      kind: '*'

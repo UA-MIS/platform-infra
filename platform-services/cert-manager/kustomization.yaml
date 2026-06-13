@@ -1,0 +1,24 @@
+# cert-manager (T4, §5.1, ADR-002) — pinned install + self-signed issuer +
+# wildcard Certificate for *.${PLATFORM_DOMAIN}. NO ACME in Phase 1 (sslip.io +
+# local CA); Phase 3 swaps the ClusterIssuer to ACME DNS-01 — an issuer change,
+# not an app change.
+#
+# Managed by the platform-services-appset (T3). Ordering is handled by ArgoCD
+# sync waves (annotations on the local resources): the install (wave 0, includes
+# CRDs) must register before the ClusterIssuer/Certificate (wave 2) can apply.
+# ServerSideApply is set on the appset for the large cert-manager CRDs.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  # Pinned upstream install: namespace cert-manager + CRDs + controller +
+  # webhook + cainjector. Pinned by tag v1.20.2 (no :latest).
+  - https://github.com/cert-manager/cert-manager/releases/download/v1.20.2/cert-manager.yaml
+  # Local: the self-signed issuer chain + the wildcard cert (applied after CRDs).
+  - clusterissuer.yaml
+  - wildcard-certificate.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false

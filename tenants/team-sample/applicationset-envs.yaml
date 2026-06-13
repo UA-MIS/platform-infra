@@ -1,0 +1,94 @@
+# ============================================================================
+# Environment ApplicationSet (§2.3, §4; ADR-008) — dev / staging / prod Apps.
+# Tokens: sample, 2026-fall.
+#
+# MATRIX generator = (env list) x (git-files read of the app repo's CANONICAL
+# promotion.yaml). Per ADR-008 (D-011) there is NO promotion.yaml in
+# platform-infra; the single source of truth is
+# team-sample-app/.devops/promotion.yaml. This ApplicationSet READS it via the
+# git `files:` generator so the per-env `gate` (auto vs manual) and `overlay`
+# drive the rendered Application without a second copy and without a cross-repo
+# fetch (the app repo is already this ApplicationSet's source, §2.3).
+#
+# How the matrix composes:
+#   - list generator contributes {env: dev|staging|prod}
+#   - git-files generator parses promotion.yaml; its TOP-LEVEL keys land at the
+#     template root: .registry, .app, .environments (ArgoCD git-files exposes a
+#     parsed file's top-level keys directly — confirmed against current docs).
+#   - templatePatch reads (index .environments .env).gate: "manual" => NO
+#     automated block (the prod gate, §4); "auto" => prune+selfHeal.
+#
+# Each generated App is pinned to the TEAM AppProject (project: sample) — the
+# tenancy fence (§2.1) — so a team App can never escape its own project.
+# ============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: sample-envs
+  namespace: argocd
+  labels:
+    platform.capstone/team: sample
+    platform.capstone/semester: 2026-fall
+    platform.capstone/component: tenant
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - matrix:
+        generators:
+          # 1) the three stable environments.
+          - list:
+              elements:
+                - env: dev
+                - env: staging
+                - env: prod
+          # 2) the CANONICAL promotion.yaml from the APP repo (ADR-008). Its
+          #    top-level keys (registry/app/environments) become root template
+          #    params. One file -> one element, matrixed across the three envs.
+          - git:
+              repoURL: https://github.com/UA-MIS/sample-app
+              revision: HEAD
+              files:
+                - path: .devops/promotion.yaml
+  template:
+    metadata:
+      name: 'sample-{{.env}}'
+      labels:
+        platform.capstone/team: sample
+        platform.capstone/semester: 2026-fall
+        platform.capstone/env: '{{.env}}'
+    spec:
+      project: sample
+      source:
+        repoURL: https://github.com/UA-MIS/sample-app
+        targetRevision: HEAD
+        # overlay is the FULL repo-relative path per the §4.1 schema, e.g.
+        # ".devops/chart/overlays/dev" — used verbatim (not basename-joined).
+        path: '{{ (index .environments .env).overlay }}'
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: 'sample-{{.env}}'
+  # Per-env sync policy from promotion.yaml's `gate`. `manual` => no `automated`
+  # block => the production gate (§4). `auto` => prune+selfHeal.
+  templatePatch: |
+    {{- $gate := (index .environments .env).gate }}
+    {{- if eq $gate "auto" }}
+    spec:
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=false
+        retry:
+          limit: 5
+          backoff:
+            duration: 5s
+            factor: 2
+            maxDuration: 3m
+    {{- else }}
+    spec:
+      syncPolicy:
+        syncOptions:
+          - CreateNamespace=false
+    {{- end }}

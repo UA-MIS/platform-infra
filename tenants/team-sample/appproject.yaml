@@ -1,0 +1,93 @@
+# ============================================================================
+# TEAM AppProject — THE TENANCY FENCE INSIDE ARGOCD (§2.2).
+# ============================================================================
+# This is the canonical BLUEPRINT. To onboard a team, copy tenants/_template/ to
+# tenants/team-<name>/ and replace the two tokens everywhere:
+#     sample      -> the team slug (e.g. sample)        [DNS label]
+#     2026-fall  -> the cohort   (e.g. 2026-fall)
+# (see tenants/_template/README.md for the one-liner). The tenants-appset git
+# generator then reconciles the new dir — no imperative kubectl.
+#
+# SECURITY CONTRACT (reviewed in T10). This AppProject is what makes a team a
+# tenant that CANNOT escape its blast radius:
+#   - sourceRepos: ONLY the team's own app repo + platform-infra. A team cannot
+#     point an Application at any other repo.
+#   - destinations: ONLY the team's four namespace patterns on the in-cluster API.
+#     A team Application can never target another team's namespace or another
+#     cluster.
+#   - clusterResourceWhitelist: EMPTY -> teams CANNOT create ANY cluster-scoped
+#     object (no CRDs, ClusterRoles, ClusterRoleBindings, PVs, Namespaces, etc.).
+#   - namespaceResourceWhitelist: ONLY the workload kinds a student app needs.
+#     Notably ABSENT: Secret (they use SealedSecret), ResourceQuota, LimitRange,
+#     NetworkPolicy, Role/RoleBinding/ServiceAccount-RBAC — all platform-managed.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: sample
+  namespace: argocd
+  labels:
+    platform.capstone/team: sample
+    platform.capstone/semester: 2026-fall
+    platform.capstone/component: tenant
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: "Tenant project for team sample (2026-fall). Team-scoped; no cluster-scoped resources."
+
+  # --- source repos: the team's app repo + platform-infra (for its tenant dir) ---
+  sourceRepos:
+    - https://github.com/UA-MIS/sample-app
+    - https://github.com/UA-MIS/sample-app.git
+    - https://github.com/UA-MIS/platform-infra
+    - https://github.com/UA-MIS/platform-infra.git
+
+  # --- destinations: ONLY this team's namespaces on the in-cluster API ---------
+  # Stable envs are enumerated; preview namespaces (<team>-pr-<n>) are matched by
+  # the wildcard. No other team's namespaces are reachable.
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: sample-dev
+    - server: https://kubernetes.default.svc
+      namespace: sample-staging
+    - server: https://kubernetes.default.svc
+      namespace: sample-prod
+    - server: https://kubernetes.default.svc
+      namespace: sample-pr-*
+
+  # --- cluster-scoped resources: NONE. Hard tenancy boundary. ------------------
+  clusterResourceWhitelist: []
+
+  # --- namespaced resources: only what a workload legitimately needs -----------
+  # SealedSecret is allowed (encrypted-at-rest); raw Secret is NOT (the
+  # sealed-secrets controller, a platform service, materializes the Secret).
+  namespaceResourceWhitelist:
+    - group: ''
+      kind: ConfigMap
+    - group: ''
+      kind: Service
+    - group: ''
+      kind: ServiceAccount
+    - group: apps
+      kind: Deployment
+    - group: apps
+      kind: ReplicaSet
+    - group: autoscaling
+      kind: HorizontalPodAutoscaler
+    - group: networking.k8s.io
+      kind: Ingress
+    - group: bitnami.com
+      kind: SealedSecret
+
+  # --- ArgoCD RBAC role for the team (§3.3) -----------------------------------
+  # Phase 1: bound to the local admin for demonstration. Phase 2: bound to a
+  # Keycloak group (D-001). The role can sync/get ONLY this project's apps.
+  roles:
+    - name: developer
+      description: "Team sample developers — sync/get own apps only."
+      policies:
+        - p, proj:sample:developer, applications, get, sample/*, allow
+        - p, proj:sample:developer, applications, sync, sample/*, allow
+        # Explicitly NO delete, NO override, NO action/* — least privilege.
+      groups:
+        # Phase 2: replace with the Keycloak group, e.g. UA-MIS:team-sample.
+        - sample-developers
