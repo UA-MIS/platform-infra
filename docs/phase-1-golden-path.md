@@ -68,8 +68,8 @@ kubectl get secret -n kube-system wildcard-platform-tls   # wildcard TLS secret 
 Evidence captured (2026-06-14): both nodes Ready; root app Synced/Healthy;
 platform-svc-{cert-manager,traefik,sealed-secrets} all Synced/Healthy; the
 cert-manager chain `selfsigned-bootstrap → platform-ca → platform-ca-issuer →
-wildcard-platform-tls` all Ready; Traefik serves `*.127.0.0.1.sslip.io` with a
-cert issued by `CN=capstone-platform-ca` (SAN `*.127.0.0.1.sslip.io`); tenancy
+wildcard-platform-tls` all Ready; Traefik serves `*.127-0-0-1.sslip.io` with a
+cert issued by `CN=capstone-platform-ca` (SAN `*.127-0-0-1.sslip.io`); tenancy
 live in sample-dev/-staging/-prod/-pr-1 (ResourceQuota, LimitRange, default-deny
 NetworkPolicy, `team-developer` Role/RoleBinding, env labels).
 
