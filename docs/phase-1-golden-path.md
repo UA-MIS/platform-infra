@@ -331,14 +331,23 @@ image-pull break below slipped through). Both are now fixed.
 > `--registry-use` now both reference `$(REGISTRY_HOST)` (= `k3d-registry.localhost`,
 > the name `k3d registry create registry.localhost` actually produces), so a
 > fresh registry lands on the single-prefixed name and the mirror key matches the
-> overlays. On the running cluster REG-001 was cleared by live-patching the
-> mirror key + k3s restart (no recreate, to avoid re-minting the sealing key):
-> proven by `Successfully pulled image k3d-registry.localhost:5000/sample:v0.1.0`
-> — pods now fail only on `secret "sample-secret" not found` (the expected
-> pre-Push-B state), NOT on image pull.
+> overlays. The fix was then PROVEN end-to-end by a **registry-only recreate**
+> (the standalone registry is independent of the cluster, so this needs NO cluster
+> recreate and does NOT touch the sealing key — the staged re-seals stay valid):
+> 1. `k3d registry delete k3d-k3d-registry.localhost` (the mis-named survivor);
+> 2. ran the FIXED Makefile create path → `k3d registry list` shows a SINGLE-prefixed
+>    `k3d-registry.localhost` (evidence a — the from-scratch name-mint is correct);
+> 3. re-pushed the 3 images from the host store (no rebuild — they were cached locally),
+>    rewrote both nodes' `registries.yaml` to the clean single mirror key
+>    `k3d-registry.localhost:5000 → http://k3d-registry.localhost:5000` (evidence b),
+>    restarted k3s + flushed serverlb;
+> 4. forced fresh pulls → `make verify-image-pull` **PASS** (evidence c), dev pod
+>    1/1 Running, staging/preview past ImagePullBackOff (only `secret not found`,
+>    the expected pre-Push-B state). Sealing key confirmed unchanged
+>    (`sealed-secrets-keydvwdb`), so the staged Push B re-seals remain valid.
 > **ADV-002 regression guard added:** `make verify-image-pull` asserts a tenant
 > app pod gets past `ImagePullBackOff`, so a green-Application/broken-pod sign-off
-> can't recur silently. Verified PASS on the cleared cluster.
+> can't recur silently. Wired into the bootstrap completion message.
 
 **PROVEN tonight (no git push required):**
 - `make cluster-down`: the **standalone registry survived** with all 3 images
