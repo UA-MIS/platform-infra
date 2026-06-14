@@ -28,9 +28,14 @@ spec:
     algorithm: ECDSA
     size: 256
   dnsNames:
-    # --- PLATFORM_DOMAIN seam: Phase-1 sslip.io literal (D-003) ---
-    - "*.127.0.0.1.sslip.io"               # <app>.<team>.<domain> + argocd.<domain>
-    - "127.0.0.1.sslip.io"                 # apex
+    # --- PLATFORM_DOMAIN seam: Phase-1 sslip.io literal, DASHED form (D-003) ---
+    # Dashed 127-0-0-1.sslip.io avoids the dotted-IP parse collision that breaks
+    # the preview host (...pr-1.127.0.0.1 -> 1.127.0.0). Traefik serves this as
+    # the default TLSStore cert for ALL hosts regardless of SAN label-depth, so
+    # the single-label wildcard is sufficient for the gateway; multi-label app
+    # hosts get the same cert (self-CA, Phase-1 — browser name-match is advisory).
+    - "*.127-0-0-1.sslip.io"               # <app>.<team>.<domain> + argocd.<domain>
+    - "127-0-0-1.sslip.io"                 # apex
   issuerRef:
     name: platform-ca-issuer
     kind: ClusterIssuer

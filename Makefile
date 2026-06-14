@@ -45,7 +45,26 @@ RUNTIME_ENV := $(shell \
   fi )
 
 # k3d needs the registry name resolvable from the host for `docker push`.
+# REGISTRY_HOST is the FINAL container/DNS name (== the in-cluster containerd
+# mirror key, == the `image:` prefix the overlays use). `k3d registry create`
+# ALWAYS prepends `k3d-` to its NAME arg, so we pass REGISTRY_CREATE_NAME (the
+# host minus that prefix); k3d re-adds `k3d-` to land back on REGISTRY_HOST.
+# Getting this wrong yields a double-prefixed `k3d-k3d-registry.localhost` mirror
+# key that does NOT match `k3d-registry.localhost:5000/...` images -> in-cluster
+# ImagePullBackOff ("lookup k3d-registry.localhost: no such host").
 REGISTRY_HOST := k3d-registry.localhost
+REGISTRY_CREATE_NAME := registry.localhost
+REGISTRY_PORT := 5000
+
+# The container network k3d creates for this cluster. We pre-create it (and the
+# registry, on it) under rootless Podman because Podman has NO default "bridge"
+# network — k3d's inline `registries.create` tries to attach the registry node
+# to "bridge" before the cluster network exists and fails with
+# `unable to find network with name or ID bridge`. k3d's documented Podman path
+# is: create the network + registry first, then `cluster create --registry-use`
+# (https://k3d.io/.../usage/advanced/podman/). Native Docker keeps the inline
+# config path unchanged (the "bridge" network exists there).
+CLUSTER_NETWORK := k3d-$(CLUSTER_NAME)
 
 .PHONY: help
 help: ## Show this help
@@ -80,11 +99,46 @@ preflight: ## Verify required tools + host prerequisites (cpuset cgroup delegati
 	    echo ""; \
 	    exit 1; \
 	  fi; \
+	  start="$$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start 2>/dev/null || echo 1024)"; \
+	  if [ "$$start" -gt 80 ]; then \
+	    echo "ERROR: rootless Podman cannot bind the ingress ports 80/443 (host"; \
+	    echo "       net.ipv4.ip_unprivileged_port_start=$$start, must be <= 80)."; \
+	    echo "       k3d's serverlb would fail: 'rootlessport cannot expose privileged port 80'."; \
+	    echo "       The cluster maps 80/443 -> host so *.$(PLATFORM_DOMAIN) reaches Traefik"; \
+	    echo "       on standard ports with no port suffix (D-003/D-010)."; \
+	    echo ""; \
+	    echo "  One-time ROOT fix (persists across reboot):"; \
+	    echo "    echo 'net.ipv4.ip_unprivileged_port_start=80' | \\"; \
+	    echo "      sudo tee /etc/sysctl.d/99-k3d-unprivileged-ports.conf"; \
+	    echo "    sudo sysctl --system"; \
+	    echo ""; \
+	    exit 1; \
+	  fi; \
 	fi
 	@echo "preflight OK (TARGET=$(TARGET), runtime=$(if $(RUNTIME_ENV),rootless-podman,docker))"
 
 # ---- cluster lifecycle -----------------------------------------------------
 .PHONY: cluster-up
+# (Podman only) Pre-create the cluster network + a standalone k3d-managed
+# registry on it, so `cluster create` can `--registry-use` it instead of the
+# inline `registries.create` that hard-fails on Podman's missing "bridge"
+# network. Idempotent: skips the network/registry if they already exist.
+.PHONY: _ensure-registry-podman
+_ensure-registry-podman:
+	@if [ "$(IS_PODMAN)" = "yes" ]; then \
+	  if ! docker network inspect "$(CLUSTER_NETWORK)" >/dev/null 2>&1; then \
+	    echo "creating podman network '$(CLUSTER_NETWORK)' for k3d..."; \
+	    docker network create "$(CLUSTER_NETWORK)" >/dev/null; \
+	  fi; \
+	  if ! env $(RUNTIME_ENV) k3d registry list 2>/dev/null | awk 'NR>1{print $$1}' | grep -qx "$(REGISTRY_HOST)"; then \
+	    echo "creating standalone k3d registry '$(REGISTRY_HOST)' on '$(CLUSTER_NETWORK)'..."; \
+	    env $(RUNTIME_ENV) k3d registry create "$(REGISTRY_CREATE_NAME)" \
+	      --default-network "$(CLUSTER_NETWORK)" --port "0.0.0.0:$(REGISTRY_PORT)"; \
+	  else \
+	    echo "k3d registry '$(REGISTRY_HOST)' already exists"; \
+	  fi; \
+	fi
+
 cluster-up: preflight ## Create the k3d cluster from $(K3D_CONFIG) if it does not exist (idempotent)
 	@test -f "$(K3D_CONFIG)" || { echo "ERROR: $(K3D_CONFIG) not found (TARGET=$(TARGET) has no k3d-config; real-k3s is provisioned out-of-band)."; exit 1; }
 	@$(MAKE) --no-print-directory _ensure-registry-hosts
@@ -92,6 +146,17 @@ cluster-up: preflight ## Create the k3d cluster from $(K3D_CONFIG) if it does no
 	@if env $(RUNTIME_ENV) k3d cluster list 2>/dev/null | awk 'NR>1{print $$1}' | grep -qx "$(CLUSTER_NAME)"; then \
 	  echo "cluster '$(CLUSTER_NAME)' already exists — ensuring it is started"; \
 	  env $(RUNTIME_ENV) k3d cluster start "$(CLUSTER_NAME)" >/dev/null 2>&1 || true; \
+	elif [ "$(IS_PODMAN)" = "yes" ]; then \
+	  $(MAKE) --no-print-directory _ensure-registry-podman; \
+	  tmpcfg="$$(mktemp --suffix=.k3d.yaml)"; \
+	  awk 'BEGIN{skip=0} /^registries:/{skip=1; next} skip && /^[^[:space:]#]/{skip=0} skip{next} {print}' \
+	    "$(K3D_CONFIG)" > "$$tmpcfg"; \
+	  echo "creating k3d cluster '$(CLUSTER_NAME)' (podman path: pre-created registry on '$(CLUSTER_NETWORK)', inline registry stripped)..."; \
+	  env $(RUNTIME_ENV) k3d cluster create --config "$$tmpcfg" \
+	    --network "$(CLUSTER_NETWORK)" --registry-use "k3d-$(REGISTRY_HOST):$(REGISTRY_PORT)" \
+	    --k3s-arg "--kubelet-arg=feature-gates=KubeletInUserNamespace=true@server:*" \
+	    --k3s-arg "--kubelet-arg=feature-gates=KubeletInUserNamespace=true@agent:*"; \
+	  rm -f "$$tmpcfg"; \
 	else \
 	  echo "creating k3d cluster '$(CLUSTER_NAME)' from $(K3D_CONFIG)..."; \
 	  env $(RUNTIME_ENV) k3d cluster create --config "$(K3D_CONFIG)"; \
@@ -156,8 +221,12 @@ bootstrap: ## (T3) Install ArgoCD + apply the platform project & app-of-apps roo
 	@kubectl config use-context "k3d-$(CLUSTER_NAME)" >/dev/null
 	@echo "==> installing ArgoCD (pinned v3.4.3) into ns argocd..."
 	@kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
-	@# `kubectl apply -k` is idempotent: re-running reconciles, never errors.
-	@kubectl apply -k bootstrap/argocd-install
+	@# Server-side apply: ArgoCD's applicationsets CRD exceeds the 256KB limit on
+	@# the client-side `last-applied-configuration` annotation that plain
+	@# `kubectl apply` writes (fails: "metadata.annotations: Too long"). SSA stores
+	@# no such annotation. --force-conflicts lets us re-own fields on re-run, so it
+	@# stays idempotent (the canonical ArgoCD install method for this reason).
+	@kubectl apply -k bootstrap/argocd-install --server-side --force-conflicts
 	@echo "==> waiting for ArgoCD CRDs to register..."
 	@kubectl wait --for=condition=Established \
 	  crd/applications.argoproj.io crd/appprojects.argoproj.io crd/applicationsets.argoproj.io \

@@ -11,7 +11,7 @@
 #     extra config. Host-side pushes use the same name via the hosts-file entry
 #     `make cluster-up` ensures (127.0.0.1 k3d-registry.localhost).
 #   - LB port maps 80/443 -> host: makes the bundled Traefik (D-010) reachable at
-#     http(s)://<anything>.127.0.0.1.sslip.io (D-003) from the host browser.
+#     http(s)://<anything>.127-0-0-1.sslip.io (D-003) from the host browser.
 #   - Traefik is NOT disabled here: D-010 says configure the bundled Traefik, so we
 #     keep k3s's default Traefik and layer wildcard-TLS config on it in T4.
 apiVersion: k3d.io/v1alpha5
@@ -21,6 +21,18 @@ metadata:
 
 servers: 1
 agents: 1
+
+# Bind the Kubernetes API server to LOOPBACK only (SEC-005). Without this, k3d
+# publishes the serverlb's 6443 on 0.0.0.0, so the control plane is reachable
+# from every host on the LAN / tailnet — contradicting the localhost-local-cluster
+# intent of D-002/D-003 (§3.3 "API never public"). Anonymous access is denied
+# (401), so this is hardening, not a breach fix: it removes the remote
+# credential-bruteforce / apiserver-CVE / DoS surface. The ingress 80/443 below
+# stay on 0.0.0.0 by design (the wildcard app ingress is meant to be reachable);
+# only the control plane is loopback-scoped. Phase 4 (real-k3s) binds the API to
+# the node's private address out-of-band — this seam documents the intent.
+kubeAPI:
+  hostIP: "127.0.0.1"
 
 # k3s/k3d ship Traefik by default (D-010). We deliberately do NOT pass
 # --disable=traefik; T4 configures this bundled instance.
@@ -34,7 +46,7 @@ registries:
     hostPort: "5000"
 
 # Map the k3d loadbalancer (which fronts the bundled Traefik) to host 80/443
-# so *.127.0.0.1.sslip.io resolves to the ingress from the host.
+# so *.127-0-0-1.sslip.io resolves to the ingress from the host.
 ports:
   - port: 80:80
     nodeFilters:

@@ -22,7 +22,7 @@ cert-manager selfsigned-bootstrap (ClusterIssuer)
                                           └─ Traefik default TLSStore serves it
 ```
 
-A team `Ingress` for `sample.sample.127.0.0.1.sslip.io` with TLS enabled is
+A team `Ingress` for `sample.sample.127-0-0-1.sslip.io` with TLS enabled is
 served the wildcard cert automatically — no per-Ingress secret needed.
 
 **Phase-3 swap:** replace `platform-ca-issuer` with an ACME DNS-01 ClusterIssuer
