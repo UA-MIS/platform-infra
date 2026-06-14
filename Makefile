@@ -130,7 +130,7 @@ _ensure-registry-podman:
 	    echo "creating podman network '$(CLUSTER_NETWORK)' for k3d..."; \
 	    docker network create "$(CLUSTER_NETWORK)" >/dev/null; \
 	  fi; \
-	  if ! env $(RUNTIME_ENV) k3d registry list 2>/dev/null | awk 'NR>1{print $$1}' | grep -qx "$(REGISTRY_HOST)"; then \
+	  if ! env $(RUNTIME_ENV) k3d registry list 2>/dev/null | awk 'NR>1{print $$1}' | grep -qx "k3d-$(REGISTRY_HOST)"; then \
 	    echo "creating standalone k3d registry '$(REGISTRY_HOST)' on '$(CLUSTER_NETWORK)'..."; \
 	    env $(RUNTIME_ENV) k3d registry create "$(REGISTRY_CREATE_NAME)" \
 	      --default-network "$(CLUSTER_NETWORK)" --port "0.0.0.0:$(REGISTRY_PORT)"; \
