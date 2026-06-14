@@ -317,16 +317,22 @@ seal: ## (T4) kubeseal helper: make seal SECRET=path/to/secret.yaml NS=<ns> > se
 #   (3) schema-invalid k8s objects.
 # Run before committing tenancy changes; cluster-independent.
 .PHONY: validate
-validate: ## Static validation of tenant manifests (kubeconform + RBAC-name + stray-file guards)
+validate: ## Static validation of tenant manifests (kubeconform + RBAC-name + stray-file + argocd-rbac-project guards)
 	@command -v kubeconform >/dev/null || { echo "ERROR: kubeconform not found (install to ~/.local/bin)."; exit 1; }
-	@echo "==> [1/3] kubeconform -strict on tenant namespace bundles..."
+	@echo "==> [1/4] kubeconform -strict on tenant namespace bundles..."
 	@kubeconform -strict -summary -kubernetes-version 1.31.5 tenants/*/namespaces/*.yaml
-	@echo "==> [2/3] RBAC-name guard: every Role/RoleBinding name must be 'team-developer'..."
+	@echo "==> [2/4] RBAC-name guard: every Role/RoleBinding name must be 'team-developer'..."
 	@bad=$$(grep -rnE '^\s+name:\s+team-[a-z0-9-]+eloper\b' tenants/ | grep -v 'team-developer' || true); \
 	  if [ -n "$$bad" ]; then echo "FAIL: malformed RBAC names (SEC-001 regression):"; echo "$$bad"; exit 1; fi; \
 	  echo "  OK — no malformed RBAC names"
-	@echo "==> [3/3] stray-file guard: tenant dirs may contain only .yaml (recurse-sync safe)..."
+	@echo "==> [3/4] stray-file guard: tenant dirs may contain only .yaml (recurse-sync safe)..."
 	@stray=$$(find tenants -type f ! -name '*.yaml' ! -name 'README.md' || true); \
 	  if [ -n "$$stray" ]; then echo "FAIL: non-manifest files in tenants/ (would break recurse sync):"; echo "$$stray"; exit 1; fi; \
 	  echo "  OK — no stray non-manifest files"
+	@echo "==> [4/4] argocd-rbac project guard: every project token in a 'p, role:...' policy must be an existing AppProject (SEC-006)..."
+	@projects="platform $$(grep -rhA2 '^kind: AppProject' tenants/*/appproject.yaml bootstrap/platform-appproject.yaml 2>/dev/null | grep -E '^\s+name:' | awk '{print $$2}' | sort -u | tr '\n' ' ')"; \
+	  refs=$$(grep -hE '^\s*p,\s*role:' platform-services/argocd-config/argocd-rbac-cm.yaml | sed -E 's#.*,\s*([a-z0-9-]+)/[^,]*,\s*(allow|deny)\s*$$#\1#' | grep -vE ',|allow|deny' | sort -u); \
+	  fail=0; for r in $$refs; do echo " $$projects " | grep -q " $$r " || { echo "FAIL: argocd-rbac policy references project '$$r' with no matching AppProject (inert role, SEC-006)"; fail=1; }; done; \
+	  if [ "$$fail" = "1" ]; then echo "  known AppProjects: $$projects"; exit 1; fi; \
+	  echo "  OK — all argocd-rbac policy projects ($$refs) resolve to AppProjects"
 	@echo "validate: PASS"

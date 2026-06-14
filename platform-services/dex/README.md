@@ -13,15 +13,25 @@ static OIDC clients and federate here — one GitHub OAuth app, unified SSO.
 
 ## Group claim format
 
-`loadAllGroups: true` + `teamNameField: slug` => groups look like
-`UA-MIS:<team-slug>` plus the bare org `UA-MIS`. ArgoCD RBAC (see
-`bootstrap/argocd-install/kustomization.yaml`, the `argocd-rbac-cm` patch) binds:
+With `orgs:` set, the GitHub connector emits **only** `<org>:<team-slug>` groups
+(`teamNameField: slug`) — e.g. `UA-MIS:sample`, `UA-MIS:capstone-admin`. The **bare
+org `UA-MIS` is NOT emitted** as a group (the connector's `groupsForOrgs` path
+returns before `loadAllGroups` is honored, so `loadAllGroups` is a no-op here and
+is omitted — SEC-007). The org-wide read-only baseline therefore comes from
+`policy.default: role:readonly`, **not** a group. ArgoCD RBAC
+(`platform-services/argocd-config/argocd-rbac-cm.yaml`) binds:
 
-| GitHub Team / org | OIDC group | ArgoCD role |
+| GitHub Team / membership | OIDC group | ArgoCD role |
 | --- | --- | --- |
 | `capstone-admin` Team | `UA-MIS:capstone-admin` | `role:admin` |
-| any UA-MIS member | `UA-MIS` | `role:readonly` (baseline) |
-| `team-<name>` Team | `UA-MIS:team-<name>` | `role:team-<name>` (scoped to its AppProject) |
+| any authenticated UA-MIS member | _(none — `policy.default`)_ | `role:readonly` (baseline) |
+| `<name>` Team (e.g. `sample`) | `UA-MIS:<name>` | `role:<name>` (scoped to AppProject `<name>`, apps `<name>/<name>-*`) |
+
+**Canonical team identifier** = `<name>` (Phase-1 convention, D-008): AppProject
+`metadata.name`, appset `project:`, GitHub Team slug, and the OIDC group suffix all
+equal `<name>` (e.g. `sample`). They MUST agree or the scoped role is inert
+(SEC-006). `make validate` enforces this (every `role:` policy resource must
+reference an existing AppProject).
 
 Local `admin` (argocd-secret) stays as **break-glass** — untouched by SSO.
 
