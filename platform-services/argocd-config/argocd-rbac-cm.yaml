@@ -43,9 +43,12 @@ data:
     # --- Per-team scoped role. Team identifier = AppProject name = GitHub Team
     #     slug = `sample`. Scoped to the team's OWN AppProject + apps (sample/sample-*)
     #     only. Instantiate one block + binding per onboarded team. ---
+    # Mirrors the team AppProject `developer` role's least-privilege stance
+    # (tenants/team-sample/appproject.yaml): get + sync ONLY — explicitly NO
+    # action/*, delete, or override (SEC consistency note on PR #3). logs/get and
+    # projects/get are read-only adjuncts ArgoCD needs for the UI to function.
     p, role:sample, applications, get, sample/*, allow
     p, role:sample, applications, sync, sample/*, allow
-    p, role:sample, applications, action/*, sample/*, allow
     p, role:sample, logs, get, sample/*, allow
     p, role:sample, projects, get, sample, allow
     g, UA-MIS:sample, role:sample
