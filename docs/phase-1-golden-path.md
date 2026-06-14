@@ -124,15 +124,18 @@ git push origin main                                # ArgoCD reconciles on next 
 
 dev overlay bumped to the commit sha (`9b08056`), ArgoCD auto-synced.
 - `sample-dev` = **Synced/Healthy**, image `k3d-registry.localhost:5000/sample:9b08056`, pod 1/1 Running.
-- Host `sample.sample.127.0.0.1.sslip.io` → HTTP 200, body `team-sample-app`,
+- Host `sample.sample.dev.127-0-0-1.sslip.io` → HTTP 200, body `team-sample-app`,
   `secret loaded: true, length=23, sha256=8a4f1795` (secret-read proof over TLS).
+  (Re-proven on the recreated cluster via REAL DNS — no `--resolve` — under the
+  new prod-canonical dashed-host convention.)
 
 ### 3.2 STAGING — tag v0.1.0 → auto-deploy ✅ PROVEN (L5)
 
 staging overlay bumped to `v0.1.0` (commit `30613c1`), pushed, ArgoCD synced after a hard refresh.
 - `sample-staging` = **Synced/Healthy** @ rev 30613c1, image `...:v0.1.0`, both pods 1/1 Running.
-- Host `sample.sample.staging.127.0.0.1.sslip.io` → HTTP 200, `team-sample-app`,
+- Host `sample.sample.staging.127-0-0-1.sslip.io` → HTTP 200, `team-sample-app`,
   `secret loaded: true, length=27, sha256=e254111a` (distinct per-env secret), TLS issuer `CN=capstone-platform-ca`, healthz 200.
+  (Re-proven on the recreated cluster via REAL DNS, dashed host.)
 
 ### 3.3 PROD — the MANUAL GATE ✅ GATE PROVEN + PROMOTION EXECUTED
 
@@ -162,8 +165,8 @@ prod's desired state but never auto-deploys it.
    kubectl --context k3d-capstone -n argocd patch application sample-prod \
      --type merge -p '{"operation":{"sync":{"revision":"HEAD","syncStrategy":{"apply":{}}}}}'
    ```
-   ArgoCD then deploys prod (3 replicas of `:v0.1.0`), reachable at
-   `sample.sample.prod.127.0.0.1.sslip.io` over TLS with the secret-read proof.
+   ArgoCD then deploys prod (3 replicas of `:v0.1.0`), reachable at the bare
+   canonical host `sample.sample.127-0-0-1.sslip.io` over TLS with the secret-read proof.
 
 **Promotion executed (captured live).** The human ran the manual sync;
 `kubectl patch` returned `application.argoproj.io/sample-prod patched`. ArgoCD
@@ -197,8 +200,11 @@ preview SealedSecret (sealed for sample-pr-1). After a hard refresh:
 - `sample-pr-1` = **Synced/Healthy** @ rev 2487355, image
   `k3d-registry.localhost:5000/sample:pull-30613c1`, pod 1/1 Running in the
   **ephemeral `sample-pr-1` namespace** (created on demand, CreateNamespace=true).
-- Host `sample.sample.pr-1.127.0.0.1.sslip.io` → HTTP 200, `team-sample-app`,
-  `secret loaded: true, length=27, sha256=8bde59f1` — its OWN per-namespace secret
+- Host `sample.sample.pr-1.127-0-0-1.sslip.io` → HTTP 200, `team-sample-app`,
+  `secret loaded: true, length=27, sha256=8bde59f1` — its OWN per-namespace secret.
+  **On the recreated cluster this host was proven via REAL DNS** (`getent` +
+  `curl` WITHOUT `--resolve`): the dashed domain resolves the multi-label preview
+  host that the dotted form mis-parsed, so it is genuinely browser-reachable
   (sha256 distinct from staging's `e254111a` despite equal length, proving the
   preview namespace has an independently-sealed secret). TLS issuer
   `CN=capstone-platform-ca`, healthz 200.
