@@ -1,0 +1,39 @@
+# CoreDNS custom rewrite (P2.1-fix2) — split-horizon DNS for the OIDC issuer.
+#
+# THE PROBLEM: the dashed-sslip convention (D-003) makes id.${PLATFORM_DOMAIN}
+# resolve to 127.0.0.1 EVERYWHERE — including inside pods. That is correct for a
+# browser on the host (127.0.0.1:443 -> host-mapped Traefik), but ArgoCD-server
+# must fetch the issuer's discovery doc SERVER-SIDE
+# (https://id.127-0-0-1.sslip.io/.well-known/openid-configuration). Inside the
+# pod, 127.0.0.1:443 is the pod's own loopback — nothing listens -> "connection
+# refused", and SSO login 500s. Every tool that federates through Dex
+# (Backstage/Grafana/Harbor, §1.1) hits the same wall.
+#
+# THE FIX: k3s/k3d CoreDNS imports `/etc/coredns/custom/*.override` into the
+# `.:53` server block (see the stock Corefile). This ConfigMap (named
+# `coredns-custom`, the k3s-watched name) adds a `rewrite` so that IN-CLUSTER DNS
+# for the issuer host resolves to Traefik's STABLE service FQDN instead of
+# 127.0.0.1. The request then goes pod -> Traefik ClusterIP:443, Traefik routes by
+# Host/SNI (`id.127-0-0-1.sslip.io`) to the Dex Ingress -> Dex. The issuer URL is
+# byte-identical inside and outside the cluster (OIDC requires the discovery
+# `issuer` to match exactly), and there is NO hardcoded IP — Traefik's
+# `traefik.kube-system.svc.cluster.local` name is resolved by kube-dns.
+#
+# For `rewrite name exact`, CoreDNS automatically rewrites the ANSWER name back to
+# the original query name (`id.127-0-0-1.sslip.io`), so the client still sees the
+# issuer host — keeps TLS SNI / issuer matching clean. (The explicit `answer auto`
+# keyword is only for the block/`name suffix` form, not this inline `exact` form.)
+#
+# Managed by the platform-services-appset (one Application per dir). CoreDNS hot-
+# reloads the imported override (the Corefile has `reload`), no pod restart needed.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns-custom
+  namespace: kube-system
+  labels:
+    platform.capstone/component: platform
+data:
+  # Filename must end in `.override` to be imported into the `.:53` block.
+  id-issuer.override: |
+    rewrite name exact id.127-0-0-1.sslip.io traefik.kube-system.svc.cluster.local

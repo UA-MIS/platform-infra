@@ -30,6 +30,20 @@ metadata:
 data:
   url: https://argocd.127-0-0-1.sslip.io
 
+  # ArgoCD-server fetches the issuer's discovery doc SERVER-SIDE over the in-cluster
+  # path (id.127-0-0-1.sslip.io -> rewritten by coredns-custom to Traefik -> Dex).
+  # That hop presents the cert-manager wildcard cert, which is signed by the
+  # self-signed PLATFORM CA (Phase-1, no ACME). ArgoCD won't trust that CA, so for
+  # the Phase-1 LOCAL self-signed setup we skip OIDC TLS verification — exactly the
+  # case the ArgoCD docs name as acceptable for a self-signed provider cert. This
+  # parallels `server.insecure: true` (TLS terminates at Traefik). In-cluster
+  # traffic only; the issuer cert is self-CA and rotates on cluster recreate, so
+  # pinning a static rootCA PEM would break the reproducible-recreate invariant.
+  # PHASE-3 REMOVAL: when the issuer moves to the Cloudflare zone with ACME-trusted
+  # certs, DELETE this line (and the coredns-custom rewrite) — discovery becomes
+  # publicly resolvable + publicly trusted. (Flagged to security: SEC review item.)
+  oidc.tls.insecure.skip.verify: "true"
+
   oidc.config: |
     name: Dex (GitHub)
     issuer: https://id.127-0-0-1.sslip.io
