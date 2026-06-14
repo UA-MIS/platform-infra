@@ -59,10 +59,14 @@ data:
           # specific GitHub Teams later, add `teams:` under the org entry.
           orgs:
             - name: UA-MIS
-          # Emit ALL of the user's orgs+teams as groups, with team SLUGs (stable,
-          # lowercase, URL-safe) — yields groups like `UA-MIS:team-<slug>` and the
-          # bare org `UA-MIS`. ArgoCD RBAC (argocd-rbac-cm) binds to these.
-          loadAllGroups: true
+          # Emit the user's GitHub Teams as groups with team SLUGs (stable,
+          # lowercase, URL-safe). With `orgs:` set, the connector's groupsForOrgs
+          # path emits ONLY `<org>:<team-slug>` entries (e.g. `UA-MIS:sample`) —
+          # the BARE org `UA-MIS` is never emitted as a group (SEC-007). Org
+          # membership is gated by `orgs:` regardless; the org-wide read-only
+          # baseline comes from argocd-rbac-cm `policy.default`, not a group.
+          # NOTE: `loadAllGroups` is intentionally omitted — it is a NO-OP when
+          # `orgs:` is set (groupsForOrgs returns before honoring it, SEC-007).
           teamNameField: slug
           # Use GitHub login (handle) as the user ID — human-readable in ArgoCD
           # audit/UI instead of an opaque numeric ID.

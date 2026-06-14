@@ -37,63 +37,12 @@ patches:
       kind: ConfigMap
       name: argocd-cmd-params-cm
 
-  # --- P2.1 (§1.1, D-017): OIDC -> standalone platform Dex broker ---
-  # Strategic-merge patch ADDS `url` + `oidc.config` to the upstream argocd-cm
-  # (the full upstream CM is present in this rendered bundle, so the merge is
-  # additive — it does not drop the install's resource.customizations.* keys).
-  # We use `oidc.config` (external provider) NOT the bundled `dex.config`, because
-  # §1.1 runs ONE shared platform Dex that Backstage/Grafana/Harbor also federate
-  # through. The clientSecret derefs the SealedSecret-materialised Secret
-  # `argocd-dex-client` (synced by the argocd-config platform-service); it MUST
-  # equal Dex's `argocd` staticClient secret.
-  - patch: |
-      apiVersion: v1
-      kind: ConfigMap
-      metadata:
-        name: argocd-cm
-      data:
-        url: https://argocd.127-0-0-1.sslip.io
-        oidc.config: |
-          name: Dex (GitHub)
-          issuer: https://id.127-0-0-1.sslip.io
-          clientID: argocd
-          clientSecret: $argocd-dex-client:oidc.dex.clientSecret
-          requestedScopes:
-            - openid
-            - profile
-            - email
-            - groups
-          requestedIDTokenClaims:
-            groups:
-              essential: true
-    target:
-      kind: ConfigMap
-      name: argocd-cm
-
-  # --- P2.1 (§1.1): RBAC binds the OIDC `groups` claim (GitHub Teams via Dex) ---
-  # Additive strategic-merge into the upstream argocd-rbac-cm. capstone-admin Team
-  # -> admin; UA-MIS org member -> read-only baseline; per-team Teams -> scoped
-  # roles (team-sample shown as the onboarding pattern). Local `admin` stays
-  # break-glass (untouched).
-  - patch: |
-      apiVersion: v1
-      kind: ConfigMap
-      metadata:
-        name: argocd-rbac-cm
-      data:
-        policy.default: role:readonly
-        scopes: '[groups]'
-        policy.csv: |
-          g, UA-MIS:capstone-admin, role:admin
-          g, UA-MIS, role:readonly
-          p, role:team-sample, applications, get, team-sample/*, allow
-          p, role:team-sample, applications, sync, team-sample/*, allow
-          p, role:team-sample, logs, get, team-sample/*, allow
-          p, role:team-sample, projects, get, team-sample, allow
-          g, UA-MIS:team-sample, role:team-sample
-    target:
-      kind: ConfigMap
-      name: argocd-rbac-cm
+  # NOTE (p2.1-fix): the argocd-cm OIDC config + argocd-rbac-cm group->role bindings
+  # were MOVED OUT of here into the `argocd-config` platform-service
+  # (platform-services/argocd-config/) so they self-heal via ArgoCD GitOps sync.
+  # Here they only applied at `make bootstrap` time and went stale after sync. The
+  # bootstrap install now carries ONLY `server.insecure` (genuinely install-time:
+  # the server flag must be set before ArgoCD first serves). See argocd-config/.
 
 labels:
   - pairs:

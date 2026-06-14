@@ -1,0 +1,45 @@
+# ArgoCD OIDC wiring -> Dex (P2.1, §1.1, D-017). Adds two keys to argocd-cm: the
+# external `url` (so ArgoCD builds correct OIDC redirect URLs) and `oidc.config`
+# pointing at the standalone platform Dex broker.
+#
+# SELF-HEALING via GitOps (moved here from bootstrap/argocd-install in p2.1-fix):
+# ArgoCD's application-controller applies with ServerSideApply using its OWN field
+# manager, which merges these keys into the install-created argocd-cm at the FIELD
+# level WITHOUT pruning the upstream `resource.customizations.*` / `resource.exclusions`
+# keys (verified by live `kubectl diff --server-side --field-manager=...`). This is
+# unlike a plain `kubectl apply`, whose default manager + last-applied annotation
+# would prune unlisted keys — which is why this lived in the bootstrap patch before.
+# Now it self-heals like every other platform-service.
+#
+# We use `oidc.config` (external OIDC provider) NOT the bundled `dex.config`,
+# because §1.1 runs ONE shared platform Dex that Backstage/Grafana/Harbor also
+# federate through.
+#
+# The clientSecret derefs the SealedSecret-materialised Secret `argocd-dex-client`
+# (sealedsecret.yaml) as $argocd-dex-client:oidc.dex.clientSecret; it MUST equal
+# the `argocd` staticClient secret Dex holds.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cm
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-cm
+    app.kubernetes.io/part-of: argocd
+    platform.capstone/component: platform
+data:
+  url: https://argocd.127-0-0-1.sslip.io
+
+  oidc.config: |
+    name: Dex (GitHub)
+    issuer: https://id.127-0-0-1.sslip.io
+    clientID: argocd
+    clientSecret: $argocd-dex-client:oidc.dex.clientSecret
+    requestedScopes:
+      - openid
+      - profile
+      - email
+      - groups
+    requestedIDTokenClaims:
+      groups:
+        essential: true

@@ -1,0 +1,54 @@
+# ArgoCD RBAC -> GitHub Teams (P2.1, §1.1, D-017; SEC-006/007 fix). Binds the
+# OIDC `groups` claim (GitHub Teams via Dex) to ArgoCD roles.
+#
+# CANONICAL TEAM IDENTIFIER = `<name>` (e.g. `sample`) — the Phase-1 convention
+# (D-008): namespaces `<name>-<env>`, AppProject `metadata.name: <name>`, team apps
+# `project: <name>`, GitHub Team slug `<name>`, OIDC group `UA-MIS:<name>`. ArgoCD
+# app RBAC matches `<project>/<app>` = `<name>/<name>-*`. (SEC-006 was a mismatch:
+# policy used `team-sample` while the AppProject is `sample` -> the role was inert.)
+#
+# Group format (SEC-007): Dex's GitHub connector with `orgs:` set emits ONLY
+# `<org>:<team-slug>` groups (e.g. `UA-MIS:sample`). The BARE org `UA-MIS` is NOT
+# emitted, so the org-wide read-only baseline is `policy.default`, not a group line.
+#
+# Bindings:
+#   - `UA-MIS:capstone-admin` GitHub Team -> role:admin (platform engineers)
+#   - any authenticated UA-MIS member       -> role:readonly (policy.default)
+#   - `UA-MIS:<name>` GitHub Team            -> role:<name> (scoped to AppProject <name>)
+#
+# Break-glass: the local `admin` account (argocd-secret) is untouched (full access).
+#
+# Self-heals via the platform-services-appset (ServerSideApply, additive merge —
+# the upstream argocd-rbac-cm ships empty so nothing is overwritten).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-rbac-cm
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-rbac-cm
+    app.kubernetes.io/part-of: argocd
+    platform.capstone/component: platform
+data:
+  # Org membership is enforced upstream by Dex (non-members never get a token), so
+  # any authenticated UA-MIS member's baseline is read-only. This IS the org-wide
+  # baseline (the bare-org group does not exist — see SEC-007 above).
+  policy.default: role:readonly
+
+  # csv format: https://argo-cd.readthedocs.io/en/stable/operator-manual/rbac/
+  policy.csv: |
+    # --- Platform admins: the capstone-admin GitHub Team -> built-in admin ---
+    g, UA-MIS:capstone-admin, role:admin
+
+    # --- Per-team scoped role. Team identifier = AppProject name = GitHub Team
+    #     slug = `sample`. Scoped to the team's OWN AppProject + apps (sample/sample-*)
+    #     only. Instantiate one block + binding per onboarded team. ---
+    p, role:sample, applications, get, sample/*, allow
+    p, role:sample, applications, sync, sample/*, allow
+    p, role:sample, applications, action/*, sample/*, allow
+    p, role:sample, logs, get, sample/*, allow
+    p, role:sample, projects, get, sample, allow
+    g, UA-MIS:sample, role:sample
+
+  # Treat the `groups` scope as the source of role bindings.
+  scopes: '[groups]'
