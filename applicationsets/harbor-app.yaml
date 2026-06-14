@@ -1,0 +1,91 @@
+# Harbor Application (P2.2, §1.5, D-022) — self-hosted OCI registry via the Harbor
+# Helm chart. DEPLOY METHOD = (A) Helm-source Application (orchestrator direction;
+# human to confirm A vs B kustomize-helm-inflation — see harbor/README.md). The
+# chart repo is pinned and must be allowlisted in the `platform` AppProject
+# sourceRepos (see bootstrap/platform-appproject.yaml patch in this PR — DO NOT
+# MERGE the allowlist change until the human confirms method A).
+#
+# Root-app recurses applicationsets/, so this Application is registered. Values are
+# declarative in git below (method-portable: the same values block feeds a
+# kustomize helmCharts: inflation if we pivot to method B).
+#
+# Chart: harbor v1.19.1 (Harbor app v2.x), pinned. Storage: local-path (Phase-2;
+# Ceph is Phase-4). Bundled postgres+redis (external DB is Phase-4). OIDC: the
+# chart exposes externalURL + serves the UI; the OIDC AUTH MODE itself is a Harbor
+# system-config applied post-install (oidc-config Job / documented) pointing at the
+# shared Dex broker — see harbor/README.md.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-harbor
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://helm.goharbor.io           # PINNED chart repo (sourceRepos allowlist)
+    chart: harbor
+    targetRevision: 1.19.1                       # pinned chart version (no ^/~/latest)
+    helm:
+      releaseName: harbor
+      values: |
+        # --- Exposure: Traefik ingress on harbor.${PLATFORM_DOMAIN}, wildcard TLS ---
+        expose:
+          type: ingress
+          tls:
+            enabled: true
+            # Traefik's default TLSStore serves the cert-manager wildcard cert for
+            # *.127-0-0-1.sslip.io, so no per-ingress secret is needed; tell the
+            # chart NOT to create/expect its own secret.
+            certSource: none
+          ingress:
+            hosts:
+              core: harbor.127-0-0-1.sslip.io
+            className: traefik
+            # k3d Traefik serves the wildcard via the default TLSStore (§5.2).
+        # External URL clients + OIDC redirect use (HTTPS, terminated at Traefik).
+        externalURL: https://harbor.127-0-0-1.sslip.io
+
+        # --- Admin password + data key from the SealedSecret (harbor-admin) ---
+        existingSecretAdminPassword: harbor-admin
+        existingSecretAdminPasswordKey: HARBOR_ADMIN_PASSWORD
+        existingSecretSecretKey: harbor-admin     # 16-char data-encryption key
+
+        # --- Persistence: local-path (default SC); Ceph is Phase-4 ---
+        persistence:
+          enabled: true
+          persistentVolumeClaim:
+            registry:   { storageClass: local-path, size: 20Gi }
+            jobservice:
+              jobLog:   { storageClass: local-path, size: 1Gi }
+            database:   { storageClass: local-path, size: 2Gi }
+            redis:      { storageClass: local-path, size: 1Gi }
+            trivy:      { storageClass: local-path, size: 5Gi }
+
+        # --- Trivy vulnerability scanning ENABLED (scan-on-push set at project
+        #     level post-install; enforce-block strength is a D-022 should-decide —
+        #     default scan+WARN, flagged for the human, see README) ---
+        trivy:
+          enabled: true
+
+        # Single-replica everything for Phase-2 local (laptop). Phase-4 scales.
+        portal:    { replicas: 1 }
+        core:      { replicas: 1 }
+        jobservice: { replicas: 1 }
+        registry:  { replicas: 1 }
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: harbor
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false      # harbor ns ships as its own object (platform-services/harbor)
+      - ServerSideApply=true       # Harbor CRDs/large objects
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

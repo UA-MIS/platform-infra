@@ -72,8 +72,10 @@ data:
           # audit/UI instead of an opaque numeric ID.
           useLoginAsID: true
 
-    # OAuth2 clients that federate through this broker. ArgoCD is the first; its
-    # static-client secret is injected from the SealedSecret as $ARGOCD_CLIENT_SECRET.
+    # OAuth2 clients that federate through this broker. Each platform tool that
+    # does human SSO is a static client here — the WHOLE POINT of the shared broker
+    # (§1.1): one GitHub OAuth app, N tools. Secrets are injected from the
+    # SealedSecret as $<NAME>_CLIENT_SECRET env vars.
     staticClients:
       - id: argocd
         name: ArgoCD
@@ -83,6 +85,16 @@ data:
           - https://argocd.127-0-0-1.sslip.io/auth/callback
           # ArgoCD CLI (argocd login --sso) loopback callback.
           - http://localhost:8085/auth/callback
+      # Harbor (P2.2) — registry SSO via the SAME broker (NO new GitHub OAuth app).
+      # Harbor-core fetches Dex discovery SERVER-SIDE; the issuer host
+      # id.127-0-0-1.sslip.io is already in-cluster-reachable via the coredns-custom
+      # rewrite -> Traefik -> Dex (slice-1 pattern, reused, no new rewrite needed).
+      - id: harbor
+        name: Harbor
+        secretEnv: HARBOR_CLIENT_SECRET
+        redirectURIs:
+          # Harbor's OIDC callback (server URL + /c/oidc/callback).
+          - https://harbor.127-0-0-1.sslip.io/c/oidc/callback
 
     oauth2:
       # Skip the per-login "approve this app" screen — these are first-party
