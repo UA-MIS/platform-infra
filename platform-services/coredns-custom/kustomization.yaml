@@ -1,0 +1,15 @@
+# coredns-custom (P2.1-fix2) — in-cluster DNS rewrite so the OIDC issuer host
+# (id.${PLATFORM_DOMAIN}) is reachable from inside pods (ArgoCD/Backstage/Grafana/
+# Harbor all fetch Dex discovery server-side). See coredns-custom.yaml for the why.
+# Managed by the platform-services-appset; targets kube-system (the explicit
+# namespace in the manifest wins over the appset's neutral default).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - coredns-custom.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false
