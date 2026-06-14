@@ -1,0 +1,29 @@
+# Dex platform-service (P2.1, §1.1, D-017) — the platform's sole OIDC broker,
+# GitHub-org gated to UA-MIS. Managed by the platform-services-appset (one Application
+# per platform-services/* dir). Self-contained, kustomize-native (no Helm), pinned
+# image v2.45.1 — matches the cert-manager/sealed-secrets convention.
+#
+# Resource ordering is handled by ArgoCD sync-waves (annotations on the manifests):
+#   wave 0: namespace, rbac, sealedsecret, configmap   (prereqs)
+#   wave 1: deployment, service, ingress               (the running broker)
+# The appset applies with ServerSideApply, fine for these objects.
+#
+# AWAITING HUMAN: sealedsecret.yaml currently carries PLACEHOLDER GitHub OAuth
+# client-id/client-secret. Once the human registers the UA-MIS OAuth app and
+# returns the real values, RE-SEAL (see dex/README.md) and the broker goes live.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - rbac.yaml
+  - sealedsecret.yaml
+  - configmap.yaml
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false

@@ -1,0 +1,32 @@
+# ArgoCD UI/API Ingress (P2.1, §5.2). Exposes ArgoCD at argocd.${PLATFORM_DOMAIN}
+# — REQUIRED for SSO: the OIDC redirect/callback URLs are derived from argocd-cm's
+# `url`, so ArgoCD must be reachable at a stable external host (port-forward alone
+# can't serve the GitHub->Dex->ArgoCD callback round-trip).
+#
+# ArgoCD server runs in insecure (HTTP) mode (bootstrap install sets
+# server.insecure: true); TLS terminates at Traefik using the cert-manager
+# wildcard cert (default TLSStore), same convention as every other host. Plain
+# Ingress, TLS host listed, NO secretName.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: argocd-server
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: argocd-server
+spec:
+  rules:
+    - host: argocd.127-0-0-1.sslip.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: argocd-server
+                port:
+                  number: 80
+  tls:
+    - hosts:
+        - argocd.127-0-0-1.sslip.io

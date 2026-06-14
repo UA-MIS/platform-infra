@@ -1,0 +1,49 @@
+# Dex RBAC (P2.1, §1.1). Dex uses Kubernetes CRD storage (storage.type:
+# kubernetes) — it persists OAuth2 auth requests, refresh tokens, signing keys,
+# etc. as custom resources in its own namespace. That requires:
+#   - a ServiceAccount the Deployment runs as;
+#   - a (namespaced) Role granting full access to dex.coreos.com CRs + the
+#     ability to create/read/update its own CRDs;
+#   - a cluster-scoped Role to manage the CustomResourceDefinitions themselves
+#     (Dex auto-creates its CRDs on first start).
+#
+# This is the upstream-documented RBAC for Dex-on-Kubernetes storage, pinned here
+# as plain manifests (kustomize-native, no Helm) to match the repo convention.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dex
+  namespace: dex
+  labels:
+    platform.capstone/component: platform
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dex
+  labels:
+    platform.capstone/component: platform
+rules:
+  # Dex's own custom resources (auth codes, refresh tokens, signing keys, ...).
+  - apiGroups: ["dex.coreos.com"]
+    resources: ["*"]
+    verbs: ["*"]
+  # Dex creates its CRDs on startup; it needs to register/read them.
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["create", "get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dex
+  labels:
+    platform.capstone/component: platform
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dex
+subjects:
+  - kind: ServiceAccount
+    name: dex
+    namespace: dex
