@@ -310,3 +310,45 @@ make cluster-up && make bootstrap
 
 After recreate, confirm `kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}'`
 shows `https://127.0.0.1:<port>` (loopback), and re-run the §3 promotion checks.
+
+### Recreate EXECUTED — results (2026-06-14)
+
+The recreate was run from the corrected IaC (platform-infra `98e5fa5` + the
+follow-up registry-idempotency fix `1ab990e`).
+
+**PROVEN tonight (no git push required):**
+- `make cluster-down`: the **standalone registry survived** with all 3 images
+  intact (`9b08056`, `v0.1.0`, `pull-30613c1`) — no image rebuild needed.
+- A reproducibility bug surfaced and was fixed: `_ensure-registry-podman`'s
+  existence grep checked `$(REGISTRY_HOST)` but `k3d registry list` reports the
+  `k3d-`-prefixed name, so the idempotent re-run hit *"A registry node with that
+  name already exists"*. Fixed to `k3d-$(REGISTRY_HOST)` (commit `1ab990e`).
+  (First-run worked; only the re-run path was broken — exactly what this pass is for.)
+- `make cluster-up`: both nodes Ready (k3s v1.31.5). **SEC-005 CLOSED** — kubeconfig
+  server = `https://127.0.0.1:37417`; serverlb publishes `127.0.0.1:37417->6443`
+  (not `0.0.0.0`); host listen socket is `127.0.0.1:37417`. Control plane is no
+  longer LAN/tailnet-reachable. Ingress 80/443 stay on `*` by design.
+- `make bootstrap`: ArgoCD installed via server-side-apply (no annotation-size
+  error); all 3 CRDs Established. platform-svc-{cert-manager,traefik,sealed-secrets}
+  + root + tenant-team-sample all **Synced/Healthy**.
+- Wildcard cert Ready with **dashed dnsNames** `*.127-0-0-1.sslip.io` + apex.
+- **All four dashed hosts resolve via REAL DNS** (`getent`, no `/etc/hosts`):
+  prod `sample.sample.127-0-0-1.sslip.io`, dev `…dev…`, staging `…staging…`,
+  preview `…pr-1…` — every one → `127.0.0.1`. The preview collision is gone.
+- Tenant ingresses render the new convention live (e.g. dev =
+  `sample.sample.dev.127-0-0-1.sslip.io`).
+- **Fresh-key re-seal verified to decrypt correctly**: applying the developer's
+  fresh-key dev SealedSecret directly (bypassing git) yielded
+  `dev-app-secret-7f3a9c21`, len 23, sha256 `8a4f1795` — IDENTICAL to the
+  pre-recreate runbook value. Confirms the re-seal is correct.
+
+**PENDING Push B (git push is human-gated):** ArgoCD pulls the four SealedSecrets
+from origin, which still holds the OLD-key seals, so the app secret-path apps are
+`Degraded`/`Missing` until the fresh-key re-seal commits are pushed:
+- sample-app `main` `21dbc8f` (re-seal dev/staging/prod), `preview-demo` `f857d52`
+  (dashed preview host + re-seal sample-pr-1), platform-infra `main` `1ab990e`.
+- After the push + a hard refresh, all four envs reconcile green and decrypt to
+  the identical sha256s (dev `8a4f1795`/23, staging `e254111a`/27, preview
+  `8bde59f1`/27, prod `1fbe4cb9`/24 after the manual gate sync). Preview is then
+  reachable over real DNS at the dashed host with no `--resolve`. PROD remains the
+  manual gate on the fresh cluster (one ACTION-B sync to deploy).
