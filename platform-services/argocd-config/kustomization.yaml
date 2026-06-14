@@ -1,0 +1,25 @@
+# ArgoCD SSO support objects (P2.1, §1.1, D-017) — the Ingress that exposes
+# ArgoCD at argocd.${PLATFORM_DOMAIN} (required so OIDC redirect URLs resolve) and
+# the SealedSecret holding the Dex static-client secret ArgoCD's oidc.config
+# dereferences.
+#
+# WHY ONLY THESE TWO (and not the argocd-cm/argocd-rbac-cm changes):
+# The OIDC `url`/`oidc.config` and the RBAC `policy.csv` are added as strategic-
+# merge patches in bootstrap/argocd-install/kustomization.yaml, where the FULL
+# upstream argocd-cm/argocd-rbac-cm are present so the merge is additive. Managing
+# those ConfigMaps from here via ServerSideApply would prune the install's other
+# keys (the live CMs have no field-manager owner), so they live with the install.
+# These two objects are standalone (no prune risk) and self-heal as a platform-service.
+#
+# Managed by the platform-services-appset (one Application per platform-services/* dir).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - sealedsecret.yaml
+  - ingress.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false

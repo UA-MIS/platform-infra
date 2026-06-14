@@ -1,0 +1,17 @@
+# Dex Service (P2.1). ClusterIP fronting the broker on :5556; the Ingress
+# (ingress.yaml) routes id.${PLATFORM_DOMAIN} here, Traefik terminating TLS.
+apiVersion: v1
+kind: Service
+metadata:
+  name: dex
+  namespace: dex
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: dex
+spec:
+  selector:
+    app.kubernetes.io/name: dex
+  ports:
+    - name: http
+      port: 5556
+      targetPort: 5556

@@ -1,0 +1,95 @@
+# Dex Deployment + Service (P2.1, §1.1). Pinned image ghcr.io/dexidp/dex:v2.45.1
+# (no :latest). Single replica for Phase 1/local (matches the non-HA ArgoCD
+# install; Phase-3 HA is a replica bump + leader-aware storage, not an app change).
+#
+# Config comes from the `dex` ConfigMap mounted at /etc/dex/config.yaml. The
+# GitHub OAuth clientID/secret + ArgoCD static-client secret come from the
+# `dex-github` Secret (materialised by the SealedSecret) as env vars, which the
+# ConfigMap references as $VARS (Dex expands env at config load).
+#
+# A change to the ConfigMap does NOT auto-restart the pod: ArgoCD syncs the new
+# ConfigMap, then a manual `kubectl -n dex rollout restart deploy/dex` picks it up
+# (documented in the dex README). Phase-2 can add a config-hash annotation later.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dex
+  namespace: dex
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: dex
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"   # after namespace/rbac/secret/configmap
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dex
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dex
+        platform.capstone/component: platform
+    spec:
+      serviceAccountName: dex
+      containers:
+        - name: dex
+          image: ghcr.io/dexidp/dex:v2.45.1
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/dex", "serve", "/etc/dex/config.yaml"]
+          ports:
+            - name: http
+              containerPort: 5556
+            - name: telemetry
+              containerPort: 5558
+          env:
+            # Injected from the dex-github Secret (SealedSecret). Referenced by
+            # $VAR in the ConfigMap; Dex expands env vars at config load.
+            - name: GITHUB_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: dex-github
+                  key: client-id
+            - name: GITHUB_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: dex-github
+                  key: client-secret
+            - name: ARGOCD_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: dex-github
+                  key: argocd-client-secret
+          volumeMounts:
+            - name: config
+              mountPath: /etc/dex
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /healthz/ready
+              port: 5558
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz/live
+              port: 5558
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1001
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: config
+          configMap:
+            name: dex

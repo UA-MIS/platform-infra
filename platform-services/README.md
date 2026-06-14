@@ -1,15 +1,17 @@
-# platform-services (Phase 1)
+# platform-services
 
 ArgoCD-managed cluster services, fanned in by `platform-services-appset` (T3):
 each subdirectory becomes one Application in the privileged `platform` AppProject.
-All three are pinned and self-contained; ordering within cert-manager is handled
-by ArgoCD sync waves.
+All are pinned and self-contained; intra-service ordering is handled by ArgoCD
+sync waves.
 
 | Service | What it installs | Namespace | Interface (§5) |
 | --- | --- | --- | --- |
 | `cert-manager/` | cert-manager v1.20.2 + self-signed CA issuer chain + wildcard `Certificate` for `*.${PLATFORM_DOMAIN}` | `cert-manager` (install), `kube-system` (wildcard secret) | exposes `ClusterIssuer` `platform-ca-issuer` + the wildcard TLS secret `wildcard-platform-tls`; consumed by Traefik (§5.1) |
 | `traefik/` | configures the **bundled** k3s/k3d Traefik (D-010): default `TLSStore` + `HelmChartConfig` | `kube-system` | serves `*.${PLATFORM_DOMAIN}` on host :80/:443 using the wildcard secret; consumed by every team `Ingress` (§5.2) |
 | `sealed-secrets/` | Sealed Secrets controller v0.37.0 | `kube-system` | exposes the `SealedSecret` CRD + controller cert (for `kubeseal`); decrypts to in-namespace `Secret` (§5.3, D-006) |
+| `dex/` (P2.1) | Dex v2.45.1 OIDC broker, GitHub connector org-gated to `UA-MIS` | `dex` | the platform's **sole OIDC broker** at `id.${PLATFORM_DOMAIN}`; surfaces GitHub Teams as the `groups` claim; ArgoCD/Backstage/Grafana/Harbor federate here (§1.1, D-017). **Has a human OAuth-app step — see `dex/README.md`.** |
+| `argocd-config/` (P2.1) | ArgoCD SSO support: the `argocd.${PLATFORM_DOMAIN}` Ingress + the SealedSecret holding ArgoCD's Dex static-client secret | `argocd` | makes ArgoCD reachable for the OIDC round-trip + supplies `oidc.dex.clientSecret`. The `argocd-cm` `oidc.config` + `argocd-rbac-cm` group→role bindings live in `bootstrap/argocd-install/` (additive patches) — see that dir |
 
 ## How TLS flows (Phase 1, no ACME)
 

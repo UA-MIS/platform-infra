@@ -1,0 +1,16 @@
+# Dex platform-service namespace (P2.1, §1.1, D-017).
+#
+# Dex is the platform's sole OIDC broker (GitHub-org membership = identity). It
+# runs in its own `dex` namespace rather than kube-system: it is a first-class
+# platform application (config-driven, stateless), and a dedicated namespace keeps
+# its ServiceAccount/RBAC, ConfigMap, and the (Sealed) GitHub OAuth secret scoped
+# and easy to reason about. The platform-services-appset's neutral kube-system
+# default is overridden here because every object below pins `namespace: dex`.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dex
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"   # namespace before everything in it
