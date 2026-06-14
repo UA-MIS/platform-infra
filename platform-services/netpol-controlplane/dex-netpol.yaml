@@ -1,0 +1,111 @@
+# Control-plane NetworkPolicies — dex namespace (P2-hardening, SEC-009).
+#
+# Dex is the OIDC broker; the skip.verify MITM precondition is specifically about
+# who can intercept the in-cluster path to Dex. So INGRESS to dex is tightened to
+# ONLY: Traefik (the issuer ingress path, kube-system) + argocd (the relying
+# party). EGRESS: DNS + apiserver (Dex's Kubernetes CRD storage) + external
+# HTTPS:443 (GitHub OAuth token exchange + org/team membership check).
+#
+# Same kube-router caveats/CIDRs as argocd-netpol.yaml. Managed by the appset.
+
+# --- default-deny (ingress + egress) for every pod in dex ---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: zz-default-deny
+  namespace: dex
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# --- INGRESS: from Traefik (issuer ingress) + from the argocd namespace
+#     (relying-party server-side discovery/token calls). ---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-traefik-and-argocd
+  namespace: dex
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: dex
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # Traefik (bundled, kube-system) — serves id.${PLATFORM_DOMAIN} -> dex:5556.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+        # ArgoCD (and future relying parties) reach Dex in-cluster via the
+        # CoreDNS-rewritten issuer host -> Traefik, but also allow the argocd ns
+        # directly for robustness.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: argocd
+      ports:
+        - protocol: TCP
+          port: 5556
+        - protocol: TCP
+          port: 5558   # telemetry/health (probes come from kubelet on the node;
+                       # see the kubelet allow below)
+    # kubelet health probes originate from the node IP, not a pod/ns — allow the
+    # node CIDR to the telemetry port so readiness/liveness keep working.
+    - from:
+        - ipBlock:
+            cidr: 10.89.0.0/24
+      ports:
+        - protocol: TCP
+          port: 5558
+---
+# --- EGRESS: DNS, apiserver (CRD storage on node IPs), external HTTPS:443
+#     (GitHub OAuth token + org/team check). ---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-scoped
+  namespace: dex
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # DNS to CoreDNS.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Intra-cluster (pods + services) — Dex CRD storage talks to the apiserver via
+    # the kubernetes service (10.43.0.1) and may resolve in-cluster names.
+    - to:
+        - ipBlock:
+            cidr: 10.42.0.0/16
+        - ipBlock:
+            cidr: 10.43.0.0/16
+    # kube-apiserver on node IPs (:6443) — Dex Kubernetes storage backend.
+    - to:
+        - ipBlock:
+            cidr: 10.89.0.0/24
+    # External HTTPS only — GitHub OAuth token exchange + org/team membership API.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.42.0.0/16
+              - 10.43.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
