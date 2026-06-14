@@ -130,7 +130,7 @@ _ensure-registry-podman:
 	    echo "creating podman network '$(CLUSTER_NETWORK)' for k3d..."; \
 	    docker network create "$(CLUSTER_NETWORK)" >/dev/null; \
 	  fi; \
-	  if ! env $(RUNTIME_ENV) k3d registry list 2>/dev/null | awk 'NR>1{print $$1}' | grep -qx "k3d-$(REGISTRY_HOST)"; then \
+	  if ! env $(RUNTIME_ENV) k3d registry list 2>/dev/null | awk 'NR>1{print $$1}' | grep -qx "$(REGISTRY_HOST)"; then \
 	    echo "creating standalone k3d registry '$(REGISTRY_HOST)' on '$(CLUSTER_NETWORK)'..."; \
 	    env $(RUNTIME_ENV) k3d registry create "$(REGISTRY_CREATE_NAME)" \
 	      --default-network "$(CLUSTER_NETWORK)" --port "0.0.0.0:$(REGISTRY_PORT)"; \
@@ -153,7 +153,7 @@ cluster-up: preflight ## Create the k3d cluster from $(K3D_CONFIG) if it does no
 	    "$(K3D_CONFIG)" > "$$tmpcfg"; \
 	  echo "creating k3d cluster '$(CLUSTER_NAME)' (podman path: pre-created registry on '$(CLUSTER_NETWORK)', inline registry stripped)..."; \
 	  env $(RUNTIME_ENV) k3d cluster create --config "$$tmpcfg" \
-	    --network "$(CLUSTER_NETWORK)" --registry-use "k3d-$(REGISTRY_HOST):$(REGISTRY_PORT)" \
+	    --network "$(CLUSTER_NETWORK)" --registry-use "$(REGISTRY_HOST):$(REGISTRY_PORT)" \
 	    --k3s-arg "--kubelet-arg=feature-gates=KubeletInUserNamespace=true@server:*" \
 	    --k3s-arg "--kubelet-arg=feature-gates=KubeletInUserNamespace=true@agent:*"; \
 	  rm -f "$$tmpcfg"; \
@@ -182,6 +182,35 @@ cluster-info: ## Show nodes, registry, and the ingress base URL
 	@env $(RUNTIME_ENV) k3d registry list 2>/dev/null || true
 	@echo "=== ingress base ==="
 	@echo "  http(s)://<app>.<team>.$(PLATFORM_DOMAIN)  (Traefik on host :80/:443)"
+
+# ADV-002 (REG-001 regression guard): POSITIVE acceptance assertion that a tenant
+# app pod actually PULLS its image — i.e. the in-cluster registry mirror key
+# matches the overlays' image prefix. A "Synced/Healthy Application" is NOT enough:
+# REG-001 shipped with every Application green while every POD was ImagePullBackOff
+# (mirror key double-prefixed). This target FAILS LOUDLY if any tenant app pod is
+# stuck on image pull, so that class can never regress to a silent green sign-off.
+# Secret-not-found / CreateContainerConfigError do NOT fail this check — those are
+# the expected pre-re-seal states; only image-pull failures are fatal here.
+.PHONY: verify-image-pull
+verify-image-pull: ## (ADV-002) Assert tenant app pods get PAST ImagePullBackOff (registry mirror sanity)
+	@echo "==> ADV-002: asserting tenant app pods pull their image (no ImagePullBackOff)..."
+	@ctx="k3d-$(CLUSTER_NAME)"; bad=0; found=0; \
+	for ns in $$(kubectl --context "$$ctx" get ns -l platform.capstone/team -o name 2>/dev/null | cut -d/ -f2); do \
+	  for i in $$(seq 1 24); do \
+	    reasons="$$(kubectl --context "$$ctx" get pods -n "$$ns" -l app.kubernetes.io/name=sample \
+	      -o jsonpath='{range .items[*]}{.status.containerStatuses[*].state.waiting.reason} {end}' 2>/dev/null)"; \
+	    [ -z "$$reasons" ] && { sleep 5; continue; }; \
+	    found=1; \
+	    if echo "$$reasons" | grep -qE 'ImagePullBackOff|ErrImagePull'; then \
+	      if [ "$$i" -ge 24 ]; then echo "  FAIL [$$ns]: pod stuck on image pull ($$reasons)"; bad=1; break; fi; \
+	      sleep 5; continue; \
+	    fi; \
+	    echo "  OK   [$$ns]: image pull resolved (state: $$reasons running/secret-pending)"; break; \
+	  done; \
+	done; \
+	if [ "$$found" = 0 ]; then echo "  (no tenant app pods found yet — run after ArgoCD has generated them)"; fi; \
+	if [ "$$bad" = 1 ]; then echo "verify-image-pull: FAIL (REG-001 class — registry mirror key mismatch)"; exit 1; fi; \
+	echo "verify-image-pull: PASS"
 
 # Ensure `k3d-registry.localhost` resolves on the host so `docker push` works.
 # Idempotent: only appends the hosts line if missing, and only if writable.
@@ -239,6 +268,8 @@ bootstrap: ## (T3) Install ArgoCD + apply the platform project & app-of-apps roo
 	@kubectl apply -f bootstrap/root-app.yaml
 	@echo "bootstrap complete. Inspect:  kubectl -n argocd get applications,applicationsets"
 	@echo "  admin pw:  kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"
+	@echo "  ACCEPTANCE (ADV-002): once ArgoCD generates the tenant pods, run \`make verify-image-pull\`"
+	@echo "                        to assert they get PAST ImagePullBackOff (registry-mirror sanity)."
 
 # ---- repoURL seam (single swappable git base) ------------------------------
 # All ArgoCD sources hardcode https://github.com/UA-MIS/<repo> (the real home).

@@ -313,17 +313,40 @@ shows `https://127.0.0.1:<port>` (loopback), and re-run the §3 promotion checks
 
 ### Recreate EXECUTED — results (2026-06-14)
 
-The recreate was run from the corrected IaC (platform-infra `98e5fa5` + the
-follow-up registry-idempotency fix `1ab990e`).
+The recreate was run from the corrected IaC. **It surfaced TWO further bugs that
+the reviewer (L7) caught — the first sign-off was premature** (it asserted
+"Applications Synced/Healthy" but did NOT assert a *Running pod*, so the
+image-pull break below slipped through). Both are now fixed.
+
+> **REG-001 (BLOCKING, found by L7, fixed):** after the recreate every app pod
+> was `ImagePullBackOff` (`lookup k3d-registry.localhost: no such host`) even
+> though all Applications were green. Root cause: the **standalone registry has
+> survived every `cluster-down` since it was first created**, so it kept its
+> original container name `k3d-k3d-registry.localhost` (double `k3d-` prefix) and
+> the in-cluster containerd mirror key stayed `k3d-k3d-registry.localhost:5000` —
+> which does NOT match the overlays' `k3d-registry.localhost:5000/...` images. The
+> earlier idempotency commit `1ab990e` masked this: it changed the existence
+> guard to `k3d-$(REGISTRY_HOST)` to match the surviving mis-named registry,
+> ENTRENCHING the double-prefix instead of correcting it. **Fix:** the guard and
+> `--registry-use` now both reference `$(REGISTRY_HOST)` (= `k3d-registry.localhost`,
+> the name `k3d registry create registry.localhost` actually produces), so a
+> fresh registry lands on the single-prefixed name and the mirror key matches the
+> overlays. On the running cluster REG-001 was cleared by live-patching the
+> mirror key + k3s restart (no recreate, to avoid re-minting the sealing key):
+> proven by `Successfully pulled image k3d-registry.localhost:5000/sample:v0.1.0`
+> — pods now fail only on `secret "sample-secret" not found` (the expected
+> pre-Push-B state), NOT on image pull.
+> **ADV-002 regression guard added:** `make verify-image-pull` asserts a tenant
+> app pod gets past `ImagePullBackOff`, so a green-Application/broken-pod sign-off
+> can't recur silently. Verified PASS on the cleared cluster.
 
 **PROVEN tonight (no git push required):**
 - `make cluster-down`: the **standalone registry survived** with all 3 images
   intact (`9b08056`, `v0.1.0`, `pull-30613c1`) — no image rebuild needed.
-- A reproducibility bug surfaced and was fixed: `_ensure-registry-podman`'s
-  existence grep checked `$(REGISTRY_HOST)` but `k3d registry list` reports the
-  `k3d-`-prefixed name, so the idempotent re-run hit *"A registry node with that
-  name already exists"*. Fixed to `k3d-$(REGISTRY_HOST)` (commit `1ab990e`).
-  (First-run worked; only the re-run path was broken — exactly what this pass is for.)
+- A second reproducibility bug surfaced: `_ensure-registry-podman`'s existence
+  grep mismatched the actual registry name, so the idempotent re-run hit *"A
+  registry node with that name already exists"*. Corrected together with REG-001
+  above so the guard, the create-name, and `--registry-use` are all consistent.
 - `make cluster-up`: both nodes Ready (k3s v1.31.5). **SEC-005 CLOSED** — kubeconfig
   server = `https://127.0.0.1:37417`; serverlb publishes `127.0.0.1:37417->6443`
   (not `0.0.0.0`); host listen socket is `127.0.0.1:37417`. Control plane is no
@@ -346,7 +369,8 @@ follow-up registry-idempotency fix `1ab990e`).
 from origin, which still holds the OLD-key seals, so the app secret-path apps are
 `Degraded`/`Missing` until the fresh-key re-seal commits are pushed:
 - sample-app `main` `21dbc8f` (re-seal dev/staging/prod), `preview-demo` `f857d52`
-  (dashed preview host + re-seal sample-pr-1), platform-infra `main` `1ab990e`.
+  (dashed preview host + re-seal sample-pr-1), platform-infra `main` (the
+  registry-mirror REG-001 fix + ADV-002 guard + this runbook correction).
 - After the push + a hard refresh, all four envs reconcile green and decrypt to
   the identical sha256s (dev `8a4f1795`/23, staging `e254111a`/27, preview
   `8bde59f1`/27, prod `1fbe4cb9`/24 after the manual gate sync). Preview is then
