@@ -6,6 +6,8 @@
 #
 # Quick start:
 #   make cluster-up      # create the k3d cluster if absent (idempotent)
+#   make cluster-start   # restart a STOPPED cluster + registry (post-reboot)
+#   make cluster-stop    # stop the cluster + registry without deleting
 #   make cluster-info    # show nodes + registry + ingress URL
 #   make cluster-down    # delete the k3d cluster
 #   make bootstrap       # (T3) apply the ArgoCD root app-of-apps
@@ -172,6 +174,53 @@ cluster-down: ## Delete the k3d cluster (idempotent — no error if absent)
 	  env $(RUNTIME_ENV) k3d cluster delete "$(CLUSTER_NAME)"; \
 	else \
 	  echo "cluster '$(CLUSTER_NAME)' not present — nothing to delete"; \
+	fi
+
+# One-command post-reboot recovery. A host reboot leaves the k3d cluster +
+# registry containers STOPPED (not deleted), so `cluster-up` is overkill — we
+# don't want to recreate, just restart the existing containers and wait for the
+# API to come back. `cluster-start` does exactly that, injecting RUNTIME_ENV so
+# the rootless-Podman socket is wired automatically (the manual `DOCKER_HOST=...`
+# export you'd otherwise repeat by hand). Idempotent: starting already-running
+# containers is a no-op.
+#
+# ORDER MATTERS: start the registry FIRST. It is a standalone container on the
+# cluster network (the Podman path pre-creates it there); the k3d serverlb and
+# node containerd resolve `$(REGISTRY_HOST)` on that network, so bringing it up
+# before the cluster avoids a transient pull/DNS miss while nodes settle. k3d has
+# no `registry start`, so we `docker start` the registry container by name
+# (== $(REGISTRY_HOST), the name `k3d registry create` lands on).
+.PHONY: cluster-start
+cluster-start: ## Restart a STOPPED cluster + registry in one command (post-reboot recovery)
+	@if ! env $(RUNTIME_ENV) k3d cluster list 2>/dev/null | awk 'NR>1{print $$1}' | grep -qx "$(CLUSTER_NAME)"; then \
+	  echo "ERROR: cluster '$(CLUSTER_NAME)' does not exist — run 'make cluster-up' to create it."; \
+	  exit 1; \
+	fi
+	@if env $(RUNTIME_ENV) k3d registry list 2>/dev/null | awk 'NR>1{print $$1}' | grep -qx "$(REGISTRY_HOST)"; then \
+	  echo "starting registry '$(REGISTRY_HOST)'..."; \
+	  env $(RUNTIME_ENV) docker start "$(REGISTRY_HOST)" >/dev/null 2>&1 || true; \
+	else \
+	  echo "NOTE: registry '$(REGISTRY_HOST)' not found — image pulls from it will fail until 'make cluster-up' recreates it."; \
+	fi
+	@echo "starting k3d cluster '$(CLUSTER_NAME)'..."
+	@env $(RUNTIME_ENV) k3d cluster start "$(CLUSTER_NAME)"
+	@echo "waiting for node(s) to be Ready..."
+	@kubectl --context "k3d-$(CLUSTER_NAME)" wait --for=condition=Ready nodes --all --timeout=180s
+	@kubectl config use-context "k3d-$(CLUSTER_NAME)" >/dev/null 2>&1 || true
+	@$(MAKE) --no-print-directory cluster-info
+	@echo "cluster-start: done. (ArgoCD apps may take a minute to re-settle to Healthy after restart.)"
+
+.PHONY: cluster-stop
+cluster-stop: ## Stop the cluster + registry without deleting (inverse of cluster-start)
+	@if env $(RUNTIME_ENV) k3d cluster list 2>/dev/null | awk 'NR>1{print $$1}' | grep -qx "$(CLUSTER_NAME)"; then \
+	  echo "stopping k3d cluster '$(CLUSTER_NAME)'..."; \
+	  env $(RUNTIME_ENV) k3d cluster stop "$(CLUSTER_NAME)"; \
+	else \
+	  echo "cluster '$(CLUSTER_NAME)' not present — nothing to stop"; \
+	fi
+	@if env $(RUNTIME_ENV) k3d registry list 2>/dev/null | awk 'NR>1{print $$1}' | grep -qx "$(REGISTRY_HOST)"; then \
+	  echo "stopping registry '$(REGISTRY_HOST)'..."; \
+	  env $(RUNTIME_ENV) docker stop "$(REGISTRY_HOST)" >/dev/null 2>&1 || true; \
 	fi
 
 .PHONY: cluster-info
