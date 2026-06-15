@@ -68,12 +68,31 @@ make cluster-info    # nodes + registry + ingress base URL
 # ... later phases:
 make bootstrap       # (T3) apply ArgoCD root app-of-apps
 make seal SECRET=... # (T4) kubeseal a secret for git
+make cluster-stop    # stop the cluster + registry without deleting
+make cluster-start   # restart a STOPPED cluster + registry (post-reboot)
 make cluster-down    # tear the cluster down (idempotent)
 ```
 
 All targets are **idempotent** — re-running them never errors. `cluster-up`
 creates the cluster only if missing (otherwise starts it); `cluster-down` is a
 no-op when the cluster is already gone.
+
+### Post-reboot recovery (`cluster-start`)
+
+A host reboot leaves the k3d cluster and registry **containers stopped, not
+deleted** — so you don't need `cluster-up` (which would try to recreate them).
+`make cluster-start` brings the existing cluster back in one command:
+
+```bash
+make cluster-start   # starts the registry, then the cluster, waits for nodes Ready
+```
+
+It injects the rootless-Podman socket automatically (no manual
+`DOCKER_HOST=…` export), starts the registry **before** the cluster so node
+containerd can resolve it, `k3d cluster start`s the cluster, waits for nodes to
+go `Ready`, and switches your kube-context to `k3d-$(CLUSTER_NAME)`. ArgoCD apps
+may take a minute to re-settle to `Healthy` after the restart. The inverse,
+`make cluster-stop`, stops both without deleting them.
 
 ### Built-in registry (D-005)
 
