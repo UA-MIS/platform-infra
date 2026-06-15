@@ -1,0 +1,61 @@
+# Control-plane NetworkPolicies Application (P2-hardening, SEC-009) — MANUAL SYNC.
+#
+# Deliberately NOT under platform-services/ (which the platform-services-appset
+# auto-syncs with automated{prune,selfHeal}). Applying default-deny to the RUNNING
+# control plane mid-session risks severing live argocd/dex connections (a wrong
+# rule can lock ArgoCD out of itself). So this is a STANDALONE Application with a
+# MANUAL sync policy: the manifests land in git + ArgoCD tracks them (shows
+# OutOfSync, harmless — nothing is applied), and enforcement happens via an
+# explicit, watched one-time sync:
+#
+#     argocd app sync platform-netpol-controlplane     # (or the UI Sync button)
+#     # VERIFY (SEC-011): argocd+dex pods stay Ready, ArgoCD keeps reconciling, AND
+#     # — most important — an ACTUAL SSO login completes end-to-end (the argocd->dex
+#     # discovery+JWKS fetch is the path most likely caught by an over-tight rule;
+#     # test a real "Log in via Dex (GitHub)", not just pod health).
+#     # ROLL BACK on any NotReady / sync failure / login break:
+#     #   kubectl -n argocd delete netpol \
+#     #     zz-default-deny allow-ingress-traefik-and-intra-ns allow-egress-scoped
+#     #   kubectl -n dex   delete netpol \
+#     #     zz-default-deny allow-ingress-traefik-and-argocd allow-egress-scoped
+#
+# ⚠ MERGE ≠ ENFORCEMENT — couple the two (SEC-011). Merging this PR only makes the
+# manifests present + tracked (manual sync = applies nothing). Enforcement is the
+# deliberate watched `argocd app sync` above. Do NOT promote to automated / do not
+# wire this into an auto-applying appset until live-enforcement is validated — that
+# would push default-deny onto the running control plane UNATTENDED (lockout risk).
+#
+# On a FRESH `make bootstrap` the operator syncs this once after the control plane
+# is up (or it can be promoted to automated then) — at which point applying
+# default-deny is safe because everything comes up together. Promote to
+# `automated:` once live-enforcement is validated + the Phase-3 egress tightening
+# lands (then it self-heals like the other platform services).
+#
+# Lives in the `platform` AppProject. Root-app recurses applicationsets/, so this
+# Application is registered automatically; only its SYNC is manual.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-netpol-controlplane
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/UA-MIS/platform-infra
+    targetRevision: HEAD
+    path: hardening/netpol-controlplane
+  destination:
+    server: https://kubernetes.default.svc
+    # Neutral default; every NetworkPolicy pins its own namespace (argocd / dex).
+    namespace: kube-system
+  syncPolicy:
+    # NO automated: block — MANUAL sync ONLY (see header). selfHeal/prune off.
+    syncOptions:
+      - ServerSideApply=true
+    retry:
+      limit: 3
+      backoff: { duration: 5s, factor: 2, maxDuration: 1m }

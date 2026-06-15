@@ -1,0 +1,22 @@
+# netpol-controlplane (P2-hardening, SEC-009) — default-deny + scoped allows for
+# the control-plane namespaces (argocd, dex). Compensating control for the
+# accepted oidc.tls.insecure.skip.verify (PR #4 / SEC-009).
+#
+# Additive to ArgoCD's upstream per-component ingress policies. k3s embedded
+# kube-router enforces these (no FQDN egress — external egress is port-scoped to
+# 443). Each manifest pins its own namespace, overriding the appset's neutral
+# kube-system default. Managed by the platform-services-appset.
+#
+# Phase-3: tighten external egress to GitHub's CIDRs (or move to an FQDN-capable
+# CNI), and remove alongside the skip.verify line when the issuer goes ACME-public.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - argocd-netpol.yaml
+  - dex-netpol.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false

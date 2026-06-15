@@ -1,0 +1,112 @@
+# Control-plane NetworkPolicies — argocd namespace (P2-hardening, SEC-009).
+#
+# Compensating control for the accepted `oidc.tls.insecure.skip.verify` (PR #4):
+# default-deny + scoped allows so the (in-cluster-only) MITM precondition that
+# skip.verify introduces is fenced. NetworkPolicies are ADDITIVE (OR) — these sit
+# alongside ArgoCD's upstream per-component ingress policies
+# (argocd-server-network-policy, etc.) without removing them; we ADD a
+# namespace-wide default-deny + the egress controls the upstream policies omit.
+#
+# k3s netpol controller = embedded kube-router. NOTE: it does NOT support
+# FQDN/DNS-based egress, so external egress is scoped by PORT (443) + the
+# cluster/node CIDRs, NOT by hostname. Tightening to github.com's specific CIDRs
+# (or an FQDN-capable CNI like Cilium) is a Phase-3 item.
+#
+# CIDRs (this cluster): pods 10.42.0.0/16, services 10.43.0.0/16, nodes
+# 10.89.0.0/24 (the kube-apiserver is on a node IP :6443, SEC-005 bind).
+#
+# Managed by the platform-services-appset.
+
+# --- default-deny (ingress + egress) for every pod in argocd ---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: zz-default-deny
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# --- INGRESS: from Traefik (kube-system) to the UI/API server; intra-namespace
+#     (server<->repo-server<->redis<->controllers<->dex-bundled) ---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-traefik-and-intra-ns
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    # Traefik (bundled, kube-system) -> argocd-server (the UI/API ingress path).
+    # kube-system also covers any other system component that must reach argocd.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+    # Intra-namespace: all argocd components talk among themselves.
+    - from:
+        - podSelector: {}
+    # Kubelet health probes (readiness/liveness) originate from the NODE IP, not a
+    # pod/namespace — without this, default-deny would fail ALL argocd pods'
+    # probes and the control plane would be restarted into an outage. Allow the
+    # node CIDR to every argocd pod (probes are the only node-sourced traffic).
+    - from:
+        - ipBlock:
+            cidr: 10.89.0.0/24
+---
+# --- EGRESS: DNS, intra-cluster (pods+services), apiserver (node IPs), and
+#     external HTTPS:443 (GitHub git pulls + GH API from repo-server; OIDC token
+#     exchange to Dex via the issuer host which resolves to Traefik). ---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-scoped
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # DNS to CoreDNS (kube-system), UDP+TCP 53.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Intra-cluster: any pod (10.42/16) or service (10.43/16) — covers argocd
+    # internal traffic + reaching Dex/Traefik ClusterIPs in-cluster.
+    - to:
+        - ipBlock:
+            cidr: 10.42.0.0/16
+        - ipBlock:
+            cidr: 10.43.0.0/16
+    # kube-apiserver: lives on the node IPs (:6443) on k3d — the application/
+    # applicationset controllers + repo-server need it.
+    - to:
+        - ipBlock:
+            cidr: 10.89.0.0/24
+    # External HTTPS only (GitHub git+API, OIDC issuer round-trips that egress the
+    # cluster). Port-scoped, not host-scoped (kube-router has no FQDN egress).
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.42.0.0/16
+              - 10.43.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
