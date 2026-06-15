@@ -11,10 +11,32 @@
 # `<org>:<team-slug>` groups (e.g. `UA-MIS:sample`). The BARE org `UA-MIS` is NOT
 # emitted, so the org-wide read-only baseline is `policy.default`, not a group line.
 #
+# REAL UA-MIS team structure (confirmed via `gh api orgs/UA-MIS/teams` 2026-06-14):
+#   - `labmx`                     = the MIS lab / platform-admin team -> role:admin.
+#   - one PARENT team per semester (e.g. `capston-spring-2026` [sic, typo'd in GH],
+#     `capstone-fall-2025`) — a grouping only, NO role (see semester note below).
+#   - one CHILD team per PROJECT, nested under its semester parent. The child team
+#     SLUG is the canonical `<name>` (= tenant/AppProject name, D-026) and gets the
+#     scoped `role:<name>`.
+#
+# Group emission (verified): Dex's GitHub connector reads team membership via the
+# GitHub `/user/teams` API, which returns EVERY team the user is in — parent AND
+# child — as FLAT, separate entries. So Dex emits a distinct `UA-MIS:<slug>` group
+# per membership (e.g. a user in project `walmart-s26` under `capston-spring-2026`
+# gets BOTH `UA-MIS:capston-spring-2026` and `UA-MIS:walmart-s26`). The scoped
+# binding therefore matches on the CHILD (project) slug; the parent slug is unused.
+#
 # Bindings:
-#   - `UA-MIS:capstone-admin` GitHub Team -> role:admin (platform engineers)
-#   - any authenticated UA-MIS member       -> role:readonly (policy.default)
-#   - `UA-MIS:<name>` GitHub Team            -> role:<name> (scoped to AppProject <name>)
+#   - `UA-MIS:labmx` GitHub Team         -> role:admin (platform/lab admins)
+#   - any authenticated UA-MIS member    -> role:readonly (policy.default baseline)
+#   - `UA-MIS:<project-slug>` GitHub Team -> role:<project-slug> (scoped to AppProject)
+#
+# SEMESTER PARENT = grouping only, NO role (deliberate). Binding a semester-wide
+# role would let any student in the cohort see/sync every SIBLING project's apps,
+# breaking tenant isolation (§2.1, four-layer model). Cohort members already get
+# the `policy.default: role:readonly` baseline; that is the only cross-cutting
+# grant. (If a semester-wide read-only "dashboard" is ever wanted, add it as an
+# explicit opt-in role then — flagged, not done now.)
 #
 # Break-glass: the local `admin` account (argocd-secret) is untouched (full access).
 #
@@ -37,12 +59,15 @@ data:
 
   # csv format: https://argo-cd.readthedocs.io/en/stable/operator-manual/rbac/
   policy.csv: |
-    # --- Platform admins: the capstone-admin GitHub Team -> built-in admin ---
-    g, UA-MIS:capstone-admin, role:admin
+    # --- Platform/lab admins: the `labmx` GitHub Team -> built-in admin ---
+    g, UA-MIS:labmx, role:admin
 
-    # --- Per-team scoped role. Team identifier = AppProject name = GitHub Team
-    #     slug = `sample`. Scoped to the team's OWN AppProject + apps (sample/sample-*)
-    #     only. Instantiate one block + binding per onboarded team. ---
+    # --- Per-PROJECT scoped role. Project = a nested GitHub team; its slug is the
+    #     canonical `<name>` = AppProject name (D-026). Scoped to the team's OWN
+    #     AppProject + apps (<name>/<name>-*) only. `sample` below is the EXAMPLE/
+    #     template instance (binds when a `sample`-slug project team exists; inert +
+    #     harmless otherwise). Instantiate one block + binding per onboarded project,
+    #     using the project's child-team slug (e.g. walmart-s26, davita-s26). ---
     # Mirrors the team AppProject `developer` role's least-privilege stance
     # (tenants/team-sample/appproject.yaml): get + sync ONLY — explicitly NO
     # action/*, delete, or override (SEC consistency note on PR #3). logs/get and
