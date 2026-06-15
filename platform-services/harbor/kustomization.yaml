@@ -1,0 +1,20 @@
+# Harbor PREREQS (P2.2) — the namespace + SealedSecrets that must exist before the
+# Harbor Helm Application (applicationsets/harbor-app.yaml) installs into the harbor
+# namespace. Managed by the platform-services-appset (kustomize directory generator);
+# the Helm chart itself is a SEPARATE Application (method A) so it does NOT render
+# through this kustomize dir.
+#
+#   harbor-admin : admin password + 16-char data key (existingSecret refs in values)
+#   harbor-oidc  : the `harbor` Dex static-client secret (for OIDC auth-mode config)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - sealedsecret-admin.yaml
+  - sealedsecret-oidc.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false

@@ -60,6 +60,11 @@ spec:
                 secretKeyRef:
                   name: dex-github
                   key: argocd-client-secret
+            - name: HARBOR_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: dex-github
+                  key: harbor-client-secret
           volumeMounts:
             - name: config
               mountPath: /etc/dex

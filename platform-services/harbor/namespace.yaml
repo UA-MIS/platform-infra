@@ -1,0 +1,10 @@
+# Harbor namespace (P2.2, §1.5, D-022). Harbor is the self-hosted OCI registry —
+# per-team projects, Trivy scan-on-push, OIDC via the shared Dex broker. Its own
+# namespace keeps its many components (core, registry, jobservice, portal, trivy,
+# bundled postgres+redis) + their (Sealed) secrets scoped.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: harbor
+  labels:
+    platform.capstone/component: platform

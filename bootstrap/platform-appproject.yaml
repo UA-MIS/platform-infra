@@ -23,6 +23,13 @@ spec:
   sourceRepos:
     - https://github.com/UA-MIS/platform-infra
     - https://github.com/UA-MIS/platform-infra.git
+    # --- P2.2 (deploy method A, D-022): pinned external Helm chart repos for
+    #     platform services that are Helm-only upstream. This widens the supply-chain
+    #     allowlist by ONE named repo per chart; security audits each addition; chart
+    #     VERSIONS are pinned in the Application (targetRevision). If the human picks
+    #     method B (kustomize helm-inflation rendered from platform-infra), REVERT
+    #     these — they're only needed for Helm-SOURCE Applications.
+    - https://helm.goharbor.io        # Harbor (platform-harbor Application)
 
   # Platform services are cluster-wide; allow any namespace on the in-cluster API.
   destinations:
