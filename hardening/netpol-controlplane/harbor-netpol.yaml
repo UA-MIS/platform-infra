@@ -1,0 +1,124 @@
+# Control-plane NetworkPolicies — harbor namespace (P2-hardening / P2.2, SEC-013).
+#
+# Compensating control extending SEC-009 to Harbor. Harbor's configure-oidc sets
+# `oidc_verify_cert: false` (SEC-012) — the SAME in-cluster self-signed-path
+# residual SEC-009 fenced for argocd/dex — but PR #7's NetworkPolicies covered
+# ONLY argocd + dex. Without this, Harbor's OIDC-MITM precondition (an in-cluster
+# attacker intercepting Harbor->Traefik->Dex / Harbor->JWKS) is UNFENCED. These
+# policies bring Harbor under the same default-deny + scoped-allow posture.
+#
+# Lives in hardening/netpol-controlplane/ (NOT platform-services/) so it inherits
+# the MANUAL-SYNC Application (platform-netpol-controlplane) — default-deny is
+# applied to the harbor namespace only via the deliberate, watched `argocd app
+# sync`, never auto-applied (same lockout-avoidance rationale as argocd/dex, and
+# folded into the SEC-011 live-apply validation gate). NetworkPolicies are ADDITIVE
+# (OR); these sit alongside any policies the Harbor chart ships.
+#
+# Same k3s embedded kube-router caveats as argocd/dex-netpol: NO FQDN/DNS egress —
+# external egress is PORT-scoped (443), not host-scoped. CIDRs (this cluster):
+# pods 10.42.0.0/16, services 10.43.0.0/16, nodes 10.89.0.0/24 (apiserver :6443).
+# Phase-3: tighten external egress to the issuer/GitHub CIDRs (or an FQDN-capable
+# CNI) and remove alongside the skip-verify line when the issuer goes ACME-public.
+
+# --- default-deny (ingress + egress) for every pod in harbor ---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: zz-default-deny
+  namespace: harbor
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# --- INGRESS: from Traefik (kube-system) to the Harbor portal/core (the UI +
+#     OCI registry API ingress path, and the docker/kaniko push+pull clients which
+#     reach Harbor via the harbor.${PLATFORM_DOMAIN} ingress -> Traefik); plus
+#     intra-namespace (core<->registry<->jobservice<->portal<->trivy<->pg<->redis)
+#     and kubelet probes from the node. ---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-traefik-and-intra-ns
+  namespace: harbor
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    # Traefik (bundled, kube-system) -> harbor core/portal. ALL registry clients
+    # (UI, `docker login`/push/pull, Kaniko CI, in-cluster workload image pulls)
+    # transit harbor.${PLATFORM_DOMAIN} -> Traefik, so kube-system ingress is the
+    # single client path. kube-system also covers any other system component.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+    # Intra-namespace: all Harbor components (core, registry, jobservice, portal,
+    # trivy, bundled postgres+redis) talk among themselves.
+    - from:
+        - podSelector: {}
+    # Kubelet health probes (readiness/liveness) originate from the NODE IP, not a
+    # pod/namespace — without this, default-deny fails ALL harbor pods' probes and
+    # the registry never goes Ready. Allow the node CIDR to every harbor pod.
+    - from:
+        - ipBlock:
+            cidr: 10.89.0.0/24
+---
+# --- EGRESS: DNS, intra-cluster (pods+services — reaches Dex/Traefik ClusterIPs,
+#     and Harbor's own bundled postgres/redis), apiserver (node IPs), and external
+#     HTTPS:443 (the OIDC issuer round-trips that egress the cluster + Trivy DB
+#     pulls). The Harbor->Dex OIDC discovery/JWKS path goes via the CoreDNS-
+#     rewritten issuer host -> Traefik (in-cluster), covered by the intra-cluster
+#     CIDRs + dex-netpol's kube-system ingress allow. ---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-scoped
+  namespace: harbor
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # DNS to CoreDNS (kube-system), UDP+TCP 53.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Intra-cluster: any pod (10.42/16) or service (10.43/16) — covers Harbor's
+    # own component mesh + reaching the Dex/Traefik ClusterIPs in-cluster (the
+    # OIDC discovery path) + the configure-oidc Job calling the harbor-core svc.
+    - to:
+        - ipBlock:
+            cidr: 10.42.0.0/16
+        - ipBlock:
+            cidr: 10.43.0.0/16
+    # kube-apiserver on the node IPs (:6443) — k3d binds it on a node address.
+    - to:
+        - ipBlock:
+            cidr: 10.89.0.0/24
+    # External HTTPS only (OIDC issuer round-trips that egress the cluster + Trivy
+    # vulnerability-DB pulls from its upstream). Port-scoped, not host-scoped
+    # (kube-router has no FQDN egress — Phase-3 tightens to issuer/Trivy CIDRs).
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.42.0.0/16
+              - 10.43.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
