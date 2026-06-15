@@ -1,0 +1,110 @@
+/*
+ * University of Alabama MIS — ArgoCD UI theme (P2.1 THEME).
+ *
+ * Loaded via argocd-cm `ui.cssurl: ./custom/ua-mis.css`, served from the
+ * argocd-server container's /shared/app/custom dir (volume-mounted ConfigMap
+ * argocd-ui-theme-cm). Fully self-contained: the UA-MIS logo is an inline SVG
+ * data-URI so the theme needs no external asset host (recreate-safe, offline-OK).
+ *
+ * Brand: UA crimson #9E1B32 + white. ArgoCD ships no native logo/title key for
+ * the login page, so logo + wordmark are injected here via CSS background images.
+ * Selectors target ArgoCD v3.4.x markup; theming degrades gracefully (color-only)
+ * if upstream class names shift in a future bump.
+ */
+
+:root {
+  --ua-crimson: #9E1B32;
+  --ua-crimson-dark: #7A1426;
+  --ua-white: #FFFFFF;
+  --ua-grey: #828A8F;
+}
+
+/* ---- Top navigation bar: crimson banner ---- */
+.nav-bar,
+.top-bar__title,
+.ui-banner .top-bar {
+  background-color: var(--ua-crimson) !important;
+}
+.nav-bar__logo,
+.nav-bar .nav-bar__logo {
+  background-color: var(--ua-crimson) !important;
+}
+
+/* Replace the ArgoCD nav logo with the UA-MIS mark (inline SVG data-URI). */
+.nav-bar__logo img,
+.nav-bar img.nav-bar__logo-image {
+  content: url("data:image/svg+xml;utf8,\
+<svg xmlns='http://www.w3.org/2000/svg' width='120' height='40' viewBox='0 0 120 40'>\
+<rect width='120' height='40' fill='%239E1B32'/>\
+<text x='8' y='28' font-family='Georgia, serif' font-size='26' font-weight='700' fill='%23FFFFFF'>A</text>\
+<text x='34' y='27' font-family='Helvetica, Arial, sans-serif' font-size='17' font-weight='700' fill='%23FFFFFF' letter-spacing='1'>MIS</text>\
+</svg>");
+  height: 36px !important;
+  width: auto !important;
+}
+
+/* ---- Login page: crimson framing + UA-MIS wordmark ---- */
+.login__text-input,
+.login {
+  color: #2a2a2a;
+}
+
+.login__box {
+  border-top: 6px solid var(--ua-crimson) !important;
+}
+
+/* Swap the ArgoCD login logo for the UA-MIS lockup. */
+.login__logo img,
+.login__logo .argo-logo,
+.login__logo {
+  content: url("data:image/svg+xml;utf8,\
+<svg xmlns='http://www.w3.org/2000/svg' width='320' height='110' viewBox='0 0 320 110'>\
+<rect width='320' height='110' rx='8' fill='%239E1B32'/>\
+<text x='160' y='52' text-anchor='middle' font-family='Georgia, serif' font-size='46' font-weight='700' fill='%23FFFFFF'>UA &#183; MIS</text>\
+<text x='160' y='84' text-anchor='middle' font-family='Helvetica, Arial, sans-serif' font-size='15' font-weight='400' fill='%23FFFFFF' letter-spacing='2'>UNIVERSITY OF ALABAMA</text>\
+</svg>");
+  max-width: 320px;
+  height: auto;
+}
+
+/* ---- Primary buttons / interactive accents in crimson ---- */
+.argo-button--base,
+button.argo-button--base {
+  background-color: var(--ua-crimson) !important;
+  border-color: var(--ua-crimson) !important;
+  color: var(--ua-white) !important;
+}
+.argo-button--base:hover,
+button.argo-button--base:hover {
+  background-color: var(--ua-crimson-dark) !important;
+  border-color: var(--ua-crimson-dark) !important;
+}
+
+/* Sign-in (SSO) button on the login page. */
+.login__button,
+button.argo-button.login__button {
+  background-color: var(--ua-crimson) !important;
+  border-color: var(--ua-crimson) !important;
+  color: var(--ua-white) !important;
+}
+.login__button:hover {
+  background-color: var(--ua-crimson-dark) !important;
+}
+
+/* Sidebar accent stripe in crimson. */
+.sidebar {
+  border-top: 3px solid var(--ua-crimson);
+}
+
+/* Identity banner (ui.bannercontent) — crimson background, white text. */
+.ui-banner,
+.ui-banner-text,
+.ui-banner__container {
+  background-color: var(--ua-crimson) !important;
+  color: var(--ua-white) !important;
+}
+.ui-banner a,
+.ui-banner__container a {
+  color: var(--ua-white) !important;
+  text-decoration: underline;
+}

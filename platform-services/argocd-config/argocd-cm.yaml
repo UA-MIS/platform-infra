@@ -18,6 +18,18 @@
 # The clientSecret derefs the SealedSecret-materialised Secret `argocd-dex-client`
 # (sealedsecret.yaml) as $argocd-dex-client:oidc.dex.clientSecret; it MUST equal
 # the `argocd` staticClient secret Dex holds.
+#
+# UI THEMING (P2.1 THEME, University of Alabama MIS branding):
+# The `ui.*` keys below are ADDITIVE and field-level-independent from the OIDC/RBAC
+# keys above — they self-heal through the same application-controller SSA merge.
+#   - ui.cssurl: a RELATIVE path "./custom/ua-mis.css" resolved against the server's
+#     /shared/app static dir. The CSS is served FROM the argocd-server container via
+#     a volume-mounted ConfigMap (argocd-ui-theme-cm, kustomization.yaml) mounted at
+#     /shared/app/custom by the bootstrap install patch (bootstrap/argocd-install).
+#     A LOCAL mount (not an external URL) keeps the theme self-contained + offline —
+#     no CDN dependency on a sslip.io-only local cluster, and recreate-safe.
+#   - ui.bannercontent: the UA-MIS identity banner. ui.bannerpermanent keeps it
+#     visible (no per-user dismiss) so the branding is always present.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -57,3 +69,13 @@ data:
     requestedIDTokenClaims:
       groups:
         essential: true
+
+  # --- University of Alabama MIS UI theme (P2.1 THEME) ---
+  # Local custom stylesheet served from the argocd-server container (see header).
+  ui.cssurl: "./custom/ua-mis.css"
+  # Identity banner shown on the login page + throughout the UI. Permanent (the UA-MIS
+  # branding is not user-dismissible); links to the MIS department site.
+  ui.bannercontent: "University of Alabama MIS — Internal Developer Platform"
+  ui.bannerurl: "https://mis.culverhouse.ua.edu"
+  ui.bannerpermanent: "true"
+  ui.bannerposition: "top"

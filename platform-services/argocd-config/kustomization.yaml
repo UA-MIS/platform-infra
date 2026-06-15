@@ -19,6 +19,19 @@ resources:
   - argocd-rbac-cm.yaml
   - ingress.yaml
 
+# UA-MIS UI theme (P2.1 THEME): the custom stylesheet lives as a real .css file
+# (ua-mis.css) and is packed into a ConfigMap here. argocd-server volume-mounts
+# this CM at /shared/app/custom (bootstrap/argocd-install patch) and argocd-cm's
+# `ui.cssurl: ./custom/ua-mis.css` points at it. A STABLE name (disableNameSuffixHash)
+# is required because the volume reference in the install patch is a fixed string.
+configMapGenerator:
+  - name: argocd-ui-theme-cm
+    namespace: argocd
+    files:
+      - ua-mis.css
+generatorOptions:
+  disableNameSuffixHash: true
+
 labels:
   - pairs:
       platform.capstone/component: platform
