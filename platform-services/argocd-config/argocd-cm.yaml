@@ -74,8 +74,9 @@ data:
   # Local custom stylesheet served from the argocd-server container (see header).
   ui.cssurl: "./custom/ua-mis.css"
   # Identity banner shown on the login page + throughout the UI. Permanent (the UA-MIS
-  # branding is not user-dismissible); links to the MIS department site.
+  # branding is not user-dismissible). PLAIN, NON-CLICKABLE text — ui.bannerurl is
+  # deliberately OMITTED so the banner does not hyperlink anywhere (human direction:
+  # the banner is identity text, not a link to the Culverhouse/MIS site).
   ui.bannercontent: "University of Alabama MIS — Internal Developer Platform"
-  ui.bannerurl: "https://mis.culverhouse.ua.edu"
   ui.bannerpermanent: "true"
   ui.bannerposition: "top"
