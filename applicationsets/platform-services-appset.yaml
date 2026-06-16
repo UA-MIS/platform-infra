@@ -18,6 +18,15 @@ spec:
         revision: HEAD
         directories:
           - path: platform-services/*
+          # EXCLUDE harbor-onboarding/: it is a per-team Job TEMPLATE (contains a
+          # literal `__TEAM__` placeholder substituted by `make harbor-onboard
+          # NAME=<name>`), NOT a GitOps-synced service. Without this exclude the
+          # appset generates `platform-svc-harbor-onboarding`, which fails to sync
+          # ("harbor-onboard-__TEAM__" is an invalid RFC-1123 name) and sits
+          # OutOfSync/Missing forever. It has no kustomization.yaml for the same
+          # reason. Applied imperatively per team, not reconciled.
+          - path: platform-services/harbor-onboarding
+            exclude: true
   template:
     metadata:
       name: 'platform-svc-{{.path.basename}}'
