@@ -11,6 +11,18 @@
 # Why the upstream raw manifest rather than the Helm chart: it is the canonical,
 # self-contained install ArgoCD itself publishes; it needs no Helm at apply time
 # (kubectl/kustomize only), keeping `make bootstrap` dependency-light.
+#
+# ⚠ INVARIANT — THIS INSTALL OWNS ONLY argocd-cm's `resource.customizations.*` KEYS.
+# The upstream install.yaml ships an argocd-cm carrying only `resource.customizations.*`
+# / `resource.exclusions`. It MUST NOT declare ui.*/oidc.* keys — those are owned
+# SOLELY by the GitOps platform-svc-argocd-config app via its ServerSideApply field
+# manager (see platform-services/argocd-config/kustomization.yaml). This split is why
+# `kubectl apply -k bootstrap/argocd-install --server-side --force-conflicts` (what
+# `make bootstrap` + `make bootstrap-reapply` run) is safe: SSA only touches the
+# install's own fields. If a stale `kubectl.kubernetes.io/last-applied-configuration`
+# annotation (from a client-side argocd-cm apply) is ever present, the CSA->SSA
+# migration prunes the ui.*/oidc keys and wipes theme+SSO — so NEVER client-side
+# `kubectl apply` argocd-cm, and keep this install's argocd-cm free of ui.*/oidc keys.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
