@@ -90,10 +90,40 @@ spec:
                   allowPrivilegeEscalation: false
                   capabilities:
                     drop: ["ALL"]
+                # --- Harbor PUSH credential for Kaniko (contract with developer,
+                #     Option A): mount the `harbor-push` dockerconfigjson Secret
+                #     (provisioned by `make harbor-push-robot`) read-only on the
+                #     runner pod; the workflow copies it into the Kaniko build's
+                #     /kaniko/.docker/config.json. KANIKO_DOCKER_CONFIG decouples the
+                #     workflow from the exact path. ⚠ The secret is present on the
+                #     runner pod for the job's lifetime, so untrusted workflow steps
+                #     that run on the runner (no `container:`) CAN read it — bounded
+                #     by (1) least-privilege robot (push to the team's OWN project
+                #     only — make harbor-push-robot) and (2) EPHEMERAL one-job runner.
+                #     Security weighing A vs C (Kaniko-as-container-step) — see msg.
+                env:
+                  - name: KANIKO_DOCKER_CONFIG
+                    value: "/home/runner/harbor/config.json"
+                volumeMounts:
+                  - name: harbor-push
+                    mountPath: /home/runner/harbor
+                    readOnly: true
                 resources:
                   # RESOURCE KNOB — caps a Kaniko-build burst from OOMing the box.
                   requests: { cpu: "250m", memory: "512Mi" }
                   limits:   { cpu: "2",    memory: "2Gi" }
+            volumes:
+              # The dockerconfigjson key is `.dockerconfigjson`; surface it as
+              # `config.json` under the mount dir. `optional: true` so the runner
+              # still starts before a team's harbor-push Secret is sealed (a build
+              # that needs it fails clearly at push time, not at pod start).
+              - name: harbor-push
+                secret:
+                  secretName: harbor-push
+                  optional: true
+                  items:
+                    - key: .dockerconfigjson
+                      path: config.json
   destination:
     server: https://kubernetes.default.svc
     namespace: arc-runners
