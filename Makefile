@@ -517,6 +517,59 @@ harbor-robot: ## (P2.2) Create a pull robot for project <name> -> SealedSecret o
 	      --controller-name sealed-secrets-controller \
 	      --namespace "$(NAME)-$(ENV)" --format yaml
 
+# Namespace the CI PUSH secret seals into (where the ARC runner consumes it). The
+# scale set runs in arc-runners (P2.3); override RUNNER_NS if the workflow mounts it
+# elsewhere (contract with developer).
+RUNNER_NS ?= arc-runners
+
+.PHONY: harbor-push-robot
+harbor-push-robot: ## (P2.3) Create a CI PUSH robot for project <name> -> `harbor-push` SealedSecret on stdout. NAME=<name> [RUNNER_NS=arc-runners]
+	@test -n "$(NAME)" || { echo "usage: make harbor-push-robot NAME=<team-slug> [RUNNER_NS=arc-runners] > harbor-push-sealed.yaml"; exit 1; }
+	@command -v kubeseal >/dev/null || { echo "ERROR: kubeseal not found (install to ~/.local/bin)."; exit 1; }
+	@# CI (Kaniko) PUSH robot — LEAST PRIVILEGE: scoped to project <name> ONLY, so a
+	@# build can push to its OWN team's Harbor project and NO other. Harbor requires
+	@# `pull` ALONGSIDE `push` (you can't push without pull), so the access list is
+	@# pull+push on `repository` for project <name> — nothing cluster/system-wide.
+	@# Same in-cluster pattern as harbor-robot: admin pw read via secretKeyRef (never
+	@# argv), token captured from the Job log, built into a docker-registry Secret
+	@# named `harbor-push`, kubesealed (strict) into RUNNER_NS -> STDOUT (clean YAML;
+	@# progress on STDERR). The CI robot is a CI-SYSTEM cred (not per-env): one push
+	@# robot per team, consumed by the runner that builds that team's image.
+	@set -e; \
+	  job="harbor-pushrobot-$(NAME)"; ns="$(HARBOR_NS)"; ctx="k3d-$(CLUSTER_NAME)"; \
+	  echo "==> creating PUSH robot for project '$(NAME)' via in-cluster Job '$$job'..." >&2; \
+	  kubectl --context "$$ctx" -n "$$ns" delete job "$$job" --ignore-not-found >/dev/null 2>&1 || true; \
+	  printf '%s\n' \
+	    'apiVersion: batch/v1' 'kind: Job' 'metadata:' "  name: $$job" "  namespace: $$ns" \
+	    'spec:' '  backoffLimit: 3' '  ttlSecondsAfterFinished: 120' '  template:' '    spec:' \
+	    '      restartPolicy: Never' '      containers:' '      - name: robot' \
+	    '        image: curlimages/curl:8.11.1' \
+	    '        env:' '        - name: HARBOR_ADMIN_PASSWORD' '          valueFrom:' \
+	    '            secretKeyRef: { name: harbor-admin, key: HARBOR_ADMIN_PASSWORD }' \
+	    '        command: ["/bin/sh","-eu","-c"]' \
+	    '        args:' \
+	    '        - >-' \
+	    '          curl -sS -u "admin:$$HARBOR_ADMIN_PASSWORD"' \
+	    '          -X POST http://harbor-core.harbor.svc:80/api/v2.0/projects/$(NAME)/robots' \
+	    "          -H 'Content-Type: application/json'" \
+	    "          -d '{\"name\":\"$(NAME)-ci-push\",\"duration\":-1,\"description\":\"per-team CI push robot ($(NAME), Kaniko)\",\"permissions\":[{\"kind\":\"project\",\"namespace\":\"$(NAME)\",\"access\":[{\"resource\":\"repository\",\"action\":\"pull\"},{\"resource\":\"repository\",\"action\":\"push\"}]}]}'" \
+	  | kubectl --context "$$ctx" apply -f - >&2; \
+	  kubectl --context "$$ctx" -n "$$ns" wait --for=condition=complete --timeout=120s job/"$$job" >&2 \
+	    || { echo "ERROR: push-robot Job failed:" >&2; kubectl --context "$$ctx" -n "$$ns" logs job/"$$job" >&2; exit 1; }; \
+	  json=$$(kubectl --context "$$ctx" -n "$$ns" logs job/"$$job"); \
+	  rname=$$(printf '%s' "$$json" | sed -n 's/.*"name":"\([^"]*\)".*/\1/p'); \
+	  rsec=$$(printf '%s'  "$$json" | sed -n 's/.*"secret":"\([^"]*\)".*/\1/p'); \
+	  kubectl --context "$$ctx" -n "$$ns" delete job "$$job" --ignore-not-found >/dev/null 2>&1 || true; \
+	  if [ -z "$$rname" ] || [ -z "$$rsec" ]; then echo "ERROR: could not parse robot {name,secret} from: $$json" >&2; exit 1; fi; \
+	  echo "==> robot '$$rname' created (pull+push on '$(NAME)' ONLY); sealing as 'harbor-push' into $(RUNNER_NS)..." >&2; \
+	  kubectl create secret docker-registry harbor-push \
+	    --docker-server="$(HARBOR_HOST)" \
+	    --docker-username="$$rname" --docker-password="$$rsec" \
+	    -n "$(RUNNER_NS)" --dry-run=client -o yaml \
+	  | kubeseal --controller-namespace kube-system \
+	      --controller-name sealed-secrets-controller \
+	      --namespace "$(RUNNER_NS)" --format yaml
+
 # ---- validation gate (T12 hardening) ---------------------------------------
 # Catches the failure classes security flagged so they can't ship again:
 #   (1) malformed/divergent tenant RBAC names (the SEC-001 blanket-sed bug),

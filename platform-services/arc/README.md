@@ -63,8 +63,11 @@ the listener can't auth (the app shows Progressing) — expected pre-credential.
   privilege — it must not push to other teams' projects). Secret **`harbor-push`**
   (dockerconfigjson), registry `harbor.127-0-0-1.sslip.io/<name>/<app>:<tag>`, robot
   `robot$<name>+ci-push`, consumed by Kaniko at `/kaniko/.docker/config.json`.
-  Provisioned by a `make harbor-push-robot NAME=<name>` companion to the existing
-  pull-robot target (follow-up; coordinate the exact mount with the developer).
+  Provisioned by **`make harbor-push-robot NAME=<name> [RUNNER_NS=arc-runners] >
+  harbor-push-sealed.yaml`** — mints a robot with **pull+push on project `<name>`
+  ONLY** (least privilege; can't push to other teams' projects) and seals it as
+  secret `harbor-push` into the runner namespace. Coordinate the exact mount path /
+  how the workflow selects the per-team cred with the developer.
 
 ## Resource posture (local k3d)
 `minRunners: 0` + `maxRunners: 3` + per-runner requests/limits (250m/512Mi →
