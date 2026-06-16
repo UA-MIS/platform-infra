@@ -1,14 +1,16 @@
-# Harbor OIDC config Application (P2.2, SEC-012) — drives the configure-oidc Sync
-# hook Job (platform-services/harbor-oidc-config/). SEPARATE from the Harbor Helm
+# Harbor OIDC config Application (P2.2, SEC-012) — drives the configure-oidc Job
+# (platform-services/harbor-oidc-config/). SEPARATE from the Harbor Helm
 # Application (applicationsets/harbor-app.yaml) because:
-#   - the Helm-source app has no kustomize path to attach a hook to, and
-#   - this must apply AFTER Harbor core is up (the Job itself waits on core, and
-#     sync-waves order it after the chart).
+#   - the Helm-source app has no kustomize path to carry this Job, and
+#   - this must apply AFTER Harbor core is up (the Job itself waits on core).
 #
-# The Job is an argocd.argoproj.io/hook: PostSync inside this app, so it runs on
-# each sync of THIS app and is idempotent (PUT configurations converges;
-# hook-delete-policy reaps it). Renders into the harbor namespace where the
-# harbor-admin + harbor-oidc Secrets live.
+# The Job is a REGULAR ArgoCD resource (Replace=true), NOT a sync hook: a hook-only
+# Application has an empty regular resource set, so the auto-sync controller never
+# starts a sync operation and the hook never fires (observed live: app Synced with
+# resources:[], Harbor auth_mode still db_auth). As a regular Job, the app goes
+# OutOfSync when this object appears -> syncs -> Job runs. Self-triggering, idempotent
+# (PUT configurations converges; Replace re-runs only on a manifest change). Renders
+# into the harbor namespace where the harbor-admin + harbor-oidc Secrets live.
 #
 # Root-app recurses applicationsets/, so this Application is registered
 # automatically. Lives in the `platform` AppProject.
