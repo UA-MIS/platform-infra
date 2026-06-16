@@ -85,9 +85,16 @@ spec:
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
+            readOnlyRootFilesystem: true   # hardened root FS; /tmp is a writable emptyDir below
             capabilities:
               drop: ["ALL"]
+          # readOnlyRootFilesystem:true makes / (incl. /tmp) read-only, but the script
+          # writes the request body + response to /tmp — without this emptyDir the Job
+          # fails at runtime: "can't create /tmp/oidc.json: Read-only file system"
+          # (only observable once the Job actually runs against a live core).
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
           env:
             # Admin password — in-cluster only, from the sealed harbor-admin Secret.
             - name: HARBOR_ADMIN_PASSWORD
@@ -162,3 +169,8 @@ spec:
                 echo "FAIL: auth_mode is '$mode', expected 'oidc_auth'"; exit 1
               fi
               echo "==> OIDC auth-mode configured + verified (auth_mode=oidc_auth, verify_cert=false)."
+      volumes:
+        # Writable scratch for the request/response files the script writes to /tmp,
+        # since readOnlyRootFilesystem:true makes the container root read-only.
+        - name: tmp
+          emptyDir: {}
