@@ -90,40 +90,39 @@ spec:
                   allowPrivilegeEscalation: false
                   capabilities:
                     drop: ["ALL"]
-                # --- Harbor PUSH credential for Kaniko (contract with developer,
-                #     Option A): mount the `harbor-push` dockerconfigjson Secret
-                #     (provisioned by `make harbor-push-robot`) read-only on the
-                #     runner pod; the workflow copies it into the Kaniko build's
-                #     /kaniko/.docker/config.json. KANIKO_DOCKER_CONFIG decouples the
-                #     workflow from the exact path. ⚠ The secret is present on the
-                #     runner pod for the job's lifetime, so untrusted workflow steps
-                #     that run on the runner (no `container:`) CAN read it — bounded
-                #     by (1) least-privilege robot (push to the team's OWN project
-                #     only — make harbor-push-robot) and (2) EPHEMERAL one-job runner.
-                #     Security weighing A vs C (Kaniko-as-container-step) — see msg.
+                # --- Harbor PUSH credential for Kaniko = OPTION C (container-hook).
+                #     In containerMode:kubernetes the build runs in its OWN job-step
+                #     pod (a `container:` step — ARC requires job containers in k8s
+                #     mode), so a secret on the RUNNER pod is invisible to it. The k8s
+                #     container hook merges `platform-services/arc/hook-template.yaml`
+                #     into every job-step pod, landing `harbor-push` inside the build
+                #     container at /kaniko/.docker/config.json (Kaniko's default dir) —
+                #     workflow needs ZERO cred steps. ACTIONS_RUNNER_CONTAINER_HOOK_TEMPLATE
+                #     points the runner at that template (mounted from the
+                #     arc-hook-template ConfigMap below). The push cred NEVER touches
+                #     the general runner pod, only the build container (tightest option:
+                #     untrusted non-build steps can't read it; + least-priv robot +
+                #     ephemeral runner).
                 env:
-                  - name: KANIKO_DOCKER_CONFIG
-                    value: "/home/runner/harbor/config.json"
+                  - name: ACTIONS_RUNNER_CONTAINER_HOOK_TEMPLATE
+                    value: /home/runner/pod-templates/hook-template.yaml
                 volumeMounts:
-                  - name: harbor-push
-                    mountPath: /home/runner/harbor
+                  - name: hook-template
+                    mountPath: /home/runner/pod-templates
                     readOnly: true
                 resources:
                   # RESOURCE KNOB — caps a Kaniko-build burst from OOMing the box.
                   requests: { cpu: "250m", memory: "512Mi" }
                   limits:   { cpu: "2",    memory: "2Gi" }
             volumes:
-              # The dockerconfigjson key is `.dockerconfigjson`; surface it as
-              # `config.json` under the mount dir. `optional: true` so the runner
-              # still starts before a team's harbor-push Secret is sealed (a build
-              # that needs it fails clearly at push time, not at pod start).
-              - name: harbor-push
-                secret:
-                  secretName: harbor-push
-                  optional: true
+              # The hook template (arc-hook-template ConfigMap, key `content`) the
+              # runner passes to the k8s container hook for every job-step pod.
+              - name: hook-template
+                configMap:
+                  name: arc-hook-template
                   items:
-                    - key: .dockerconfigjson
-                      path: config.json
+                    - key: content
+                      path: hook-template.yaml
   destination:
     server: https://kubernetes.default.svc
     namespace: arc-runners

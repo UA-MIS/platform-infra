@@ -66,8 +66,17 @@ the listener can't auth (the app shows Progressing) — expected pre-credential.
   Provisioned by **`make harbor-push-robot NAME=<name> [RUNNER_NS=arc-runners] >
   harbor-push-sealed.yaml`** — mints a robot with **pull+push on project `<name>`
   ONLY** (least privilege; can't push to other teams' projects) and seals it as
-  secret `harbor-push` into the runner namespace. Coordinate the exact mount path /
-  how the workflow selects the per-team cred with the developer.
+  secret `harbor-push` into the runner namespace.
+  - **CONSUMPTION = OPTION C (container-hook).** In `containerMode: kubernetes` the
+    build runs in its own job-step pod (ARC requires job containers in k8s mode), so
+    a secret on the runner pod is invisible to it. `hook-template.yaml` (the
+    `arc-hook-template` ConfigMap) is merged by the k8s container hook into every
+    job-step pod, landing `harbor-push` inside the build container at
+    **`/kaniko/.docker/config.json`** — so the workflow needs **zero** cred-handling
+    steps; Kaniko finds it. The cred is projected ONLY into the build container,
+    never onto the general runner pod (untrusted non-build steps can't read it).
+    Wired via `ACTIONS_RUNNER_CONTAINER_HOOK_TEMPLATE` in
+    `applicationsets/arc-runner-scaleset-app.yaml`.
 
 ## Resource posture (local k3d)
 `minRunners: 0` + `maxRunners: 3` + per-runner requests/limits (250m/512Mi →
