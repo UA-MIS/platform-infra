@@ -125,6 +125,26 @@ effect. **Idempotent** — safe to run repeatedly; a no-op when the live objects
 already match git (the rollout creates no new ReplicaSet if the spec is unchanged).
 It does **not** modify the manifests or touch GitOps-synced services.
 
+> **argocd-cm is co-managed — the reapply protects the GitOps keys.** `argocd-cm`
+> is layered: the install owns only the `resource.customizations.*` keys, while the
+> GitOps `platform-svc-argocd-config` app owns the `ui.*` (theme/banner) and `oidc.*`
+> (SSO) keys. If the live `argocd-cm` still carries a stale
+> `kubectl.kubernetes.io/last-applied-configuration` annotation listing the
+> `ui.*`/`oidc.*` keys, a `--force-conflicts` CSA→SSA migration can transiently
+> **prune** them (k8s SSA deletes a last-applied field absent from the new manifest
+> when no other manager owns it) — which once blanked the theme + SSO live until
+> selfHeal restored them. So `bootstrap-reapply` **hard-refreshes
+> `platform-svc-argocd-config` to re-assert those keys immediately and then asserts
+> `ui.cssurl` + `oidc.config` are live, failing loudly if a reapply ever blanks
+> them.** To remove the root cause once (so the migration can't trigger at all),
+> strip the stale annotation a single time:
+>
+> ```bash
+> kubectl -n argocd annotate cm argocd-cm kubectl.kubernetes.io/last-applied-configuration-
+> ```
+>
+> `argocd-controller` owns the annotation and will not re-add it on its SSA syncs.
+
 ### Built-in registry (D-005)
 
 `cluster-up` provisions `k3d-registry.localhost:5000` and ensures it resolves on
