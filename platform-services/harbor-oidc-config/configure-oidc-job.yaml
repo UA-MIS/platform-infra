@@ -1,0 +1,150 @@
+# Harbor OIDC auth-mode configuration Job (P2.2, SEC-012) — declarative + idempotent.
+#
+# WHY THIS EXISTS: the Harbor Helm chart serves the UI + externalURL but does NOT
+# configure the OIDC AUTH MODE — that is Harbor *system config*, applied via the
+# Harbor API after core is up (harbor/README.md documents the manual curl form).
+# SEC-012 flagged that doing it by hand means the security-critical posture
+# (auth_mode=oidc_auth, the oidc-client-secret, AND oidc_verify_cert:false) is
+# out-of-band: not declarative, not reviewed-as-code, can drift, and the admin
+# password + client secret transit a shell/curl invocation. This Job makes it
+# GitOps: the posture lives in git, the secrets are read IN-CLUSTER from the
+# SealedSecret-materialized Secrets (env, never argv), and ArgoCD re-applies it
+# on every sync.
+#
+# IDEMPOTENT: PUT /api/v2.0/configurations is converging (it sets named items;
+# re-running with the same body is a no-op-equivalent). The Job also runs as an
+# ArgoCD Sync hook with hook-delete-policy BeforeHookCreation,HookSucceeded — so a
+# fresh Job replaces the prior one each sync and successful runs are reaped (no
+# accumulation, always reflects current git).
+#
+# SECRETS NEVER ON ARGV: admin password (harbor-admin/HARBOR_ADMIN_PASSWORD) and
+# client secret (harbor-oidc/oidc-client-secret) are injected as env via
+# secretKeyRef; curl reads them with `-u` from $HARBOR_ADMIN_PASSWORD and the JSON
+# body is built with a heredoc referencing $OIDC_CLIENT_SECRET — neither appears
+# in the process command line or in git.
+#
+# IN-CLUSTER ENDPOINT: targets the harbor-core ClusterIP service directly
+# (http://harbor-core.harbor.svc:80), NOT the external https ingress — so no
+# Traefik / self-signed-TLS / CoreDNS-rewrite round-trip is needed just to
+# configure auth. (The oidc_endpoint Harbor stores still points at the public
+# issuer id.${PLATFORM_DOMAIN}, which Harbor reaches in-cluster via the existing
+# coredns-custom rewrite at login time — SEC-013 fences that path.)
+#
+# oidc_verify_cert:false mirrors ArgoCD's oidc.tls.insecure.skip.verify (the
+# self-signed platform CA, in-cluster; SEC-009). SEC-013's harbor-netpol provides
+# the matching compensating control. Phase-3 flips this to true when the issuer
+# goes ACME-public.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: harbor-configure-oidc
+  namespace: harbor
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    # Run AFTER the Harbor chart's resources are synced+healthy, on every sync.
+    argocd.argoproj.io/hook: PostSync
+    # Replace any prior Job before creating, and delete on success — keeps the run
+    # idempotent and avoids "field is immutable" errors on re-sync (Jobs are
+    # largely immutable once created).
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+spec:
+  backoffLimit: 10            # Harbor core can take minutes post-install; retry.
+  activeDeadlineSeconds: 900  # give up after 15m rather than hang a sync forever.
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        platform.capstone/component: platform
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: configure-oidc
+          # curlimages/curl is a minimal (distroless-ish) static curl image, pinned
+          # by digest-bearing tag. Only needs curl + sh; no shell beyond /bin/sh.
+          image: curlimages/curl:8.11.1
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            # Admin password — in-cluster only, from the sealed harbor-admin Secret.
+            - name: HARBOR_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: harbor-admin
+                  key: HARBOR_ADMIN_PASSWORD
+            # OIDC client secret — same value as the dex `harbor` static client.
+            - name: OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: harbor-oidc
+                  key: oidc-client-secret
+            # In-cluster core API (plain HTTP, no TLS/Traefik round-trip).
+            - name: HARBOR_CORE
+              value: "http://harbor-core.harbor.svc:80"
+            # The OIDC endpoint Harbor STORES (public issuer; reached in-cluster via
+            # the coredns-custom rewrite at login). Keep in sync with Dex issuer.
+            - name: OIDC_ENDPOINT
+              value: "https://id.127-0-0-1.sslip.io"
+          command: ["/bin/sh", "-eu", "-c"]
+          args:
+            - |
+              CORE="$HARBOR_CORE"
+              AUTH="admin:$HARBOR_ADMIN_PASSWORD"
+
+              echo "==> waiting for Harbor core API at $CORE ..."
+              # Poll the unauthenticated health/ping until core answers (chart can
+              # take minutes to migrate the DB on first install).
+              i=0
+              until curl -fsS -o /dev/null "$CORE/api/v2.0/systeminfo"; do
+                i=$((i+1)); [ "$i" -ge 60 ] && { echo "core not ready after ~5m"; exit 1; }
+                echo "   ...not ready yet (attempt $i), sleeping 5s"; sleep 5
+              done
+              echo "==> core is up."
+
+              # Build the configuration body. OIDC_CLIENT_SECRET is interpolated by
+              # the shell into the heredoc (it is an env var, NOT on the command
+              # line / argv / git). auth_mode=oidc_auth + the full Dex wiring +
+              # oidc_verify_cert:false (SEC-009 parity; SEC-013 fences the path).
+              cat > /tmp/oidc.json <<EOF
+              {
+                "auth_mode": "oidc_auth",
+                "oidc_name": "dex",
+                "oidc_endpoint": "$OIDC_ENDPOINT",
+                "oidc_client_id": "harbor",
+                "oidc_client_secret": "$OIDC_CLIENT_SECRET",
+                "oidc_scope": "openid,profile,email,groups",
+                "oidc_groups_claim": "groups",
+                "oidc_auto_onboard": true,
+                "oidc_user_claim": "preferred_username",
+                "oidc_verify_cert": false
+              }
+              EOF
+
+              echo "==> applying OIDC auth-mode config (PUT /api/v2.0/configurations) ..."
+              # -u reads the password from the env-derived $AUTH; -f fails on HTTP>=400
+              # so a rejected change (e.g. legacy users block) surfaces as Job failure.
+              code=$(curl -sS -u "$AUTH" -o /tmp/put.out -w '%{http_code}' \
+                -X PUT "$CORE/api/v2.0/configurations" \
+                -H 'Content-Type: application/json' --data @/tmp/oidc.json)
+              if [ "$code" != "200" ]; then
+                echo "FAIL: PUT configurations returned HTTP $code"; cat /tmp/put.out; exit 1
+              fi
+              echo "==> PUT ok (HTTP 200)."
+
+              echo "==> verifying auth_mode == oidc_auth ..."
+              # GET the live config and assert the auth_mode landed (declarative proof).
+              mode=$(curl -fsS -u "$AUTH" "$CORE/api/v2.0/configurations" \
+                | tr -d ' \n' | sed -n 's/.*"auth_mode":{"value":"\([a-z_]*\)".*/\1/p')
+              if [ "$mode" != "oidc_auth" ]; then
+                echo "FAIL: auth_mode is '$mode', expected 'oidc_auth'"; exit 1
+              fi
+              echo "==> OIDC auth-mode configured + verified (auth_mode=oidc_auth, verify_cert=false)."

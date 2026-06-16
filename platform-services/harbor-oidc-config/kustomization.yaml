@@ -1,0 +1,18 @@
+# Harbor OIDC auth-mode config (P2.2, SEC-012). A single ArgoCD Sync-hook Job that
+# applies Harbor's OIDC system-config (auth_mode + client secret + verify_cert)
+# declaratively + idempotently — see configure-oidc-job.yaml.
+#
+# Kept in its OWN dir (not under harbor/ prereqs) so it is driven by its OWN
+# Application (applicationsets/harbor-oidc-config-app.yaml), which can depend on
+# the Harbor Helm Application being Healthy first. It renders into the harbor
+# namespace (where harbor-admin + harbor-oidc Secrets live).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - configure-oidc-job.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false

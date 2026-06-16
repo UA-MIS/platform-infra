@@ -359,6 +359,77 @@ seal: ## (T4) kubeseal helper: make seal SECRET=path/to/secret.yaml NS=<ns> > se
 	  $(if $(NS),--namespace $(NS),) \
 	  --format yaml < "$(SECRET)"
 
+# ---- Harbor per-team onboarding (P2.2, D-026) ------------------------------
+# Two steps, both keyed on the SINGLE canonical `<name>` slug (D-026). See
+# platform-services/harbor-onboarding/README.md.
+HARBOR_NS       ?= harbor
+HARBOR_HOST     ?= harbor.$(PLATFORM_DOMAIN)
+HARBOR_ONBOARD_JOB := platform-services/harbor-onboarding/onboard-team-job.yaml
+
+.PHONY: harbor-onboard
+harbor-onboard: ## (P2.2) Onboard team into Harbor: create project <name> + map OIDC group -> Developer. NAME=<name>
+	@test -n "$(NAME)" || { echo "usage: make harbor-onboard NAME=<team-slug>"; exit 1; }
+	@command -v kubectl >/dev/null || { echo "ERROR: kubectl not found."; exit 1; }
+	@# Substitute the __TEAM__ token and apply the idempotent onboarding Job into
+	@# the harbor ns (admin creds stay in-cluster — read by the Job via secretKeyRef).
+	@echo "==> onboarding team '$(NAME)' into Harbor (project + OIDC Developer mapping)..."
+	@sed 's/__TEAM__/$(NAME)/g' "$(HARBOR_ONBOARD_JOB)" \
+	  | kubectl --context "k3d-$(CLUSTER_NAME)" apply -f -
+	@echo "==> waiting for the onboarding Job to complete..."
+	@kubectl --context "k3d-$(CLUSTER_NAME)" -n "$(HARBOR_NS)" \
+	  wait --for=condition=complete --timeout=300s job/harbor-onboard-$(NAME) \
+	  || { echo "Job did not complete — logs:"; kubectl --context "k3d-$(CLUSTER_NAME)" -n "$(HARBOR_NS)" logs job/harbor-onboard-$(NAME) --tail=40; exit 1; }
+	@kubectl --context "k3d-$(CLUSTER_NAME)" -n "$(HARBOR_NS)" logs job/harbor-onboard-$(NAME) --tail=20
+	@echo "harbor-onboard: DONE for '$(NAME)'. NEXT: make harbor-robot NAME=$(NAME) ENV=dev > .../harbor-pull-sealed.yaml"
+
+.PHONY: harbor-robot
+harbor-robot: ## (P2.2) Create a pull robot for project <name> -> SealedSecret on stdout. NAME=<name> ENV=<env>
+	@test -n "$(NAME)" || { echo "usage: make harbor-robot NAME=<team-slug> ENV=<env> > harbor-pull-sealed.yaml"; exit 1; }
+	@test -n "$(ENV)"  || { echo "usage: make harbor-robot NAME=<team-slug> ENV=<env> (e.g. dev/staging/prod)"; exit 1; }
+	@command -v kubeseal >/dev/null || { echo "ERROR: kubeseal not found (install to ~/.local/bin)."; exit 1; }
+	@# Create a project-scoped PULL robot via the Harbor API from INSIDE the cluster
+	@# (a transient Job in the harbor ns) so the admin password is read from the
+	@# in-cluster Secret via secretKeyRef and never touches the host shell/argv. The
+	@# robot token is Harbor-generated + one-time, so this step is imperative (it
+	@# cannot be GitOps). The Job logs the raw {name,secret} JSON; we capture it,
+	@# build a docker-registry Secret, and kubeseal it (strict to <name>-<env>) to
+	@# STDOUT for the caller to redirect into the team overlay + commit. All human-
+	@# readable progress goes to STDERR so STDOUT is clean SealedSecret YAML.
+	@set -e; \
+	  job="harbor-robot-$(NAME)-$(ENV)"; ns="$(HARBOR_NS)"; ctx="k3d-$(CLUSTER_NAME)"; \
+	  echo "==> creating pull robot for project '$(NAME)' via in-cluster Job '$$job'..." >&2; \
+	  kubectl --context "$$ctx" -n "$$ns" delete job "$$job" --ignore-not-found >/dev/null 2>&1 || true; \
+	  printf '%s\n' \
+	    'apiVersion: batch/v1' 'kind: Job' 'metadata:' "  name: $$job" "  namespace: $$ns" \
+	    'spec:' '  backoffLimit: 3' '  ttlSecondsAfterFinished: 120' '  template:' '    spec:' \
+	    '      restartPolicy: Never' '      containers:' '      - name: robot' \
+	    '        image: curlimages/curl:8.11.1' \
+	    '        env:' '        - name: HARBOR_ADMIN_PASSWORD' '          valueFrom:' \
+	    '            secretKeyRef: { name: harbor-admin, key: HARBOR_ADMIN_PASSWORD }' \
+	    '        command: ["/bin/sh","-eu","-c"]' \
+	    '        args:' \
+	    '        - >-' \
+	    '          curl -sS -u "admin:$$HARBOR_ADMIN_PASSWORD"' \
+	    '          -X POST http://harbor-core.harbor.svc:80/api/v2.0/projects/$(NAME)/robots' \
+	    "          -H 'Content-Type: application/json'" \
+	    "          -d '{\"name\":\"$(NAME)-pull\",\"duration\":-1,\"description\":\"per-team pull robot ($(NAME))\",\"permissions\":[{\"kind\":\"project\",\"namespace\":\"$(NAME)\",\"access\":[{\"resource\":\"repository\",\"action\":\"pull\"}]}]}'" \
+	  | kubectl --context "$$ctx" apply -f - >&2; \
+	  kubectl --context "$$ctx" -n "$$ns" wait --for=condition=complete --timeout=120s job/"$$job" >&2 \
+	    || { echo "ERROR: robot Job failed:" >&2; kubectl --context "$$ctx" -n "$$ns" logs job/"$$job" >&2; exit 1; }; \
+	  json=$$(kubectl --context "$$ctx" -n "$$ns" logs job/"$$job"); \
+	  rname=$$(printf '%s' "$$json" | sed -n 's/.*"name":"\([^"]*\)".*/\1/p'); \
+	  rsec=$$(printf '%s'  "$$json" | sed -n 's/.*"secret":"\([^"]*\)".*/\1/p'); \
+	  kubectl --context "$$ctx" -n "$$ns" delete job "$$job" --ignore-not-found >/dev/null 2>&1 || true; \
+	  if [ -z "$$rname" ] || [ -z "$$rsec" ]; then echo "ERROR: could not parse robot {name,secret} from: $$json" >&2; exit 1; fi; \
+	  echo "==> robot '$$rname' created (pull-only on '$(NAME)'); sealing into $(NAME)-$(ENV)..." >&2; \
+	  kubectl create secret docker-registry harbor-pull \
+	    --docker-server="$(HARBOR_HOST)" \
+	    --docker-username="$$rname" --docker-password="$$rsec" \
+	    -n "$(NAME)-$(ENV)" --dry-run=client -o yaml \
+	  | kubeseal --controller-namespace kube-system \
+	      --controller-name sealed-secrets-controller \
+	      --namespace "$(NAME)-$(ENV)" --format yaml
+
 # ---- validation gate (T12 hardening) ---------------------------------------
 # Catches the failure classes security flagged so they can't ship again:
 #   (1) malformed/divergent tenant RBAC names (the SEC-001 blanket-sed bug),
