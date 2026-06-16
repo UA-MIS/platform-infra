@@ -51,13 +51,18 @@ metadata:
     # controller syncs it -> the Job is created and runs. Self-triggering, no manual
     # `argocd app sync` needed.
     #
-    # Replace=true: a Job's pod template is immutable, so a plain re-apply of a
-    # CHANGED spec would fail "field is immutable". Replace re-creates the Job
-    # (delete+create) when the manifest changes, which also RE-RUNS the config
-    # (idempotent: PUT /configurations converges). An UNCHANGED re-sync leaves the
-    # completed Job in place (no needless re-run). Sync-wave 1 keeps it after the
-    # Harbor chart; the Job ALSO waits on harbor-core readiness itself (belt+braces).
-    argocd.argoproj.io/sync-options: Replace=true
+    # Force=true,Replace=true: a Job's pod template is immutable. Replace=true ALONE
+    # uses `kubectl replace OR create` — but over an existing immutable Job that can
+    # fall to `create`, which then fails "jobs.batch already exists" and the app
+    # SyncFails in a retry loop (observed live). Per ArgoCD docs, JOBS that must be
+    # deleted+recreated need Force=true (delete+create). So Force+Replace cleanly
+    # re-creates the Job when the manifest changes (re-running the idempotent PUT);
+    # an UNCHANGED re-sync leaves the completed Job in place (no churn).
+    # ServerSideApply=false: the app sets ServerSideApply=true app-wide (for large
+    # CRDs elsewhere), but SSA is incompatible with Replace/Force — disable it for
+    # THIS resource so the delete+create path is used. Sync-wave 1 keeps it after
+    # the Harbor chart; the Job ALSO waits on harbor-core readiness itself.
+    argocd.argoproj.io/sync-options: Force=true,Replace=true,ServerSideApply=false
     argocd.argoproj.io/sync-wave: "1"
 spec:
   backoffLimit: 10            # Harbor core can take minutes post-install; retry.
@@ -163,8 +168,16 @@ spec:
 
               echo "==> verifying auth_mode == oidc_auth ..."
               # GET the live config and assert the auth_mode landed (declarative proof).
+              # NOTE: Harbor returns each setting as an OBJECT with editable+value, and
+              # the field ORDER is {"editable":true,"value":"oidc_auth"} — `editable`
+              # comes BEFORE `value`. The first cut of this regex assumed
+              # `"auth_mode":{"value":...}` and so never matched (returned ''), failing
+              # the Job even though the PUT succeeded. Isolate the auth_mode OBJECT first
+              # (up to its closing brace), THEN pull value — order-independent.
               mode=$(curl -fsS -u "$AUTH" "$CORE/api/v2.0/configurations" \
-                | tr -d ' \n' | sed -n 's/.*"auth_mode":{"value":"\([a-z_]*\)".*/\1/p')
+                | tr -d ' \n' \
+                | sed -n 's/.*"auth_mode":{\([^}]*\)}.*/\1/p' \
+                | sed -n 's/.*"value":"\([a-z_]*\)".*/\1/p')
               if [ "$mode" != "oidc_auth" ]; then
                 echo "FAIL: auth_mode is '$mode', expected 'oidc_auth'"; exit 1
               fi
