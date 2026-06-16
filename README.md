@@ -125,25 +125,28 @@ effect. **Idempotent** — safe to run repeatedly; a no-op when the live objects
 already match git (the rollout creates no new ReplicaSet if the spec is unchanged).
 It does **not** modify the manifests or touch GitOps-synced services.
 
-> **argocd-cm is co-managed — the reapply protects the GitOps keys.** `argocd-cm`
-> is layered: the install owns only the `resource.customizations.*` keys, while the
-> GitOps `platform-svc-argocd-config` app owns the `ui.*` (theme/banner) and `oidc.*`
-> (SSO) keys. If the live `argocd-cm` still carries a stale
-> `kubectl.kubernetes.io/last-applied-configuration` annotation listing the
-> `ui.*`/`oidc.*` keys, a `--force-conflicts` CSA→SSA migration can transiently
-> **prune** them (k8s SSA deletes a last-applied field absent from the new manifest
-> when no other manager owns it) — which once blanked the theme + SSO live until
-> selfHeal restored them. So `bootstrap-reapply` **hard-refreshes
-> `platform-svc-argocd-config` to re-assert those keys immediately and then asserts
-> `ui.cssurl` + `oidc.config` are live, failing loudly if a reapply ever blanks
-> them.** To remove the root cause once (so the migration can't trigger at all),
-> strip the stale annotation a single time:
+> **argocd-cm is co-managed — `bootstrap-reapply` actively prevents an SSO/theme
+> outage.** `argocd-cm` is layered: the install ships only the
+> `resource.customizations.*` keys, while the GitOps `platform-svc-argocd-config` app
+> owns the `ui.*` (theme/banner) and `oidc.*` (SSO) keys. **Verified live (2026-06-16):
+> a standalone `kubectl apply -k bootstrap/argocd-install --server-side
+> --force-conflicts` WIPED the entire `argocd-cm.data` — `oidc.config`, `url`, all
+> `ui.*` gone, SSO login broke — and the GitOps app did NOT self-heal.** Cause: the
+> live `argocd-cm` carried a stale `kubectl.kubernetes.io/last-applied-configuration`
+> annotation listing the `ui.*`/`oidc.*` keys; the `--force-conflicts` CSA→SSA
+> migration prunes any last-applied field absent from the applied manifest. `make
+> bootstrap` only survives this because the GitOps app applies the ui/oidc keys
+> *after* the install apply — a standalone re-apply has no such follow-up. So
+> `bootstrap-reapply` (1) **strips the stale annotation first** (removes the trigger),
+> (2) re-applies the install + AppProject, (3) **force-syncs `platform-svc-argocd-config`
+> to re-assert the ui/oidc keys — a hard refresh / passive selfHeal is NOT enough,
+> only a force-sync restores them — BEFORE (4) it rolls `argocd-server` (so the server
+> re-reads the restored `oidc.config`), then (5) asserts `oidc.config` AND `ui.cssurl`
+> are present, failing loudly otherwise.** The one-time annotation strip on its own:
 >
 > ```bash
 > kubectl -n argocd annotate cm argocd-cm kubectl.kubernetes.io/last-applied-configuration-
 > ```
->
-> `argocd-controller` owns the annotation and will not re-add it on its SSA syncs.
 
 ### Built-in registry (D-005)
 
