@@ -1,0 +1,47 @@
+# ARC container-hook extension template (P2.3, §1.3, D-032) — injects the Harbor
+# PUSH credential into the BUILD job-step pod ONLY (Option C, the only one that
+# works in containerMode:kubernetes).
+#
+# WHY: in containerMode:kubernetes the workflow build runs in its OWN job-step pod
+# (a `container:` step — ARC requires job containers in k8s mode), NOT on the
+# runner pod. A volume on the runner pod is invisible to it. The k8s container hook
+# MERGES this template's pod-spec patch into every job-step pod it creates, so the
+# `harbor-push` Secret lands inside the Kaniko build container at
+# /kaniko/.docker/config.json (Kaniko's default DOCKER_CONFIG dir) — the workflow
+# needs ZERO cred-handling steps; Kaniko just finds it.
+#
+# SECURITY (resolves the A-vs-C question in C's favour): the push cred is projected
+# ONLY into the build job-step container, NEVER onto the general runner pod — so
+# untrusted NON-build workflow steps cannot read it. Combined with the
+# least-privilege robot (push to the team's OWN Harbor project only,
+# `make harbor-push-robot`) + ephemeral runners, this is the tight option.
+#
+# `optional: true` so a job container still starts before a team's harbor-push
+# Secret is sealed (a build that needs it fails at push with a clear auth error,
+# not at pod start). `$job` is the ARC convention for the job-step container.
+# Mounted on the runner pod + referenced via ACTIONS_RUNNER_CONTAINER_HOOK_TEMPLATE
+# (see applicationsets/arc-runner-scaleset-app.yaml).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arc-hook-template
+  namespace: arc-runners
+  labels:
+    platform.capstone/component: platform
+data:
+  content: |
+    spec:
+      containers:
+        - name: "$job"
+          volumeMounts:
+            - name: harbor-push
+              mountPath: /kaniko/.docker
+              readOnly: true
+      volumes:
+        - name: harbor-push
+          secret:
+            secretName: harbor-push
+            optional: true
+            items:
+              - key: .dockerconfigjson
+                path: config.json
