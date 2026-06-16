@@ -10,6 +10,21 @@
 # placement only applied at `make bootstrap` time and did NOT self-heal — so after
 # the platform-service synced, ArgoCD still had no OIDC/RBAC config. Moving it here
 # makes it GitOps-reconciled like every other service.
+#
+# ⚠ INVARIANT — THIS APP IS THE SOLE OWNER OF argocd-cm's ui.*/oidc.* DATA.
+# argocd-cm is co-managed: the install (bootstrap/argocd-install/) owns ONLY the
+# `resource.customizations.*` keys; THIS app (platform-svc-argocd-config, via the
+# application-controller's ServerSideApply field manager) owns the `ui.*` (theme),
+# `oidc.*` (SSO), and `url` keys. That split is what keeps both safe — SSA only
+# touches each manager's own fields. DO NOT (re)introduce a CLIENT-SIDE
+# `kubectl apply` of argocd-cm anywhere (bootstrap, a Makefile target, a runbook):
+# a default-field-manager apply writes a `kubectl.kubernetes.io/last-applied-
+# configuration` annotation, and the next `--server-side --force-conflicts` install
+# apply then does a CSA->SSA migration that PRUNES the ui.*/oidc keys (absent from
+# the install manifest) — which once wiped theme + SSO live (recovered by a
+# force-sync of this app). `make bootstrap-reapply` is hardened to re-assert + assert
+# these keys, but the durable rule is: argocd-cm reaches the cluster ONLY via this
+# app's SSA. See bootstrap/argocd-install/kustomization.yaml for the mirror note.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
