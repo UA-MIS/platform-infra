@@ -12,10 +12,10 @@
 # on every sync.
 #
 # IDEMPOTENT: PUT /api/v2.0/configurations is converging (it sets named items;
-# re-running with the same body is a no-op-equivalent). The Job also runs as an
-# ArgoCD Sync hook with hook-delete-policy BeforeHookCreation,HookSucceeded — so a
-# fresh Job replaces the prior one each sync and successful runs are reaped (no
-# accumulation, always reflects current git).
+# re-running with the same body is a no-op-equivalent). The Job is a REGULAR ArgoCD
+# resource (NOT a sync hook — see the metadata annotations for why a hook-only app
+# never fires) with sync-option Replace=true, so a CHANGED manifest re-creates +
+# re-runs it, while an unchanged re-sync leaves the completed Job in place.
 #
 # SECRETS NEVER ON ARGV: admin password (harbor-admin/HARBOR_ADMIN_PASSWORD) and
 # client secret (harbor-oidc/oidc-client-secret) are injected as env via
@@ -42,16 +42,30 @@ metadata:
   labels:
     platform.capstone/component: platform
   annotations:
-    # Run AFTER the Harbor chart's resources are synced+healthy, on every sync.
-    argocd.argoproj.io/hook: PostSync
-    # Replace any prior Job before creating, and delete on success — keeps the run
-    # idempotent and avoids "field is immutable" errors on re-sync (Jobs are
-    # largely immutable once created).
-    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+    # REGULAR RESOURCE (not a sync hook). A PostSync HOOK only fires during a sync
+    # OPERATION, and an Application whose ONLY object is a hook has an empty regular
+    # resource set — so the auto-sync controller sees nothing OutOfSync, never starts
+    # a sync operation, and the hook stays DORMANT forever (observed: app Synced/
+    # Healthy with resources:[] and auth_mode still db_auth — the hook never ran).
+    # As a REGULAR Job, the app goes OutOfSync the moment this object appears -> the
+    # controller syncs it -> the Job is created and runs. Self-triggering, no manual
+    # `argocd app sync` needed.
+    #
+    # Replace=true: a Job's pod template is immutable, so a plain re-apply of a
+    # CHANGED spec would fail "field is immutable". Replace re-creates the Job
+    # (delete+create) when the manifest changes, which also RE-RUNS the config
+    # (idempotent: PUT /configurations converges). An UNCHANGED re-sync leaves the
+    # completed Job in place (no needless re-run). Sync-wave 1 keeps it after the
+    # Harbor chart; the Job ALSO waits on harbor-core readiness itself (belt+braces).
+    argocd.argoproj.io/sync-options: Replace=true
+    argocd.argoproj.io/sync-wave: "1"
 spec:
   backoffLimit: 10            # Harbor core can take minutes post-install; retry.
   activeDeadlineSeconds: 900  # give up after 15m rather than hang a sync forever.
-  ttlSecondsAfterFinished: 600
+  # NO ttlSecondsAfterFinished: as a REGULAR ArgoCD resource the completed Job must
+  # persist — if TTL deleted it, ArgoCD would see the Job missing -> OutOfSync ->
+  # re-create + re-run on a loop. The Job stays Completed; Replace=true re-runs it
+  # only when the manifest actually changes.
   template:
     metadata:
       labels:

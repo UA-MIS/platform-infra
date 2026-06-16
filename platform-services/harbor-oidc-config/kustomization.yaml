@@ -1,6 +1,7 @@
-# Harbor OIDC auth-mode config (P2.2, SEC-012). A single ArgoCD Sync-hook Job that
+# Harbor OIDC auth-mode config (P2.2, SEC-012). A single ArgoCD-managed Job that
 # applies Harbor's OIDC system-config (auth_mode + client secret + verify_cert)
-# declaratively + idempotently — see configure-oidc-job.yaml.
+# declaratively + idempotently — see configure-oidc-job.yaml. (Regular resource
+# with Replace=true, NOT a sync hook — a hook-only app never self-triggers.)
 #
 # Kept in its OWN dir (not under harbor/ prereqs) so it is driven by its OWN
 # Application (applicationsets/harbor-oidc-config-app.yaml), which can depend on
