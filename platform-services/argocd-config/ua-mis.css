@@ -108,3 +108,86 @@ button.argo-button.login__button {
   color: var(--ua-white) !important;
   text-decoration: underline;
 }
+
+/* ==========================================================================
+ * LEFT NAV SIDEBAR — DE-BLUE TO CHARCOAL (P2.1 THEME polish, human-scoped).
+ * The one real eyesore: ArgoCD's default dark NAVY/BLUE left sidebar clashing
+ * with the crimson top bar. Human's pick: keep it DARK but strip the blue cast
+ * to a neutral near-black charcoal, with crimson ONLY on the active/hover nav
+ * item (a left crimson accent bar + subtle crimson tint) — NOT the whole
+ * sidebar crimson. Light/white text for contrast; logo area charcoal (no blue
+ * box). Buttons are LEFT ALONE (human-approved). Selectors target argo-ui
+ * v3.4.x sidebar markup + degrade gracefully on a version bump.
+ * ====================================================================== */
+
+/* Class names below are VERIFIED against the live argo-ui v3.4.x bundle
+ * (main.*.js): .sidebar / .sidebar__container / .sidebar__nav-item(--active) /
+ * .sidebar__logo / .sidebar__version, and the left icon rail .nav-bar__item
+ * whose ACTIVE state ships a teal border (border-color:#1fbdd0) we retint. */
+:root {
+  --ua-charcoal: #1F2023;        /* neutral near-black, no navy/blue cast */
+  --ua-charcoal-hover: #2A2C30;  /* slightly lifted for hover/active rows */
+}
+
+/* ---- The dark navy SIDEBAR panel -> charcoal (this is the element clashing
+ *      with the crimson top bar; the .nav-bar icon rail is already crimson
+ *      from the base theme above). ---- */
+.sidebar,
+.sidebar__container {
+  background-color: var(--ua-charcoal) !important;
+  background-image: none !important;   /* drop the default navy gradient/tint */
+}
+
+/* ---- Sidebar nav items: light text on charcoal ---- */
+.sidebar__nav-item,
+.sidebar__nav-item a {
+  color: #E6E6E6 !important;
+}
+
+/* ---- Hover: subtle lift + crimson left-accent bar ---- */
+.sidebar__nav-item:hover {
+  background-color: var(--ua-charcoal-hover) !important;
+  color: var(--ua-white) !important;
+  box-shadow: inset 3px 0 0 0 var(--ua-crimson) !important;
+}
+
+/* ---- ACTIVE nav item: crimson left-accent bar + charcoal tint (the ONLY
+ *      crimson in the sidebar; white text for contrast) ---- */
+.sidebar__nav-item--active,
+.sidebar__nav-item.active {
+  background-color: var(--ua-charcoal-hover) !important;
+  color: var(--ua-white) !important;
+  box-shadow: inset 4px 0 0 0 var(--ua-crimson) !important;
+}
+
+/* ---- Sidebar logo + version footer: charcoal to match (no blue box) ---- */
+.sidebar__logo,
+.sidebar__logo-container,
+.sidebar__version {
+  background-color: var(--ua-charcoal) !important;
+  color: #E6E6E6 !important;
+}
+
+/* ---- The left .nav-bar icon rail is already crimson; its ACTIVE item ships a
+ *      TEAL border (border-color:#1fbdd0 in the bundle). Retint that one stray
+ *      teal accent -> white so the active icon reads against the crimson rail. */
+.nav-bar__item.active {
+  border-color: var(--ua-white) !important;
+}
+
+/* ==========================================================================
+ * LIGHT TOUCH (content area): only the most obvious stray Argo-blue LINKS ->
+ * crimson, so the de-blued sidebar doesn't sit next to jarring blue links.
+ * Intentionally NOT touching tabs/pagination/status accents/buttons — the human
+ * scoped this to the sidebar; these are the trivial adjacent wins only.
+ * ====================================================================== */
+.application-details a,
+.applications-list a,
+.argo-table-list__row a {
+  color: var(--ua-crimson) !important;
+}
+.application-details a:hover,
+.applications-list a:hover,
+.argo-table-list__row a:hover {
+  color: var(--ua-crimson-dark) !important;
+}
