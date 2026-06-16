@@ -1,0 +1,24 @@
+# ARC PREREQS (P2.3, §1.3, D-032) — the namespaces that must exist before the ARC
+# Helm Applications (applicationsets/arc-*-app.yaml) install. Managed by the
+# platform-services-appset (kustomize directory generator over platform-services/*;
+# this dir produces app `platform-svc-arc`). The two Helm charts (controller +
+# runner scale set) are SEPARATE Helm-source Applications (method A, D-028) and do
+# NOT render through this kustomize dir.
+#
+# The GitHub App credential is a SealedSecret added here ONCE the human creates the
+# GitHub App (see README.md "GitHub App" — it carries github_app_id /
+# github_app_installation_id / github_app_private_key). It is NOT committed as a
+# placeholder (an unsealed/empty secret would be worse than absent); add
+# `sealedsecret-github-app.yaml` to `resources` below after sealing. The controller
+# app's `githubConfigSecret` references it by name.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  # - sealedsecret-github-app.yaml   # add after the human seals the GitHub App creds (README)
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false

@@ -1,0 +1,54 @@
+# ARC controller Application (P2.3, §1.3, D-032) — the Actions Runner Controller
+# operator (gha-runner-scale-set-controller), the MODERN scale-set ARC (not the
+# legacy summerwind RunnerDeployment CRDs). Helm-source Application, deploy method A
+# (D-028): pinned OCI chart + the chart's OCI registry added to the `platform`
+# AppProject sourceRepos allowlist (bootstrap/platform-appproject.yaml in this PR;
+# security audits the addition).
+#
+# Installs the controller + the AutoscalingRunnerSet/EphemeralRunner CRDs into
+# arc-system. The runner scale set itself is a SEPARATE Application
+# (arc-runner-scaleset-app.yaml) so the CRDs (this app, sync-wave 0) land before any
+# AutoscalingRunnerSet (that app, sync-wave 1) references them.
+#
+# Chart: gha-runner-scale-set-controller v0.14.2 (pinned; bump deliberately).
+# Root-app recurses applicationsets/, so this Application is registered.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-arc-controller
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"   # CRDs first, before the scale set (wave 1)
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    # OCI Helm registry (ArgoCD treats the registry as repoURL, chart as the name).
+    # PINNED — added to the platform AppProject sourceRepos allowlist (supply chain).
+    repoURL: ghcr.io/actions/actions-runner-controller-charts
+    chart: gha-runner-scale-set-controller
+    targetRevision: 0.14.2               # pinned chart version (no ^/~/latest)
+    helm:
+      releaseName: arc
+      values: |
+        # Single-replica controller for Phase-2 local (laptop). Phase-4 scales/HAs.
+        replicaCount: 1
+        # The controller watches AutoscalingRunnerSets cluster-wide (multi-tenant
+        # later); flags/SA come from the chart defaults. Pin the runner image +
+        # resources at the SCALE-SET level (arc-runner-scaleset-app.yaml), not here.
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: arc-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false           # arc-system ships via platform-services/arc
+      - ServerSideApply=true            # ARC CRDs are large — SSA avoids the 256KB anno limit
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

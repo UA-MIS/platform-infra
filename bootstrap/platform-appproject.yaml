@@ -30,6 +30,14 @@ spec:
     #     method B (kustomize helm-inflation rendered from platform-infra), REVERT
     #     these — they're only needed for Helm-SOURCE Applications.
     - https://helm.goharbor.io        # Harbor (platform-harbor Application)
+    # ARC (P2.3, D-032): GitHub's official OCI Helm charts for the Actions Runner
+    # Controller (controller + runner scale set). OCI registry — ONE named source,
+    # chart versions pinned in the Applications (gha-runner-scale-set[-controller]
+    # @ 0.14.2). ⚠ INSTALL-OWNED: like the helm.goharbor.io add, this reaches the
+    # live `platform` AppProject only via `make bootstrap`/`make bootstrap-reapply`
+    # (bootstrap/platform-appproject.yaml is not GitOps-reconciled) — re-apply after
+    # merge or the ARC apps will InvalidSpecError "repo not permitted".
+    - ghcr.io/actions/actions-runner-controller-charts   # ARC (platform-arc-* Applications)
 
   # Platform services are cluster-wide; allow any namespace on the in-cluster API.
   destinations:

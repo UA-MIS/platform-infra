@@ -1,0 +1,24 @@
+# ARC namespaces (P2.3, §1.3, D-032). Two namespaces, deliberately separate:
+#   arc-system  — the gha-runner-scale-set-controller (the operator + listener).
+#   arc-runners — where ephemeral runner pods + their containerMode:kubernetes
+#                 workflow job pods land. This is the UNTRUSTED-CODE blast radius
+#                 (self-hosted runners execute student PRs), so it is isolated by
+#                 the default-deny NetworkPolicy set (runner-netpol.yaml) + the
+#                 per-pod securityContext in the scale-set values. Keeping runners
+#                 OUT of arc-system means a runner compromise can't trivially reach
+#                 the controller's GitHub-App credentials.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: arc-system
+  labels:
+    platform.capstone/component: platform
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: arc-runners
+  labels:
+    platform.capstone/component: platform
+    # Marks this ns as the untrusted CI runner surface (netpol + podSecurity target).
+    platform.capstone/trust: untrusted
