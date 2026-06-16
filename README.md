@@ -67,6 +67,7 @@ make cluster-up      # create the k3d cluster if absent (idempotent)
 make cluster-info    # nodes + registry + ingress base URL
 # ... later phases:
 make bootstrap       # (T3) apply ArgoCD root app-of-apps
+make bootstrap-reapply  # re-apply install-owned bootstrap objects after a bootstrap/ merge
 make seal SECRET=... # (T4) kubeseal a secret for git
 make cluster-stop    # stop the cluster + registry without deleting
 make cluster-start   # restart a STOPPED cluster + registry (post-reboot)
@@ -93,6 +94,36 @@ containerd can resolve it, `k3d cluster start`s the cluster, waits for nodes to
 go `Ready`, and switches your kube-context to `k3d-$(CLUSTER_NAME)`. ArgoCD apps
 may take a minute to re-settle to `Healthy` after the restart. The inverse,
 `make cluster-stop`, stops both without deleting them.
+
+### Re-applying install-owned bootstrap objects (`bootstrap-reapply`)
+
+**Most of the platform is GitOps-reconciled** — ArgoCD watches this repo and
+self-heals `platform-services/`, `tenants/`, `applicationsets/`. But two objects
+are **install-owned and NOT GitOps-reconciled, by design**:
+
+- `bootstrap/argocd-install/` — the upstream ArgoCD install plus our `argocd-server`
+  patches (the `server.insecure` flag, the UI-theme CSS volume mount).
+- `bootstrap/platform-appproject.yaml` — the `platform` AppProject (its
+  `sourceRepos` allowlist, destinations, resource whitelists).
+
+These are the chicken-and-egg roots ArgoCD's own apps live in and run on, so the
+application-controller doesn't manage them — `make bootstrap` applies them once.
+**Consequence:** when you merge a PR that changes anything under `bootstrap/`, git
+is updated but the **live cluster stays stale** until you re-apply. (We hit this:
+the Harbor chart blocked on a missing `sourceRepos` entry, and the UI theme 404'd
+because the `argocd-server` volume mount never reached the live Deployment.)
+
+After merging any `bootstrap/` change, run:
+
+```bash
+make bootstrap-reapply
+```
+
+It server-side-applies (with `--force-conflicts`) both objects, then rolls
+`argocd-server` so any Deployment-spec change (e.g. a new volume mount) takes
+effect. **Idempotent** — safe to run repeatedly; a no-op when the live objects
+already match git (the rollout creates no new ReplicaSet if the spec is unchanged).
+It does **not** modify the manifests or touch GitOps-synced services.
 
 ### Built-in registry (D-005)
 

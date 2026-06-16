@@ -320,6 +320,42 @@ bootstrap: ## (T3) Install ArgoCD + apply the platform project & app-of-apps roo
 	@echo "  ACCEPTANCE (ADV-002): once ArgoCD generates the tenant pods, run \`make verify-image-pull\`"
 	@echo "                        to assert they get PAST ImagePullBackOff (registry-mirror sanity)."
 
+# Re-apply ONLY the INSTALL-OWNED bootstrap objects to the live cluster. WHY THIS
+# EXISTS: bootstrap/argocd-install/ (the upstream ArgoCD install + our argocd-server
+# patches) and bootstrap/platform-appproject.yaml are applied ONCE by `make bootstrap`
+# and are NOT GitOps-reconciled — by design. The argocd-server Deployment and the
+# `platform` AppProject are the chicken-and-egg roots ArgoCD's own apps live in/run
+# on, so the application-controller does not manage them. Consequence: when a PR
+# MERGES a change under bootstrap/ (e.g. an argocd-server volume mount, a
+# server.insecure flag, or a new sourceRepos allowlist entry), git is updated but the
+# CLUSTER stays stale until someone re-applies. We hit this twice: the Harbor chart
+# blocked on a missing `helm.goharbor.io` sourceRepos entry, and the UI-theme CSS
+# 404'd because the argocd-server volume mount never reached the live Deployment.
+#
+# RUN THIS after merging ANY PR that touches bootstrap/ (and after the human confirms
+# the merge landed). Idempotent + safe to run repeatedly: server-side apply with
+# --force-conflicts re-owns fields without the client-side last-applied annotation
+# (the same flags `make bootstrap` uses for the install — see that target for why
+# SSA is required). It does NOT change the manifests, only reconciles the live
+# objects to match git. It does NOT touch root-app or any GitOps-synced platform
+# service (those self-heal via ArgoCD).
+.PHONY: bootstrap-reapply
+bootstrap-reapply: ## Re-apply install-owned bootstrap objects (argocd-install + platform AppProject) after merging a bootstrap/ change (idempotent)
+	@kubectl --context "k3d-$(CLUSTER_NAME)" config use-context "k3d-$(CLUSTER_NAME)" >/dev/null 2>&1 || true
+	@echo "==> re-applying bootstrap/argocd-install (server-side, force-conflicts)..."
+	@kubectl --context "k3d-$(CLUSTER_NAME)" apply -k bootstrap/argocd-install --server-side --force-conflicts
+	@echo "==> re-applying bootstrap/platform-appproject.yaml (server-side, force-conflicts)..."
+	@kubectl --context "k3d-$(CLUSTER_NAME)" apply -f bootstrap/platform-appproject.yaml --server-side --force-conflicts
+	@# The argocd-server Deployment may have changed (e.g. a new volume mount); SSA
+	@# updates the spec but a running ReplicaSet only picks up pod-template changes on
+	@# a rollout. Restart is a no-op if the spec is unchanged (no new ReplicaSet).
+	@echo "==> rolling argocd-server so any Deployment-spec change takes effect..."
+	@kubectl --context "k3d-$(CLUSTER_NAME)" -n argocd rollout restart deploy/argocd-server
+	@kubectl --context "k3d-$(CLUSTER_NAME)" -n argocd rollout status deploy/argocd-server --timeout=180s
+	@echo "bootstrap-reapply complete. The AppProject (sourceRepos) + argocd-server (mounts/flags) now match git."
+	@echo "  Verify a sourceRepos change:  kubectl -n argocd get appproject platform -o jsonpath='{.spec.sourceRepos}'"
+	@echo "  Verify the UI-theme mount:    curl -sk https://argocd.$(PLATFORM_DOMAIN)/custom/ua-mis.css | head"
+
 # ---- repoURL seam (single swappable git base) ------------------------------
 # All ArgoCD sources hardcode https://github.com/UA-MIS/<repo> (the real home).
 # For a local run where those repos aren't hosted yet, set GIT_BASE_URL in
