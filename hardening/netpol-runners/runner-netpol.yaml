@@ -90,9 +90,23 @@ spec:
     # node-IP apiserver) + Harbor's ClusterIP (harbor-core for push/pull). The pod
     # CIDR (10.42/16) is intentionally OMITTED so a runner cannot reach OTHER teams'
     # pods directly (cross-tenant block); it talks to services by ClusterIP only.
+    #
+    # PORT-SCOPED (SEC-014): a build needs ONLY the API (443) + harbor-core (80).
+    # Leaving this all-ports let a runner reach arbitrary in-cluster service ports
+    # (e.g. another team's in-namespace ClusterIP service, internal admin ports).
+    # We keep the /16 (NOT /32 ClusterIP pins) because ClusterIPs are not stable
+    # across the k3d recreate invariant — the /32 pin would go stale; /32-pinning is
+    # deferred to Phase-3 (FQDN-capable CNI). 443 = kube-apiserver Service; 80 =
+    # harbor-core (cleartext in-cluster, ClusterIP path only). Update if Harbor's
+    # service port changes or a build needs another in-cluster service port.
     - to:
         - ipBlock:
             cidr: 10.43.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443    # kubernetes API Service (containerMode job-pod create)
+        - protocol: TCP
+          port: 80     # harbor-core (push/pull)
     # External HTTPS:443 ONLY — GitHub (clone/Actions API/job token) + base-image
     # pulls. Port-scoped (kube-router has no FQDN egress). The except list BLOCKS
     # the apiserver (node CIDR :6443) + all intra-cluster ranges, so "external"
