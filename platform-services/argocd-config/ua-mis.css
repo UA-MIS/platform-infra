@@ -91,6 +91,26 @@ button.argo-button.login__button {
   background-color: var(--ua-crimson-dark) !important;
 }
 
+/* ---- FIX: per-application-CARD action buttons (the Sync/Refresh/Delete row at
+ *      the bottom of each app tile, .applications-tiles__actions) — the crimson
+ *      `.argo-button--base` background above applies to them, but their LABEL/ICON
+ *      kept the default argo accent color => crimson-on-crimson = invisible text.
+ *      Force the text + icon WHITE so the labels read (matching the top-toolbar
+ *      buttons, which are already fine). Scoped to .applications-tiles__actions
+ *      ONLY — does NOT touch the top toolbar (NEW APP / SYNC APPS / REFRESH APPS,
+ *      a different container) or the sidebar. ---- */
+.applications-tiles__actions .argo-button,
+.applications-tiles__actions button.argo-button,
+.applications-tiles__actions .argo-button--base {
+  color: var(--ua-white) !important;
+}
+.applications-tiles__actions .argo-button i,
+.applications-tiles__actions .argo-button .fa,
+.applications-tiles__actions .argo-button [class^="argo-icon"],
+.applications-tiles__actions .argo-button [class*=" argo-icon"] {
+  color: var(--ua-white) !important;
+}
+
 /* Sidebar accent stripe in crimson. */
 .sidebar {
   border-top: 3px solid var(--ua-crimson);
