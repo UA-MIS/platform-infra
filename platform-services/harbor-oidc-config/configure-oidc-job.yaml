@@ -166,22 +166,24 @@ spec:
               fi
               echo "==> PUT ok (HTTP 200)."
 
-              echo "==> verifying auth_mode == oidc_auth ..."
-              # GET the live config and assert the auth_mode landed (declarative proof).
-              # NOTE: Harbor returns each setting as an OBJECT with editable+value, and
-              # the field ORDER is {"editable":true,"value":"oidc_auth"} — `editable`
-              # comes BEFORE `value`. The first cut of this regex assumed
-              # `"auth_mode":{"value":...}` and so never matched (returned ''), failing
-              # the Job even though the PUT succeeded. Isolate the auth_mode OBJECT first
-              # (up to its closing brace), THEN pull value — order-independent.
-              mode=$(curl -fsS -u "$AUTH" "$CORE/api/v2.0/configurations" \
-                | tr -d ' \n' \
-                | sed -n 's/.*"auth_mode":{\([^}]*\)}.*/\1/p' \
-                | sed -n 's/.*"value":"\([a-z_]*\)".*/\1/p')
+              echo "==> verifying auth_mode == oidc_auth (reading .auth_mode.value) ..."
+              # GET the live config and assert auth_mode actually flipped — a 200 on the
+              # PUT is NOT proof (Harbor 200s even on a partial/ignored config), so we
+              # READ IT BACK. Harbor returns each setting as an OBJECT:
+              # "auth_mode":{"editable":true,"value":"oidc_auth"}. The image has no jq,
+              # so extract robustly with grep (no fragile field-order/whitespace
+              # assumptions — `tr -d` removes spaces+newlines, then isolate the
+              # auth_mode object, then its "value" token): order-independent and
+              # whitespace-independent (stress-tested vs swapped-order + spaced JSON).
+              cfg=$(curl -fsS -u "$AUTH" "$CORE/api/v2.0/configurations" | tr -d ' \n')
+              mode=$(printf '%s' "$cfg" \
+                | grep -o '"auth_mode":{[^}]*}' \
+                | grep -o '"value":"[a-z_]*"' \
+                | grep -o '[a-z_]*"$' | tr -d '"')
               if [ "$mode" != "oidc_auth" ]; then
-                echo "FAIL: auth_mode is '$mode', expected 'oidc_auth'"; exit 1
+                echo "FAIL: auth_mode read back as '$mode', expected 'oidc_auth' (PUT 200 but no flip — check the OIDC block / Harbor logs)."; exit 1
               fi
-              echo "==> OIDC auth-mode configured + verified (auth_mode=oidc_auth, verify_cert=false)."
+              echo "==> OIDC auth-mode configured + VERIFIED via read-back (auth_mode=oidc_auth, verify_cert=false)."
       volumes:
         # Writable scratch for the request/response files the script writes to /tmp,
         # since readOnlyRootFilesystem:true makes the container root read-only.
