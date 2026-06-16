@@ -340,37 +340,57 @@ bootstrap: ## (T3) Install ArgoCD + apply the platform project & app-of-apps roo
 # objects to match git. It does NOT touch root-app or any GitOps-synced platform
 # service (those self-heal via ArgoCD).
 #
-# ⚠ argocd-cm LAYERING (the gotcha that makes this target non-trivial): argocd-cm is
-# CO-MANAGED. The install (this target) owns ONLY the `resource.customizations.*` /
-# `resource.exclusions` keys; the GitOps `platform-svc-argocd-config` app owns the
-# `ui.*` (theme/banner) + `oidc.*` (SSO) keys. Pure SSA respects that split (each
-# manager only touches its own fields). BUT if the LIVE argocd-cm still carries a
-# stale `kubectl.kubernetes.io/last-applied-configuration` annotation listing the
-# ui.*/oidc keys (written by ArgoCD's legacy client-side apply), a CSA->SSA migration
-# during `--force-conflicts` can PRUNE those keys for a window (k8s SSA: a field in
-# last-applied but absent from the applied manifest is deleted if no other manager
-# owns it) — which once blanked the theme+SSO live until selfHeal restored them.
-# THIS TARGET DEFENDS AGAINST THAT: after re-applying, it hard-refreshes the
-# argocd-config app to RE-ASSERT its keys immediately (no waiting on periodic
-# selfHeal), then ASSERTS ui.cssurl + oidc.config are live — failing loudly if a
-# reapply ever blanks them. (One-time prerequisite to remove the root cause entirely:
-#   kubectl -n argocd annotate cm argocd-cm kubectl.kubernetes.io/last-applied-configuration-
-# strips the stale annotation; argocd-controller owns it and won't re-add it on SSA.)
+# ⚠ argocd-cm LAYERING — THE OUTAGE THIS TARGET MUST PREVENT (verified live 2026-06-16):
+# argocd-cm is CO-MANAGED. The install (this target) ships ONLY the
+# `resource.customizations.*` / `resource.exclusions` keys; the GitOps
+# `platform-svc-argocd-config` app owns the `ui.*` (theme/banner) + `oidc.*` (SSO) keys.
+# A STANDALONE `kubectl apply -k bootstrap/argocd-install --server-side --force-conflicts`
+# WIPED the ENTIRE argocd-cm.data live (oidc.config, url, ALL ui.* gone -> SSO login
+# broke), because the live argocd-cm carried a stale
+# `kubectl.kubernetes.io/last-applied-configuration` annotation (written by ArgoCD's
+# legacy client-side apply) that LISTED the ui.*/oidc keys: the CSA->SSA migration that
+# `--force-conflicts` performs PRUNES any last-applied field absent from the applied
+# manifest. `make bootstrap` only survives this because the GitOps app applies the
+# ui/oidc keys AFTER the install apply — a standalone re-apply has no such follow-up, so
+# it strips them and DOES NOT self-heal (passive selfHeal did NOT restore; only a
+# FORCE-sync of platform-svc-argocd-config did). So this target must actively re-assert.
+#
+# ORDER IS LOAD-BEARING:
+#   0. STRIP the stale CSA annotation first  -> removes the prune trigger entirely.
+#   1. apply bootstrap/argocd-install (SSA)  -> may still touch resource.customizations.*.
+#   2. apply platform-appproject (SSA).
+#   3. FORCE-SYNC platform-svc-argocd-config -> re-asserts ui.*/oidc from git (the PROVEN
+#      restore; a hard refresh / passive selfHeal is NOT enough). BEFORE the rollout.
+#   4. THEN rollout-restart argocd-server     -> so it reads the RESTORED oidc.config
+#      (restarting before re-assert would serve a wiped config = SSO down in the window).
+#   5. ASSERT oidc.config AND ui.cssurl are present live -> FAIL LOUDLY otherwise.
 .PHONY: bootstrap-reapply
-bootstrap-reapply: ## Re-apply install-owned bootstrap objects (argocd-install + platform AppProject) after merging a bootstrap/ change; re-asserts + verifies argocd-cm GitOps keys
+bootstrap-reapply: ## Re-apply install-owned bootstrap objects after a bootstrap/ change; force-re-asserts + verifies argocd-cm theme/SSO keys (wipe-safe)
 	@ctx="k3d-$(CLUSTER_NAME)"; \
-	echo "==> re-applying bootstrap/argocd-install (server-side, force-conflicts)..."; \
+	echo "==> [0/5] stripping any stale last-applied-configuration annotation on argocd-cm (removes the CSA->SSA prune trigger)..."; \
+	kubectl --context "$$ctx" -n argocd annotate cm argocd-cm kubectl.kubernetes.io/last-applied-configuration- >/dev/null 2>&1 || true; \
+	echo "==> [1/5] re-applying bootstrap/argocd-install (server-side, force-conflicts)..."; \
 	kubectl --context "$$ctx" apply -k bootstrap/argocd-install --server-side --force-conflicts; \
-	echo "==> re-applying bootstrap/platform-appproject.yaml (server-side, force-conflicts)..."; \
+	echo "==> [2/5] re-applying bootstrap/platform-appproject.yaml (server-side, force-conflicts)..."; \
 	kubectl --context "$$ctx" apply -f bootstrap/platform-appproject.yaml --server-side --force-conflicts; \
-	echo "==> rolling argocd-server so any Deployment-spec change (e.g. a volume mount) takes effect (no-op if unchanged)..."; \
+	echo "==> [3/5] FORCE-syncing platform-svc-argocd-config to re-assert argocd-cm theme/SSO keys (BEFORE the rollout)..."; \
+	if kubectl --context "$$ctx" -n argocd get application platform-svc-argocd-config >/dev/null 2>&1; then \
+	  kubectl --context "$$ctx" -n argocd patch application platform-svc-argocd-config --type merge \
+	    -p '{"operation":{"initiatedBy":{"username":"bootstrap-reapply"},"sync":{"syncStrategy":{"apply":{"force":true}}}}}' >/dev/null; \
+	  echo "    waiting for the force-sync to complete..."; \
+	  for i in $$(seq 1 24); do \
+	    ph="$$(kubectl --context "$$ctx" -n argocd get application platform-svc-argocd-config -o jsonpath='{.status.operationState.phase}' 2>/dev/null)"; \
+	    case "$$ph" in Succeeded) echo "    force-sync Succeeded."; break;; Failed|Error) echo "    force-sync $$ph"; break;; esac; \
+	    sleep 5; \
+	  done; \
+	else \
+	  echo "    (platform-svc-argocd-config app not found — skipping re-assert; run after \`make bootstrap\`)"; \
+	fi; \
+	echo "==> [4/5] rolling argocd-server so it re-reads the restored oidc.config + any Deployment-spec change (no-op if unchanged)..."; \
 	kubectl --context "$$ctx" -n argocd rollout restart deploy/argocd-server; \
 	kubectl --context "$$ctx" -n argocd rollout status deploy/argocd-server --timeout=180s; \
-	echo "==> re-asserting GitOps-owned argocd-cm keys (theme/SSO) via a hard refresh of platform-svc-argocd-config..."; \
-	kubectl --context "$$ctx" -n argocd annotate application platform-svc-argocd-config argocd.argoproj.io/refresh=hard --overwrite >/dev/null 2>&1 || \
-	  echo "   (note: platform-svc-argocd-config app not found — skipping re-assert; run after bootstrap)"; \
-	echo "==> ASSERTING the GitOps argocd-cm keys survived the reapply (theme + SSO)..."; \
-	ok=1; \
+	echo "==> [5/5] ASSERTING argocd-cm GitOps keys survived (theme + SSO)..."; \
+	ok=1; css=""; oidc=""; \
 	for i in $$(seq 1 12); do \
 	  css="$$(kubectl --context "$$ctx" -n argocd get cm argocd-cm -o jsonpath='{.data.ui\.cssurl}' 2>/dev/null)"; \
 	  oidc="$$(kubectl --context "$$ctx" -n argocd get cm argocd-cm -o jsonpath='{.data.oidc\.config}' 2>/dev/null)"; \
@@ -378,14 +398,12 @@ bootstrap-reapply: ## Re-apply install-owned bootstrap objects (argocd-install +
 	  sleep 5; \
 	done; \
 	if [ "$$ok" != 0 ]; then \
-	  echo "  FAIL: argocd-cm lost its GitOps keys after reapply (ui.cssurl='$$css' oidc.config empty=$$([ -z "$$oidc" ] && echo yes))."; \
-	  echo "        The argocd-config app did not re-assert. Strip the stale annotation + hard-refresh:"; \
-	  echo "          kubectl -n argocd annotate cm argocd-cm kubectl.kubernetes.io/last-applied-configuration-"; \
-	  echo "          kubectl -n argocd annotate app platform-svc-argocd-config argocd.argoproj.io/refresh=hard --overwrite"; \
+	  echo "  FAIL: argocd-cm is MISSING GitOps keys after reapply (ui.cssurl='$$css'; oidc.config empty=$$([ -z "$$oidc" ] && echo yes || echo no)). SSO/theme would be DOWN."; \
+	  echo "        Recover now:  kubectl -n argocd patch app platform-svc-argocd-config --type merge -p '{\"operation\":{\"sync\":{\"syncStrategy\":{\"apply\":{\"force\":true}}}}}'"; \
 	  exit 1; \
 	fi; \
-	echo "  OK — ui.cssurl='$$css' and oidc.config are live (theme + SSO intact)."; \
-	echo "bootstrap-reapply complete. AppProject (sourceRepos) + argocd-server (mounts/flags) match git; argocd-cm GitOps keys verified."; \
+	echo "  OK — ui.cssurl='$$css' present and oidc.config present (theme + SSO intact)."; \
+	echo "bootstrap-reapply complete. AppProject (sourceRepos) + argocd-server (mounts/flags) match git; argocd-cm theme/SSO keys force-re-asserted + verified."; \
 	echo "  Verify a sourceRepos change:  kubectl -n argocd get appproject platform -o jsonpath='{.spec.sourceRepos}'"; \
 	echo "  Verify the UI-theme mount:    curl -sk https://argocd.$(PLATFORM_DOMAIN)/custom/ua-mis.css | head"
 
