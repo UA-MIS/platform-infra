@@ -7,16 +7,16 @@
 #
 # The GitHub App credential is a SealedSecret added here ONCE the human creates the
 # GitHub App (see README.md "GitHub App" — it carries github_app_id /
-# github_app_installation_id / github_app_private_key). It is NOT committed as a
-# placeholder (an unsealed/empty secret would be worse than absent); add
-# `sealedsecret-github-app.yaml` to `resources` below after sealing. The controller
-# app's `githubConfigSecret` references it by name.
+# github_app_installation_id / github_app_private_key). The human sealed it (PR #24)
+# and it is now referenced in `resources` below; the scale-set's `githubConfigSecret:
+# arc-github-app` materialises from it. (A NEW App credential = re-seal the file with
+# `make seal NS=arc-runners` and recommit — never commit an unsealed Secret.)
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
   - namespace.yaml
-  # - sealedsecret-github-app.yaml   # add after the human seals the GitHub App creds (README)
+  - sealedsecret-github-app.yaml   # the human's sealed GitHub App creds (arc-github-app)
 
 labels:
   - pairs:
