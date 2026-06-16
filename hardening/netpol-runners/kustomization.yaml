@@ -1,0 +1,22 @@
+# netpol-runners (P2.3, §1.3) — default-deny + scoped allows for the arc-runners
+# namespace, the UNTRUSTED CI runner surface (self-hosted runners run student PR
+# code). Separate from netpol-controlplane (argocd/dex/harbor) because this fences
+# a different, higher-risk blast radius and is gated/validated independently.
+#
+# MANUAL-SYNC (like SEC-011): driven by the platform-netpol-runners Application
+# (applicationsets/arc-runner-netpol-app.yaml), NOT the auto-syncing
+# platform-services-appset — applying default-deny to a namespace with in-flight
+# builds mid-sync could sever a running job, so enforcement is a deliberate,
+# watched `argocd app sync platform-netpol-runners` (verify: a real workflow run
+# still clones from GitHub + pushes to Harbor, AND a runner canNOT reach the
+# apiserver/other tenants). Same k3s kube-router caveats + CIDRs as netpol-controlplane.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - runner-netpol.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false

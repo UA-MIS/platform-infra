@@ -1,0 +1,52 @@
+# Runner-isolation NetworkPolicies Application (P2.3, §1.3) — MANUAL SYNC.
+#
+# Same rationale as platform-netpol-controlplane (SEC-011): applying default-deny
+# to the arc-runners namespace while a build is in flight could sever a running
+# job, so this is a STANDALONE Application with a MANUAL sync policy. Merging it
+# only makes the manifests present + tracked (ArgoCD shows OutOfSync, harmless —
+# nothing is applied); enforcement is the explicit, watched one-time sync:
+#
+#     argocd app sync platform-netpol-runners
+#     # VERIFY (the isolation gate — security signs this off):
+#     #   - a real workflow run still CLONES from GitHub + PUSHES to Harbor, and
+#     #     the containerMode:kubernetes job pod still starts (apiserver via the
+#     #     in-cluster kubernetes Service, NOT the node IP);
+#     #   - a runner CANNOT reach the apiserver on the node IP (:6443) nor another
+#     #     tenant's pods (cross-tenant block) — the whole point of the fence.
+#     # ROLL BACK on any break:
+#     #   kubectl -n arc-runners delete netpol \
+#     #     zz-default-deny allow-ingress-kubelet-probes allow-egress-scoped
+#
+# ⚠ MERGE != ENFORCEMENT — couple the two. Do NOT promote to automated until the
+# live-enforcement validation above passes (else default-deny lands on running
+# builds unattended). Promote to `automated:` once validated + Phase-3 egress
+# tightening (443 -> GitHub CIDRs) lands.
+#
+# Lives in the `platform` AppProject. Root-app recurses applicationsets/, so this
+# Application is registered automatically; only its SYNC is manual.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-netpol-runners
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/UA-MIS/platform-infra
+    targetRevision: HEAD
+    path: hardening/netpol-runners
+  destination:
+    server: https://kubernetes.default.svc
+    # Neutral default; the NetworkPolicies pin their own namespace (arc-runners).
+    namespace: kube-system
+  syncPolicy:
+    # NO automated: block — MANUAL sync ONLY (see header). selfHeal/prune off.
+    syncOptions:
+      - ServerSideApply=true
+    retry:
+      limit: 3
+      backoff: { duration: 5s, factor: 2, maxDuration: 1m }

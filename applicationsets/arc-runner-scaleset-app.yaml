@@ -1,0 +1,109 @@
+# ARC runner scale set Application (P2.3, §1.3, D-032) — the org-scoped, ephemeral,
+# scale-FROM-ZERO self-hosted runner set, the UNTRUSTED-CODE surface. Helm-source
+# Application (method A, gha-runner-scale-set chart, same OCI registry + version as
+# the controller). Sync-wave 1 so the controller CRDs (wave 0) exist first.
+#
+# ⚠ runs-on CONTRACT: in the scale-set model the workflow `runs-on:` value IS the
+# SCALE SET NAME (helm.releaseName / AutoscalingRunnerSet metadata.name). This is
+# set to `ua-mis-kaniko` — DEVELOPER must use `runs-on: ua-mis-kaniko` in the
+# .devops workflow (confirming the exact string with them; change both sides
+# together if they prefer another token).
+#
+# ⚠ GitHub App credential: githubConfigSecret references the SealedSecret
+# `arc-github-app` (keys github_app_id / github_app_installation_id /
+# github_app_private_key) the human seals into arc-runners — see
+# platform-services/arc/README.md. Until that exists the listener can't auth (the
+# app will be Progressing); that's expected pre-credential.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-arc-runner-scaleset
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"   # after the controller CRDs (wave 0)
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: ghcr.io/actions/actions-runner-controller-charts
+    chart: gha-runner-scale-set
+    targetRevision: 0.14.2               # pinned (match the controller chart)
+    helm:
+      # releaseName == the runs-on label the workflow selects (see header).
+      releaseName: ua-mis-kaniko
+      values: |
+        # --- org-scoped runners (UA-MIS), authed by the GitHub App SealedSecret ---
+        githubConfigUrl: "https://github.com/UA-MIS"
+        githubConfigSecret: arc-github-app   # SealedSecret in arc-runners (README)
+
+        # Be EXPLICIT about the controller SA + namespace instead of relying on the
+        # chart's cross-namespace label discovery (which fails when the controller
+        # isn't found — e.g. at standalone `helm template` time, or if discovery
+        # mislabels). The controller (arc-controller-app, release `arc`, ns
+        # arc-system) creates SA `arc-gha-rs-controller`. Keep in sync if either
+        # the controller releaseName or namespace changes.
+        controllerServiceAccount:
+          name: arc-gha-rs-controller
+          namespace: arc-system
+
+        # --- SCALE FROM ZERO: no idle runners burning the box; cap the burst.
+        #     maxRunners is the RESOURCE KNOB — 3 on the local k3d laptop; raise on
+        #     real hardware (Phase-4). minRunners 0 = pods only exist during a job. ---
+        minRunners: 0
+        maxRunners: 3
+
+        # --- containerMode KUBERNETES: workflow job steps run as separate K8s PODS,
+        #     NO dind, NO docker socket, NOT privileged — the rootless model Kaniko
+        #     needs + the isolation foundation. Job pods get an ephemeral work PVC
+        #     (local-path on k3d; cleared per job). ---
+        containerMode:
+          type: "kubernetes"
+          kubernetesModeWorkVolumeClaim:
+            accessModes: ["ReadWriteOnce"]
+            storageClassName: "local-path"
+            resources:
+              requests:
+                storage: "5Gi"
+
+        # --- Runner POD hardening (the security gate; security reviews this).
+        #     non-root, no privilege-escalation, drop ALL caps, seccomp
+        #     RuntimeDefault. (read-only root FS is NOT set on the runner container:
+        #     the actions runner writes its _work/_diag dirs; the ephemeral work PVC
+        #     + per-job pod recycle bound that. Job-step pods inherit the same
+        #     restricted posture via the controller.) ---
+        template:
+          spec:
+            securityContext:
+              runAsNonRoot: true
+              runAsUser: 1001
+              fsGroup: 1001
+              seccompProfile:
+                type: RuntimeDefault
+            containers:
+              - name: runner
+                image: ghcr.io/actions/actions-runner:2.328.0   # pinned runner image
+                command: ["/home/runner/run.sh"]
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  capabilities:
+                    drop: ["ALL"]
+                resources:
+                  # RESOURCE KNOB — caps a Kaniko-build burst from OOMing the box.
+                  requests: { cpu: "250m", memory: "512Mi" }
+                  limits:   { cpu: "2",    memory: "2Gi" }
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: arc-runners
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false           # arc-runners ships via platform-services/arc
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }
