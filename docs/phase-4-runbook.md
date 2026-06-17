@@ -143,12 +143,41 @@ not a baked static IP — see talconfig header). So generate up front, apply per
 cd clusters/real-talos
 talhelper gensecret > talsecret.sops.yaml      # PROOF: leave plaintext LOCALLY; it's
                                                # gitignored — sops-encrypt before ANY commit
-export TS_AUTHKEY='tskey-auth-...'             # the minted reusable tag:talos-node key (NOT committed)
+# Provide the Tailscale auth key via talenv.yaml — talhelper AUTO-LOADS it and
+# envsubst's ${TS_AUTHKEY} into the tailscale ExtensionServiceConfig. More reliable
+# than a shell export (an UNSET var silently substitutes to EMPTY — that's what put
+# box-3 on the empty schematic + would break tailscale auth):
+cat > talenv.yaml <<EOF
+TS_AUTHKEY: "tskey-auth-...the-real-reusable-tag:talos-node-key..."
+EOF
+# talenv.yaml is gitignored; sops-encrypt -> talenv.sops.yaml before ANY commit.
 talhelper genconfig                            # -> ./clusterconfig/{capstone-capstone-n1,-n2,-n3}.yaml + talosconfig
 ```
-> If genconfig errors on `${TS_AUTHKEY}` substitution, inline the key into the
-> tailscale ExtensionServiceConfig in the generated `clusterconfig/*.yaml` AFTER
-> genconfig — `clusterconfig/` is gitignored, so the key never reaches git.
+> The install image comes from the `schematic` block in talconfig (talhelper hashes
+> it → the 8957 extension set), so NO `SCHEMATIC_ID` env is needed. Only `TS_AUTHKEY`
+> is env-substituted — hence the talenv.yaml + the MANDATORY gate next.
+
+### Step 3.5 — PRE-APPLY GATE: verify the generated config (catch unsubstituted values)
+⚠ **Run this on EVERY generated node file BEFORE apply.** envsubst silently turns an
+unset `${VAR}` into empty — this gate catches the whole class (the schematic-image,
+authkey, and endpoint bugs would ALL have been caught here pre-hardware):
+```bash
+F=clusterconfig/capstone-capstone-n3.yaml      # repeat per node file
+# (1) real Tailscale key present (expect a tskey-auth-... line), not literal/empty:
+grep -i 'tskey-auth-' "$F" || echo "❌ NO real TS key — fix talenv.yaml + re-genconfig"
+# (2) install image = the 8957 extension set, NOT the empty 376567:
+grep 'image:.*metal-installer' "$F"            # expect 8957336b…a26972:v1.13.4
+# (3) FAIL LOUD on ANY leftover ${...} placeholder or empty TS_AUTHKEY:
+grep -nE '\$\{[A-Z_]+\}|TS_AUTHKEY=$|TS_AUTHKEY=""' "$F" \
+  && echo "❌ STOP: unsubstituted/empty value — do NOT apply" \
+  || echo "✅ no unsubstituted placeholders — safe to apply"
+# (4) endpoint is a real IP, not the placeholder:
+grep -E 'NODE1_TAILSCALE_100_IP|N[123]_TAILSCALE_100_IP' "$F" \
+  && echo "❌ endpoint still a placeholder — set it in talconfig + re-genconfig" \
+  || echo "✅ endpoint substituted"
+```
+Proceed to apply ONLY when (1) shows a real `tskey-auth-…`, (2) the image is `8957…`,
+(3) prints ✅, and (4) prints ✅.
 
 ### Step 4 — ONE BOX AT A TIME: BIOS → boot → confirm → apply → move to switch
 The human has a single setup station, so do each box fully, then move it to the
