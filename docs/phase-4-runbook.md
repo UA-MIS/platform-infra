@@ -174,9 +174,12 @@ F=clusterconfig/capstone-capstone-n3.yaml      # repeat per node file
 grep -i 'tskey-auth-' "$F" || echo "❌ NO real TS key — fix talenv.yaml + re-genconfig"
 # (2) install image = the 8957 extension set, NOT the empty 376567:
 grep 'image:.*metal-installer' "$F"            # expect 8957336b…a26972:v1.13.4
-# (3) FAIL LOUD on ANY leftover ${...} placeholder or empty TS_AUTHKEY:
-grep -nE '\$\{[A-Z_]+\}|TS_AUTHKEY=$|TS_AUTHKEY=""' "$F" \
-  && echo "❌ STOP: unsubstituted/empty value — do NOT apply" \
+# (3) FAIL LOUD on ANY leftover ${...} OR $(...) shell-sub OR empty TS_AUTHKEY.
+#     Note BOTH forms: talhelper envsubst expands ${VAR} only — a literal $(cmd)
+#     (e.g. the old --hostname=$(hostname)) survives into the config and breaks the
+#     extension at runtime, so catch it here too:
+grep -nE '\$\{[A-Z_]+\}|\$\([a-z]+\)|TS_AUTHKEY=$|TS_AUTHKEY=""' "$F" \
+  && echo "❌ STOP: unsubstituted \${VAR} / leftover \$(shell-sub) / empty value — do NOT apply" \
   || echo "✅ no unsubstituted placeholders — safe to apply"
 # (4) endpoint is a real IP, not the placeholder:
 grep -E 'NODE1_TAILSCALE_100_IP|N[123]_TAILSCALE_100_IP' "$F" \

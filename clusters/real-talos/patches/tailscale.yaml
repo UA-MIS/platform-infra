@@ -15,7 +15,17 @@ apiVersion: v1alpha1
 kind: ExtensionServiceConfig
 name: tailscale
 environment:
-  - TS_AUTHKEY=${TS_AUTHKEY}          # sops/sealed — never plaintext in git
-  # Advertise the node + accept routes so nodes reach each other over the tailnet.
+  - TS_AUTHKEY=${TS_AUTHKEY}          # filled by talhelper envsubst from talenv.yaml — never git plaintext
+  # ⚠ NO shell substitution here. talhelper's envsubst only expands ${VAR}, NOT
+  # $(...). The old `TS_EXTRA_ARGS=--hostname=$(hostname)` passed a literal/mangled
+  # `$(hostname)` to `tailscale up` → exit 1 ("must start with a number" / newline)
+  # → ext-tailscale failed to auth (box-3 2026-06-17). FIX: drop the shell-sub.
+  #   - Hostname: OMITTED on purpose — tailscale registers under the node's OS
+  #     hostname, which Talos sets PER-NODE from the machine config (capstone-n1/2/3),
+  #     so each node gets the right tailnet name with NO per-node value here. (To
+  #     force it, set TS_HOSTNAME via a per-node `nodes[].patches` entry, not here.)
+  #   - TS_EXTRA_ARGS holds STATIC flags only (--accept-routes); no shell.
+  #   - TS_ROUTES left empty for the proof (nodes just join); advertise pod+svc CIDRs
+  #     here later if the tailnet needs to reach cluster services.
   - TS_ROUTES=
-  - TS_EXTRA_ARGS=--accept-routes --hostname=$(hostname)
+  - TS_EXTRA_ARGS=--accept-routes
