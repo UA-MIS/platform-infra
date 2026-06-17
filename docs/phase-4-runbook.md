@@ -128,12 +128,19 @@ curl -sL https://github.com/siderolabs/talos/releases/download/v1.13.4/talosctl-
 # talhelper (https://github.com/budimanjojo/talhelper/releases) + sops + age to ~/.local/bin
 ```
 
-### ⚠ Prereqs for apply (both REQUIRED or apply fails)
+### ⚠ Prereqs for apply (all REQUIRED or apply fails)
 - **Same-segment reachability:** `talosctl ... --insecure -n <maint-ip>` needs your
   laptop on the SAME switch segment as the box in maintenance mode (pre-Tailscale).
 - **The switch MUST have an internet UPLINK.** During `apply-config` the node PULLS
   the factory installer image AND joins Tailscale — **air-gapped = install fails.**
   (Same uplinked switch the DB box used.) Confirm uplink before applying.
+- **⚠ SHELL = fish on the workstation.** `bash`-style `export VAR=value` SILENTLY
+  FAILS in fish (`Expected a string`), which is what left SCHEMATIC_ID/TS_AUTHKEY
+  EMPTY → the empty-schematic + empty-authkey bugs. So below:
+  - talhelper vars (TS_AUTHKEY, etc.) go in **`talenv.yaml`** — NOT a shell export.
+  - For real shell env (TALOSCONFIG, KUBECONFIG) in **fish**, use `set -x VAR value`
+    (each `export X=Y` step shows the fish form too). `echo $SHELL` to confirm which
+    shell you're in; the bash form works only in bash/zsh.
 
 ### Step 3 — generate the machine configs ONCE (before touching any box)
 The generated per-node config is IDENTICAL regardless of the box's transient DHCP IP
@@ -219,7 +226,8 @@ known post-install):
 # or once you can reach it: talosctl -n <n1 any-reachable-ip> get addresses | grep 100\.
 # Put each node's 100.x into talconfig.yaml ipAddress (N1/N2/N3_TAILSCALE_100_IP), then:
 talhelper genconfig                            # regenerates talosconfig + cert SANs incl the 100.x
-export TALOSCONFIG=$(pwd)/clusterconfig/talosconfig
+export TALOSCONFIG=$(pwd)/clusterconfig/talosconfig    # bash/zsh
+# fish:  set -x TALOSCONFIG (pwd)/clusterconfig/talosconfig
 # Re-apply so the apiserver cert SAN includes the 100.x endpoint (secure mode now — node is installed):
 talosctl -n <n1 100.x> apply-config --file clusterconfig/capstone-capstone-n1.yaml
 # Bootstrap etcd ONCE, on node-1 only:
@@ -234,7 +242,8 @@ talosctl bootstrap
 ### Step 6 — kubeconfig + verify Ready
 ```bash
 talosctl kubeconfig .                            # writes ./kubeconfig
-export KUBECONFIG=$(pwd)/kubeconfig
+export KUBECONFIG=$(pwd)/kubeconfig              # bash/zsh
+# fish:  set -x KUBECONFIG (pwd)/kubeconfig
 kubectl get nodes -o wide                        # EXPECT: 3 nodes, all Ready, control-plane
 talosctl -n <n1 100.x> health                    # EXPECT: all checks pass (etcd, apid, kubelet)
 ```
