@@ -20,7 +20,7 @@ kubernetesVersion: v1.31.5            # match the k3d cluster's k8s minor (porta
 # No VIP: the apiserver endpoint is the bootstrap node's TAILSCALE 100.x. Bring-up
 # order is 3→2→1, so box-3 (capstone-n3) is the bootstrap/etcd-init node and the
 # endpoint. (HA/multi-endpoint is a later concern; pinned to n3 for the proof.)
-endpoint: https://100.127.169.30:6443        # capstone-n3 tailnet 100.x (live 2026-06-17)
+endpoint: https://100.117.55.70:6443         # capstone-n3 ualaims tailnet 100.x (live 2026-06-17; old 100.127.169.30 DEAD after re-key/org-tailnet move)
 
 # apiserver cert SANs — talhelper does not guarantee auto-adding the endpoint, so
 # list every address kubectl/talosctl will hit the API on: n3's 100.x (the endpoint),
@@ -28,8 +28,8 @@ endpoint: https://100.127.169.30:6443        # capstone-n3 tailnet 100.x (live 2
 # n2/n1's 100.x once they join (fill when known so a future endpoint move / direct
 # API access to them works without a cert regen).
 additionalApiServerCertSans:
-  - 100.127.169.30          # capstone-n3 (current endpoint)
-  - 10.237.26.253           # n3 switch/LAN IP (bring-up secure apply)
+  - 100.117.55.70           # capstone-n3 ualaims tailnet (current endpoint)
+  - 10.237.171.8            # n3 LAN/switch IP (10.237.168.0/22 segment; bring-up secure apply)
   # - N2_TAILSCALE_100_IP   # fill when box-2 joins
   # - N1_TAILSCALE_100_IP   # fill when box-1 joins
 
@@ -94,7 +94,7 @@ nodes:
           physical: true
         dhcp: true
   - hostname: capstone-n3
-    ipAddress: 100.127.169.30     # n3 tailnet 100.x (live) = talosconfig target + the endpoint. Apply during bring-up with -n 10.237.26.253 (switch IP).
+    ipAddress: 100.117.55.70      # n3 ualaims tailnet 100.x (live) = talosconfig target + the endpoint. Secure re-apply with -n 100.117.55.70 (or -e 10.237.171.8 LAN).
     controlPlane: true
     talosImageURL: factory.talos.dev/metal-installer/8957336bb929170959e3afc61b9088e41cb072988407edd699b9b3deb4a26972   # 8957 schematic (NO :version — talhelper appends it)
     installDisk: /dev/nvme0n1          # OS disk; n3's 500GB sata SSD (sda=WDC WDS500G2B0A) is left raw for Ceph
