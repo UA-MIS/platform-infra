@@ -30,10 +30,10 @@ creation_rules:
   # comment — sops reads the WHOLE value as the recipient; a trailing comment or a
   # folded `>-` scalar corrupts it → "invalid recipient encoding").
   - path_regex: (^|/)talsecret\.sops\.ya?ml$
-    age: REPLACE_WITH_AGE_PUBLIC_KEY
+    age: age1ad2tla3wd2fzz8v6wdwedkykt6xt5lfhg538l9ffz3j963w6mqnsdahpnw
 
   # Talos env secrets (TS_AUTHKEY etc.) IF the operator chooses to commit them
   # encrypted as talenv.sops.yaml instead of keeping a local-only talenv.yaml.
   # (Same PUBLIC key, or a distinct one — comma-separate multiple recipients.)
   - path_regex: (^|/)talenv\.sops\.ya?ml$
-    age: REPLACE_WITH_AGE_PUBLIC_KEY
+    age: age1ad2tla3wd2fzz8v6wdwedkykt6xt5lfhg538l9ffz3j963w6mqnsdahpnw

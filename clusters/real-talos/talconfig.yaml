@@ -41,32 +41,23 @@ allowSchedulingOnControlPlanes: true
 # cniConfig.name: none here + install Cilium post-bootstrap; nodes are NotReady until
 # the CNI is up. Not doing that for the proof.)
 
-# INSTALLER IMAGE — declare the extensions as a talhelper `schematic` block so
-# talhelper COMPUTES the Image Factory schematic ID itself (content hash) and builds
-# the installer URL. This is the reproducible, no-env, self-verifying way.
-#
-# ⚠ ROOT CAUSE of box-3 installing the EMPTY schematic (376567…, zero extensions →
-# no tailscale → no tailnet): the old `talosImageURL: .../metal-installer/${SCHEMATIC_ID}`
-# relied on shell `${SCHEMATIC_ID}` substitution, but talhelper does NOT expand env
-# in that field — so it fell back to generating the default (empty) schematic. The
-# `schematic` block below avoids ALL substitution: these 4 extensions hash to the
-# intended schematic 8957336bb929170959e3afc61b9088e41cb072988407edd699b9b3deb4a26972
-# (the same ID the boot ISO used). `talhelper genconfig` now produces the correct
-# installer with NO env exports.
-schematic:
-  customization:
-    systemExtensions:
-      officialExtensions:
-        - siderolabs/tailscale          # node overlay (REQUIRED — it IS the network)
-        - siderolabs/iscsi-tools        # Rook-Ceph RBD (future)
-        - siderolabs/util-linux-tools   # Rook-Ceph disk tooling (future)
-        - siderolabs/intel-ucode        # Comet Lake CPU microcode
+# INSTALLER IMAGE — pinned to the 8957 schematic (tailscale + iscsi-tools +
+# util-linux-tools + intel-ucode) via a LITERAL `talosImageURL` set PER NODE (see each
+# nodes[] entry below). TWO hard-won rules (talhelper 3.1.11, verified by genconfig):
+#   1. `schematic:`/`talosImageURL` MUST be NODE-LEVEL (a $defs/Node property). A
+#      TOP-LEVEL `schematic:` block is SILENTLY IGNORED → talhelper POSTs an EMPTY
+#      schematic → install.image = 376567… (zero extensions → NO tailscale → the
+#      box-3 nightmare). That top-level block is what shipped the regression.
+#   2. The URL must NOT carry the `:vX.Y.Z` version/digest — talhelper appends
+#      `:{talosVersion}` itself; a version suffix fails validate ("should not contains
+#      version or digest"). So: bare `factory.talos.dev/metal-installer/<ID>`.
+# (A node-level `schematic:` block ALSO works but content-hashes to the EXACT extension
+# set/order you list — which did NOT reproduce 8957 here — so the LITERAL pinned ID is
+# the deterministic choice. Verified: genconfig → install.image=8957…:v1.13.4 on all 3.)
 
-# ⚠ SINGLE-DISK NODES (live 2026-06-16): the 7080 Micro has only ONE disk usable as
-# the OS target — nvme0n1 (512GB); OS installs there, NO separate Ceph disk -> storage
-# = local-path for the proof (Ceph-on-partition is the upgrade, runbook §D2 Step 7).
-# (n2/n3 ALSO have a free 500GB SATA = future dedicated Ceph disk.) BIOS must be AHCI
-# (not RAID) for Talos to see the NVMe.
+# ⚠ DUAL-DISK NODES (live 2026-06-17): every 7080 has nvme0n1 (512GB)=Talos OS
+# (installDisk) AND a 500GB sata SSD (sda)=dedicated RAW Ceph OSD, left untouched by
+# Talos for Rook (replica-3, D-037). BIOS must be AHCI (not RAID) for Talos to see nvme0n1.
 #
 # ⚠ NODE ADDRESSING (DHCP + Tailscale) — `ipAddress` is NOT baked as a static IP.
 # The interface is `dhcp: true`, so each node gets its IP from DHCP; talhelper uses
@@ -82,7 +73,8 @@ nodes:
   - hostname: capstone-n1
     ipAddress: N1_TAILSCALE_100_IP     # STABLE talosconfig target (n1 100.x); NOT baked. Apply with -n <current maint IP, e.g. 10.237.26.254>
     controlPlane: true
-    installDisk: /dev/nvme0n1          # the ONLY disk (512GB SK hynix BC511)
+    talosImageURL: factory.talos.dev/metal-installer/8957336bb929170959e3afc61b9088e41cb072988407edd699b9b3deb4a26972   # 8957 schematic (NO :version — talhelper appends it)
+    installDisk: /dev/nvme0n1          # OS disk (512GB nvme); n1's 500GB sata SSD (sda) is left raw for Ceph
     networkInterfaces:
       # ⚠ DO NOT hardcode an interface NAME — the 7080's NIC is a PREDICTABLE name
       # (Intel i219 => enp0s31f6 / eno1, NOT eth0). Naming a non-existent `eth0`
@@ -95,7 +87,8 @@ nodes:
   - hostname: capstone-n2
     ipAddress: N2_TAILSCALE_100_IP     # fill post-join; apply with -n <n2 current maint IP>
     controlPlane: true
-    installDisk: /dev/nvme0n1          # (n2 also has a free 500GB SATA -> future Ceph)
+    talosImageURL: factory.talos.dev/metal-installer/8957336bb929170959e3afc61b9088e41cb072988407edd699b9b3deb4a26972   # 8957 schematic (NO :version — talhelper appends it)
+    installDisk: /dev/nvme0n1          # OS disk; n2's 500GB sata SSD (sda) is left raw for Ceph
     networkInterfaces:
       - deviceSelector:
           physical: true
@@ -103,7 +96,8 @@ nodes:
   - hostname: capstone-n3
     ipAddress: 100.127.169.30     # n3 tailnet 100.x (live) = talosconfig target + the endpoint. Apply during bring-up with -n 10.237.26.253 (switch IP).
     controlPlane: true
-    installDisk: /dev/nvme0n1          # (n3 also has a free 500GB SATA -> future Ceph)
+    talosImageURL: factory.talos.dev/metal-installer/8957336bb929170959e3afc61b9088e41cb072988407edd699b9b3deb4a26972   # 8957 schematic (NO :version — talhelper appends it)
+    installDisk: /dev/nvme0n1          # OS disk; n3's 500GB sata SSD (sda=WDC WDS500G2B0A) is left raw for Ceph
     networkInterfaces:
       - deviceSelector:
           physical: true

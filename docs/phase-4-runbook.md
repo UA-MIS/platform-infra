@@ -202,9 +202,13 @@ grep -q 'ENC\[' talenv.sops.yaml && ! grep -q 'tskey-auth-' talenv.sops.yaml \
 #  it survives in git for the next cohort + can't be the thing that leaks.)
 talhelper genconfig                            # auto-decrypts talsecret.sops.yaml + talenv.sops.yaml -> ./clusterconfig/{…-n1,-n2,-n3}.yaml + talosconfig
 ```
-> The install image comes from the `schematic` block in talconfig (talhelper hashes
-> it → the 8957 extension set), so NO `SCHEMATIC_ID` env is needed. Only `TS_AUTHKEY`
-> is env-substituted — hence the talenv.yaml + the MANDATORY gate next.
+> The install image comes from the LITERAL **node-level `talosImageURL`** in talconfig
+> (pinned to the 8957 schematic, no `:version` suffix — talhelper appends it). ⚠ This
+> MUST be node-level: a TOP-LEVEL `schematic:`/`talosImageURL` is SILENTLY IGNORED by
+> talhelper 3.1.11 → it POSTs an EMPTY schematic → install.image = 376567… (no
+> extensions, no tailscale). That top-level mistake is exactly what the gate below
+> caught pre-hardware. No `SCHEMATIC_ID` env is needed; only `TS_AUTHKEY` is
+> env-substituted — hence talenv.sops.yaml + the MANDATORY gate next.
 
 ### Step 3.5 — PRE-APPLY GATE: verify the generated config (catch unsubstituted values)
 ⚠ **Run this on EVERY generated node file BEFORE apply.** envsubst silently turns an
@@ -214,8 +218,11 @@ authkey, and endpoint bugs would ALL have been caught here pre-hardware):
 F=clusterconfig/capstone-capstone-n3.yaml      # repeat per node file
 # (1) real Tailscale key present (expect a tskey-auth-... line), not literal/empty:
 grep -i 'tskey-auth-' "$F" || echo "❌ NO real TS key — fix talenv.yaml + re-genconfig"
-# (2) install image = the 8957 extension set, NOT the empty 376567:
-grep 'image:.*metal-installer' "$F"            # expect 8957336b…a26972:v1.13.4
+# (2) install image = the 8957 extension set, NOT the empty 376567 (HARD pass/fail):
+grep -q 'image:.*metal-installer/8957336bb929170959e3afc61b9088e41cb072988407edd699b9b3deb4a26972' "$F" \
+  && ! grep -q '376567988ad370138ad8b2698212367b8edcb69b5fd68c80be1f2ec7d603b4ba' "$F" \
+  && echo "✅ install image = 8957 (extensions present)" \
+  || echo "❌ WRONG install image (empty 376567 or other) — talosImageURL must be NODE-LEVEL + no :version. STOP."
 # (3) FAIL LOUD on ANY leftover ${...} OR $(...) shell-sub OR empty TS_AUTHKEY.
 #     Note BOTH forms: talhelper envsubst expands ${VAR} only — a literal $(cmd)
 #     (e.g. the old --hostname=$(hostname)) survives into the config and breaks the
