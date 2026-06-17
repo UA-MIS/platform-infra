@@ -15,7 +15,7 @@ apiVersion: v1alpha1
 kind: ExtensionServiceConfig
 name: tailscale
 environment:
-  - TS_AUTHKEY=${TS_AUTHKEY}          # filled by talhelper envsubst from talenv.yaml — never git plaintext
+  - TS_AUTHKEY=${TS_AUTHKEY}          # envsubst'd by talhelper from the ENCRYPTED env file talenv.sops.yaml — never git plaintext
   # ⚠ NO shell substitution here. talhelper's envsubst only expands ${VAR}, NOT
   # $(...). The old `TS_EXTRA_ARGS=--hostname=$(hostname)` passed a literal/mangled
   # `$(hostname)` to `tailscale up` → exit 1 ("must start with a number" / newline)

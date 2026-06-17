@@ -184,17 +184,23 @@ grep -q 'ENC\[' talsecret.sops.yaml && grep -q '^sops:' talsecret.sops.yaml \
   || { echo "❌ NOT ENCRYPTED — STOP. Check .sops.yaml recipient + re-run sops -e -i."; }
 # talhelper genconfig auto-DECRYPTS talsecret.sops.yaml on the fly (default secret-file)
 # as long as the age PRIVATE key is at ~/.config/sops/age/keys.txt (or SOPS_AGE_KEY_FILE).
-# Provide the Tailscale auth key via talenv.yaml — talhelper AUTO-LOADS it and
-# envsubst's ${TS_AUTHKEY} into the tailscale ExtensionServiceConfig. More reliable
-# than a shell export (an UNSET var silently substitutes to EMPTY — that's what put
-# box-3 on the empty schematic + would break tailscale auth):
-cat > talenv.yaml <<EOF
-TS_AUTHKEY: "tskey-auth-...the-real-reusable-tag:talos-node-key..."
+# TS_AUTHKEY is an ENV-VAR (${TS_AUTHKEY} in the tailscale ExtensionServiceConfig
+# patch), so it lives in the talhelper ENV file — talenv.sops.yaml — NOT in talsecret
+# (that's the PKI secret-file). Write it, then ENCRYPT it the same way (the .sops.yaml
+# rule covers talenv.sops.yaml too). genconfig auto-loads talenv.sops.yaml and envsubst's
+# ${TS_AUTHKEY} in — more reliable than a shell export (an UNSET var silently substitutes
+# to EMPTY → that's what put box-3 on the empty schematic + broke tailscale auth):
+cat > talenv.sops.yaml <<EOF
+TS_AUTHKEY: "tskey-auth-...the-fresh-reusable-tag:talos-node-key-on-ualaims..."
 EOF
-# talenv.yaml is gitignored (stays LOCAL-only — simplest). If you instead want it in
-# git, encrypt it: rename to talenv.sops.yaml + `sops -e -i talenv.sops.yaml` (the
-# .sops.yaml rule covers it) + verify ENC[]/no `tskey-auth-` before `git add -f`.
-talhelper genconfig                            # -> ./clusterconfig/{capstone-capstone-n1,-n2,-n3}.yaml + talosconfig
+sops -e -i talenv.sops.yaml                     # ENCRYPT (uses the .sops.yaml talenv rule). NOT OPTIONAL.
+grep -q 'ENC\[' talenv.sops.yaml && ! grep -q 'tskey-auth-' talenv.sops.yaml \
+  && echo "✅ talenv encrypted (TS_AUTHKEY is ENC[], no plaintext key)" \
+  || { echo "❌ talenv NOT encrypted — STOP, re-run sops -e -i."; }
+# (Local-only fallback if you'd rather not commit it: write talenv.yaml [gitignored]
+#  instead, plaintext, NEVER committed. The encrypted talenv.sops.yaml is preferred —
+#  it survives in git for the next cohort + can't be the thing that leaks.)
+talhelper genconfig                            # auto-decrypts talsecret.sops.yaml + talenv.sops.yaml -> ./clusterconfig/{…-n1,-n2,-n3}.yaml + talosconfig
 ```
 > The install image comes from the `schematic` block in talconfig (talhelper hashes
 > it → the 8957 extension set), so NO `SCHEMATIC_ID` env is needed. Only `TS_AUTHKEY`
