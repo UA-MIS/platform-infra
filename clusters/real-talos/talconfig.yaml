@@ -30,30 +30,30 @@ allowSchedulingOnControlPlanes: true
 # turns this into the factory installer image reference per node.
 talosImageURL: factory.talos.dev/metal-installer/${SCHEMATIC_ID}
 
+# ⚠ SINGLE-DISK NODES (live finding 2026-06-16): the 7080 Micro has only ONE disk —
+# nvme0n1 (512GB). The OS installs to it; there is NO separate disk for Ceph. So
+# storage = local-path-provisioner for the proof (Ceph-on-partition is the
+# documented upgrade — see runbook §D2 Step 8). installDisk pins the single NVMe.
+# (BIOS must be AHCI, not RAID, for Talos to see nvme0n1 — flip it per box.)
 nodes:
   - hostname: capstone-n1
-    ipAddress: NODE1_LAN_IP            # DHCP-reserved; or remove for pure DHCP
+    ipAddress: 10.237.26.254           # n1 maintenance IP (live)
     controlPlane: true
-    installDiskSelector:
-      # OS disk = the SATA/Boot SSD, NOT the 512GB NVMe (which is for Ceph).
-      # Confirm per box in maintenance mode: `talosctl disks --insecure -n <ip>`.
-      size: "<= 256GB"                 # adjust to the actual OS disk; keep Ceph NVMe free
+    installDisk: /dev/nvme0n1          # the ONLY disk (512GB SK hynix BC511)
     networkInterfaces:
       - interface: eth0                # i219-LM => e1000e; confirm name via runbook
-        dhcp: true                     # DHCP underlay (overlay rides on top)
+        dhcp: true                     # DHCP underlay (Tailscale overlay rides on top)
   - hostname: capstone-n2
-    ipAddress: NODE2_LAN_IP
+    ipAddress: NODE2_MAINT_IP          # fill when box 2 boots (talosctl get links/disks)
     controlPlane: true
-    installDiskSelector:
-      size: "<= 256GB"
+    installDisk: /dev/nvme0n1
     networkInterfaces:
       - interface: eth0
         dhcp: true
   - hostname: capstone-n3
-    ipAddress: NODE3_LAN_IP
+    ipAddress: NODE3_MAINT_IP          # fill when box 3 boots
     controlPlane: true
-    installDiskSelector:
-      size: "<= 256GB"
+    installDisk: /dev/nvme0n1
     networkInterfaces:
       - interface: eth0
         dhcp: true

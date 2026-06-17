@@ -188,27 +188,34 @@ talosctl -n <NODE1_IP> health                    # EXPECT: all checks pass (etcd
 ```
 **GATE: do not proceed until all 3 nodes are `Ready` and `talosctl health` is green.**
 
-### Step 8 — Rook-Ceph on the 512GB NVMe (replica-3, 3 failure domains)
-With the cluster Ready and each node's NVMe still RAW (Step 3):
+### Step 8 — storage class (SINGLE-DISK nodes → local-path now)
+⚠ **The 7080 Micro is SINGLE-DISK** (only `nvme0n1`, which now holds the OS). There
+is no raw dedicated disk for Ceph, so for the proof we use **local-path-provisioner**
+as the storage class — fastest to a proven platform; the platform's GitOps/tenancy/CI
+do not need replicated storage to be proven. **Ceph-on-a-partition is the documented
+upgrade** (below), and a true dedicated Ceph disk is the real fix if the Micro can
+take a second NVMe/SATA (verify the chassis — likely not on the Micro).
 ```bash
-# Install the Rook operator (pinned), then a CephCluster CR targeting the NVMe.
-kubectl apply -k 'github.com/rook/rook//deploy/examples?ref=v1.15.5'   # operator (pin a current release)
-# CephCluster: storage.deviceFilter '^nvme0n1$' (the 512GB NVMe per box),
-# mon.count: 3, failureDomain: host, replicated.size: 3. (CR shipped in a follow-up
-# platform-services overlay; for first bring-up the rook examples cluster.yaml edited
-# to deviceFilter + size:3 is fine.)
-# If a NVMe isn't claimed, it wasn't raw — wipe it (Step "ceph-nvme" guidance):
-#   talosctl -n <node> wipe disk nvme0n1
+# local-path-provisioner (pin a current release), then make it the default SC:
+kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.31/deploy/local-path-storage.yaml
+kubectl patch storageclass local-path \
+  -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+kubectl get storageclass                          # EXPECT: local-path (default)
 ```
-**Verify Ceph healthy:**
-```bash
-kubectl -n rook-ceph get cephcluster            # PHASE: Ready
-kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph status   # EXPECT: HEALTH_OK
-```
-**GATE: a healthy 3-node cluster = 3 nodes Ready + `ceph status` HEALTH_OK.** Stop
-here — the k3d→hardware migration (sealing-key migrate, netpol CIDR re-param for the
-overlay ranges, `make bootstrap` with the kube-context override) + the 9020M DB tier
-are sequenced AFTER this, per the team lead.
+**GATE: a healthy proof cluster = 3 nodes `Ready` + `talosctl health` green + a
+default StorageClass.** Stop here — the k3d→hardware migration (sealing-key migrate,
+netpol CIDR re-param for the overlay ranges, `make bootstrap` with the kube-context
+override) + the DB tier are sequenced AFTER this, per the team lead.
+
+> **UPGRADE PATH — Ceph-on-partition (keep-it-replicated, when you want HA storage):**
+> carve a raw partition out of `nvme0n1` (leave the OS + a capped EPHEMERAL partition,
+> reserve the rest raw via a Talos user-volume / disk layout), then point Rook at the
+> PARTITION (`devicePathFilter: ^/dev/nvme0n1p[0-9]+$`, NOT the whole device),
+> `mon.count: 3`, `failureDomain: host`, `replicated.size: 3` — replica-3 across the
+> 3 nodes' partitions is still a legit 3-failure-domain pool. This needs a Talos
+> machine-config disk-layout change + re-apply (reinstall), so do it as a deliberate
+> follow-up, not during first bring-up. (A second physical disk per node, if the
+> chassis allows, is cleaner than partitioning — prefer that if available.)
 
 ---
 
@@ -217,5 +224,10 @@ are sequenced AFTER this, per the team lead.
   `talosctl -n <ip> reset --graceful=false --reboot` to wipe back to maintenance.
 - apiserver cert SAN errors after moving `endpoint` to the overlay IP: re-run
   `talhelper genconfig` + `talosctl apply-config` so the new SAN is in the cert.
-- Ceph OSDs not created: the NVMe wasn't raw (`talosctl wipe disk nvme0n1`), or the
-  `deviceFilter` doesn't match (`talosctl -n <node> disks` to get the exact name).
+- Talos can't see the disk at boot: BIOS storage is in **RAID** mode — switch to
+  **AHCI** (the 7080s shipped RAID+Windows; AHCI is required for Talos to see nvme0n1).
+- "disk in use" on apply: the NVMe still has the old Windows/partition table — Talos
+  wipes the install disk on apply, but if it balks, `talosctl -n <ip> --insecure wipe
+  disk nvme0n1` from maintenance first.
+- (Ceph-on-partition upgrade only) OSD not created: Rook needs the PARTITION raw +
+  `devicePathFilter` matching `nvme0n1pN`, not the whole in-use device.
