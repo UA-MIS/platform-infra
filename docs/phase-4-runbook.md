@@ -128,6 +128,22 @@ curl -sL https://github.com/siderolabs/talos/releases/download/v1.13.4/talosctl-
 # talhelper (https://github.com/budimanjojo/talhelper/releases) + sops + age to ~/.local/bin
 ```
 
+#### age key setup (one-time — REQUIRED for encrypted secrets, B2 leak fix)
+The Talos secrets (`talsecret.sops.yaml`) are sops/age-encrypted. Generate the keypair
+ONCE, register the PUBLIC key, and vault the PRIVATE key:
+```bash
+mkdir -p ~/.config/sops/age
+age-keygen -o ~/.config/sops/age/keys.txt        # prints "Public key: age1…"
+# 1) paste that age1… PUBLIC key into the repo-root .sops.yaml (REPLACE_WITH_AGE_PUBLIC_KEY).
+# 2) the PRIVATE key file ~/.config/sops/age/keys.txt is a SECRET:
+#      - never commit it (gitignored), and
+#      - store it in the HANDOFF VAULT with the `ualaims` creds — the NEXT cohort
+#        needs it to decrypt talsecret/talenv (continuance). No key = re-key the cluster.
+```
+sops + talhelper auto-find the private key at `~/.config/sops/age/keys.txt` (or via
+`SOPS_AGE_KEY_FILE`). The `.sops.yaml` recipient (public key) is committed; the private
+key never is.
+
 ### ⚠ Prereqs for apply (all REQUIRED or apply fails)
 - **Same-segment reachability:** `talosctl ... --insecure -n <maint-ip>` needs your
   laptop on the SAME switch segment as the box in maintenance mode (pre-Tailscale).
@@ -155,8 +171,19 @@ The generated per-node config is IDENTICAL regardless of the box's transient DHC
 not a baked static IP — see talconfig header). So generate up front, apply per box:
 ```bash
 cd clusters/real-talos
-talhelper gensecret > talsecret.sops.yaml      # PROOF: leave plaintext LOCALLY; it's
-                                               # gitignored — sops-encrypt before ANY commit
+# ── SECRETS ARE SOPS/age-ENCRYPTED (B2 leak fix, D-040) ──
+# ONE-TIME (if you haven't already — see "age key setup" in prereqs): generate the
+# age keypair, paste its PUBLIC key into the repo-root .sops.yaml recipient, store the
+# PRIVATE key (~/.config/sops/age/keys.txt) in the HANDOFF VAULT. Then:
+talhelper gensecret > talsecret.sops.yaml      # writes PLAINTEXT secrets...
+sops -e -i talsecret.sops.yaml                 # ...then ENCRYPT in place (uses .sops.yaml rule). NOT OPTIONAL.
+# VERIFY it actually encrypted before doing ANYTHING else (this is the gate that was missing):
+grep -q 'ENC\[' talsecret.sops.yaml && grep -q '^sops:' talsecret.sops.yaml \
+  && ! grep -qiE 'BEGIN .*PRIVATE KEY|tskey-auth-' talsecret.sops.yaml \
+  && echo "✅ talsecret encrypted (ENC[] + sops: stanza, no plaintext keys)" \
+  || { echo "❌ NOT ENCRYPTED — STOP. Check .sops.yaml recipient + re-run sops -e -i."; }
+# talhelper genconfig auto-DECRYPTS talsecret.sops.yaml on the fly (default secret-file)
+# as long as the age PRIVATE key is at ~/.config/sops/age/keys.txt (or SOPS_AGE_KEY_FILE).
 # Provide the Tailscale auth key via talenv.yaml — talhelper AUTO-LOADS it and
 # envsubst's ${TS_AUTHKEY} into the tailscale ExtensionServiceConfig. More reliable
 # than a shell export (an UNSET var silently substitutes to EMPTY — that's what put
@@ -164,7 +191,9 @@ talhelper gensecret > talsecret.sops.yaml      # PROOF: leave plaintext LOCALLY;
 cat > talenv.yaml <<EOF
 TS_AUTHKEY: "tskey-auth-...the-real-reusable-tag:talos-node-key..."
 EOF
-# talenv.yaml is gitignored; sops-encrypt -> talenv.sops.yaml before ANY commit.
+# talenv.yaml is gitignored (stays LOCAL-only — simplest). If you instead want it in
+# git, encrypt it: rename to talenv.sops.yaml + `sops -e -i talenv.sops.yaml` (the
+# .sops.yaml rule covers it) + verify ENC[]/no `tskey-auth-` before `git add -f`.
 talhelper genconfig                            # -> ./clusterconfig/{capstone-capstone-n1,-n2,-n3}.yaml + talosconfig
 ```
 > The install image comes from the `schematic` block in talconfig (talhelper hashes
