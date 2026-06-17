@@ -1,0 +1,74 @@
+# Phase-4 real cluster — Talos via talhelper (D-035/§3.4, ADR-017).
+# 3 CONVERGED OptiPlex 7080s: each is control-plane (etcd quorum=3) AND UNTAINTED
+# so it also runs workloads. No LAN VIP — the apiserver endpoint is an OVERLAY IP
+# (KubeSpan or Tailscale per the Step-0 probe). Rook-Ceph consumes the 512GB NVMe
+# (replica-3 = 3 failure domains). Generate with: `talhelper genconfig` (reads this
+# + talsecret.sops.yaml), then apply per the runbook (docs/phase-4-runbook.md §D2).
+#
+# ⚠ FILL THE PLACEHOLDERS the human captures during bring-up:
+#   ${SCHEMATIC_ID}  — from Deliverable 1 Step 1a (the factory schematic ID).
+#   node ipAddress   — each box's LAN IP (DHCP-reserved, see runbook) OR drop
+#                      ipAddress to use pure DHCP + a stable hostname.
+#   endpoint         — the OVERLAY IP of node-1 once the overlay is up (KubeSpan
+#                      stable IP, or the Tailscale 100.x IP). Placeholder below.
+#   installDiskSelector — confirm the OS disk vs the Ceph NVMe per box (runbook §D2).
+
+clusterName: capstone
+talosVersion: v1.13.4
+kubernetesVersion: v1.31.5            # match the k3d cluster's k8s minor (portability §6)
+
+# No VIP: endpoint is the overlay IP of node-1 = its TAILSCALE 100.x address (set
+# after node-1 joins the tailnet; see runbook §D2 Step 6 note). (KubeSpan-alt would
+# use node-1's KubeSpan address instead.)
+endpoint: https://NODE1_TAILSCALE_100_IP:6443
+
+# Converged: control-plane nodes are UNTAINTED so workloads schedule on them.
+allowSchedulingOnControlPlanes: true
+
+# Bake the SAME factory schematic the boot ISO used (Deliverable 1) so the INSTALLED
+# system keeps iscsi-tools + util-linux-tools + intel-ucode + tailscale. talhelper
+# turns this into the factory installer image reference per node.
+talosImageURL: factory.talos.dev/metal-installer/${SCHEMATIC_ID}
+
+nodes:
+  - hostname: capstone-n1
+    ipAddress: NODE1_LAN_IP            # DHCP-reserved; or remove for pure DHCP
+    controlPlane: true
+    installDiskSelector:
+      # OS disk = the SATA/Boot SSD, NOT the 512GB NVMe (which is for Ceph).
+      # Confirm per box in maintenance mode: `talosctl disks --insecure -n <ip>`.
+      size: "<= 256GB"                 # adjust to the actual OS disk; keep Ceph NVMe free
+    networkInterfaces:
+      - interface: eth0                # i219-LM => e1000e; confirm name via runbook
+        dhcp: true                     # DHCP underlay (overlay rides on top)
+  - hostname: capstone-n2
+    ipAddress: NODE2_LAN_IP
+    controlPlane: true
+    installDiskSelector:
+      size: "<= 256GB"
+    networkInterfaces:
+      - interface: eth0
+        dhcp: true
+  - hostname: capstone-n3
+    ipAddress: NODE3_LAN_IP
+    controlPlane: true
+    installDiskSelector:
+      size: "<= 256GB"
+    networkInterfaces:
+      - interface: eth0
+        dhcp: true
+
+# ---- cluster-wide patches ---------------------------------------------------
+patches:
+  # OVERLAY = TAILSCALE-everywhere (DEFAULT, architect-resolved). The tailscale ext
+  # service authenticates with the Step-0 auth key (TS_AUTHKEY via sops). KubeSpan
+  # is a DOCUMENTED ALTERNATIVE ONLY (it can't relay) — to use it instead, comment
+  # the tailscale patch + uncomment kubespan, but that's not the chosen path.
+  - "@./patches/tailscale.yaml"
+  # - "@./patches/kubespan.yaml"      # <- ALT ONLY (no DERP relay); not the chosen overlay
+
+  # Rook-Ceph wants the raw 512GB NVMe untouched by Talos (no partition/format) so
+  # Ceph OSDs can claim it. This patch documents the intent; the actual wipe/claim
+  # is done by the Rook cluster CR (runbook §D2). Talos installs ONLY to the OS
+  # disk selected above, leaving the NVMe raw.
+  - "@./patches/ceph-nvme.yaml"

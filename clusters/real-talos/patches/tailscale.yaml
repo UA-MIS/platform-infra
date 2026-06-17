@@ -1,0 +1,21 @@
+# Tailscale-everywhere overlay (P4, FALLBACK branch — Step-0 probe FAIL = UDP
+# blocked, so WireGuard rides Tailscale's DERP/TCP-443 relays). Used INSTEAD OF
+# kubespan.yaml (toggle in talconfig.yaml). The siderolabs/tailscale extension is
+# already baked into the image (Deliverable 1), so switching to this branch needs
+# NO re-imaging — just flip the patch + re-apply machine config.
+#
+# The Tailscale extension runs as a Talos extension service, configured via
+# ExtensionServiceConfig. It needs an AUTH KEY — generate a reusable, pre-approved,
+# ephemeral=false tailnet auth key and store it in talsecret.sops.yaml / a sealed
+# value; DO NOT commit it in plaintext. Replace ${TS_AUTHKEY} via sops/talhelper.
+#
+# With Tailscale as the overlay, the apiserver endpoint in talconfig.yaml is the
+# node's Tailscale 100.x IP (not a KubeSpan address).
+apiVersion: v1alpha1
+kind: ExtensionServiceConfig
+name: tailscale
+environment:
+  - TS_AUTHKEY=${TS_AUTHKEY}          # sops/sealed — never plaintext in git
+  # Advertise the node + accept routes so nodes reach each other over the tailnet.
+  - TS_ROUTES=
+  - TS_EXTRA_ARGS=--accept-routes --hostname=$(hostname)

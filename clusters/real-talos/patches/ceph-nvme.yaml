@@ -1,0 +1,20 @@
+# Rook-Ceph NVMe intent (P4). Talos installs ONLY to the OS disk
+# (installDiskSelector in talconfig.yaml); the 512GB NVMe is left RAW + unpartitioned
+# so Rook-Ceph can claim it as an OSD (replica-3 across the 3 nodes = 3 failure
+# domains). There is nothing to set in the MACHINE config to "reserve" the NVMe —
+# leaving it out of installDiskSelector + not declaring a Talos volume on it is what
+# keeps it raw. This patch is a NO-OP placeholder documenting that contract + a guard
+# comment so nobody later adds a Talos user-volume on the Ceph NVMe.
+#
+# The actual OSD claim happens in the Rook CephCluster CR (storage.devices /
+# deviceFilter targeting the NVMe by path, e.g. /dev/nvme0n1) — applied AFTER the
+# 3-node cluster is Ready (runbook §D2 "Rook-Ceph"). If a node's NVMe was previously
+# partitioned, wipe it first: `talosctl wipe disk nvme0n1 -n <node>` (Talos 1.13+)
+# or sgdisk --zap-all from a maintenance shell — Rook only claims raw/empty devices.
+#
+# Intentionally empty machine patch (documentation-only); keeps talconfig's patch
+# list explicit about the NVMe being Ceph-owned, not Talos-owned.
+machine:
+  # (no-op) — see comment above; the NVMe is deliberately NOT referenced here so it
+  # stays raw for Rook-Ceph. Do NOT add a machine.disks/volumes entry for it.
+  {}

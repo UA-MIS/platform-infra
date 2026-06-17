@@ -16,51 +16,41 @@ k3d→hardware migration (sequenced later).
 
 ## ✅ DELIVERABLE 1 — burn the image + run the network probe (DO THIS FIRST)
 
-### Step 0 — WG-UDP probe: which overlay branch? (run BEFORE imaging)
+### Step 0 — mint the Tailscale auth key (the node overlay credential)
 
-Phase-4 needs a node-to-node overlay. Two branches; **the probe decides which**:
-- **KubeSpan** (Talos-native WireGuard mesh, UDP) — preferred (no extra dependency)
-  if the network lets WireGuard UDP through between the boxes.
-- **Tailscale-everywhere** — fallback if UDP is blocked (Tailscale relays
-  WireGuard over DERP/TCP-443, which is nearly unblockable).
+**Overlay = Tailscale-everywhere (RESOLVED by the architect).** All boxes join the
+tailnet; node-to-node traffic rides Tailscale (direct WireGuard when the network
+allows it, automatically falling back to DERP/TCP-443 relays when direct UDP is
+blocked — which a locked-down managed network may do). KubeSpan is a documented
+alternative only (see "Alt: KubeSpan" at the end); it cannot relay, so it's not the
+primary. The `siderolabs/tailscale` extension is in the image (Step 1) and the nodes
+authenticate to the tailnet with the auth key you mint here.
 
-Run the probe from **two machines on the SAME network segment the 7080s will live
-on** (e.g. your laptop + any second host, or two of the boxes once booted into
-Talos maintenance mode — but easiest to do now on two normal hosts on that LAN/VLAN).
+**Mint a reusable, tagged auth key** (this becomes `TS_AUTHKEY` in the node config —
+a BOOTSTRAP SECRET, never committed to git in plaintext):
+1. (one-time ACL tag) In the Tailscale admin console → **Access controls**, ensure a
+   tag owner exists for the node tag, e.g. add to the ACL `tagOwners`:
+   ```json
+   "tagOwners": { "tag:talos-node": ["autogroup:admin"] }
+   ```
+   (Save. This lets keys/devices use `tag:talos-node`.)
+2. Admin console → **Settings → Keys** (https://login.tailscale.com/admin/settings/keys)
+   → **Generate auth key**:
+   - **Reusable**: ON (all 3 nodes + later boxes use the same key).
+   - **Ephemeral**: OFF (nodes are long-lived; ephemeral would reap them when offline).
+   - **Tags**: `tag:talos-node` (so nodes are ACL-scoped, not tied to a user; required
+     for tagged, non-expiring device identity).
+   - Expiry: pick the longest allowed; note it for rotation. Generate → copy the
+     `tskey-auth-...` value.
+3. Hand that value to the config as `TS_AUTHKEY` via the talhelper sops secret
+   (Deliverable 2) — NOT in git plaintext. Record only that it's minted:
+   `[ ] tailscale auth key minted (reusable, tag:talos-node)  (by: ____, expires: ____)`
 
-**Probe A — general UDP verdict (needs Tailscale on the probe host; you already run it):**
-```bash
-tailscale netcheck
-```
-Read the output:
-- **PASS (→ KubeSpan):** `UDP: true` AND it reports a **direct** path / a low-latency
-  nearest DERP with `MappingVariesByDestIP: false` (well-behaved NAT). UDP egress works.
-- **FAIL (→ Tailscale-everywhere):** `UDP: false`, or only DERP latencies are shown
-  with no direct path (the network blocks/varies UDP). Corporate/campus firewalls
-  that drop outbound UDP land here.
-
-**Probe B — direct WireGuard-port reachability between the two hosts (authoritative
-for the intra-LAN KubeSpan path; KubeSpan uses UDP/51820):**
-```bash
-# On host RECEIVER (one of the LAN hosts), open a UDP listener on the KubeSpan port:
-nc -u -l 51820            # (BSD nc: `nc -u -l -p 51820`)
-
-# On host SENDER (the other LAN host), send a datagram to RECEIVER's LAN IP:
-echo "kubespan-probe" | nc -u -w3 <RECEIVER_LAN_IP> 51820
-```
-- **PASS (→ KubeSpan):** the string `kubespan-probe` appears on RECEIVER. UDP/51820
-  flows between the boxes on this segment.
-- **FAIL (→ Tailscale-everywhere):** nothing arrives within a few seconds → the
-  segment filters UDP/51820 (host firewall or switch/VLAN ACL). Re-test with the
-  host firewalls off to isolate; if still blocked, it's the network → Tailscale.
-
-**DECISION:** Probe A `UDP:true` **and** Probe B delivers the datagram → **KubeSpan**.
-Either fails → **Tailscale-everywhere**. Record the result here:
-`[ ] KubeSpan   [ ] Tailscale-everywhere   (probe run: ____, by: ____)`
-
-> Both overlay configs are provided in `clusters/real-talos/` and toggled by one
-> variable — see Deliverable 2. The **Tailscale system extension is baked into the
-> image regardless** (Step 1), so a KubeSpan→Tailscale switch needs NO re-imaging.
+> **OPTIONAL diagnostic (not a branch decision):** `tailscale netcheck` from a host
+> on the boxes' segment tells you whether intra-LAN Tailscale will be **direct**
+> (`UDP: true`, low-latency direct path) or **relayed** (`UDP: false` / DERP-only).
+> Relayed still works (that's why we chose Tailscale) — this is just perf insight
+> for later tuning, NOT a KubeSpan-vs-Tailscale fork.
 
 ---
 
@@ -68,10 +58,10 @@ Either fails → **Tailscale-everywhere**. Record the result here:
 
 These boxes need system extensions baked in: **iscsi-tools** + **util-linux-tools**
 (Rook-Ceph RBD + disk tooling), **intel-ucode** (Comet Lake CPU microcode), and
-**tailscale** (so the Tailscale overlay branch is available without re-imaging —
-inert if KubeSpan is chosen). The 7080's NIC is Intel i219-LM, driven by the
-in-kernel `e1000e` — **no NIC extension needed** (verify in Step 3 if a NIC doesn't
-appear).
+**tailscale** — which is REQUIRED: it IS the node overlay (Tailscale-everywhere),
+configured at install via `ExtensionServiceConfig` with the Step-0 auth key. The
+7080's NIC is Intel i219-LM, driven by the in-kernel `e1000e` — **no NIC extension
+needed** (verify in Step 3 if a NIC doesn't appear).
 
 **1a. Create the schematic** (returns a schematic ID; do this from any machine with
 `curl`):
@@ -120,5 +110,112 @@ install runbook below), produced next.
 
 ---
 
-## DELIVERABLE 2 — 3-node install (configs in clusters/real-talos/, steps below)
-*(filled in next — burn→boot→apply machine config→bootstrap etcd→verify Ready + Ceph HEALTH_OK)*
+## DELIVERABLE 2 — stand up the 3-node converged cluster
+
+Configs: `clusters/real-talos/` (`talconfig.yaml` + `patches/` + `values.env`).
+3 converged 7080s — each control-plane (etcd quorum=3) AND untainted (runs
+workloads). No LAN VIP — apiserver on the overlay IP. Tools the human needs:
+`talosctl` + `talhelper` (+ `sops`/`age` for secrets) + `kubectl`, all pinned.
+
+### Prereqs (one-time, on your workstation)
+```bash
+# talosctl pinned to the cluster version:
+curl -sL https://github.com/siderolabs/talos/releases/download/v1.13.4/talosctl-linux-amd64 \
+  -o ~/.local/bin/talosctl && chmod +x ~/.local/bin/talosctl
+# talhelper (https://github.com/budimanjojo/talhelper/releases) + sops + age to ~/.local/bin
+```
+
+### Step 3 — boot each 7080 from the USB into maintenance mode
+For each box: insert the USB, power on, F12 → boot the USB. Talos boots into
+**maintenance mode** (no config yet) and DHCPs an IP. Note each box's IP (from your
+DHCP server, or the Talos console). Then CONFIRM hardware before applying config:
+```bash
+# NIC name (expect eth0 via in-kernel e1000e for the i219-LM) + the disks:
+talosctl -n <BOX_IP> --insecure get links            # find the ethernet link name
+talosctl -n <BOX_IP> --insecure disks                # OS SSD vs the 512GB Ceph NVMe
+```
+- If the NIC is NOT `eth0`, set the real name in `talconfig.yaml` `networkInterfaces`.
+- If NO NIC appears at all, the box has a non-i219 PHY — capture `talosctl -n <ip>
+  --insecure get pcidevices` and add the matching `siderolabs/<nic>-firmware`
+  extension to the schematic (Step 1a) + re-burn. (Unlikely on a stock 7080.)
+- Note which disk is the OS SSD (≤256GB) vs the 512GB NVMe; set `installDiskSelector`
+  in `talconfig.yaml` accordingly. **The NVMe must stay raw for Ceph.**
+
+### Step 4 — fill the configs + generate machine configs
+In `clusters/real-talos/`:
+1. Fill `values.env` (SCHEMATIC_ID from Step 1a, OVERLAY=kubespan|tailscale per the
+   probe) and the placeholders in `talconfig.yaml` (node IPs, OS-disk selector, and
+   `endpoint` = node-1's overlay IP — for KubeSpan you'll get the stable IP after
+   bootstrap; bootstrap with node-1's LAN IP first, see note below).
+2. If `OVERLAY=tailscale`: in `talconfig.yaml` comment the `kubespan.yaml` patch +
+   uncomment `tailscale.yaml`, and put the tailnet auth key in the talhelper secret
+   (`talsecret.sops.yaml`, sops-encrypted — never plaintext).
+3. Generate secrets + machine configs:
+```bash
+cd clusters/real-talos
+talhelper gensecret > talsecret.sops.yaml      # then: sops --encrypt -i talsecret.sops.yaml
+talhelper genconfig                            # -> ./clusterconfig/*.yaml + talosconfig
+```
+
+### Step 5 — apply config to each node (installs Talos to the OS disk)
+```bash
+# Per node — apply its generated config (talhelper names them by hostname):
+talosctl apply-config --insecure -n <BOX_IP> \
+  --file clusterconfig/capstone-capstone-n1.yaml
+# repeat for n2, n3. Each node installs Talos to the selected OS disk + REBOOTS
+# off the USB into the installed system. (Remove the USB after first reboot.)
+```
+
+### Step 6 — bootstrap etcd (ONCE, on node-1 only)
+```bash
+# Point talosctl at the generated config + node-1:
+export TALOSCONFIG=$(pwd)/clusterconfig/talosconfig
+talosctl config endpoint <NODE1_IP> && talosctl config node <NODE1_IP>
+talosctl bootstrap                              # initializes etcd on node-1 ONLY
+```
+> KubeSpan note: nodes form the WireGuard mesh once configured; after bootstrap,
+> read node-1's stable KubeSpan address (`talosctl get kubespanidentities` /
+> `talosctl get addresses`) and set `endpoint:` in talconfig to it, then
+> `talhelper genconfig` + re-apply so the apiserver cert SANs include the overlay IP.
+> (For Tailscale, use node-1's `100.x` tailnet IP as the endpoint.)
+
+### Step 7 — get kubeconfig + verify the cluster is Ready
+```bash
+talosctl kubeconfig .                            # writes ./kubeconfig
+export KUBECONFIG=$(pwd)/kubeconfig
+kubectl get nodes -o wide                        # EXPECT: 3 nodes, all Ready, control-plane
+talosctl -n <NODE1_IP> health                    # EXPECT: all checks pass (etcd, apid, kubelet)
+```
+**GATE: do not proceed until all 3 nodes are `Ready` and `talosctl health` is green.**
+
+### Step 8 — Rook-Ceph on the 512GB NVMe (replica-3, 3 failure domains)
+With the cluster Ready and each node's NVMe still RAW (Step 3):
+```bash
+# Install the Rook operator (pinned), then a CephCluster CR targeting the NVMe.
+kubectl apply -k 'github.com/rook/rook//deploy/examples?ref=v1.15.5'   # operator (pin a current release)
+# CephCluster: storage.deviceFilter '^nvme0n1$' (the 512GB NVMe per box),
+# mon.count: 3, failureDomain: host, replicated.size: 3. (CR shipped in a follow-up
+# platform-services overlay; for first bring-up the rook examples cluster.yaml edited
+# to deviceFilter + size:3 is fine.)
+# If a NVMe isn't claimed, it wasn't raw — wipe it (Step "ceph-nvme" guidance):
+#   talosctl -n <node> wipe disk nvme0n1
+```
+**Verify Ceph healthy:**
+```bash
+kubectl -n rook-ceph get cephcluster            # PHASE: Ready
+kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph status   # EXPECT: HEALTH_OK
+```
+**GATE: a healthy 3-node cluster = 3 nodes Ready + `ceph status` HEALTH_OK.** Stop
+here — the k3d→hardware migration (sealing-key migrate, netpol CIDR re-param for the
+overlay ranges, `make bootstrap` with the kube-context override) + the 9020M DB tier
+are sequenced AFTER this, per the team lead.
+
+---
+
+### Troubleshooting quick-refs
+- A node won't `apply-config`: it's not in maintenance mode (already configured) —
+  `talosctl -n <ip> reset --graceful=false --reboot` to wipe back to maintenance.
+- apiserver cert SAN errors after moving `endpoint` to the overlay IP: re-run
+  `talhelper genconfig` + `talosctl apply-config` so the new SAN is in the cert.
+- Ceph OSDs not created: the NVMe wasn't raw (`talosctl wipe disk nvme0n1`), or the
+  `deviceFilter` doesn't match (`talosctl -n <node> disks` to get the exact name).
