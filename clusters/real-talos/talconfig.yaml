@@ -52,21 +52,29 @@ nodes:
     controlPlane: true
     installDisk: /dev/nvme0n1          # the ONLY disk (512GB SK hynix BC511)
     networkInterfaces:
-      - interface: eth0                # i219-LM => e1000e; confirm name via runbook
+      # ⚠ DO NOT hardcode an interface NAME — the 7080's NIC is a PREDICTABLE name
+      # (Intel i219 => enp0s31f6 / eno1, NOT eth0). Naming a non-existent `eth0`
+      # configured a phantom iface, the real NIC lost DHCP, and the node went
+      # offline -> couldn't pull the installer -> never installed (box-3 outage
+      # 2026-06-16). Match the single ONBOARD NIC by SELECTOR instead:
+      - deviceSelector:
+          physical: true               # the one physical NIC, any predictable name/driver (portable)
         dhcp: true                     # DHCP underlay (Tailscale overlay rides on top)
   - hostname: capstone-n2
     ipAddress: N2_TAILSCALE_100_IP     # fill post-join; apply with -n <n2 current maint IP>
     controlPlane: true
     installDisk: /dev/nvme0n1          # (n2 also has a free 500GB SATA -> future Ceph)
     networkInterfaces:
-      - interface: eth0
+      - deviceSelector:
+          physical: true
         dhcp: true
   - hostname: capstone-n3
     ipAddress: N3_TAILSCALE_100_IP     # fill post-join; apply with -n 10.237.26.253 (n3 current maint IP)
     controlPlane: true
     installDisk: /dev/nvme0n1          # (n3 also has a free 500GB SATA -> future Ceph)
     networkInterfaces:
-      - interface: eth0
+      - deviceSelector:
+          physical: true
         dhcp: true
 
 # ---- cluster-wide patches ---------------------------------------------------

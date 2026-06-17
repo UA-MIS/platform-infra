@@ -157,9 +157,15 @@ The human has a single setup station, so do each box fully, then move it to the
    (`$MIP`) from the Talos console or your DHCP server.
 3. CONFIRM hardware (over the same segment):
    ```bash
-   talosctl -n $MIP --insecure get links     # expect eth0 (i219-LM/e1000e); if not, fix talconfig + re-genconfig
+   talosctl -n $MIP --insecure get links     # note the REAL NIC name (Intel i219 = enp0s31f6/eno1, NOT eth0)
    talosctl -n $MIP --insecure get disks      # expect nvme0n1 (install target)
    ```
+   The talconfig uses `deviceSelector: { physical: true }` (NOT a hardcoded name), so
+   it auto-matches the onboard NIC whatever its predictable name is — no edit needed.
+   ⚠ NEVER hardcode an interface name: naming a non-existent `eth0` took box-3 offline
+   (phantom iface → real NIC lost DHCP → couldn't pull the installer → no install).
+   If `get links` shows MULTIPLE physical NICs (it won't on a stock 7080), narrow the
+   selector with `driver: e1000e` or `busPath`.
 4. APPLY this box's config, TARGETING ITS CURRENT IP with `-n $MIP` (overrides whatever
    `ipAddress` is in talconfig — that's fine):
    ```bash
@@ -234,6 +240,13 @@ override) + the DB tier are sequenced AFTER this, per the team lead.
 ---
 
 ### Troubleshooting quick-refs
+- **Node went offline after apply / "Applied configuration without a reboot" but never
+  installed** = the network config named a non-existent interface (e.g. hardcoded
+  `eth0`), so the real NIC lost DHCP → no network → no installer pull → no install.
+  The node is NOT installed (still on USB/RAM), so just **power-cycle it back into
+  maintenance mode** (DHCP returns), confirm `get links`, and re-apply with the
+  CORRECTED config (deviceSelector physical:true — already fixed in talconfig). No
+  reinstall/wipe needed since it never installed.
 - A node won't `apply-config`: it's not in maintenance mode (already configured) —
   `talosctl -n <ip> reset --graceful=false --reboot` to wipe back to maintenance.
 - apiserver cert SAN errors after moving `endpoint` to the overlay IP: re-run
