@@ -1,23 +1,13 @@
-# Storage / Ceph-disk contract (P4, §3.4, D-035). DUAL-DISK nodes (confirmed live
-# 2026-06-17 via `talosctl -n <node> get disks`): every 7080 has
-#   nvme0n1  512 GB nvme = Talos OS  (installDisk: /dev/nvme0n1 in talconfig.yaml)
-#   sda      500 GB sata = RAW Ceph OSD disk — left UNTOUCHED by Talos, claimed by Rook
-#   sdb       62 GB usb  = install USB stick (transient; not storage)
-# → uniform layout across all 3 boxes → Rook-Ceph replica-3, host failure domain
-#   (3 OSDs / 3 failure domains). NOT the old single-disk/local-path compromise.
+# Storage note (P4) — SINGLE-DISK nodes (live finding 2026-06-16).
+# The 7080 Micro has only ONE disk: nvme0n1 (512GB), and the OS installs to it
+# (installDisk: /dev/nvme0n1 in talconfig.yaml). There is NO separate raw disk for
+# Ceph, so the PROOF storage class is local-path-provisioner (runbook §D2 Step 7);
+# Ceph-on-a-partition is the documented HA upgrade.
 #
-# This is intentionally a NO-OP MACHINE PATCH. Talos must NOT format, partition, or
-# mount the sata disk — Rook-Ceph consumes it as a WHOLE RAW BLOCK DEVICE (see
-# applicationsets/rook-ceph-cluster-app.yaml, per-node by-id WWN device list). If we
-# declared the sata disk as a Talos user-volume/mount here, Rook could no longer
-# claim it. So: installDisk pins the OS to nvme0n1 (talconfig.yaml), and we
-# deliberately say NOTHING about sda here — leaving it raw for Rook.
-#
-# ⚠ The Ceph disk must be EMPTY before Rook will use it. Box 3's sda shipped with a
-# leftover Windows GPT (EFI/MSR/Basic-data partitions); Rook REFUSES a disk that has
-# an existing partition table / filesystem. Zap each Ceph disk once before syncing
-# the Rook cluster app — human-gated destructive step in runbook §D2 Step 7.
+# This is a NO-OP machine patch kept only to document that contract + guard against
+# someone re-adding a "reserve a 2nd disk for Ceph" assumption that doesn't hold on
+# single-disk hardware. (If a node ever gets a 2nd physical disk, Ceph claims THAT;
+# until then, local-path on nvme0n1's filesystem.)
 machine:
-  # (no-op) — OS installs to nvme0n1 (installDisk in talconfig); the sata disk is
-  # left raw on purpose for Rook-Ceph to claim. Do NOT add the sata disk here.
+  # (no-op) — storage is local-path for the proof; no dedicated Ceph disk exists.
   {}

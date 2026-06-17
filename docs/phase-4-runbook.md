@@ -259,54 +259,34 @@ talosctl -n <n1 100.x> health                    # EXPECT: all checks pass (etcd
 ```
 **GATE: do not proceed until all 3 nodes are `Ready` and `talosctl health` is green.**
 
-### Step 7 — storage: Rook-Ceph replica-3 (dual-disk nodes)
-Every 7080 is **DUAL-DISK**: `nvme0n1` (512GB) holds the OS; a 500GB sata SSD (`sda`)
-is the dedicated **raw Ceph OSD disk**, left untouched by Talos (installDisk pins the
-OS to nvme0n1 only). 3 OSDs across the 3 nodes → **replica-3, host failure domain**
-(survives any single node loss). The Rook charts ship via GitOps as two Applications
-(`platform-rook-ceph-operator` wave 0, `platform-rook-ceph-cluster` wave 1).
-
-**7a — discover each node's Ceph-disk WWN (stable selector).** The kernel name `sda`
-is NOT stable (the install USB stick floats across `sda`/`sdb`), so the CephCluster
-targets the disk by its `/dev/disk/by-id/wwn-…` path. For each node, read the WWID:
+### Step 7 — storage class (SINGLE-DISK nodes → local-path now)
+⚠ **The 7080 Micro is SINGLE-DISK** (only `nvme0n1`, which now holds the OS). There
+is no raw dedicated disk for Ceph, so for the proof we use **local-path-provisioner**
+as the storage class — fastest to a proven platform; the platform's GitOps/tenancy/CI
+do not need replicated storage to be proven. **Ceph-on-a-partition is the documented
+upgrade** (below), and a true dedicated Ceph disk is the real fix if the Micro can
+take a second NVMe/SATA (verify the chassis — likely not on the Micro).
 ```bash
-talosctl -n <node 100.x> get disks                # find the 500GB sata SSD row → WWID col
-# e.g. n3: WDC WDS500G2B0A, WWID naa.5001b448b555979f → /dev/disk/by-id/wwn-0x5001b448b555979f
+# local-path-provisioner (pin a current release), then make it the default SC:
+kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.31/deploy/local-path-storage.yaml
+kubectl patch storageclass local-path \
+  -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+kubectl get storageclass                          # EXPECT: local-path (default)
 ```
-Put each node's path into `applicationsets/rook-ceph-cluster-app.yaml`
-(`storage.nodes[].devices[].name`). n3 is pre-filled; replace the
-`wwn-REPLACE_N1/N2_CEPH_DISK_WWN` placeholders as boxes 1 & 2 join. **The cluster app
-must not sync with placeholders present** (it would target a non-existent device).
+**GATE: a healthy proof cluster = 3 nodes `Ready` + `talosctl health` green + a
+default StorageClass.** Stop here — the k3d→hardware migration (sealing-key migrate,
+netpol CIDR re-param for the overlay ranges, `make bootstrap` with the kube-context
+override) + the DB tier are sequenced AFTER this, per the team lead.
 
-**7b — ZAP each Ceph disk (DESTRUCTIVE — human-gated).** Rook REFUSES a disk with an
-existing partition table/filesystem. The 7080 sata SSDs shipped with a leftover
-Windows GPT (EFI/MSR/Basic-data). Wipe ONLY the sata disk on each node (NEVER
-`nvme0n1` = the OS):
-```bash
-# ⚠ Verify the device is the sata SSD, NOT nvme0n1, NOT the USB stick, before running.
-talosctl -n <node 100.x> wipe disk sda            # zaps sda's partition table; OS (nvme0n1) untouched
-talosctl -n <node 100.x> get discoveredvolumes | grep sda   # EXPECT: sda 'disk' only, no sdaN partitions
-```
-
-**7c — let GitOps install Rook.** The two apps land via the root-app/appset
-(operator first, then the CephCluster). Verify:
-```bash
-kubectl -n rook-ceph get pods                     # EXPECT: operator, 3× mon, 2× mgr, 3× osd, csi pods Running
-kubectl -n rook-ceph get cephcluster              # EXPECT: HEALTH_OK (HEALTH_WARN briefly during OSD bring-up)
-kubectl -n rook-ceph exec deploy/rook-ceph-tools -- ceph -s   # 3 osds up/in, pgs active+clean
-kubectl get storageclass                          # EXPECT: ceph-block (default)
-```
-**GATE: a healthy hardware cluster = 3 nodes `Ready` + `talosctl health` green + Ceph
-`HEALTH_OK` (3 OSDs up/in) + `ceph-block` as the default StorageClass.** Stop here —
-the k3d→hardware migration (sealing-key migrate, netpol CIDR re-param for the overlay
-ranges, `make bootstrap` with the kube-context override) + the DB tier are sequenced
-AFTER this, per the team lead.
-
-> **FALLBACK — if a node's Ceph disk is missing/unusable:** start with the OSDs you
-> have (replica-3 needs all 3; with 2 OSDs set `replicated.size: 2` temporarily, NOT
-> size 1 — `requireSafeReplicaSize` forbids size 1) and add the third OSD by filling
-> its WWN + re-syncing once the disk is present. local-path-provisioner is the
-> last-resort non-replicated stopgap only if no raw disk is usable on any node.
+> **UPGRADE PATH — Ceph-on-partition (keep-it-replicated, when you want HA storage):**
+> carve a raw partition out of `nvme0n1` (leave the OS + a capped EPHEMERAL partition,
+> reserve the rest raw via a Talos user-volume / disk layout), then point Rook at the
+> PARTITION (`devicePathFilter: ^/dev/nvme0n1p[0-9]+$`, NOT the whole device),
+> `mon.count: 3`, `failureDomain: host`, `replicated.size: 3` — replica-3 across the
+> 3 nodes' partitions is still a legit 3-failure-domain pool. This needs a Talos
+> machine-config disk-layout change + re-apply (reinstall), so do it as a deliberate
+> follow-up, not during first bring-up. (A second physical disk per node, if the
+> chassis allows, is cleaner than partitioning — prefer that if available.)
 
 ---
 
@@ -327,8 +307,5 @@ AFTER this, per the team lead.
 - "disk in use" on apply: the NVMe still has the old Windows/partition table — Talos
   wipes the install disk on apply, but if it balks, `talosctl -n <ip> --insecure wipe
   disk nvme0n1` from maintenance first.
-- Rook OSD never appears: the Ceph disk still has a partition table/filesystem — Rook
-  skips non-empty disks. Re-run the Step-7b zap (`talosctl -n <node> wipe disk sda`),
-  confirm `get discoveredvolumes` shows the bare `sda` disk with no `sdaN` partitions,
-  then `kubectl -n rook-ceph rollout restart deploy rook-ceph-operator` to re-scan. Or
-  the WWN in rook-ceph-cluster-app.yaml is wrong/placeholder — match `talosctl get disks`.
+- (Ceph-on-partition upgrade only) OSD not created: Rook needs the PARTITION raw +
+  `devicePathFilter` matching `nvme0n1pN`, not the whole in-use device.
