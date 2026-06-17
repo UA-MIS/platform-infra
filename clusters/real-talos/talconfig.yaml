@@ -17,13 +17,29 @@ clusterName: capstone
 talosVersion: v1.13.4
 kubernetesVersion: v1.31.5            # match the k3d cluster's k8s minor (portability §6)
 
-# No VIP: endpoint is the overlay IP of node-1 = its TAILSCALE 100.x address (set
-# after node-1 joins the tailnet; see runbook §D2 Step 6 note). (KubeSpan-alt would
-# use node-1's KubeSpan address instead.)
-endpoint: https://NODE1_TAILSCALE_100_IP:6443
+# No VIP: the apiserver endpoint is the bootstrap node's TAILSCALE 100.x. Bring-up
+# order is 3→2→1, so box-3 (capstone-n3) is the bootstrap/etcd-init node and the
+# endpoint. (HA/multi-endpoint is a later concern; pinned to n3 for the proof.)
+endpoint: https://100.127.169.30:6443        # capstone-n3 tailnet 100.x (live 2026-06-17)
+
+# apiserver cert SANs — talhelper does not guarantee auto-adding the endpoint, so
+# list every address kubectl/talosctl will hit the API on: n3's 100.x (the endpoint),
+# the .253 switch IP (in-cluster/secure apply over the LAN during bring-up), and
+# n2/n1's 100.x once they join (fill when known so a future endpoint move / direct
+# API access to them works without a cert regen).
+additionalApiServerCertSans:
+  - 100.127.169.30          # capstone-n3 (current endpoint)
+  - 10.237.26.253           # n3 switch/LAN IP (bring-up secure apply)
+  # - N2_TAILSCALE_100_IP   # fill when box-2 joins
+  # - N1_TAILSCALE_100_IP   # fill when box-1 joins
 
 # Converged: control-plane nodes are UNTAINTED so workloads schedule on them.
 allowSchedulingOnControlPlanes: true
+
+# CNI: omitted on purpose -> Talos default = FLANNEL (on). So nodes go Ready after
+# bootstrap with working pod networking, no extra install. (For Cilium later: set
+# cniConfig.name: none here + install Cilium post-bootstrap; nodes are NotReady until
+# the CNI is up. Not doing that for the proof.)
 
 # INSTALLER IMAGE — declare the extensions as a talhelper `schematic` block so
 # talhelper COMPUTES the Image Factory schematic ID itself (content hash) and builds
@@ -85,7 +101,7 @@ nodes:
           physical: true
         dhcp: true
   - hostname: capstone-n3
-    ipAddress: N3_TAILSCALE_100_IP     # fill post-join; apply with -n 10.237.26.253 (n3 current maint IP)
+    ipAddress: 100.127.169.30     # n3 tailnet 100.x (live) = talosconfig target + the endpoint. Apply during bring-up with -n 10.237.26.253 (switch IP).
     controlPlane: true
     installDisk: /dev/nvme0n1          # (n3 also has a free 500GB SATA -> future Ceph)
     networkInterfaces:
