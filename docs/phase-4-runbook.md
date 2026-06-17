@@ -125,70 +125,84 @@ curl -sL https://github.com/siderolabs/talos/releases/download/v1.13.4/talosctl-
 # talhelper (https://github.com/budimanjojo/talhelper/releases) + sops + age to ~/.local/bin
 ```
 
-### Step 3 — boot each 7080 from the USB into maintenance mode
-For each box: insert the USB, power on, F12 → boot the USB. Talos boots into
-**maintenance mode** (no config yet) and DHCPs an IP. Note each box's IP (from your
-DHCP server, or the Talos console). Then CONFIRM hardware before applying config:
-```bash
-# NIC name (expect eth0 via in-kernel e1000e for the i219-LM) + the disks:
-talosctl -n <BOX_IP> --insecure get links            # find the ethernet link name
-talosctl -n <BOX_IP> --insecure disks                # OS SSD vs the 512GB Ceph NVMe
-```
-- If the NIC is NOT `eth0`, set the real name in `talconfig.yaml` `networkInterfaces`.
-- If NO NIC appears at all, the box has a non-i219 PHY — capture `talosctl -n <ip>
-  --insecure get pcidevices` and add the matching `siderolabs/<nic>-firmware`
-  extension to the schematic (Step 1a) + re-burn. (Unlikely on a stock 7080.)
-- Note which disk is the OS SSD (≤256GB) vs the 512GB NVMe; set `installDiskSelector`
-  in `talconfig.yaml` accordingly. **The NVMe must stay raw for Ceph.**
+### ⚠ Prereqs for apply (both REQUIRED or apply fails)
+- **Same-segment reachability:** `talosctl ... --insecure -n <maint-ip>` needs your
+  laptop on the SAME switch segment as the box in maintenance mode (pre-Tailscale).
+- **The switch MUST have an internet UPLINK.** During `apply-config` the node PULLS
+  the factory installer image AND joins Tailscale — **air-gapped = install fails.**
+  (Same uplinked switch the DB box used.) Confirm uplink before applying.
 
-### Step 4 — fill the configs + generate machine configs
-In `clusters/real-talos/`:
-1. Fill `values.env` (SCHEMATIC_ID from Step 1a, OVERLAY=kubespan|tailscale per the
-   probe) and the placeholders in `talconfig.yaml` (node IPs, OS-disk selector, and
-   `endpoint` = node-1's overlay IP — for KubeSpan you'll get the stable IP after
-   bootstrap; bootstrap with node-1's LAN IP first, see note below).
-2. If `OVERLAY=tailscale`: in `talconfig.yaml` comment the `kubespan.yaml` patch +
-   uncomment `tailscale.yaml`, and put the tailnet auth key in the talhelper secret
-   (`talsecret.sops.yaml`, sops-encrypted — never plaintext).
-3. Generate secrets + machine configs:
+### Step 3 — generate the machine configs ONCE (before touching any box)
+The generated per-node config is IDENTICAL regardless of the box's transient DHCP IP
+(nodes are `dhcp: true`; `ipAddress` in talconfig is only the talosconfig endpoint,
+not a baked static IP — see talconfig header). So generate up front, apply per box:
 ```bash
 cd clusters/real-talos
-talhelper gensecret > talsecret.sops.yaml      # then: sops --encrypt -i talsecret.sops.yaml
-talhelper genconfig                            # -> ./clusterconfig/*.yaml + talosconfig
+talhelper gensecret > talsecret.sops.yaml      # PROOF: leave plaintext LOCALLY; it's
+                                               # gitignored — sops-encrypt before ANY commit
+export TS_AUTHKEY='tskey-auth-...'             # the minted reusable tag:talos-node key (NOT committed)
+talhelper genconfig                            # -> ./clusterconfig/{capstone-capstone-n1,-n2,-n3}.yaml + talosconfig
 ```
+> If genconfig errors on `${TS_AUTHKEY}` substitution, inline the key into the
+> tailscale ExtensionServiceConfig in the generated `clusterconfig/*.yaml` AFTER
+> genconfig — `clusterconfig/` is gitignored, so the key never reaches git.
 
-### Step 5 — apply config to each node (installs Talos to the OS disk)
-```bash
-# Per node — apply its generated config (talhelper names them by hostname):
-talosctl apply-config --insecure -n <BOX_IP> \
-  --file clusterconfig/capstone-capstone-n1.yaml
-# repeat for n2, n3. Each node installs Talos to the selected OS disk + REBOOTS
-# off the USB into the installed system. (Remove the USB after first reboot.)
-```
+### Step 4 — ONE BOX AT A TIME: BIOS → boot → confirm → apply → move to switch
+The human has a single setup station, so do each box fully, then move it to the
+(uplinked) switch and do the next:
 
-### Step 6 — bootstrap etcd (ONCE, on node-1 only)
+**Per box (repeat for n1, n2, n3):**
+1. At the station: BIOS → set SATA mode **AHCI** (not RAID), boot order USB first; insert USB, power on.
+2. Talos boots **maintenance mode** + DHCPs. Note this box's CURRENT maintenance IP
+   (`$MIP`) from the Talos console or your DHCP server.
+3. CONFIRM hardware (over the same segment):
+   ```bash
+   talosctl -n $MIP --insecure get links     # expect eth0 (i219-LM/e1000e); if not, fix talconfig + re-genconfig
+   talosctl -n $MIP --insecure get disks      # expect nvme0n1 (install target)
+   ```
+4. APPLY this box's config, TARGETING ITS CURRENT IP with `-n $MIP` (overrides whatever
+   `ipAddress` is in talconfig — that's fine):
+   ```bash
+   talosctl apply-config --insecure -n $MIP --file clusterconfig/capstone-capstone-n1.yaml   # n1; use -n2/-n3 file per box
+   ```
+   The box installs Talos to nvme0n1, REBOOTS off the USB into the installed system,
+   and (per the tailscale patch) joins the tailnet. Remove the USB after first reboot.
+5. Move the box to the uplinked switch. → next box.
+
+Known IPs so far (maintenance, transient): n1=10.237.26.254, n3=10.237.26.253, n2=TBD.
+The `-n $MIP` target uses whatever each box has when YOU apply it — don't rely on
+these persisting.
+
+### Step 5 — once all 3 are installed + on the tailnet: set the endpoint + bootstrap
+Resolve the endpoint chicken-egg (apiserver endpoint = node-1's Tailscale 100.x, only
+known post-install):
 ```bash
-# Point talosctl at the generated config + node-1:
+# Find node-1's Tailscale 100.x — from the Tailscale admin console (host capstone-n1),
+# or once you can reach it: talosctl -n <n1 any-reachable-ip> get addresses | grep 100\.
+# Put each node's 100.x into talconfig.yaml ipAddress (N1/N2/N3_TAILSCALE_100_IP), then:
+talhelper genconfig                            # regenerates talosconfig + cert SANs incl the 100.x
 export TALOSCONFIG=$(pwd)/clusterconfig/talosconfig
-talosctl config endpoint <NODE1_IP> && talosctl config node <NODE1_IP>
-talosctl bootstrap                              # initializes etcd on node-1 ONLY
+# Re-apply so the apiserver cert SAN includes the 100.x endpoint (secure mode now — node is installed):
+talosctl -n <n1 100.x> apply-config --file clusterconfig/capstone-capstone-n1.yaml
+# Bootstrap etcd ONCE, on node-1 only:
+talosctl config endpoint <n1 100.x> && talosctl config node <n1 100.x>
+talosctl bootstrap
 ```
-> KubeSpan note: nodes form the WireGuard mesh once configured; after bootstrap,
-> read node-1's stable KubeSpan address (`talosctl get kubespanidentities` /
-> `talosctl get addresses`) and set `endpoint:` in talconfig to it, then
-> `talhelper genconfig` + re-apply so the apiserver cert SANs include the overlay IP.
-> (For Tailscale, use node-1's `100.x` tailnet IP as the endpoint.)
+> Shortcut if you want to bootstrap BEFORE chasing the 100.x: bootstrap against n1's
+> current reachable IP first (`talosctl -n <n1 ip> bootstrap`), get the cluster up,
+> THEN do the endpoint→100.x re-gen/re-apply as a follow-up. Either order works; the
+> 100.x endpoint is what makes the cluster reachable overlay-only long-term.
 
-### Step 7 — get kubeconfig + verify the cluster is Ready
+### Step 6 — kubeconfig + verify Ready
 ```bash
 talosctl kubeconfig .                            # writes ./kubeconfig
 export KUBECONFIG=$(pwd)/kubeconfig
 kubectl get nodes -o wide                        # EXPECT: 3 nodes, all Ready, control-plane
-talosctl -n <NODE1_IP> health                    # EXPECT: all checks pass (etcd, apid, kubelet)
+talosctl -n <n1 100.x> health                    # EXPECT: all checks pass (etcd, apid, kubelet)
 ```
 **GATE: do not proceed until all 3 nodes are `Ready` and `talosctl health` is green.**
 
-### Step 8 — storage class (SINGLE-DISK nodes → local-path now)
+### Step 7 — storage class (SINGLE-DISK nodes → local-path now)
 ⚠ **The 7080 Micro is SINGLE-DISK** (only `nvme0n1`, which now holds the OS). There
 is no raw dedicated disk for Ceph, so for the proof we use **local-path-provisioner**
 as the storage class — fastest to a proven platform; the platform's GitOps/tenancy/CI

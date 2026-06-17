@@ -1,17 +1,17 @@
 # Phase-4 real cluster — Talos via talhelper (D-035/§3.4, ADR-017).
 # 3 CONVERGED OptiPlex 7080s: each is control-plane (etcd quorum=3) AND UNTAINTED
-# so it also runs workloads. No LAN VIP — the apiserver endpoint is an OVERLAY IP
-# (KubeSpan or Tailscale per the Step-0 probe). Rook-Ceph consumes the 512GB NVMe
-# (replica-3 = 3 failure domains). Generate with: `talhelper genconfig` (reads this
-# + talsecret.sops.yaml), then apply per the runbook (docs/phase-4-runbook.md §D2).
+# so it also runs workloads. No LAN VIP — the apiserver endpoint is node-1's TAILSCALE
+# 100.x (overlay = Tailscale-everywhere, architect-resolved). Storage = local-path for
+# the proof (single-disk nodes; Ceph-on-partition is the upgrade). Generate with
+# `talhelper genconfig` (reads this + talsecret.sops.yaml + $TS_AUTHKEY), then apply
+# per the runbook (docs/phase-4-runbook.md §D2).
 #
 # ⚠ FILL THE PLACEHOLDERS the human captures during bring-up:
-#   ${SCHEMATIC_ID}  — from Deliverable 1 Step 1a (the factory schematic ID).
-#   node ipAddress   — each box's LAN IP (DHCP-reserved, see runbook) OR drop
-#                      ipAddress to use pure DHCP + a stable hostname.
-#   endpoint         — the OVERLAY IP of node-1 once the overlay is up (KubeSpan
-#                      stable IP, or the Tailscale 100.x IP). Placeholder below.
-#   installDiskSelector — confirm the OS disk vs the Ceph NVMe per box (runbook §D2).
+#   ${SCHEMATIC_ID}        — from Deliverable 1 Step 1a (factory schematic ID; or values.env).
+#   endpoint / ipAddress   — node-1's / each node's TAILSCALE 100.x, filled AFTER the box
+#                            joins the tailnet. NOT baked as static IPs (dhcp:true) — these
+#                            are only the talosconfig targets; apply uses -n <current IP>.
+#   $TS_AUTHKEY            — minted reusable tag:talos-node key, via env/sops, NEVER git.
 
 clusterName: capstone
 talosVersion: v1.13.4
@@ -30,30 +30,41 @@ allowSchedulingOnControlPlanes: true
 # turns this into the factory installer image reference per node.
 talosImageURL: factory.talos.dev/metal-installer/${SCHEMATIC_ID}
 
-# ⚠ SINGLE-DISK NODES (live finding 2026-06-16): the 7080 Micro has only ONE disk —
-# nvme0n1 (512GB). The OS installs to it; there is NO separate disk for Ceph. So
-# storage = local-path-provisioner for the proof (Ceph-on-partition is the
-# documented upgrade — see runbook §D2 Step 8). installDisk pins the single NVMe.
-# (BIOS must be AHCI, not RAID, for Talos to see nvme0n1 — flip it per box.)
+# ⚠ SINGLE-DISK NODES (live 2026-06-16): the 7080 Micro has only ONE disk usable as
+# the OS target — nvme0n1 (512GB); OS installs there, NO separate Ceph disk -> storage
+# = local-path for the proof (Ceph-on-partition is the upgrade, runbook §D2 Step 7).
+# (n2/n3 ALSO have a free 500GB SATA = future dedicated Ceph disk.) BIOS must be AHCI
+# (not RAID) for Talos to see the NVMe.
+#
+# ⚠ NODE ADDRESSING (DHCP + Tailscale) — `ipAddress` is NOT baked as a static IP.
+# The interface is `dhcp: true`, so each node gets its IP from DHCP; talhelper uses
+# `ipAddress` ONLY as the default endpoint/node written into the generated talosconfig
+# (how `talosctl` reaches the node by default). The MACHINE config is IDENTICAL
+# regardless — so the transient maintenance DHCP IPs DON'T need to be pinned here.
+# At apply time you OVERRIDE the target with `-n <current-maint-ip>` (see runbook
+# §D2 one-at-a-time flow). Set `ipAddress` to each node's STABLE post-install address
+# = its TAILSCALE 100.x (filled after the box joins the tailnet); until then the
+# placeholder is fine because `-n` at apply wins. (talhelper requires the field to be
+# present, hence placeholders — they do not end up as static IPs on the nodes.)
 nodes:
   - hostname: capstone-n1
-    ipAddress: 10.237.26.254           # n1 maintenance IP (live)
+    ipAddress: N1_TAILSCALE_100_IP     # STABLE talosconfig target (n1 100.x); NOT baked. Apply with -n <current maint IP, e.g. 10.237.26.254>
     controlPlane: true
     installDisk: /dev/nvme0n1          # the ONLY disk (512GB SK hynix BC511)
     networkInterfaces:
       - interface: eth0                # i219-LM => e1000e; confirm name via runbook
         dhcp: true                     # DHCP underlay (Tailscale overlay rides on top)
   - hostname: capstone-n2
-    ipAddress: NODE2_MAINT_IP          # fill when box 2 boots (talosctl get links/disks)
+    ipAddress: N2_TAILSCALE_100_IP     # fill post-join; apply with -n <n2 current maint IP>
     controlPlane: true
-    installDisk: /dev/nvme0n1
+    installDisk: /dev/nvme0n1          # (n2 also has a free 500GB SATA -> future Ceph)
     networkInterfaces:
       - interface: eth0
         dhcp: true
   - hostname: capstone-n3
-    ipAddress: NODE3_MAINT_IP          # fill when box 3 boots
+    ipAddress: N3_TAILSCALE_100_IP     # fill post-join; apply with -n 10.237.26.253 (n3 current maint IP)
     controlPlane: true
-    installDisk: /dev/nvme0n1
+    installDisk: /dev/nvme0n1          # (n3 also has a free 500GB SATA -> future Ceph)
     networkInterfaces:
       - interface: eth0
         dhcp: true
@@ -67,8 +78,7 @@ patches:
   - "@./patches/tailscale.yaml"
   # - "@./patches/kubespan.yaml"      # <- ALT ONLY (no DERP relay); not the chosen overlay
 
-  # Rook-Ceph wants the raw 512GB NVMe untouched by Talos (no partition/format) so
-  # Ceph OSDs can claim it. This patch documents the intent; the actual wipe/claim
-  # is done by the Rook cluster CR (runbook §D2). Talos installs ONLY to the OS
-  # disk selected above, leaving the NVMe raw.
+  # Single-disk storage note (no-op patch). Nodes are single-disk (OS on nvme0n1),
+  # so storage = local-path for the proof; Ceph-on-partition (or the n2/n3 free SATA)
+  # is the documented upgrade. See the patch file + runbook §D2 Step 7.
   - "@./patches/ceph-nvme.yaml"
