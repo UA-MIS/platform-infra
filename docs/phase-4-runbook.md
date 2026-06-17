@@ -141,6 +141,13 @@ curl -sL https://github.com/siderolabs/talos/releases/download/v1.13.4/talosctl-
   - For real shell env (TALOSCONFIG, KUBECONFIG) in **fish**, use `set -x VAR value`
     (each `export X=Y` step shows the fish form too). `echo $SHELL` to confirm which
     shell you're in; the bash form works only in bash/zsh.
+- **⚠ NO shell `$(...)` (command substitution) ANYWHERE in talconfig/patches/
+  ExtensionServiceConfig.** talhelper's envsubst expands `${VAR}` ONLY — a `$(cmd)`
+  survives as a LITERAL into the rendered config and breaks at runtime (the
+  `--hostname=$(hostname)` → `tailscale up: "$(hostname)" is not a valid DNS label`
+  failure). For per-node values, rely on what Talos already sets per node (e.g. the
+  OS hostname) or use a per-node `nodes[].patches` entry — never a shell-sub. The
+  Step-3.5 gate greps for both `${...}` and `$(...)` to catch this pre-apply.
 
 ### Step 3 — generate the machine configs ONCE (before touching any box)
 The generated per-node config is IDENTICAL regardless of the box's transient DHCP IP
