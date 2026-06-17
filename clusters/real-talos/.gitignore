@@ -1,0 +1,13 @@
+# Talos secrets + machine-generated credentials — NEVER commit (public repo).
+# These hold LIVE secrets: Tailscale auth key, cluster CA private keys, admin key.
+# Keep them ONLY on the operator's workstation (talenv/talsecret) — they're inputs
+# talhelper reads at genconfig time. The generated machine configs + talosconfig +
+# kubeconfig are derived credentials and equally secret.
+talenv.yaml
+talsecret.sops.yaml
+talsecret.yaml
+kubeconfig
+
+# NOTE: the rendered talhelper output (clusterconfig/capstone-*.yaml + talosconfig)
+# is already ignored by clusters/real-talos/clusterconfig/.gitignore — those carry
+# the same CA material and must also stay out of git.
