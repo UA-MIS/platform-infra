@@ -89,9 +89,12 @@ SCHEMATIC_ID=<paste the id from 1a>
 curl -L -o talos-v1.13.4-metal-amd64.iso \
   "https://factory.talos.dev/image/${SCHEMATIC_ID}/v1.13.4/metal-amd64.iso"
 ```
-> Keep this `SCHEMATIC_ID` — the machine configs reference the matching INSTALLER
-> image `factory.talos.dev/metal-installer/${SCHEMATIC_ID}:v1.13.4` (Deliverable 2),
-> so the installed system keeps the same extensions as the boot ISO.
+> This ISO `SCHEMATIC_ID` should equal **8957336bb929170959e3afc61b9088e41cb072988407edd699b9b3deb4a26972**
+> (the hash of the 4 extensions above). The INSTALLED system gets the SAME extensions
+> automatically: talconfig.yaml declares them as a `schematic` block, so `talhelper
+> genconfig` computes the matching installer image itself — NO env/`${SCHEMATIC_ID}`
+> substitution (that fallback to the EMPTY schematic 376567… is what left box-3
+> without tailscale). So boot ISO + installed system both = the 8957 extension set.
 
 ### Step 2 — burn the ISO to USB
 

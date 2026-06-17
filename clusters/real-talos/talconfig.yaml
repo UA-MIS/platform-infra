@@ -25,10 +25,26 @@ endpoint: https://NODE1_TAILSCALE_100_IP:6443
 # Converged: control-plane nodes are UNTAINTED so workloads schedule on them.
 allowSchedulingOnControlPlanes: true
 
-# Bake the SAME factory schematic the boot ISO used (Deliverable 1) so the INSTALLED
-# system keeps iscsi-tools + util-linux-tools + intel-ucode + tailscale. talhelper
-# turns this into the factory installer image reference per node.
-talosImageURL: factory.talos.dev/metal-installer/${SCHEMATIC_ID}
+# INSTALLER IMAGE — declare the extensions as a talhelper `schematic` block so
+# talhelper COMPUTES the Image Factory schematic ID itself (content hash) and builds
+# the installer URL. This is the reproducible, no-env, self-verifying way.
+#
+# ⚠ ROOT CAUSE of box-3 installing the EMPTY schematic (376567…, zero extensions →
+# no tailscale → no tailnet): the old `talosImageURL: .../metal-installer/${SCHEMATIC_ID}`
+# relied on shell `${SCHEMATIC_ID}` substitution, but talhelper does NOT expand env
+# in that field — so it fell back to generating the default (empty) schematic. The
+# `schematic` block below avoids ALL substitution: these 4 extensions hash to the
+# intended schematic 8957336bb929170959e3afc61b9088e41cb072988407edd699b9b3deb4a26972
+# (the same ID the boot ISO used). `talhelper genconfig` now produces the correct
+# installer with NO env exports.
+schematic:
+  customization:
+    systemExtensions:
+      officialExtensions:
+        - siderolabs/tailscale          # node overlay (REQUIRED — it IS the network)
+        - siderolabs/iscsi-tools        # Rook-Ceph RBD (future)
+        - siderolabs/util-linux-tools   # Rook-Ceph disk tooling (future)
+        - siderolabs/intel-ucode        # Comet Lake CPU microcode
 
 # ⚠ SINGLE-DISK NODES (live 2026-06-16): the 7080 Micro has only ONE disk usable as
 # the OS target — nvme0n1 (512GB); OS installs there, NO separate Ceph disk -> storage
