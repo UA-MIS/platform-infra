@@ -12,8 +12,8 @@
 # cluster/node CIDRs, NOT by hostname. Tightening to github.com's specific CIDRs
 # (or an FQDN-capable CNI like Cilium) is a Phase-3 item.
 #
-# CIDRs (this cluster): pods 10.42.0.0/16, services 10.43.0.0/16, nodes
-# 10.89.0.0/24 (the kube-apiserver is on a node IP :6443, SEC-005 bind).
+# CIDRs (this cluster): pods 10.244.0.0/16, services 10.96.0.0/12, nodes
+# 10.237.168.0/22 (the kube-apiserver is on a node IP :6443, SEC-005 bind).
 #
 # Managed by the platform-services-appset.
 
@@ -60,7 +60,7 @@ spec:
     # node CIDR to every argocd pod (probes are the only node-sourced traffic).
     - from:
         - ipBlock:
-            cidr: 10.89.0.0/24
+            cidr: 10.237.168.0/22
 ---
 # --- EGRESS: DNS, intra-cluster (pods+services), apiserver (node IPs), and
 #     external HTTPS:443 (GitHub git pulls + GH API from repo-server; OIDC token
@@ -91,22 +91,22 @@ spec:
     # internal traffic + reaching Dex/Traefik ClusterIPs in-cluster.
     - to:
         - ipBlock:
-            cidr: 10.42.0.0/16
+            cidr: 10.244.0.0/16
         - ipBlock:
-            cidr: 10.43.0.0/16
+            cidr: 10.96.0.0/12
     # kube-apiserver: lives on the node IPs (:6443) on k3d — the application/
     # applicationset controllers + repo-server need it.
     - to:
         - ipBlock:
-            cidr: 10.89.0.0/24
+            cidr: 10.237.168.0/22
     # External HTTPS only (GitHub git+API, OIDC issuer round-trips that egress the
     # cluster). Port-scoped, not host-scoped (kube-router has no FQDN egress).
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
             except:
-              - 10.42.0.0/16
-              - 10.43.0.0/16
+              - 10.244.0.0/16
+              - 10.96.0.0/12
       ports:
         - protocol: TCP
           port: 443
