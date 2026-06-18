@@ -1,8 +1,8 @@
 # Phase-4 real cluster — Talos via talhelper (D-035/§3.4, ADR-017).
 # 3 CONVERGED OptiPlex 7080s: each is control-plane (etcd quorum=3) AND UNTAINTED
 # so it also runs workloads. No LAN VIP — the apiserver endpoint is node-1's TAILSCALE
-# 100.x (overlay = Tailscale-everywhere, architect-resolved). Storage = local-path for
-# the proof (single-disk nodes; Ceph-on-partition is the upgrade). Generate with
+# 100.x (overlay = Tailscale-everywhere, architect-resolved). Storage = Rook-Ceph
+# replica-3 on the dedicated sata SSD per node (dual-disk; see ceph-nvme.yaml). Generate with
 # `talhelper genconfig` (reads this + talsecret.sops.yaml + $TS_AUTHKEY), then apply
 # per the runbook (docs/phase-4-runbook.md §D2).
 #
@@ -112,7 +112,8 @@ patches:
   - "@./patches/tailscale.yaml"
   # - "@./patches/kubespan.yaml"      # <- ALT ONLY (no DERP relay); not the chosen overlay
 
-  # Single-disk storage note (no-op patch). Nodes are single-disk (OS on nvme0n1),
-  # so storage = local-path for the proof; Ceph-on-partition (or the n2/n3 free SATA)
-  # is the documented upgrade. See the patch file + runbook §D2 Step 7.
+  # Dual-disk storage contract (no-op patch). OS installs to nvme0n1; the 500GB sata
+  # SSD (sda) is left RAW for Rook-Ceph (replica-3). The patch deliberately does NOT
+  # declare the sata disk so Rook can claim the whole device. See the patch file +
+  # applicationsets/rook-ceph-*-app.yaml + runbook §D2 Step 7.
   - "@./patches/ceph-nvme.yaml"

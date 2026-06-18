@@ -1,0 +1,61 @@
+# Rook-Ceph OPERATOR Application (P4, §3.4, D-035 / task #5). The Rook operator +
+# the Ceph CRDs (CephCluster, CephBlockPool, CephFilesystem, …). Helm-source
+# Application, deploy method A (D-028): pinned chart + the chart repo added to the
+# `platform` AppProject sourceRepos allowlist (bootstrap/platform-appproject.yaml;
+# security audits the addition — supply chain).
+#
+# Two-app split (mirrors the ARC controller/scale-set split):
+#   wave 0 — THIS app: operator + CRDs (rook-ceph chart).
+#   wave 1 — rook-ceph-cluster-app.yaml: the CephCluster CR + pools + storageclass
+#            (rook-ceph-cluster chart). The CRDs from THIS app must exist before the
+#            CephCluster CR in that app is applied, hence the wave ordering.
+#
+# Talos notes: the operator runs in the rook-ceph ns (privileged PSA — see
+# platform-services/rook-ceph/namespace.yaml). The `rbd` kernel module is built into
+# Talos; iscsi-tools + util-linux-tools are baked into the node image schematic
+# (clusters/real-talos/talconfig.yaml), so no host-side LVM/module install is needed.
+#
+# Chart: rook-ceph (operator) v1.20.1 (Ceph v20.2.1). Pin; bump deliberately.
+# Root-app recurses applicationsets/, so this Application is registered.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-rook-ceph-operator
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"   # operator + CRDs first, before the CephCluster (wave 1)
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://charts.rook.io/release
+    chart: rook-ceph
+    targetRevision: v1.20.1             # pinned chart version (no ^/~/latest)
+    helm:
+      releaseName: rook-ceph
+      values: |
+        # CSI provisioners run in the operator namespace; defaults are fine for a
+        # 3-node cluster. Keep the operator single-replica (Phase-4 3-node; HA the
+        # operator later if needed — the DATA path (mon/OSD) is already replica-3).
+        crds:
+          enabled: true               # ship the Ceph CRDs with the operator (wave 0)
+        csi:
+          # Talos: kubelet dir differs from the default — Rook auto-detects, but pin
+          # it explicit so a kubelet-path change can't silently break CSI mounts.
+          kubeletDirPath: /var/lib/kubelet
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: rook-ceph
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false           # rook-ceph ns ships via platform-services/rook-ceph
+      - ServerSideApply=true            # Ceph CRDs are large — SSA avoids the 256KB anno limit
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

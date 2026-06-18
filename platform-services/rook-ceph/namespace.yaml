@@ -1,0 +1,26 @@
+# Rook-Ceph namespace (P4, §3.4, D-035 / task #5). The single namespace that holds
+# BOTH the Rook operator AND the CephCluster (the rook-ceph-cluster chart's
+# operatorNamespace == its release namespace == rook-ceph; co-located is the Rook
+# default + what the chart's RBAC assumes).
+#
+# pod-security: PRIVILEGED. Rook's OSD prepare/daemon pods, the mon/mgr pods, and
+# the CSI provisioner run privileged + hostPath (they own raw block devices and
+# /var/lib/rook). On Talos (no host package manager, locked-down by default) the
+# enforce=privileged label is REQUIRED or the OSDs never schedule. This namespace
+# is platform-operator-only (no tenant workloads), so privileged here is scoped to
+# the storage operator, not a tenant escape surface.
+#
+# Ships via the platform-services directory generator (platform-services-appset) →
+# Application `platform-svc-rook-ceph`. The two Helm charts (operator + cluster)
+# are SEPARATE Helm-source Applications (applicationsets/rook-ceph-*-app.yaml,
+# method A / D-028) that target THIS namespace; they do not render through here.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rook-ceph
+  labels:
+    platform.capstone/component: platform
+    # Talos + Rook need privileged: OSD/mon/mgr/CSI pods are privileged + hostPath.
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: privileged
+    pod-security.kubernetes.io/audit: privileged

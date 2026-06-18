@@ -1,0 +1,124 @@
+# Rook-Ceph CLUSTER Application (P4, §3.4, D-035 / task #5). The CephCluster CR +
+# the replicated block pool + the RBD StorageClass. Helm-source Application, method A
+# (D-028). Installs into rook-ceph (same ns as the operator — the chart's
+# operatorNamespace default + RBAC assume co-location). sync-wave 1 → lands AFTER
+# the operator + Ceph CRDs (rook-ceph-operator-app.yaml, wave 0).
+#
+# ── DISK TARGETING (the safety-critical part) ──────────────────────────────────
+# Each 7080 has THREE block devices at install time:
+#   nvme0n1  512 GB nvme  = Talos OS (installDisk; system-disk) — MUST NOT be touched
+#   sda      500 GB sata  = the dedicated raw Ceph OSD disk      — Ceph claims THIS
+#   sdb       62 GB usb   = the install USB stick (transient)    — MUST NOT be touched
+#
+# We do NOT use `useAllDevices: true` / a bare `deviceFilter: sda`: the kernel name
+# `sda` is NOT stable (the floating USB stick can grab sda/sdb across boots), and a
+# greedy filter could eat the wrong disk. Instead `useAllDevices: false` + an
+# explicit per-node device list keyed by the disk's STABLE /dev/disk/by-id WWN path.
+# Each node's WWN is discovered with `talosctl -n <node> get disks` (WWID column).
+# All 3 WWNs are filled in (confirmed live 2026-06-17 — all three boxes joined); if a
+# node is ever re-disked, re-read its WWID and update its line (see runbook §D2 Step 7).
+#
+# PRE-REQ: the Ceph disk must be EMPTY (no partition table). Box 3's sda shipped with
+# a leftover Windows GPT (EFI/MSR/Basic-data) — Rook will REFUSE a disk with an
+# existing FS/partition table. Each disk must be zapped first (runbook §D2 Step 7,
+# human-gated destructive step). Until zapped, the OSD silently never appears.
+#
+# Chart: rook-ceph-cluster v1.20.1 (Ceph v20.2.1). Pin; bump deliberately.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-rook-ceph-cluster
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"   # CephCluster CR after the operator+CRDs (wave 0)
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://charts.rook.io/release
+    chart: rook-ceph-cluster
+    targetRevision: v1.20.1
+    helm:
+      releaseName: rook-ceph-cluster
+      values: |
+        operatorNamespace: rook-ceph
+        # Do NOT let the chart create the namespace — it ships via
+        # platform-services/rook-ceph (with the privileged PSA label).
+        toolbox:
+          enabled: true                 # `ceph` CLI pod for status/debug (ceph -s)
+        monitoring:
+          enabled: false                # wire to Prometheus later (no stack yet)
+
+        cephClusterSpec:
+          # Pin the Ceph image (chart default is commented out → must set it).
+          cephVersion:
+            image: quay.io/ceph/ceph:v20.2.1
+          dataDirHostPath: /var/lib/rook   # Talos /var is writable + persistent
+          mon:
+            count: 3                    # one mon per node = quorum survives 1 node loss
+            allowMultiplePerNode: false
+          mgr:
+            count: 2                    # active/standby mgr (HA dashboard/metrics)
+          dashboard:
+            enabled: true
+            ssl: false                  # front via the platform ingress later, not Ceph TLS
+          # ── explicit per-node device selection (no greedy filters) ──
+          storage:
+            useAllNodes: false
+            useAllDevices: false
+            # The 7080 sata SSD is ~500 GB → no metadataDevice / db-size override.
+            # All 3 WWNs confirmed live 2026-06-17 via `talosctl -n <node> get disks`
+            # (each node's 500GB WDC WDS500G2B0A sata SSD = the `sda` OSD disk; the
+            # WWID `naa.<x>` maps to the stable by-id path `/dev/disk/by-id/wwn-0x<x>`).
+            nodes:
+              - name: capstone-n1       # 100.120.67.119 — WWID naa.5001b448b5559d1d
+                devices:
+                  - name: /dev/disk/by-id/wwn-0x5001b448b5559d1d   # WDC WDS500G2B0A 500GB sata
+              - name: capstone-n2       # 100.89.87.126 — WWID naa.5001b448b555195c
+                devices:
+                  - name: /dev/disk/by-id/wwn-0x5001b448b555195c   # WDC WDS500G2B0A 500GB sata
+              - name: capstone-n3       # 100.117.55.70 — WWID naa.5001b448b555979f
+                devices:
+                  - name: /dev/disk/by-id/wwn-0x5001b448b555979f   # WDC WDS500G2B0A 500GB sata
+
+        # ── replicated block pool: replica-3, failure domain = host ──
+        # 3 OSDs (one per node) → replica-3 with host failure domain = the cluster
+        # survives ANY single node loss with no data loss. requireSafeReplicaSize
+        # forbids the unsafe size<2; size:3 is the whole point of 3 nodes.
+        cephBlockPools:
+          - name: replicapool
+            spec:
+              failureDomain: host
+              replicated:
+                size: 3
+                requireSafeReplicaSize: true
+            storageClass:
+              enabled: true
+              name: ceph-block
+              isDefault: true           # default SC for the cluster (PVCs land on Ceph RBD)
+              reclaimPolicy: Delete
+              allowVolumeExpansion: true
+              parameters:
+                imageFormat: "2"
+                imageFeatures: layering
+                csi.storage.k8s.io/fstype: ext4
+
+        # CephFS / object store not needed for the proof — RBD block only.
+        cephFileSystems: []
+        cephObjectStores: []
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: rook-ceph
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }
