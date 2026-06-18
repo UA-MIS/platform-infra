@@ -1,0 +1,94 @@
+# cloudflared Deployment (P3, §5 ingress, D-036) — the Cloudflare Tunnel connector.
+#
+# TOPOLOGY: a token-based (remotely-managed) tunnel. cloudflared runs `tunnel run`
+# with TUNNEL_TOKEN (from the SealedSecret) and dials out to the Cloudflare edge; the
+# tunnel's PUBLIC HOSTNAME route is configured ONCE in the Cloudflare dashboard as a
+# single wildcard `*.capstone.uamishub.com -> http://traefik.kube-system.svc.cluster.local:80`.
+# All per-service routing (harbor./argocd./backstage./id.) then happens INSIDE Traefik
+# by Host header (its IngressRoutes key off PLATFORM_DOMAIN) — so there is exactly one
+# Cloudflare-side route and everything else stays in git. TLS is terminated at the
+# Cloudflare edge (Universal SSL); the edge->cloudflared leg is the encrypted tunnel,
+# and cloudflared->Traefik is plain http inside the cluster (no origin cert needed).
+#
+# HA: 2 replicas. cloudflared registers multiple connections to the edge; running 2
+# pods means a node loss / rollout never drops the tunnel.
+#
+# Image PINNED — bump deliberately (cloudflared releases often; --no-autoupdate keeps
+# the running binary fixed to this tag so a silent upstream change can't alter behavior).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudflared
+  namespace: cloudflared
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: cloudflared
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cloudflared
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cloudflared
+        platform.capstone/component: platform
+    spec:
+      # Spread the 2 replicas across nodes so a single node loss can't drop both.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: cloudflared
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: cloudflared
+          image: cloudflare/cloudflared:2025.2.0   # PINNED (no :latest) — bump deliberately
+          args:
+            - tunnel
+            - --no-autoupdate
+            # metrics/readiness endpoint (the /ready probe target below)
+            - --metrics
+            - 0.0.0.0:2000
+            - run
+          env:
+            # The tunnel token. Sourced from the SealedSecret (cloudflared-tunnel-token);
+            # cloudflared reads TUNNEL_TOKEN and needs no other credentials/config.
+            - name: TUNNEL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: cloudflared-tunnel-token
+                  key: token
+          ports:
+            - name: metrics
+              containerPort: 2000
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: 2000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 2000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

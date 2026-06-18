@@ -1,0 +1,22 @@
+# cloudflared namespace (P3, §5 ingress, D-036) — the Cloudflare Tunnel connector
+# that publishes the platform at *.capstone.uamishub.com WITHOUT opening any inbound
+# firewall port. cloudflared dials OUT to the Cloudflare edge and the edge proxies
+# public traffic back down the tunnel to the in-cluster Traefik.
+#
+# Ships via the platform-services directory generator (platform-services-appset) →
+# Application `platform-svc-cloudflared` (namespace + Deployment + the tunnel-token
+# SealedSecret all render through this kustomize dir).
+#
+# pod-security: RESTRICTED. cloudflared runs as an unprivileged process — no host
+# mounts, no extra caps, no privilege escalation — so the strictest PSA profile fits
+# and documents that this connector is NOT a privileged escape surface even though it
+# bridges to the public internet.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cloudflared
+  labels:
+    platform.capstone/component: platform
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
