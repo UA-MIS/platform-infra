@@ -43,6 +43,20 @@ spec:
         crds:
           enabled: true               # ship the Ceph CRDs with the operator (wave 0)
         csi:
+          # ⚠ USE THE CLASSIC CSI DRIVER, NOT THE CSI-OPERATOR (v1.20.1 fix).
+          # The v1.20.1 rook-ceph chart DEFAULTS `installCsiOperator: true`, which
+          # installs the ceph-csi-operator subchart (ceph-csi-controller-manager +
+          # Driver/CephConnection/ClientProfile CRDs). In our 1.20.1 + ceph-csi-operator
+          # 1.0.1 combo that operator reconciled the ClientProfile/CephConnection but
+          # NEVER created the RBD `Driver` CR → no csi-rbdplugin-provisioner / -rbdplugin
+          # pods, `kubectl get csidrivers` empty → EVERY ceph-block PVC stuck Pending
+          # ("verify that the provisioner is running") → Harbor + all stateful svcs dead.
+          # Setting this false drops the operator subchart and lets the ROOK operator
+          # deploy the classic csi-rbdplugin-provisioner Deployment + csi-rbdplugin
+          # DaemonSet directly (auto-enabled when the CephCluster CR appears) — the
+          # stable, proven provisioning path. (The CSI-operator becomes mandatory in a
+          # later Rook release; revisit + migrate deliberately when we bump.)
+          installCsiOperator: false
           # Talos: kubelet dir differs from the default — Rook auto-detects, but pin
           # it explicit so a kubelet-path change can't silently break CSI mounts.
           kubeletDirPath: /var/lib/kubelet
