@@ -95,6 +95,18 @@ data:
         redirectURIs:
           # Harbor's OIDC callback (server URL + /c/oidc/callback).
           - https://harbor.capstone.uamishub.com/c/oidc/callback
+      # Backstage "Relay" (P5) — developer-portal SSO via the SAME broker (NO new
+      # GitHub OAuth app). Backstage fetches Dex discovery SERVER-SIDE at
+      # id.capstone.uamishub.com (in-cluster via the coredns-custom rewrite -> Traefik
+      # -> Dex, slice-1 pattern, reused). Same self-signed-CA caveat as ArgoCD/Harbor.
+      # ⚠ The RELAY_CLIENT_SECRET env (deployment.yaml) needs a `relay-client-secret`
+      #   key added to the dex-github SealedSecret — RE-SEAL before go-live (README).
+      - id: relay
+        name: Relay
+        secretEnv: RELAY_CLIENT_SECRET
+        redirectURIs:
+          # Backstage OIDC callback (baseUrl + /api/auth/oidc/handler/frame).
+          - https://relay.capstone.uamishub.com/api/auth/oidc/handler/frame
 
     oauth2:
       # Skip the per-login "approve this app" screen — these are first-party
