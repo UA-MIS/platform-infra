@@ -1,0 +1,13 @@
+# Storage note (P4) — SINGLE-DISK nodes (live finding 2026-06-16).
+# The 7080 Micro has only ONE disk: nvme0n1 (512GB), and the OS installs to it
+# (installDisk: /dev/nvme0n1 in talconfig.yaml). There is NO separate raw disk for
+# Ceph, so the PROOF storage class is local-path-provisioner (runbook §D2 Step 7);
+# Ceph-on-a-partition is the documented HA upgrade.
+#
+# This is a NO-OP machine patch kept only to document that contract + guard against
+# someone re-adding a "reserve a 2nd disk for Ceph" assumption that doesn't hold on
+# single-disk hardware. (If a node ever gets a 2nd physical disk, Ceph claims THAT;
+# until then, local-path on nvme0n1's filesystem.)
+machine:
+  # (no-op) — storage is local-path for the proof; no dedicated Ceph disk exists.
+  {}

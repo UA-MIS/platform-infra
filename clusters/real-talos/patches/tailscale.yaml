@@ -1,0 +1,31 @@
+# Tailscale-everywhere overlay (P4, FALLBACK branch — Step-0 probe FAIL = UDP
+# blocked, so WireGuard rides Tailscale's DERP/TCP-443 relays). Used INSTEAD OF
+# kubespan.yaml (toggle in talconfig.yaml). The siderolabs/tailscale extension is
+# already baked into the image (Deliverable 1), so switching to this branch needs
+# NO re-imaging — just flip the patch + re-apply machine config.
+#
+# The Tailscale extension runs as a Talos extension service, configured via
+# ExtensionServiceConfig. It needs an AUTH KEY — generate a reusable, pre-approved,
+# ephemeral=false tailnet auth key and store it in talsecret.sops.yaml / a sealed
+# value; DO NOT commit it in plaintext. Replace ${TS_AUTHKEY} via sops/talhelper.
+#
+# With Tailscale as the overlay, the apiserver endpoint in talconfig.yaml is the
+# node's Tailscale 100.x IP (not a KubeSpan address).
+apiVersion: v1alpha1
+kind: ExtensionServiceConfig
+name: tailscale
+environment:
+  - TS_AUTHKEY=${TS_AUTHKEY}          # envsubst'd by talhelper from the ENCRYPTED env file talenv.sops.yaml — never git plaintext
+  # ⚠ NO shell substitution here. talhelper's envsubst only expands ${VAR}, NOT
+  # $(...). The old `TS_EXTRA_ARGS=--hostname=$(hostname)` passed a literal/mangled
+  # `$(hostname)` to `tailscale up` → exit 1 ("must start with a number" / newline)
+  # → ext-tailscale failed to auth (box-3 2026-06-17). FIX: drop the shell-sub.
+  #   - Hostname: OMITTED on purpose — tailscale registers under the node's OS
+  #     hostname, which Talos sets PER-NODE from the machine config (capstone-n1/2/3),
+  #     so each node gets the right tailnet name with NO per-node value here. (To
+  #     force it, set TS_HOSTNAME via a per-node `nodes[].patches` entry, not here.)
+  #   - TS_EXTRA_ARGS holds STATIC flags only (--accept-routes); no shell.
+  #   - TS_ROUTES left empty for the proof (nodes just join); advertise pod+svc CIDRs
+  #     here later if the tailnet needs to reach cluster services.
+  - TS_ROUTES=
+  - TS_EXTRA_ARGS=--accept-routes

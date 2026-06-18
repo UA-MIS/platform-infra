@@ -1,0 +1,20 @@
+# KubeSpan overlay (P4, default branch — Step-0 probe PASS = UDP/WireGuard works).
+# Talos-native WireGuard mesh between nodes; peer discovery via the PUBLIC Sidero
+# discovery service (discovery.talos.dev) — the KubeSpan path the human approved.
+# No extra dependency vs Tailscale. WireGuard is UDP/51820 (what Probe B tested).
+#
+# Cluster discovery must be enabled for KubeSpan to find peers. Public discovery
+# shares only encrypted peer metadata (IPs/public keys), not workload data.
+machine:
+  network:
+    kubespan:
+      enabled: true
+cluster:
+  discovery:
+    enabled: true
+    registries:
+      service:
+        # Public Sidero discovery (discovery.talos.dev) — KubeSpan peer exchange.
+        endpoint: https://discovery.talos.dev/
+      kubernetes:
+        disabled: true

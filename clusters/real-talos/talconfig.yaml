@@ -1,0 +1,118 @@
+# Phase-4 real cluster — Talos via talhelper (D-035/§3.4, ADR-017).
+# 3 CONVERGED OptiPlex 7080s: each is control-plane (etcd quorum=3) AND UNTAINTED
+# so it also runs workloads. No LAN VIP — the apiserver endpoint is node-1's TAILSCALE
+# 100.x (overlay = Tailscale-everywhere, architect-resolved). Storage = local-path for
+# the proof (single-disk nodes; Ceph-on-partition is the upgrade). Generate with
+# `talhelper genconfig` (reads this + talsecret.sops.yaml + $TS_AUTHKEY), then apply
+# per the runbook (docs/phase-4-runbook.md §D2).
+#
+# ⚠ FILL THE PLACEHOLDERS the human captures during bring-up:
+#   ${SCHEMATIC_ID}        — from Deliverable 1 Step 1a (factory schematic ID; or values.env).
+#   endpoint / ipAddress   — node-1's / each node's TAILSCALE 100.x, filled AFTER the box
+#                            joins the tailnet. NOT baked as static IPs (dhcp:true) — these
+#                            are only the talosconfig targets; apply uses -n <current IP>.
+#   $TS_AUTHKEY            — minted reusable tag:talos-node key, via env/sops, NEVER git.
+
+clusterName: capstone
+talosVersion: v1.13.4
+kubernetesVersion: v1.31.5            # match the k3d cluster's k8s minor (portability §6)
+
+# No VIP: the apiserver endpoint is the bootstrap node's TAILSCALE 100.x. Bring-up
+# order is 3→2→1, so box-3 (capstone-n3) is the bootstrap/etcd-init node and the
+# endpoint. (HA/multi-endpoint is a later concern; pinned to n3 for the proof.)
+endpoint: https://100.117.55.70:6443         # capstone-n3 ualaims tailnet 100.x (live 2026-06-17; old 100.127.169.30 DEAD after re-key/org-tailnet move)
+
+# apiserver cert SANs — talhelper does not guarantee auto-adding the endpoint, so
+# list every address kubectl/talosctl will hit the API on: n3's 100.x (the endpoint),
+# the .253 switch IP (in-cluster/secure apply over the LAN during bring-up), and
+# n2/n1's 100.x once they join (fill when known so a future endpoint move / direct
+# API access to them works without a cert regen).
+additionalApiServerCertSans:
+  - 100.117.55.70           # capstone-n3 ualaims tailnet (current endpoint)
+  - 10.237.171.8            # n3 LAN/switch IP (10.237.168.0/22 segment; bring-up secure apply)
+  # - N2_TAILSCALE_100_IP   # fill when box-2 joins
+  # - N1_TAILSCALE_100_IP   # fill when box-1 joins
+
+# Converged: control-plane nodes are UNTAINTED so workloads schedule on them.
+allowSchedulingOnControlPlanes: true
+
+# CNI: omitted on purpose -> Talos default = FLANNEL (on). So nodes go Ready after
+# bootstrap with working pod networking, no extra install. (For Cilium later: set
+# cniConfig.name: none here + install Cilium post-bootstrap; nodes are NotReady until
+# the CNI is up. Not doing that for the proof.)
+
+# INSTALLER IMAGE — pinned to the 8957 schematic (tailscale + iscsi-tools +
+# util-linux-tools + intel-ucode) via a LITERAL `talosImageURL` set PER NODE (see each
+# nodes[] entry below). TWO hard-won rules (talhelper 3.1.11, verified by genconfig):
+#   1. `schematic:`/`talosImageURL` MUST be NODE-LEVEL (a $defs/Node property). A
+#      TOP-LEVEL `schematic:` block is SILENTLY IGNORED → talhelper POSTs an EMPTY
+#      schematic → install.image = 376567… (zero extensions → NO tailscale → the
+#      box-3 nightmare). That top-level block is what shipped the regression.
+#   2. The URL must NOT carry the `:vX.Y.Z` version/digest — talhelper appends
+#      `:{talosVersion}` itself; a version suffix fails validate ("should not contains
+#      version or digest"). So: bare `factory.talos.dev/metal-installer/<ID>`.
+# (A node-level `schematic:` block ALSO works but content-hashes to the EXACT extension
+# set/order you list — which did NOT reproduce 8957 here — so the LITERAL pinned ID is
+# the deterministic choice. Verified: genconfig → install.image=8957…:v1.13.4 on all 3.)
+
+# ⚠ DUAL-DISK NODES (live 2026-06-17): every 7080 has nvme0n1 (512GB)=Talos OS
+# (installDisk) AND a 500GB sata SSD (sda)=dedicated RAW Ceph OSD, left untouched by
+# Talos for Rook (replica-3, D-037). BIOS must be AHCI (not RAID) for Talos to see nvme0n1.
+#
+# ⚠ NODE ADDRESSING (DHCP + Tailscale) — `ipAddress` is NOT baked as a static IP.
+# The interface is `dhcp: true`, so each node gets its IP from DHCP; talhelper uses
+# `ipAddress` ONLY as the default endpoint/node written into the generated talosconfig
+# (how `talosctl` reaches the node by default). The MACHINE config is IDENTICAL
+# regardless — so the transient maintenance DHCP IPs DON'T need to be pinned here.
+# At apply time you OVERRIDE the target with `-n <current-maint-ip>` (see runbook
+# §D2 one-at-a-time flow). Set `ipAddress` to each node's STABLE post-install address
+# = its TAILSCALE 100.x (filled after the box joins the tailnet); until then the
+# placeholder is fine because `-n` at apply wins. (talhelper requires the field to be
+# present, hence placeholders — they do not end up as static IPs on the nodes.)
+nodes:
+  - hostname: capstone-n1
+    ipAddress: N1_TAILSCALE_100_IP     # STABLE talosconfig target (n1 100.x); NOT baked. Apply with -n <current maint IP, e.g. 10.237.26.254>
+    controlPlane: true
+    talosImageURL: factory.talos.dev/metal-installer/8957336bb929170959e3afc61b9088e41cb072988407edd699b9b3deb4a26972   # 8957 schematic (NO :version — talhelper appends it)
+    installDisk: /dev/nvme0n1          # OS disk (512GB nvme); n1's 500GB sata SSD (sda) is left raw for Ceph
+    networkInterfaces:
+      # ⚠ DO NOT hardcode an interface NAME — the 7080's NIC is a PREDICTABLE name
+      # (Intel i219 => enp0s31f6 / eno1, NOT eth0). Naming a non-existent `eth0`
+      # configured a phantom iface, the real NIC lost DHCP, and the node went
+      # offline -> couldn't pull the installer -> never installed (box-3 outage
+      # 2026-06-16). Match the single ONBOARD NIC by SELECTOR instead:
+      - deviceSelector:
+          physical: true               # the one physical NIC, any predictable name/driver (portable)
+        dhcp: true                     # DHCP underlay (Tailscale overlay rides on top)
+  - hostname: capstone-n2
+    ipAddress: N2_TAILSCALE_100_IP     # fill post-join; apply with -n <n2 current maint IP>
+    controlPlane: true
+    talosImageURL: factory.talos.dev/metal-installer/8957336bb929170959e3afc61b9088e41cb072988407edd699b9b3deb4a26972   # 8957 schematic (NO :version — talhelper appends it)
+    installDisk: /dev/nvme0n1          # OS disk; n2's 500GB sata SSD (sda) is left raw for Ceph
+    networkInterfaces:
+      - deviceSelector:
+          physical: true
+        dhcp: true
+  - hostname: capstone-n3
+    ipAddress: 100.117.55.70      # n3 ualaims tailnet 100.x (live) = talosconfig target + the endpoint. Secure re-apply with -n 100.117.55.70 (or -e 10.237.171.8 LAN).
+    controlPlane: true
+    talosImageURL: factory.talos.dev/metal-installer/8957336bb929170959e3afc61b9088e41cb072988407edd699b9b3deb4a26972   # 8957 schematic (NO :version — talhelper appends it)
+    installDisk: /dev/nvme0n1          # OS disk; n3's 500GB sata SSD (sda=WDC WDS500G2B0A) is left raw for Ceph
+    networkInterfaces:
+      - deviceSelector:
+          physical: true
+        dhcp: true
+
+# ---- cluster-wide patches ---------------------------------------------------
+patches:
+  # OVERLAY = TAILSCALE-everywhere (DEFAULT, architect-resolved). The tailscale ext
+  # service authenticates with the Step-0 auth key (TS_AUTHKEY via sops). KubeSpan
+  # is a DOCUMENTED ALTERNATIVE ONLY (it can't relay) — to use it instead, comment
+  # the tailscale patch + uncomment kubespan, but that's not the chosen path.
+  - "@./patches/tailscale.yaml"
+  # - "@./patches/kubespan.yaml"      # <- ALT ONLY (no DERP relay); not the chosen overlay
+
+  # Single-disk storage note (no-op patch). Nodes are single-disk (OS on nvme0n1),
+  # so storage = local-path for the proof; Ceph-on-partition (or the n2/n3 free SATA)
+  # is the documented upgrade. See the patch file + runbook §D2 Step 7.
+  - "@./patches/ceph-nvme.yaml"

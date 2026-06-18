@@ -1,0 +1,39 @@
+# SOPS creation rules (P4 leak remediation, B2 root-cause fix, D-040).
+# This file is COMMITTED on purpose — it contains only PUBLIC age recipients, never
+# a private key. It is what was MISSING when the leak happened: `talsecret.sops.yaml`
+# was named `.sops` but there was no rule telling sops which key to encrypt with, so
+# `sops -e` was never wired in and the file shipped PLAINTEXT (etcd/k8s/aggregator CA
+# private keys + SA/OS keys, world-readable on a public repo). With this file present,
+# `sops -e -i clusters/real-talos/talsecret.sops.yaml` "just works" and encrypts to
+# the recipient below — and the runbook makes that step mandatory + verified.
+#
+# ── HOW TO FILL THE RECIPIENT (one-time, human/operator) ──────────────────────────
+#   age-keygen -o ~/.config/sops/age/keys.txt      # generates the keypair
+#   # → prints "Public key: age1….."  ← paste THAT (the PUBLIC key) below.
+# The PRIVATE key in ~/.config/sops/age/keys.txt is a SECRET:
+#   - gitignored (never commit it),
+#   - stored in the HANDOFF VAULT alongside the `ualaims` credentials — the next
+#     cohort needs it to decrypt talsecret/talenv (continuance requirement).
+# `sops`/`talhelper genconfig` find the private key automatically via
+# SOPS_AGE_KEY_FILE or the default ~/.config/sops/age/keys.txt.
+#
+# Add a SECOND `age:` recipient (comma-separated) for a break-glass key when one
+# exists — multiple recipients can each decrypt independently.
+creation_rules:
+  # ⚠ path_regex matches the path AS sops SEES IT (relative to cwd). The runbook does
+  # `cd clusters/real-talos` then `sops -e -i talsecret.sops.yaml`, so the path is the
+  # BARE basename — anchor on the basename (no dir prefix) so the rule matches whether
+  # you run sops from the repo root OR from inside clusters/real-talos.
+  #
+  # Talos cluster secrets (CA/SA/OS private keys, bootstrap token, secretbox key).
+  # Replace the placeholder with the bare age1… PUBLIC key (no quotes, no inline
+  # comment — sops reads the WHOLE value as the recipient; a trailing comment or a
+  # folded `>-` scalar corrupts it → "invalid recipient encoding").
+  - path_regex: (^|/)talsecret\.sops\.ya?ml$
+    age: age1ad2tla3wd2fzz8v6wdwedkykt6xt5lfhg538l9ffz3j963w6mqnsdahpnw
+
+  # Talos env secrets (TS_AUTHKEY etc.) IF the operator chooses to commit them
+  # encrypted as talenv.sops.yaml instead of keeping a local-only talenv.yaml.
+  # (Same PUBLIC key, or a distinct one — comma-separate multiple recipients.)
+  - path_regex: (^|/)talenv\.sops\.ya?ml$
+    age: age1ad2tla3wd2fzz8v6wdwedkykt6xt5lfhg538l9ffz3j963w6mqnsdahpnw

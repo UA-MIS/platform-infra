@@ -6,8 +6,10 @@ everything in it. This is the **platform-engineer-owned** half of the platform
 [`artifacts/design/phase-1-architecture.md`](../artifacts/design/phase-1-architecture.md).
 
 > **Generalize-then-instantiate.** Every primitive is written for *N* teams and
-> parameterized by three variables. Porting to the real k3s cluster (Phase 4) is
-> "fill `clusters/real-k3s/values.env` + re-point ArgoCD", not a rewrite (§6).
+> parameterized by three variables. Porting to the real Talos cluster (Phase 4,
+> D-024/ADR-017 — upstream k8s) is "fill `clusters/real-talos/values.env` + re-point
+> ArgoCD", not a rewrite (§6). (The cluster substrate is Talos, not k3s — only the
+> node OS/control-plane differs; tenants/AppProjects/ApplicationSets/netpols port unchanged.)
 
 ## Layout
 
@@ -19,7 +21,8 @@ platform-infra/
 │   ├── local-k3d/                #   Phase 1 (k3d)
 │   │   ├── k3d-config.yaml        #     cluster shape: 1 server + 1 agent, registry, LB 80/443
 │   │   └── values.env             #     PLATFORM_DOMAIN / REGISTRY / GITHUB_ORG / CLUSTER_NAME
-│   └── real-k3s/                  #   Phase 4 stub (same keys, placeholder values)
+│   ├── real-talos/               #   Phase 4 — Talos via talhelper (talconfig + patches + values) [D-024/ADR-017]
+│   └── real-k3s/                  #   SUPERSEDED stub -> redirects to real-talos
 ├── bootstrap/                    # what a human applies ONCE (ArgoCD + root app) — T3
 ├── platform-services/            # ArgoCD-managed cluster services — T4
 ├── tenants/                      # multi-tenancy: one dir per team — T7

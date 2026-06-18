@@ -1,0 +1,28 @@
+# Talos secrets + machine-generated credentials — NEVER commit unencrypted (public repo).
+# These hold LIVE secrets: Tailscale auth key, cluster CA private keys, admin key.
+# Keep them ONLY on the operator's workstation (talenv/talsecret) — they're inputs
+# talhelper reads at genconfig time. The generated machine configs + talosconfig +
+# kubeconfig are derived credentials and equally secret.
+talenv.yaml
+talsecret.yaml
+kubeconfig
+
+# age PRIVATE key — the new linchpin secret (decrypts talsecret/talenv). Gitignored +
+# stored in the handoff vault. (Default sops location is ~/.config/sops/age/keys.txt,
+# outside the repo; this guards against a stray copy landing in the cluster dir.)
+*.agekey
+age-key.txt
+keys.txt
+
+# talsecret.sops.yaml / talenv.sops.yaml stay IGNORED until PROVEN sops-encrypted.
+# Once the .sops.yaml recipient is filled + `sops -e -i` has run — verify the file has
+# ENC[…] values + a `sops:` stanza AND `grep -iE 'BEGIN .*PRIVATE KEY|tskey-auth-'`
+# finds NOTHING — the ENCRYPTED file MAY be committed with `git add -f`. Keeping them
+# ignored by DEFAULT is the safety net: an un-encrypted talsecret/talenv can never be
+# committed by accident — that was the B2 leak.
+talsecret.sops.yaml
+talenv.sops.yaml
+
+# NOTE: the rendered talhelper output (clusterconfig/capstone-*.yaml + talosconfig)
+# is already ignored by clusters/real-talos/clusterconfig/.gitignore — those carry
+# the same CA material and must also stay out of git.
