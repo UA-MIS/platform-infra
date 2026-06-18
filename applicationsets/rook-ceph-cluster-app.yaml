@@ -23,7 +23,9 @@
 # existing FS/partition table. Each disk must be zapped first (runbook §D2 Step 7,
 # human-gated destructive step). Until zapped, the OSD silently never appears.
 #
-# Chart: rook-ceph-cluster v1.20.1 (Ceph v20.2.1). Pin; bump deliberately.
+# Chart: rook-ceph-cluster v1.19.7 (Ceph v20.x). Version-matched to the operator
+# chart (rook-ceph-operator-app.yaml is v1.19.7 — see its header for why NOT v1.20:
+# the v1.20 chart dropped the classic in-operator CSI driver). Pin; bump deliberately.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -40,7 +42,7 @@ spec:
   source:
     repoURL: https://charts.rook.io/release
     chart: rook-ceph-cluster
-    targetRevision: v1.20.1
+    targetRevision: v1.19.7      # version-matched to the operator chart (NOT v1.20 — see header)
     helm:
       releaseName: rook-ceph-cluster
       values: |
