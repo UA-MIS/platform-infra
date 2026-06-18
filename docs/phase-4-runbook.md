@@ -351,6 +351,79 @@ AFTER this, per the team lead.
 > its WWN + re-syncing once the disk is present. local-path-provisioner is the
 > last-resort non-replicated stopgap only if no raw disk is usable on any node.
 
+### Step 8 — land the platform (ArgoCD + app-of-apps) on the real cluster
+**PRE-REQ: Step 7 Ceph `HEALTH_OK` + `ceph-block` default StorageClass.** Harbor / Dex /
+ARC PVCs land on ceph-block, so storage must be green first. Run from a worktree that
+has the merged platform-infra (the `p4/rook-ceph-storage` content), with the Talos
+kubeconfig:
+```fish
+set -x KUBECONFIG /home/ccsmith33/Projects/Capstone-Modernization/.wt-talos/clusters/real-talos/talos-kubeconfig
+kubectl config get-contexts                       # confirm the context is admin@capstone (cluster capstone), NOT k3d-*
+```
+
+**8a — repo base.** The manifests' repoURLs point at `github.com/UA-MIS/platform-infra`.
+If that IS the real GitOps home for the Talos cluster, **skip `make set-repo-base`**
+(no-op). Only run it if the cluster pulls from a different base — set `GIT_BASE_URL` in
+`clusters/real-talos/values.env` first, then `make set-repo-base TARGET=real-talos`.
+(Also fill `PLATFORM_DOMAIN` + `REGISTRY` in that values.env before Harbor's ingress
+comes up — they're still `REPLACE_ME` placeholders; not bootstrap-blocking but Harbor's
+ingress host needs them.)
+
+**8b — install ArgoCD + the app-of-apps root (KUBE_CONTEXT override).** The Makefile
+defaults to the k3d context; override it for Talos:
+```fish
+make bootstrap TARGET=real-talos KUBE_CONTEXT=admin@capstone \
+  KUBECONFIG=/home/ccsmith33/Projects/Capstone-Modernization/.wt-talos/clusters/real-talos/talos-kubeconfig
+# installs ArgoCD v3.4.3, applies the platform AppProject + root-app; the root-app
+# recurse then fans in platform-services + the Helm apps (Rook adopts its existing
+# Helm releases by name, metrics-server, Harbor, Dex, ARC).
+```
+
+**8c — sealed-secrets sealing-key migration (DESTRUCTIVE-ADJACENT, SECURITY-GATED).**
+The 5 committed SealedSecrets (harbor-admin, harbor-oidc, argocd-config/Dex SSO,
+arc-github-app) were sealed against the **k3d** sealed-secrets controller's keypair. A
+fresh Talos controller generates a NEW keypair, so those SealedSecrets will NOT decrypt
+there until the OLD private key is migrated in. **Migrate** (keeps all committed
+SealedSecrets valid — no re-seal):
+```fish
+# ⚠ The exported secret IS the cluster's PRIVATE sealing key — same sensitivity class
+#   as talsecret / the cluster CA. /tmp only, NEVER commit, shred after import.
+#   SECURITY REVIEWS this step before the human runs it.
+
+# 1) export the active sealing key from the k3d cluster (still up):
+kubectl --context k3d-capstone -n kube-system \
+  get secret -l sealedsecrets.bitnami.com/sealed-secrets-key -o yaml > /tmp/ss-key.yaml
+
+# 2) import it into the Talos cluster (after the sealed-secrets app has synced in 8b):
+kubectl --context admin@capstone apply -f /tmp/ss-key.yaml
+
+# 3) restart the Talos controller so it loads the migrated key:
+kubectl --context admin@capstone -n kube-system rollout restart deploy sealed-secrets-controller
+kubectl --context admin@capstone -n kube-system rollout status  deploy sealed-secrets-controller
+
+# 4) SHRED the exported private key immediately:
+shred -u /tmp/ss-key.yaml    # or: rm -P /tmp/ss-key.yaml
+```
+Then verify the SealedSecrets decrypt (the underlying Secrets get created):
+```fish
+kubectl --context admin@capstone -n harbor get secret harbor-admin          # EXPECT: exists
+kubectl --context admin@capstone -n argocd get secret argocd-dex-server      # (or the Dex SSO secret name)
+kubectl --context admin@capstone get sealedsecret -A                         # EXPECT: all Synced, no decrypt errors
+```
+> **If k3d is gone / the key is lost:** you cannot migrate — RE-SEAL instead. Recreate
+> each plaintext source Secret, `make seal SECRET=… NS=… KUBE_CONTEXT=admin@capstone`
+> against the new controller, and re-commit all 5 SealedSecrets. More work + needs all
+> 5 plaintext sources in hand.
+
+**8d — verify the fleet is green.**
+```fish
+kubectl --context admin@capstone -n argocd get applications      # EXPECT: all Synced/Healthy
+# (intentional exception: platform-netpol-controlplane stays OutOfSync — SEC-011 manual gate)
+kubectl --context admin@capstone get pvc -A                      # Harbor/etc PVCs Bound on ceph-block
+```
+**GATE: platform fleet green on ceph-block storage.** AFTER this: netpol CIDR re-param
+for the overlay ranges (security-gated) + the DB tier, per the team lead.
+
 ---
 
 ### Troubleshooting quick-refs
