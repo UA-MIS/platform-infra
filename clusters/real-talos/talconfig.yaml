@@ -39,10 +39,16 @@ additionalApiServerCertSans:
 # Converged: control-plane nodes are UNTAINTED so workloads schedule on them.
 allowSchedulingOnControlPlanes: true
 
-# CNI: omitted on purpose -> Talos default = FLANNEL (on). So nodes go Ready after
-# bootstrap with working pod networking, no extra install. (For Cilium later: set
-# cniConfig.name: none here + install Cilium post-bootstrap; nodes are NotReady until
-# the CNI is up. Not doing that for the proof.)
+# CNI = Cilium (D-036 / netpol-enforcement). Talos installs NO CNI (cniConfig.name:none)
+# and we disable kube-proxy (patches/cilium-proxy-disable.yaml) — Cilium provides both
+# (eBPF dataplane + kubeProxyReplacement). This replaces the Phase-1 flannel default,
+# which had NO NetworkPolicy backend (every netpol was inert). ⚠ nodes are NotReady
+# until Cilium is installed post-apply (helm) — that's expected; see
+# docs/cilium-cni-runbook.md for the node-1-first sequence + the Tailscale/eBPF
+# hostLegacyRouting gotcha + the deny-test. Pod/service CIDRs are UNCHANGED (Talos
+# defaults 10.244.0.0/16 / 10.96.0.0/12; not pinned here so they stay default).
+cniConfig:
+  name: none            # Talos installs no CNI — Cilium does (post-bootstrap helm install)
 
 # INSTALLER IMAGE — pinned to the 8957 schematic (tailscale + iscsi-tools +
 # util-linux-tools + intel-ucode) via a LITERAL `talosImageURL` set PER NODE (see each
@@ -120,3 +126,8 @@ patches:
   # declare the sata disk so Rook can claim the whole device. See the patch file +
   # applicationsets/rook-ceph-*-app.yaml + runbook §D2 Step 7.
   - "@./patches/ceph-nvme.yaml"
+
+  # Disable kube-proxy — Cilium runs in kubeProxyReplacement mode (eBPF). Pairs with
+  # cniConfig.name:none above. Cluster-config patch (cluster.proxy.disabled). See
+  # docs/cilium-cni-runbook.md.
+  - "@./patches/cilium-proxy-disable.yaml"
