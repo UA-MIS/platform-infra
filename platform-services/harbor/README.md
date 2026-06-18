@@ -7,7 +7,8 @@ swap. At `https://harbor.127-0-0-1.sslip.io` (wildcard TLS via Traefik).
 
 - Chart: `harbor` **v1.19.1** (pinned), Helm-source Application
   `applicationsets/harbor-app.yaml` (deploy method A — see below).
-- Storage: `local-path` (Phase-2). Ceph is Phase-4.
+- Storage: `ceph-block` (Phase-4 Rook RBD, replica-3, the cluster default SC). Was
+  `local-path` (k3d/Phase-2) — that SC is absent on Talos, so the Phase-4 switch is now wired in.
 - Bundled postgres + redis (Phase-2 local). External DB is Phase-4.
 - Prereqs (ns + SealedSecrets) sync via the platform-services-appset (this dir);
   the chart installs into the `harbor` namespace as a separate Application.

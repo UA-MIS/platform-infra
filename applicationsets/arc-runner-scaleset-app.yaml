@@ -58,12 +58,14 @@ spec:
         # --- containerMode KUBERNETES: workflow job steps run as separate K8s PODS,
         #     NO dind, NO docker socket, NOT privileged — the rootless model Kaniko
         #     needs + the isolation foundation. Job pods get an ephemeral work PVC
-        #     (local-path on k3d; cleared per job). ---
+        #     (ceph-block = the cluster default RBD SC; was local-path/k3d which is
+        #     absent on Talos -> the PVC would hang Pending and no runner could start;
+        #     RWO, cleared per job). ---
         containerMode:
           type: "kubernetes"
           kubernetesModeWorkVolumeClaim:
             accessModes: ["ReadWriteOnce"]
-            storageClassName: "local-path"
+            storageClassName: "ceph-block"
             resources:
               requests:
                 storage: "5Gi"
