@@ -15,7 +15,22 @@
 # Talos; iscsi-tools + util-linux-tools are baked into the node image schematic
 # (clusters/real-talos/talconfig.yaml), so no host-side LVM/module install is needed.
 #
-# Chart: rook-ceph (operator) v1.20.1 (Ceph v20.2.1). Pin; bump deliberately.
+# Chart: rook-ceph (operator) v1.19.7 (Ceph v20.x). Pin; bump deliberately.
+# ⚠ PINNED TO v1.19.x (NOT v1.20.x) ON PURPOSE — CSI driver deployment model:
+# v1.20 REMOVED the classic in-operator CSI driver from this chart; in v1.20 "CSI
+# drivers are admin-managed via the ceph-csi-operator, and Rook no longer deploys
+# them" (Rook v1.20 breaking-changes). v1.20.1 left CSI half-wired: the chart installs
+# the ceph-csi-operator subchart (controller-manager + CRDs) but neither sets
+# ROOK_USE_CSI_OPERATOR nor ships the Driver CR, so NO RBD provisioner ever deploys
+# (live symptom: operator-config had only 8 keys, zero CSI_*; every ceph-block PVC
+# stuck Pending "verify that the provisioner is running"). Using the v1.20 operator
+# path would require a SEPARATE `ceph-csi-drivers` chart (Driver/OperatorConfig CRs).
+# v1.19.7 keeps the CLASSIC driver: `csi.enableRbdDriver: true` (default) → the Rook
+# operator renders the full CSI block into rook-ceph-operator-config (~48 keys incl.
+# ROOK_CSI_ENABLE_RBD) and deploys csi-rbdplugin-provisioner + csi-rbdplugin itself —
+# the stable, single-chart path. Revisit the CSI-operator migration deliberately when
+# we move to v1.20+ (it becomes mandatory there). The cluster chart is pinned to the
+# SAME v1.19.7 (version-matched).
 # Root-app recurses applicationsets/, so this Application is registered.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
@@ -33,7 +48,7 @@ spec:
   source:
     repoURL: https://charts.rook.io/release
     chart: rook-ceph
-    targetRevision: v1.20.1             # pinned chart version (no ^/~/latest)
+    targetRevision: v1.19.7             # pinned chart version (no ^/~/latest) — see header for WHY not v1.20
     helm:
       releaseName: rook-ceph
       values: |
@@ -43,6 +58,21 @@ spec:
         crds:
           enabled: true               # ship the Ceph CRDs with the operator (wave 0)
         csi:
+          # v1.19.7 ships the CLASSIC in-operator CSI driver, ON by default
+          # (enableRbdDriver / enableCephfsDriver true). The Rook operator renders the
+          # full CSI block into rook-ceph-operator-config (ROOK_CSI_ENABLE_RBD etc.) and
+          # deploys csi-rbdplugin-provisioner + csi-rbdplugin directly when it reconciles
+          # the CephCluster CR — no ceph-csi-operator, no separate Driver CR. (See the
+          # header for why we did NOT take the v1.20 ceph-csi-operator path.)
+          #
+          # v1.19.7 ALSO bundles the ceph-csi-operator subchart (gated on
+          # csi.rookUseCsiOperator). Turn it OFF so we get ONLY the classic driver and
+          # NOT an idle ceph-csi-controller-manager. Result (verified in the render):
+          # operator-config = 49 keys incl. ROOK_CSI_ENABLE_RBD:true +
+          # ROOK_USE_CSI_OPERATOR:false; no controller-manager Deployment.
+          rookUseCsiOperator: false    # classic driver only; no ceph-csi-operator subchart
+          enableRbdDriver: true        # explicit (chart default) — the RBD provisioner the ceph-block SC needs
+          enableCephfsDriver: false    # RBD block only for the proof; no CephFS RWX yet
           # Talos: kubelet dir differs from the default — Rook auto-detects, but pin
           # it explicit so a kubelet-path change can't silently break CSI mounts.
           kubeletDirPath: /var/lib/kubelet
