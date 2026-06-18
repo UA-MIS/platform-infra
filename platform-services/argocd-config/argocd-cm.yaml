@@ -40,6 +40,31 @@ metadata:
     app.kubernetes.io/part-of: argocd
     platform.capstone/component: platform
 data:
+  # --- Ingress health override (P3 fix) ---------------------------------------
+  # ArgoCD's BUILT-IN Ingress health check reports Healthy only once the Ingress has
+  # `.status.loadBalancer.ingress` populated — i.e. a cloud LB / MetalLB writes an
+  # address back. On THIS cluster (Talos + the bundled Traefik, no cloud-LB/MetalLB;
+  # public traffic arrives via the Cloudflare Tunnel) Traefik never writes a LB
+  # address to Ingress status, so EVERY Ingress sits Progressing forever. That hung
+  # the wave-based sync of `platform-svc-dex` AT the Ingress wave and it NEVER applied
+  # the Dex Deployment (Deployment/dex = OutOfSync, zero pods, SSO down) — the app's
+  # operation stuck "waiting for healthy state of networking.k8s.io/Ingress/dex".
+  # Override: an Ingress with rules is Healthy (Traefik routes by Host header
+  # regardless of LB status). This is a `resource.customizations.*` key — co-managed
+  # with the install's other resource.customizations via SSA (a NEW distinct key, no
+  # conflict) and SEPARATE from the ui.*/oidc.* keys, so it does NOT touch the
+  # wipe-gotcha surface. Applies cluster-wide (unblocks dex + any future Ingress).
+  resource.customizations.health.networking.k8s.io_Ingress: |
+    hs = {}
+    if obj.spec ~= nil and obj.spec.rules ~= nil and #obj.spec.rules > 0 then
+      hs.status = "Healthy"
+      hs.message = "Ingress has routing rules (Traefik routes by Host; no cloud-LB address expected on this tunnel-fronted cluster)"
+      return hs
+    end
+    hs.status = "Progressing"
+    hs.message = "Waiting for Ingress rules"
+    return hs
+
   url: https://argocd.127-0-0-1.sslip.io
 
   # ArgoCD-server fetches the issuer's discovery doc SERVER-SIDE over the in-cluster
