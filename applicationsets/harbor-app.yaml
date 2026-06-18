@@ -9,8 +9,8 @@
 # declarative in git below (method-portable: the same values block feeds a
 # kustomize helmCharts: inflation if we pivot to method B).
 #
-# Chart: harbor v1.19.1 (Harbor app v2.x), pinned. Storage: local-path (Phase-2;
-# Ceph is Phase-4). Bundled postgres+redis (external DB is Phase-4). OIDC: the
+# Chart: harbor v1.19.1 (Harbor app v2.x), pinned. Storage: ceph-block (Phase-4 Rook
+# RBD, the cluster default SC). Bundled postgres+redis (external DB is Phase-4). OIDC: the
 # chart exposes externalURL + serves the UI; the OIDC AUTH MODE itself is a Harbor
 # system-config applied post-install (oidc-config Job / documented) pointing at the
 # shared Dex broker — see harbor/README.md.
@@ -54,16 +54,20 @@ spec:
         existingSecretAdminPasswordKey: HARBOR_ADMIN_PASSWORD
         existingSecretSecretKey: harbor-admin     # 16-char data-encryption key
 
-        # --- Persistence: local-path (default SC); Ceph is Phase-4 ---
+        # --- Persistence: ceph-block (Phase-4 Rook RBD, the cluster default SC).
+        #     Was local-path (k3d), which does NOT exist on Talos -> every Harbor PVC
+        #     hung Pending "unbound immediate PersistentVolumeClaims" and the data
+        #     tier never started. ceph-block is replica-3 RWO RBD (survives a node
+        #     loss). ---
         persistence:
           enabled: true
           persistentVolumeClaim:
-            registry:   { storageClass: local-path, size: 20Gi }
+            registry:   { storageClass: ceph-block, size: 20Gi }
             jobservice:
-              jobLog:   { storageClass: local-path, size: 1Gi }
-            database:   { storageClass: local-path, size: 2Gi }
-            redis:      { storageClass: local-path, size: 1Gi }
-            trivy:      { storageClass: local-path, size: 5Gi }
+              jobLog:   { storageClass: ceph-block, size: 1Gi }
+            database:   { storageClass: ceph-block, size: 2Gi }
+            redis:      { storageClass: ceph-block, size: 1Gi }
+            trivy:      { storageClass: ceph-block, size: 5Gi }
 
         # --- Trivy vulnerability scanning ENABLED (scan-on-push set at project
         #     level post-install; enforce-block strength is a D-022 should-decide —
