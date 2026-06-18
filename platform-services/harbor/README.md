@@ -3,7 +3,7 @@
 Harbor is the platform's container registry: **per-team projects**, **Trivy
 scan-on-push**, **OIDC via the shared Dex broker** (NO new GitHub OAuth app).
 Replaces the Phase-1 k3d built-in registry; the `REGISTRY` variable abstracts the
-swap. At `https://harbor.127-0-0-1.sslip.io` (wildcard TLS via Traefik).
+swap. At `https://harbor.capstone.uamishub.com` (wildcard TLS via Traefik).
 
 - Chart: `harbor` **v1.19.1** (pinned), Helm-source Application
   `applicationsets/harbor-app.yaml` (deploy method A — see below).
@@ -29,7 +29,7 @@ all Phase-2 Helm services — Vault/Backstage/Grafana):
 1. **Already wired (this PR):** a `harbor` static client in Dex
    (`platform-services/dex/configmap.yaml`), its secret sealed in BOTH `dex-github`
    (`harbor-client-secret`) and `harbor-oidc` (`oidc-client-secret`) — same value.
-   Harbor-core reaches the issuer `id.127-0-0-1.sslip.io` IN-CLUSTER via the
+   Harbor-core reaches the issuer `id.capstone.uamishub.com` IN-CLUSTER via the
    existing `coredns-custom` rewrite -> Traefik -> Dex (slice-1 pattern, reused —
    no new DNS rewrite needed). Same self-signed-CA caveat as ArgoCD applies.
 2. **Post-install (Harbor system-config, NOT in the chart):** set Harbor
@@ -39,11 +39,11 @@ all Phase-2 Helm services — Vault/Backstage/Grafana):
    # admin creds from the SealedSecret:
    ADMIN=$(kubectl -n harbor get secret harbor-admin -o jsonpath='{.data.HARBOR_ADMIN_PASSWORD}' | base64 -d)
    CS=$(kubectl -n harbor get secret harbor-oidc -o jsonpath='{.data.oidc-client-secret}' | base64 -d)
-   curl -sk -u "admin:$ADMIN" -X PUT https://harbor.127-0-0-1.sslip.io/api/v2.0/configurations \
+   curl -sk -u "admin:$ADMIN" -X PUT https://harbor.capstone.uamishub.com/api/v2.0/configurations \
      -H 'Content-Type: application/json' -d '{
        "auth_mode": "oidc_auth",
        "oidc_name": "dex",
-       "oidc_endpoint": "https://id.127-0-0-1.sslip.io",
+       "oidc_endpoint": "https://id.capstone.uamishub.com",
        "oidc_client_id": "harbor",
        "oidc_client_secret": "'"$CS"'",
        "oidc_scope": "openid,profile,email,groups",
@@ -65,10 +65,10 @@ Each team gets a Harbor **project** named `<name>` (= AppProject = GitHub Team s
 project member role. Onboarding (per project, ideally a Job/Scaffolder step):
 ```
 # create the project (private):
-curl -sk -u "admin:$ADMIN" -X POST https://harbor.127-0-0-1.sslip.io/api/v2.0/projects \
+curl -sk -u "admin:$ADMIN" -X POST https://harbor.capstone.uamishub.com/api/v2.0/projects \
   -H 'Content-Type: application/json' -d '{"project_name":"<name>","metadata":{"public":"false","auto_scan":"true"}}'
 # map the OIDC group UA-MIS:<name> -> Developer (or Maintainer) role on <name>:
-curl -sk -u "admin:$ADMIN" -X POST https://harbor.127-0-0-1.sslip.io/api/v2.0/projects/<name>/members \
+curl -sk -u "admin:$ADMIN" -X POST https://harbor.capstone.uamishub.com/api/v2.0/projects/<name>/members \
   -H 'Content-Type: application/json' -d '{"role_id":2,"member_group":{"group_name":"UA-MIS:<name>","group_type":3}}'
 ```
 `group_type:3` = OIDC group. `role_id:2` = Developer (push/pull). Mirrors the
@@ -80,11 +80,11 @@ with a robot too. Pattern: create a project-scoped robot, capture its token, wri
 a `dockerconfigjson` Secret, seal it into the team's namespace overlay:
 ```
 # create a pull robot scoped to project <name>:
-curl -sk -u "admin:$ADMIN" -X POST https://harbor.127-0-0-1.sslip.io/api/v2.0/projects/<name>/robots \
+curl -sk -u "admin:$ADMIN" -X POST https://harbor.capstone.uamishub.com/api/v2.0/projects/<name>/robots \
   -H 'Content-Type: application/json' -d '{"name":"<name>-pull","duration":-1,"permissions":[{"kind":"project","namespace":"<name>","access":[{"resource":"repository","action":"pull"}]}]}'
 # -> returns {name, secret}; build a docker config + seal into <name>-<env>:
 kubectl create secret docker-registry harbor-pull \
-  --docker-server=harbor.127-0-0-1.sslip.io \
+  --docker-server=harbor.capstone.uamishub.com \
   --docker-username='robot$<name>+<name>-pull' --docker-password='<secret>' \
   -n <name>-dev --dry-run=client -o yaml \
   | kubeseal --controller-namespace kube-system --controller-name sealed-secrets-controller \
@@ -103,8 +103,8 @@ is whether a HIGH/CRITICAL finding **BLOCKS** pull/deploy or only **WARNS**:
   dev/preview. **Human decision** on threshold + which envs.
 
 ## Validation (post-merge + post-method-confirm)
-- Harbor UI reachable over TLS at https://harbor.127-0-0-1.sslip.io; `admin` login
+- Harbor UI reachable over TLS at https://harbor.capstone.uamishub.com; `admin` login
   with the sealed password.
 - After the OIDC post-install: "LOGIN VIA OIDC PROVIDER" works (UA-MIS member).
-- `docker login harbor.127-0-0-1.sslip.io` + push a test image; Trivy scan appears.
+- `docker login harbor.capstone.uamishub.com` + push a test image; Trivy scan appears.
 - Per-team project isolation: a `<name>` member sees only project `<name>`.
