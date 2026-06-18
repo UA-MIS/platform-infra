@@ -103,10 +103,28 @@ spec:
               isDefault: true           # default SC for the cluster (PVCs land on Ceph RBD)
               reclaimPolicy: Delete
               allowVolumeExpansion: true
+              # ⚠ The CSI SECRET params are MANDATORY and MUST be listed here in full.
+              # Defining `cephBlockPools` at all replaces the chart's default pool entry
+              # (incl. its default SC parameters), and a `parameters:` block is taken
+              # wholesale (NOT merged). So if any of the csi.storage.k8s.io/*-secret-
+              # name/namespace keys are omitted, the rendered SC has NO secret refs ->
+              # the RBD provisioner fails "provided secret is empty" and NO PVC binds
+              # (live blocker 2026-06-18: the SC had only pool/clusterID/fstype/image*,
+              # missing all 4 secret pairs). These point at the rook-csi-rbd-provisioner
+              # (controller) + rook-csi-rbd-node (node) secrets the operator creates in
+              # rook-ceph. Replicated verbatim from the chart's own default ceph-block SC.
               parameters:
                 imageFormat: "2"
                 imageFeatures: layering
                 csi.storage.k8s.io/fstype: ext4
+                csi.storage.k8s.io/provisioner-secret-name: rook-csi-rbd-provisioner
+                csi.storage.k8s.io/provisioner-secret-namespace: rook-ceph
+                csi.storage.k8s.io/controller-expand-secret-name: rook-csi-rbd-provisioner
+                csi.storage.k8s.io/controller-expand-secret-namespace: rook-ceph
+                csi.storage.k8s.io/controller-publish-secret-name: rook-csi-rbd-provisioner
+                csi.storage.k8s.io/controller-publish-secret-namespace: rook-ceph
+                csi.storage.k8s.io/node-stage-secret-name: rook-csi-rbd-node
+                csi.storage.k8s.io/node-stage-secret-namespace: rook-ceph
 
         # CephFS / object store not needed for the proof — RBD block only.
         cephFileSystems: []
