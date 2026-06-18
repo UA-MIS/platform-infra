@@ -34,6 +34,15 @@ export
 endif
 CLUSTER_NAME ?= capstone
 
+# kube-context the bootstrap/reapply targets act on. Defaults to the k3d context
+# (k3d-<cluster>, unchanged for local runs). For the real Talos cluster the context
+# is `admin@capstone`, so override on the CLI together with the Talos kubeconfig, e.g.
+#   make bootstrap TARGET=real-talos KUBE_CONTEXT=admin@capstone \
+#     KUBECONFIG=clusters/real-talos/talos-kubeconfig
+# (Talos is provisioned out-of-band, so the k3d cluster-up/down targets don't apply
+# there — only bootstrap + bootstrap-reapply take this override.)
+KUBE_CONTEXT ?= k3d-$(CLUSTER_NAME)
+
 # ---- container runtime auto-detection (Docker or rootless Podman) -----------
 # If a real Docker daemon answers, use it. Otherwise (rootless Podman, detected
 # by "podman" appearing in `docker info`) fall back to the rootless Podman user
@@ -295,28 +304,31 @@ _ensure-registry-insecure:
 
 # ---- ArgoCD bootstrap (T3) -------------------------------------------------
 .PHONY: bootstrap
-bootstrap: ## (T3) Install ArgoCD + apply the platform project & app-of-apps root (idempotent)
-	@kubectl config use-context "k3d-$(CLUSTER_NAME)" >/dev/null
-	@echo "==> installing ArgoCD (pinned v3.4.3) into ns argocd..."
-	@kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+bootstrap: ## (T3) Install ArgoCD + apply the platform project & app-of-apps root (idempotent). Override KUBE_CONTEXT for non-k3d clusters.
+	@# Target KUBE_CONTEXT explicitly per-call (does NOT mutate the user's current-context).
+	@# Default k3d-$(CLUSTER_NAME); for the Talos cluster pass KUBE_CONTEXT=admin@capstone.
+	@kubectl config get-contexts "$(KUBE_CONTEXT)" >/dev/null 2>&1 \
+	  || { echo "ERROR: kube-context '$(KUBE_CONTEXT)' not found. For the Talos cluster set KUBECONFIG=clusters/real-talos/talos-kubeconfig and KUBE_CONTEXT=admin@capstone."; exit 1; }
+	@echo "==> installing ArgoCD (pinned v3.4.3) into ns argocd on context '$(KUBE_CONTEXT)'..."
+	@kubectl --context "$(KUBE_CONTEXT)" create namespace argocd --dry-run=client -o yaml | kubectl --context "$(KUBE_CONTEXT)" apply -f -
 	@# Server-side apply: ArgoCD's applicationsets CRD exceeds the 256KB limit on
 	@# the client-side `last-applied-configuration` annotation that plain
 	@# `kubectl apply` writes (fails: "metadata.annotations: Too long"). SSA stores
 	@# no such annotation. --force-conflicts lets us re-own fields on re-run, so it
 	@# stays idempotent (the canonical ArgoCD install method for this reason).
-	@kubectl apply -k bootstrap/argocd-install --server-side --force-conflicts
+	@kubectl --context "$(KUBE_CONTEXT)" apply -k bootstrap/argocd-install --server-side --force-conflicts
 	@echo "==> waiting for ArgoCD CRDs to register..."
-	@kubectl wait --for=condition=Established \
+	@kubectl --context "$(KUBE_CONTEXT)" wait --for=condition=Established \
 	  crd/applications.argoproj.io crd/appprojects.argoproj.io crd/applicationsets.argoproj.io \
 	  --timeout=120s
 	@echo "==> waiting for ArgoCD components to be Available..."
-	@kubectl -n argocd rollout status deploy/argocd-server --timeout=300s
-	@kubectl -n argocd rollout status deploy/argocd-applicationset-controller --timeout=300s
+	@kubectl --context "$(KUBE_CONTEXT)" -n argocd rollout status deploy/argocd-server --timeout=300s
+	@kubectl --context "$(KUBE_CONTEXT)" -n argocd rollout status deploy/argocd-applicationset-controller --timeout=300s
 	@echo "==> applying the platform AppProject + app-of-apps root..."
-	@kubectl apply -f bootstrap/platform-appproject.yaml
-	@kubectl apply -f bootstrap/root-app.yaml
-	@echo "bootstrap complete. Inspect:  kubectl -n argocd get applications,applicationsets"
-	@echo "  admin pw:  kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"
+	@kubectl --context "$(KUBE_CONTEXT)" apply -f bootstrap/platform-appproject.yaml
+	@kubectl --context "$(KUBE_CONTEXT)" apply -f bootstrap/root-app.yaml
+	@echo "bootstrap complete. Inspect:  kubectl --context $(KUBE_CONTEXT) -n argocd get applications,applicationsets"
+	@echo "  admin pw:  kubectl --context $(KUBE_CONTEXT) -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"
 	@echo "  ACCEPTANCE (ADV-002): once ArgoCD generates the tenant pods, run \`make verify-image-pull\`"
 	@echo "                        to assert they get PAST ImagePullBackOff (registry-mirror sanity)."
 
@@ -365,8 +377,8 @@ bootstrap: ## (T3) Install ArgoCD + apply the platform project & app-of-apps roo
 #      (restarting before re-assert would serve a wiped config = SSO down in the window).
 #   5. ASSERT oidc.config AND ui.cssurl are present live -> FAIL LOUDLY otherwise.
 .PHONY: bootstrap-reapply
-bootstrap-reapply: ## Re-apply install-owned bootstrap objects after a bootstrap/ change; force-re-asserts + verifies argocd-cm theme/SSO keys (wipe-safe)
-	@ctx="k3d-$(CLUSTER_NAME)"; \
+bootstrap-reapply: ## Re-apply install-owned bootstrap objects after a bootstrap/ change; force-re-asserts + verifies argocd-cm theme/SSO keys (wipe-safe). Override KUBE_CONTEXT for non-k3d clusters.
+	@ctx="$(KUBE_CONTEXT)"; \
 	echo "==> [0/5] stripping any stale last-applied-configuration annotation on argocd-cm (removes the CSA->SSA prune trigger)..."; \
 	kubectl --context "$$ctx" -n argocd annotate cm argocd-cm kubectl.kubernetes.io/last-applied-configuration- >/dev/null 2>&1 || true; \
 	echo "==> [1/5] re-applying bootstrap/argocd-install (server-side, force-conflicts)..."; \
