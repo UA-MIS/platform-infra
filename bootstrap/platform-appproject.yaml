@@ -45,6 +45,13 @@ spec:
     # `make bootstrap`/`make bootstrap-reapply` — re-apply after merge or the
     # platform-rook-ceph-* apps will InvalidSpecError "repo not permitted".
     - https://charts.rook.io/release    # Rook-Ceph (platform-rook-ceph-* Applications)
+    # metrics-server (P4): the Metrics API provider (kubectl top / k9s CPU+MEM, HPA
+    # backing). ONE named source; chart version pinned in the Application
+    # (metrics-server @ 3.13.1). ⚠ INSTALL-OWNED (same as Harbor/ARC/Rook adds):
+    # reaches the live `platform` AppProject only via `make bootstrap`/`make
+    # bootstrap-reapply` — re-apply after merge or platform-metrics-server will
+    # InvalidSpecError "repo not permitted".
+    - https://kubernetes-sigs.github.io/metrics-server/   # metrics-server (platform-metrics-server Application)
 
   # Platform services are cluster-wide; allow any namespace on the in-cluster API.
   destinations:
