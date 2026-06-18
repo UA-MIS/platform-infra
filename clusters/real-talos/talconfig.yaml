@@ -1,8 +1,8 @@
 # Phase-4 real cluster — Talos via talhelper (D-035/§3.4, ADR-017).
 # 3 CONVERGED OptiPlex 7080s: each is control-plane (etcd quorum=3) AND UNTAINTED
 # so it also runs workloads. No LAN VIP — the apiserver endpoint is node-1's TAILSCALE
-# 100.x (overlay = Tailscale-everywhere, architect-resolved). Storage = local-path for
-# the proof (single-disk nodes; Ceph-on-partition is the upgrade). Generate with
+# 100.x (overlay = Tailscale-everywhere, architect-resolved). Storage = Rook-Ceph
+# replica-3 on the dedicated sata SSD per node (dual-disk; see ceph-nvme.yaml). Generate with
 # `talhelper genconfig` (reads this + talsecret.sops.yaml + $TS_AUTHKEY), then apply
 # per the runbook (docs/phase-4-runbook.md §D2).
 #
@@ -23,15 +23,18 @@ kubernetesVersion: v1.31.5            # match the k3d cluster's k8s minor (porta
 endpoint: https://100.117.55.70:6443         # capstone-n3 ualaims tailnet 100.x (live 2026-06-17; old 100.127.169.30 DEAD after re-key/org-tailnet move)
 
 # apiserver cert SANs — talhelper does not guarantee auto-adding the endpoint, so
-# list every address kubectl/talosctl will hit the API on: n3's 100.x (the endpoint),
-# the .253 switch IP (in-cluster/secure apply over the LAN during bring-up), and
-# n2/n1's 100.x once they join (fill when known so a future endpoint move / direct
-# API access to them works without a cert regen).
+# list every address kubectl/talosctl will hit the API on: all 3 nodes' 100.x tailnet
+# IPs (n3 is the current endpoint; n1/n2 listed so a future endpoint move / direct API
+# access to them works without a cert regen) + each node's LAN/switch IP (10.237.171.x,
+# 10.237.168.0/22 segment, used for in-cluster/secure apply during bring-up). All 3
+# boxes are live (2026-06-17), so the full SAN list is filled.
 additionalApiServerCertSans:
   - 100.117.55.70           # capstone-n3 ualaims tailnet (current endpoint)
   - 10.237.171.8            # n3 LAN/switch IP (10.237.168.0/22 segment; bring-up secure apply)
-  # - N2_TAILSCALE_100_IP   # fill when box-2 joins
-  # - N1_TAILSCALE_100_IP   # fill when box-1 joins
+  - 100.89.87.126           # capstone-n2 ualaims tailnet (HA API reach / future endpoint move)
+  - 10.237.171.6            # n2 LAN/switch IP
+  - 100.120.67.119          # capstone-n1 ualaims tailnet (HA API reach / future endpoint move)
+  - 10.237.171.5            # n1 LAN/switch IP
 
 # Converged: control-plane nodes are UNTAINTED so workloads schedule on them.
 allowSchedulingOnControlPlanes: true
@@ -71,7 +74,7 @@ allowSchedulingOnControlPlanes: true
 # present, hence placeholders — they do not end up as static IPs on the nodes.)
 nodes:
   - hostname: capstone-n1
-    ipAddress: N1_TAILSCALE_100_IP     # STABLE talosconfig target (n1 100.x); NOT baked. Apply with -n <current maint IP, e.g. 10.237.26.254>
+    ipAddress: 100.120.67.119     # n1 ualaims tailnet 100.x (live) = talosconfig target. Secure re-apply with -n 100.120.67.119 (or -e 10.237.171.5 LAN).
     controlPlane: true
     talosImageURL: factory.talos.dev/metal-installer/8957336bb929170959e3afc61b9088e41cb072988407edd699b9b3deb4a26972   # 8957 schematic (NO :version — talhelper appends it)
     installDisk: /dev/nvme0n1          # OS disk (512GB nvme); n1's 500GB sata SSD (sda) is left raw for Ceph
@@ -85,7 +88,7 @@ nodes:
           physical: true               # the one physical NIC, any predictable name/driver (portable)
         dhcp: true                     # DHCP underlay (Tailscale overlay rides on top)
   - hostname: capstone-n2
-    ipAddress: N2_TAILSCALE_100_IP     # fill post-join; apply with -n <n2 current maint IP>
+    ipAddress: 100.89.87.126     # n2 ualaims tailnet 100.x (live) = talosconfig target. Secure re-apply with -n 100.89.87.126 (or -e 10.237.171.6 LAN).
     controlPlane: true
     talosImageURL: factory.talos.dev/metal-installer/8957336bb929170959e3afc61b9088e41cb072988407edd699b9b3deb4a26972   # 8957 schematic (NO :version — talhelper appends it)
     installDisk: /dev/nvme0n1          # OS disk; n2's 500GB sata SSD (sda) is left raw for Ceph
@@ -112,7 +115,8 @@ patches:
   - "@./patches/tailscale.yaml"
   # - "@./patches/kubespan.yaml"      # <- ALT ONLY (no DERP relay); not the chosen overlay
 
-  # Single-disk storage note (no-op patch). Nodes are single-disk (OS on nvme0n1),
-  # so storage = local-path for the proof; Ceph-on-partition (or the n2/n3 free SATA)
-  # is the documented upgrade. See the patch file + runbook §D2 Step 7.
+  # Dual-disk storage contract (no-op patch). OS installs to nvme0n1; the 500GB sata
+  # SSD (sda) is left RAW for Rook-Ceph (replica-3). The patch deliberately does NOT
+  # declare the sata disk so Rook can claim the whole device. See the patch file +
+  # applicationsets/rook-ceph-*-app.yaml + runbook §D2 Step 7.
   - "@./patches/ceph-nvme.yaml"

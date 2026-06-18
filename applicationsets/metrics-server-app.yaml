@@ -1,0 +1,63 @@
+# metrics-server Application (P4) — the Kubernetes Metrics API provider that feeds
+# `kubectl top` + k9s' CPU/MEM columns (they read metrics.k8s.io, which a bare Talos
+# cluster does NOT ship). Without this, k9s/`kubectl top` show `n/a`. Also the backing
+# API for HPA later. Deploy method = (A) Helm-source Application (same as Harbor/ARC/
+# Rook, D-022/D-028); the chart repo is pinned + allowlisted in the `platform`
+# AppProject sourceRepos (bootstrap/platform-appproject.yaml — INSTALL-OWNED).
+#
+# Root-app recurses applicationsets/, so this Application is registered. No Ceph
+# dependency (in-memory metrics; no PVC) and no extra namespace — it targets
+# kube-system (always present), like sealed-secrets/traefik.
+#
+# ── kubelet TLS (the one config that matters) ──────────────────────────────────
+# metrics-server scrapes each kubelet's /metrics/resource over HTTPS. Talos' kubelet
+# serving cert is self-signed / not in metrics-server's trust chain, so the scrape
+# fails cert verification and ALL metrics read empty (the classic `n/a`). We pass
+# `--kubelet-insecure-tls` (skip kubelet cert verification) — simple + fine for the
+# proof. The HARDENED alternative is rotating Talos' kubelet serving certs
+# (machine.kubelet.extraArgs rotate-server-certificates + the serving-cert approver)
+# so the cert is verifiable; defer that to a security pass — flagged, not blocking.
+# The chart's default `--kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname`
+# is already correct for the Talos/Tailscale nodes (InternalIP first), so we only
+# APPEND the insecure-tls flag rather than overriding the arg list.
+#
+# Chart: metrics-server 3.13.1 (app v0.8.1), pinned. Bump deliberately.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-metrics-server
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://kubernetes-sigs.github.io/metrics-server/   # PINNED chart repo (sourceRepos allowlist)
+    chart: metrics-server
+    targetRevision: 3.13.1                       # pinned chart version (no ^/~/latest)
+    helm:
+      releaseName: metrics-server
+      values: |
+        # APPENDS to the chart's sensible defaults (secure-port 10250, cert-dir /tmp,
+        # preferred-address-types InternalIP,ExternalIP,Hostname, metric-resolution 15s).
+        # Only the kubelet cert-skip is cluster-specific (Talos self-signed serving cert).
+        args:
+          - --kubelet-insecure-tls
+        # Single replica for the 3-node proof (metrics-server HA = 2 replicas + a PDB;
+        # add later if needed — losing metrics briefly is not a data-loss event).
+        replicas: 1
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false      # kube-system always exists
+      - ServerSideApply=true       # the APIService registration is cluster-scoped
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

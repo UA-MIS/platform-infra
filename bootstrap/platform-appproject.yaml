@@ -38,6 +38,20 @@ spec:
     # (bootstrap/platform-appproject.yaml is not GitOps-reconciled) — re-apply after
     # merge or the ARC apps will InvalidSpecError "repo not permitted".
     - ghcr.io/actions/actions-runner-controller-charts   # ARC (platform-arc-* Applications)
+    # Rook-Ceph (P4, §3.4, D-035): the operator + cluster Helm charts (replicated
+    # block storage on the 3-node hardware). ONE named source; chart versions pinned
+    # in the Applications (rook-ceph + rook-ceph-cluster @ v1.20.1). ⚠ INSTALL-OWNED
+    # (same as the Harbor/ARC adds): reaches the live `platform` AppProject only via
+    # `make bootstrap`/`make bootstrap-reapply` — re-apply after merge or the
+    # platform-rook-ceph-* apps will InvalidSpecError "repo not permitted".
+    - https://charts.rook.io/release    # Rook-Ceph (platform-rook-ceph-* Applications)
+    # metrics-server (P4): the Metrics API provider (kubectl top / k9s CPU+MEM, HPA
+    # backing). ONE named source; chart version pinned in the Application
+    # (metrics-server @ 3.13.1). ⚠ INSTALL-OWNED (same as Harbor/ARC/Rook adds):
+    # reaches the live `platform` AppProject only via `make bootstrap`/`make
+    # bootstrap-reapply` — re-apply after merge or platform-metrics-server will
+    # InvalidSpecError "repo not permitted".
+    - https://kubernetes-sigs.github.io/metrics-server/   # metrics-server (platform-metrics-server Application)
 
   # Platform services are cluster-wide; allow any namespace on the in-cluster API.
   destinations:
