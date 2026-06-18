@@ -1,0 +1,214 @@
+# Backstage "Relay" Application (P5, §1.6) — the platform's developer portal: the
+# software catalog + Scaffolder golden-path templates + TechDocs, with human SSO via
+# the SAME shared Dex broker as ArgoCD/Harbor. DEPLOY METHOD = (A) Helm-source
+# Application (the Harbor/ARC/Rook/metrics-server precedent, D-022/D-028): the chart
+# is pinned + its OCI repo allowlisted in the `platform` AppProject sourceRepos
+# (bootstrap/platform-appproject.yaml — INSTALL-OWNED, re-apply after merge).
+#
+# Root-app recurses applicationsets/, so this Application is registered. The namespace
+# + SealedSecret PREREQS ship separately via the platform-services-appset
+# (platform-services/backstage/), which must sync FIRST — same split as Harbor.
+#
+# ⚠ AHEAD-OF-NEED PREP — DO NOT DEPLOY YET. Relay goes live AFTER (1) the cluster
+#   heals (Cilium swap), (2) the Phase-3 domain cutover, and (3) the one-time custom
+#   Backstage image is built + pushed to Harbor. See platform-services/backstage/README.md
+#   "To go live" checklist. Until then this renders + reviews but is intentionally not synced.
+#
+# ── THE CUSTOM IMAGE (the load-bearing prereq) ─────────────────────────────────
+# Backstage is NOT a configure-and-run server: you scaffold YOUR OWN app with
+# `npx @backstage/create-app`, wire plugins (OIDC auth provider, the Scaffolder
+# actions, the catalog), `yarn build-image`, and push to Harbor. The chart's default
+# image `ghcr.io/backstage/backstage:latest` is a DEMO and has neither our Dex auth
+# provider nor the Relay templates — so `image.repository` below points at the Harbor
+# image we will build. Until that image exists the tag is a PLACEHOLDER (`v0.1.0`).
+#
+# Chart: backstage 2.8.2 (OCI: ghcr.io/backstage/charts), pinned. Bundles the Bitnami
+# postgresql subchart (postgresql.enabled=true) on ceph-block.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-backstage-relay
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    # Explicitly OPT OUT of auto-sync until go-live (see header). The syncPolicy
+    # below carries automated:{} so this annotation documents intent for reviewers;
+    # the human enables auto-sync at cutover by uncommenting the block.
+    platform.capstone/deploy-status: "prep-do-not-deploy"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: ghcr.io/backstage/charts          # PINNED OCI chart repo (sourceRepos allowlist)
+    chart: backstage
+    targetRevision: 2.8.2                       # pinned chart version (no ^/~/latest)
+    helm:
+      releaseName: backstage
+      values: |
+        # ── The portal pod ────────────────────────────────────────────────────
+        backstage:
+          replicas: 1                           # single replica for the 3-box cluster
+          # Recreate so plugin DB migrations never run concurrently (chart guidance:
+          # a single Backstage pod at a time when migrations run on startup).
+          strategy:
+            type: Recreate
+          image:
+            # THE CUSTOM IMAGE built from `npx @backstage/create-app` + pushed to
+            # Harbor (see README "To go live"). PLACEHOLDER tag until that image exists.
+            registry: harbor.127-0-0-1.sslip.io
+            repository: library/backstage-relay
+            tag: v0.1.0                          # PLACEHOLDER — bump to the real built tag
+            pullPolicy: IfNotPresent
+            # Pull from the private Harbor `library` project via a robot imagePullSecret
+            # (created at go-live, same robot pattern as team workloads — see README).
+            pullSecrets:
+              - harbor-pull
+
+          # Modest requests for the 3-OptiPlex converged cluster (resource-governance
+          # backlog: small requests). Limits give headroom for the Node backend +
+          # plugin migrations without starving the box.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+
+          # OIDC client secret + backend signing key + DB password are env-injected
+          # from the SealedSecret (platform-services/backstage/sealedsecret-oidc.yaml).
+          extraEnvVarsSecrets:
+            - backstage-relay-secrets
+
+          # app-config.yaml baked into the custom image is the source of truth; this
+          # block is MERGED on top (chart -> ConfigMap -> $APP_CONFIG_*). Kept minimal
+          # + env-substituted so no secret lands in git and the host is the one seam.
+          appConfig:
+            app:
+              title: "Relay — UA-MIS Capstone Developer Portal"
+              baseUrl: https://relay.127-0-0-1.sslip.io
+            organization:
+              name: "UA-MIS"
+            backend:
+              baseUrl: https://relay.127-0-0-1.sslip.io
+              listen:
+                port: 7007
+              cors:
+                origin: https://relay.127-0-0-1.sslip.io
+                methods: [GET, HEAD, PATCH, POST, PUT, DELETE]
+                credentials: true
+              # Backend auth signing key from the SealedSecret (BACKEND_SECRET).
+              auth:
+                keys:
+                  - secret: ${BACKEND_SECRET}
+              database:
+                client: pg
+                connection:
+                  host: backstage-postgresql       # the bundled Postgres Service
+                  port: 5432
+                  user: bn_backstage               # Bitnami app user
+                  password: ${POSTGRES_PASSWORD}
+            # ── SSO via the shared Dex broker (issuer id.<domain>) ──────────────
+            # Same broker as ArgoCD/Harbor. The `relay` Dex staticClient is added in
+            # platform-services/dex/configmap.yaml; its secret is env-injected here.
+            # NOTE: the OIDC auth provider + signInResolver must be WIRED IN THE
+            # CUSTOM IMAGE's packages/backend (createBackendModule / providers) — the
+            # demo image does not ship it. This app-config drives that wired provider.
+            auth:
+              environment: production
+              session:
+                secret: ${BACKEND_SECRET}
+              providers:
+                oidc:
+                  production:
+                    metadataUrl: https://id.127-0-0-1.sslip.io/.well-known/openid-configuration
+                    clientId: ${AUTH_OIDC_CLIENT_ID}
+                    clientSecret: ${AUTH_OIDC_CLIENT_SECRET}
+                    prompt: auto
+                    # Map the Dex token to a Backstage user. Dex emits the GitHub login
+                    # as preferred_username (useLoginAsID) — resolve to a User entity.
+                    signIn:
+                      resolvers:
+                        - resolver: preferredUsernameMatchingUserEntityName
+            # Org/identity gating is already enforced UPSTREAM at Dex (UA-MIS org-only,
+            # SEC-007). Backstage trusts the broker; no second org check needed.
+
+            # ── Catalog: the Relay golden-path templates + seed entities ─────────
+            catalog:
+              rules:
+                - allow: [Component, System, API, Resource, Location, Template, Group, User]
+              locations:
+                # The Scaffolder golden-path template(s), baked into the image OR
+                # served from platform-infra. Pointed at the in-repo catalog dir so
+                # the template shows up without rebuilding the image for content edits.
+                - type: url
+                  target: https://github.com/UA-MIS/platform-infra/blob/main/platform-services/backstage/catalog/all.yaml
+                  rules:
+                    - allow: [Template, Location, Group, System]
+
+            # ── Integrations: GitHub (Scaffolder publishes team repos to UA-MIS) ──
+            # The Scaffolder's publish:github action needs a token with repo+admin:org
+            # to create repos under UA-MIS. Injected at go-live (GITHUB_TOKEN env via
+            # the SealedSecret — add the key when wiring the Scaffolder). Documented in
+            # README; left out of the placeholder secret to avoid implying it's set.
+            integrations:
+              github:
+                - host: github.com
+                  token: ${GITHUB_TOKEN}
+
+        # ── Ingress: relay.<domain> via Traefik (matches every other service) ────
+        # Plain Ingress, TLS host listed but NO secretName — Traefik's default TLSStore
+        # serves the cert-manager wildcard cert for *.127-0-0-1.sslip.io (§5.1/§5.2),
+        # exactly like dex/harbor/argocd. className: traefik.
+        ingress:
+          enabled: true
+          className: traefik
+          host: relay.127-0-0-1.sslip.io
+          tls:
+            enabled: true
+            # No secretName: the wildcard cert is served via the default TLSStore.
+
+        service:
+          type: ClusterIP
+          ports:
+            backend: 7007
+
+        # ── Bundled Postgres on ceph-block (Phase-4 Rook RBD, cluster default SC) ─
+        # Same storage decision as Harbor: ceph-block is replica-3 RWO RBD (survives a
+        # node loss); local-path does NOT exist on Talos. External DB (ua-mis-db-1 PG17)
+        # is a later optimization — the bundled subchart is correct for the proof.
+        postgresql:
+          enabled: true
+          auth:
+            username: bn_backstage
+            database: backstage
+            existingSecret: backstage-postgresql   # Bitnami keys: postgres-password, password
+          primary:
+            persistence:
+              enabled: true
+              storageClass: ceph-block
+              size: 8Gi
+            resources:
+              requests:
+                cpu: 100m
+                memory: 256Mi
+              limits:
+                cpu: "1"
+                memory: 1Gi
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: backstage
+  syncPolicy:
+    # ⚠ AUTO-SYNC INTENTIONALLY OMITTED (prep-do-not-deploy). At go-live the human
+    # enables it by uncommenting the `automated` block below (matching Harbor):
+    #   automated:
+    #     prune: true
+    #     selfHeal: true
+    syncOptions:
+      - CreateNamespace=false      # backstage ns ships via platform-services/backstage
+      - ServerSideApply=true       # large chart objects
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

@@ -1,0 +1,179 @@
+# "New Capstone Project" — the Relay Scaffolder GOLDEN-PATH template (P5, §1.2).
+#
+# This is the headline IDP feature: a student fills four fields, and Relay creates a
+# new team app repo under UA-MIS pre-wired to the platform's `.devops/` contract
+# (the same one team-sample-app proves end-to-end: PR -> preview, merge -> dev,
+# tag -> staging, manual gate -> prod). The student then only ever edits `app/` and
+# the four fields in `.devops/app-metadata.yaml` — everything else is platform-managed.
+#
+# WHAT IT DOES (steps below):
+#   1. fetch:template — render the ./skeleton (app/ starter + .devops/app-metadata.yaml
+#      + catalog-info.yaml + mkdocs/TechDocs) with the four collected values.
+#   2. fetch:plain    — overlay the CANONICAL, immutable .devops/ tree (CI workflow,
+#      chart/ base+overlays, promotion.yaml, ci/ scripts) copied verbatim from the
+#      reference golden-path repo so every team gets the SAME platform contract. Pinned
+#      by ref so the template is reproducible. (Alternative at go-live: a GitHub
+#      template repo + publish:github:pull-request — see README; fetch:plain keeps the
+#      single source of truth in one reference repo.)
+#   3. publish:github — create UA-MIS/<repo>, push, set the default branch + the
+#      branch protection the platform expects (PRs only into main; no direct pushes).
+#   4. catalog:register — register the new component's catalog-info.yaml so it shows
+#      up in the Relay software catalog immediately.
+#
+# ⚠ REQUIRES (wired at go-live — see platform-services/backstage/README.md):
+#   - The GitHub integration token (${GITHUB_TOKEN}) with repo + admin:org on UA-MIS
+#     (the Scaffolder's publish:github action). Injected via the SealedSecret.
+#   - The reference .devops/ source repo URL (REFERENCE_DEVOPS_URL below) confirmed.
+#   - The OIDC sign-in so the acting user (a UA-MIS member) is the repo author.
+apiVersion: scaffolder.backstage.io/v1beta3
+kind: Template
+metadata:
+  name: new-capstone-project
+  title: New Capstone Project
+  description: >-
+    Create a new UA-MIS capstone team app repo, pre-wired to the platform golden
+    path (PR -> preview, merge -> dev, tag -> staging, manual gate -> prod). You edit
+    only `app/` and the four fields in `.devops/app-metadata.yaml`.
+  tags:
+    - capstone
+    - golden-path
+    - recommended
+spec:
+  owner: group:default/platform
+  type: service
+
+  parameters:
+    - title: Your project
+      required:
+        - appName
+        - team
+        - semester
+      properties:
+        appName:
+          title: App name
+          type: string
+          description: >-
+            Short slug for your app + repo (lowercase, digits, hyphens). Becomes the
+            repo name, workload names, and the ingress host
+            <app-name>.<team>.<platform-domain>.
+          pattern: '^[a-z]([-a-z0-9]*[a-z0-9])?$'
+          maxLength: 30
+          ui:autofocus: true
+        team:
+          title: Team slug
+          type: string
+          description: >-
+            Your team's canonical slug — MUST equal your GitHub Team slug and your
+            AppProject name (the platform keys per-team namespaces, RBAC, Harbor
+            project, and OIDC group on this single value, D-026).
+          pattern: '^[a-z]([-a-z0-9]*[a-z0-9])?$'
+          maxLength: 30
+        semester:
+          title: Semester
+          type: string
+          description: Cohort selector label, e.g. 2026-fall.
+          pattern: '^[0-9]{4}-(spring|summer|fall)$'
+          default: '2026-fall'
+        port:
+          title: Container port
+          type: integer
+          description: The port your app listens on (PORT env + Service/Ingress target).
+          default: 8080
+          minimum: 1
+          maximum: 65535
+        description:
+          title: Description
+          type: string
+          description: One-line description of your project (shown in the catalog).
+          default: A UA-MIS capstone project.
+
+    - title: Repository
+      required:
+        - repoUrl
+      properties:
+        repoUrl:
+          title: Repository location
+          type: string
+          description: >-
+            Where to create the repo. Org is fixed to UA-MIS; the repo name defaults
+            to your app name.
+          ui:field: RepoUrlPicker
+          ui:options:
+            allowedHosts:
+              - github.com
+            allowedOwners:
+              - UA-MIS
+            # Default the repo name to the app slug (BEP-0010 parameter templating).
+            requestUserCredentials:
+              secretsKey: USER_OAUTH_TOKEN
+              additionalScopes:
+                github:
+                  - repo
+
+  steps:
+    # 1) Render the per-team starter (app/ + the 4-field app-metadata.yaml + catalog).
+    - id: fetch-skeleton
+      name: Render project skeleton
+      action: fetch:template
+      input:
+        url: ./skeleton
+        values:
+          appName: ${{ parameters.appName }}
+          team: ${{ parameters.team }}
+          semester: ${{ parameters.semester }}
+          port: ${{ parameters.port }}
+          description: ${{ parameters.description }}
+          destination: ${{ parameters.repoUrl | parseRepoUrl }}
+
+    # 2) Overlay the CANONICAL platform .devops/ contract verbatim (immutable; every
+    #    team gets the SAME CI workflow, chart base/overlays, promotion.yaml, scripts).
+    #    Pinned to a ref so the scaffold is reproducible. See README to confirm the
+    #    reference repo URL at go-live.
+    - id: fetch-devops
+      name: Overlay platform .devops/ contract
+      action: fetch:plain
+      input:
+        targetPath: ./.devops
+        # REFERENCE golden-path .devops tree (the team-sample-app contract). Pin a
+        # tag/sha at go-live for reproducibility (e.g. .../tree/v1/.devops).
+        url: https://github.com/UA-MIS/team-sample-app/tree/main/.devops
+
+    # 3) Create UA-MIS/<repo>, push, protect main (PRs only — matches platform policy).
+    - id: publish
+      name: Publish to GitHub (UA-MIS)
+      action: publish:github
+      input:
+        repoUrl: ${{ parameters.repoUrl }}
+        description: ${{ parameters.description }}
+        defaultBranch: main
+        repoVisibility: private
+        # Platform branch policy: PRs into main, no direct pushes (mirrors the live
+        # branch-protection the golden path assumes; reviewers/CI gate merges).
+        protectDefaultBranch: true
+        requireCodeOwnerReviews: true
+        token: ${{ secrets.USER_OAUTH_TOKEN }}
+
+    # 4) Register the new component so it appears in the Relay catalog right away.
+    - id: register
+      name: Register in catalog
+      action: catalog:register
+      input:
+        repoContentsUrl: ${{ steps['publish'].output.repoContentsUrl }}
+        catalogInfoPath: '/catalog-info.yaml'
+
+  output:
+    links:
+      - title: Repository
+        url: ${{ steps['publish'].output.remoteUrl }}
+      - title: Open in catalog
+        icon: catalog
+        entityRef: ${{ steps['register'].output.entityRef }}
+    text:
+      - title: Next steps
+        content: |
+          Your repo **${{ parameters.appName }}** is live under UA-MIS. Now:
+          1. Clone it and edit `app/` (your code) — leave `.devops/` alone.
+          2. Open a PR -> a **preview** environment is built automatically.
+          3. Merge to `main` -> **dev** auto-deploys.
+          4. Tag `vX.Y.Z` -> **staging** auto-deploys; **prod** waits on the manual gate.
+          Your app will be at `https://${{ parameters.appName }}.${{ parameters.team }}.<platform-domain>`.

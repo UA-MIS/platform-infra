@@ -52,6 +52,13 @@ spec:
     # bootstrap-reapply` — re-apply after merge or platform-metrics-server will
     # InvalidSpecError "repo not permitted".
     - https://kubernetes-sigs.github.io/metrics-server/   # metrics-server (platform-metrics-server Application)
+    # Backstage "Relay" (P5, D-022 method A): the official Backstage OCI Helm chart
+    # (developer portal). OCI registry — ONE named source, chart version pinned in the
+    # Application (backstage @ 2.8.2). ⚠ INSTALL-OWNED (same as the Harbor/ARC/Rook/
+    # metrics-server adds): reaches the live `platform` AppProject only via `make
+    # bootstrap`/`make bootstrap-reapply` — re-apply after merge or platform-backstage-relay
+    # will InvalidSpecError "repo not permitted". (NOT needed until Relay go-live.)
+    - ghcr.io/backstage/charts                            # Backstage Relay (platform-backstage-relay Application)
 
   # Platform services are cluster-wide; allow any namespace on the in-cluster API.
   destinations:

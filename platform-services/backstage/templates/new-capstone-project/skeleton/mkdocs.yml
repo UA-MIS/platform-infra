@@ -1,0 +1,10 @@
+# TechDocs config — Relay builds these docs from this repo (techdocs-ref: dir:.)
+# and serves them in the catalog's Docs tab.
+site_name: '${{ values.appName }}'
+site_description: '${{ values.description }}'
+
+nav:
+  - Home: index.md
+
+plugins:
+  - techdocs-core
