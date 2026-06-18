@@ -9,21 +9,25 @@
 #           probes from the node.
 #
 # ⚠ APISERVER BLOCK IS NON-NEGOTIABLE. The kube-apiserver lives on the NODE IPs
-# (10.89.0.0/24 :6443 on k3d). Untrusted runner code must NOT be able to reach it
-# (a reachable apiserver + any token = cluster escalation). So the external-egress
-# rule EXCLUDES the node CIDR (and the pod/svc CIDRs — that blocks CROSS-TENANT
-# reach + in-cluster lateral movement). containerMode:kubernetes job pods DO need
-# the apiserver to create their work pods, but that goes through the runner's
-# ServiceAccount via the in-cluster `kubernetes` Service — see the scoped allow
-# below (tightly limited to the kubernetes service ClusterIP, NOT the whole node).
+# (Talos: 10.237.171.{5,6,8}:6443 = the `kubernetes` Service endpoints) AND is
+# reachable over the Tailscale overlay (endpoint 100.117.55.70:6443). Untrusted
+# runner code must NOT be able to reach it (a reachable apiserver + any token =
+# cluster escalation). So the external-egress rule EXCLUDES the node LAN segment,
+# the TAILNET range (new on Talos — the overlay path to the apiserver did not exist
+# on k3d), and the pod/svc CIDRs (blocks CROSS-TENANT reach + lateral movement).
+# containerMode:kubernetes job pods DO need the apiserver to create their work pods,
+# but that goes through the runner's ServiceAccount via the in-cluster `kubernetes`
+# Service ClusterIP (10.96.0.1), NOT the node/overlay IP — see the scoped allow below.
 #
-# Same k3s embedded kube-router constraints as the SEC-009 control-plane netpols:
-# NO FQDN/DNS egress — external egress is PORT-scoped (443), not host-scoped.
-# Phase-3 tightens 443 to GitHub's published CIDRs (or an FQDN-capable CNI like
-# Cilium). CIDRs (this cluster): pods 10.42.0.0/16, svc 10.43.0.0/16, nodes
-# 10.89.0.0/24 (apiserver :6443). MANUAL-SYNC gated like SEC-011 (the Application
-# applies nothing until a watched `argocd app sync` — see arc-netpol Application),
-# so default-deny is never auto-pushed onto a running build mid-flight.
+# ⚠ ENFORCEMENT: these policies are INERT until a policy CNI is installed. Talos ships
+# flannel (no NetworkPolicy backend) → every rule here is accepted but NOT enforced.
+# Real enforcement requires the Cilium/Canal swap (separate maintenance-window task) +
+# this CIDR re-param. External egress is still PORT-scoped (443), not host-scoped;
+# Cilium would enable FQDN egress (tighten 443 to GitHub CIDRs/FQDNs) as a follow-up.
+# CIDRs (Talos, live): pods 10.244.0.0/16, svc 10.96.0.0/12, nodes 10.237.168.0/22
+# (LAN segment, apiserver :6443), tailnet 100.64.0.0/10. MANUAL-SYNC gated like
+# SEC-011 (the Application applies nothing until a watched `argocd app sync` — see the
+# arc-netpol Application), so default-deny is never auto-pushed onto a running build.
 
 # --- default-deny (ingress + egress) for every pod in arc-runners ---
 apiVersion: networking.k8s.io/v1
@@ -56,7 +60,7 @@ spec:
     # Kubelet readiness/liveness probes originate from the NODE IP, not a pod/ns.
     - from:
         - ipBlock:
-            cidr: 10.89.0.0/24
+            cidr: 10.237.168.0/22   # Talos node LAN segment (kubelet probe source)
 ---
 # --- EGRESS: DNS + the in-cluster kubernetes API service (for containerMode:
 #     kubernetes job-pod creation) + Harbor (in-cluster) + external HTTPS:443
@@ -85,11 +89,11 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
-    # In-cluster services ONLY (10.43/16): the `kubernetes` API Service (10.43.0.1
+    # In-cluster services ONLY (10.96/12): the `kubernetes` API Service (10.96.0.1
     # — containerMode:kubernetes job-pod orchestration via the runner SA, NOT the
-    # node-IP apiserver) + Harbor's ClusterIP (harbor-core for push/pull). The pod
-    # CIDR (10.42/16) is intentionally OMITTED so a runner cannot reach OTHER teams'
-    # pods directly (cross-tenant block); it talks to services by ClusterIP only.
+    # node-IP/overlay apiserver) + Harbor's ClusterIP (harbor-core for push/pull). The
+    # pod CIDR (10.244/16) is intentionally OMITTED so a runner cannot reach OTHER
+    # teams' pods directly (cross-tenant block); it talks to services by ClusterIP only.
     #
     # PORT-SCOPED (SEC-014): a build needs ONLY the API (443) + harbor-core (80).
     # Leaving this all-ports let a runner reach arbitrary in-cluster service ports
@@ -101,23 +105,26 @@ spec:
     # service port changes or a build needs another in-cluster service port.
     - to:
         - ipBlock:
-            cidr: 10.43.0.0/16
+            cidr: 10.96.0.0/12
       ports:
         - protocol: TCP
           port: 443    # kubernetes API Service (containerMode job-pod create)
         - protocol: TCP
           port: 80     # harbor-core (push/pull)
     # External HTTPS:443 ONLY — GitHub (clone/Actions API/job token) + base-image
-    # pulls. Port-scoped (kube-router has no FQDN egress). The except list BLOCKS
-    # the apiserver (node CIDR :6443) + all intra-cluster ranges, so "external"
-    # truly means off-cluster — no apiserver, no cross-tenant, no node access.
+    # pulls. Port-scoped (no FQDN egress until Cilium). The except list BLOCKS the
+    # apiserver (node LAN + overlay :6443) + all intra-cluster ranges, so "external"
+    # truly means off-cluster — no apiserver, no cross-tenant, no node, no overlay.
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
             except:
-              - 10.42.0.0/16    # pods (cross-tenant + lateral) — blocked
-              - 10.43.0.0/16    # services (covered by the scoped allow above)
-              - 10.89.0.0/24    # NODES incl. apiserver :6443 — BLOCKED (non-negotiable)
+              - 10.244.0.0/16    # pods (cross-tenant + lateral) — blocked
+              - 10.96.0.0/12     # services (covered by the scoped allow above)
+              - 10.237.168.0/22  # NODE LAN segment incl. apiserver :6443 — BLOCKED (non-negotiable)
+              - 100.64.0.0/10    # TAILNET (Talos overlay) — the apiserver endpoint + every
+                                 # node/peer is reachable here; BLOCKED so a runner can't hit
+                                 # the apiserver (or any node) via Tailscale (new vs k3d).
       ports:
         - protocol: TCP
           port: 443

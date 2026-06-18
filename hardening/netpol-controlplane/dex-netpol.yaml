@@ -59,7 +59,7 @@ spec:
     # node CIDR to the telemetry port so readiness/liveness keep working.
     - from:
         - ipBlock:
-            cidr: 10.89.0.0/24
+            cidr: 10.237.168.0/22
       ports:
         - protocol: TCP
           port: 5558
@@ -89,23 +89,23 @@ spec:
         - protocol: TCP
           port: 53
     # Intra-cluster (pods + services) — Dex CRD storage talks to the apiserver via
-    # the kubernetes service (10.43.0.1) and may resolve in-cluster names.
+    # the kubernetes service (10.96.0.1) and may resolve in-cluster names.
     - to:
         - ipBlock:
-            cidr: 10.42.0.0/16
+            cidr: 10.244.0.0/16
         - ipBlock:
-            cidr: 10.43.0.0/16
+            cidr: 10.96.0.0/12
     # kube-apiserver on node IPs (:6443) — Dex Kubernetes storage backend.
     - to:
         - ipBlock:
-            cidr: 10.89.0.0/24
+            cidr: 10.237.168.0/22
     # External HTTPS only — GitHub OAuth token exchange + org/team membership API.
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
             except:
-              - 10.42.0.0/16
-              - 10.43.0.0/16
+              - 10.244.0.0/16
+              - 10.96.0.0/12
       ports:
         - protocol: TCP
           port: 443

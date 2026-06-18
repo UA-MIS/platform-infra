@@ -16,7 +16,7 @@
 #
 # Same k3s embedded kube-router caveats as argocd/dex-netpol: NO FQDN/DNS egress —
 # external egress is PORT-scoped (443), not host-scoped. CIDRs (this cluster):
-# pods 10.42.0.0/16, services 10.43.0.0/16, nodes 10.89.0.0/24 (apiserver :6443).
+# pods 10.244.0.0/16, services 10.96.0.0/12, nodes 10.237.168.0/22 (apiserver :6443).
 # Phase-3: tighten external egress to the issuer/GitHub CIDRs (or an FQDN-capable
 # CNI) and remove alongside the skip-verify line when the issuer goes ACME-public.
 
@@ -68,7 +68,7 @@ spec:
     # the registry never goes Ready. Allow the node CIDR to every harbor pod.
     - from:
         - ipBlock:
-            cidr: 10.89.0.0/24
+            cidr: 10.237.168.0/22
 ---
 # --- EGRESS: DNS, intra-cluster (pods+services — reaches Dex/Traefik ClusterIPs,
 #     and Harbor's own bundled postgres/redis), apiserver (node IPs), and external
@@ -103,13 +103,13 @@ spec:
     # OIDC discovery path) + the configure-oidc Job calling the harbor-core svc.
     - to:
         - ipBlock:
-            cidr: 10.42.0.0/16
+            cidr: 10.244.0.0/16
         - ipBlock:
-            cidr: 10.43.0.0/16
+            cidr: 10.96.0.0/12
     # kube-apiserver on the node IPs (:6443) — k3d binds it on a node address.
     - to:
         - ipBlock:
-            cidr: 10.89.0.0/24
+            cidr: 10.237.168.0/22
     # External HTTPS only (OIDC issuer round-trips that egress the cluster + Trivy
     # vulnerability-DB pulls from its upstream). Port-scoped, not host-scoped
     # (kube-router has no FQDN egress — Phase-3 tightens to issuer/Trivy CIDRs).
@@ -117,8 +117,8 @@ spec:
         - ipBlock:
             cidr: 0.0.0.0/0
             except:
-              - 10.42.0.0/16
-              - 10.43.0.0/16
+              - 10.244.0.0/16
+              - 10.96.0.0/12
       ports:
         - protocol: TCP
           port: 443
