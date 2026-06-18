@@ -10,7 +10,7 @@
 # (sealedsecret.yaml) and referenced below as $VARS — Dex expands environment
 # variables in its config file at load. So this ConfigMap is safe to commit.
 #
-# PLATFORM_DOMAIN seam (§6): the issuer host `id.127-0-0-1.sslip.io` is the
+# PLATFORM_DOMAIN seam (§6): the issuer host `id.capstone.uamishub.com` is the
 # Phase-1 dashed-sslip literal. Phase 3/4 re-points it at the Cloudflare zone —
 # a one-line change here mirrored from clusters/<target>/values.env, plus the
 # matching callback URL on the GitHub OAuth app.
@@ -24,9 +24,9 @@ metadata:
 data:
   config.yaml: |
     # External issuer URL — must match what clients use and what TLS terminates
-    # at (Traefik wildcard cert for *.127-0-0-1.sslip.io). HTTPS-terminated at the
+    # at (Traefik wildcard cert for *.capstone.uamishub.com). HTTPS-terminated at the
     # ingress; Dex itself listens HTTP on :5556 behind Traefik.
-    issuer: https://id.127-0-0-1.sslip.io
+    issuer: https://id.capstone.uamishub.com
 
     storage:
       type: kubernetes
@@ -52,7 +52,7 @@ data:
           clientID: $GITHUB_CLIENT_ID
           clientSecret: $GITHUB_CLIENT_SECRET
           # MUST exactly equal the GitHub OAuth app's Authorization callback URL.
-          redirectURI: https://id.127-0-0-1.sslip.io/callback
+          redirectURI: https://id.capstone.uamishub.com/callback
           # --- THE SECURITY BOUNDARY (§1.1): org-gated to UA-MIS only ---
           # Dex rejects any login from a non-member of UA-MIS at the connector
           # level (uses the read:org grant to check membership). To admit only
@@ -82,19 +82,19 @@ data:
         secretEnv: ARGOCD_CLIENT_SECRET
         redirectURIs:
           # ArgoCD's OIDC callback (server URL + /auth/callback).
-          - https://argocd.127-0-0-1.sslip.io/auth/callback
+          - https://argocd.capstone.uamishub.com/auth/callback
           # ArgoCD CLI (argocd login --sso) loopback callback.
           - http://localhost:8085/auth/callback
       # Harbor (P2.2) — registry SSO via the SAME broker (NO new GitHub OAuth app).
       # Harbor-core fetches Dex discovery SERVER-SIDE; the issuer host
-      # id.127-0-0-1.sslip.io is already in-cluster-reachable via the coredns-custom
+      # id.capstone.uamishub.com is already in-cluster-reachable via the coredns-custom
       # rewrite -> Traefik -> Dex (slice-1 pattern, reused, no new rewrite needed).
       - id: harbor
         name: Harbor
         secretEnv: HARBOR_CLIENT_SECRET
         redirectURIs:
           # Harbor's OIDC callback (server URL + /c/oidc/callback).
-          - https://harbor.127-0-0-1.sslip.io/c/oidc/callback
+          - https://harbor.capstone.uamishub.com/c/oidc/callback
 
     oauth2:
       # Skip the per-login "approve this app" screen — these are first-party

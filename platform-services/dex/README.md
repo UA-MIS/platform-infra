@@ -6,7 +6,7 @@ issues a token to UA-MIS members and surfaces their **GitHub Teams as the OIDC
 `groups` claim**. ArgoCD (and, later, Backstage/Grafana/Harbor) register as
 static OIDC clients and federate here — one GitHub OAuth app, unified SSO.
 
-- Issuer / ingress: `https://id.127-0-0-1.sslip.io` (wildcard TLS via Traefik).
+- Issuer / ingress: `https://id.capstone.uamishub.com` (wildcard TLS via Traefik).
 - Storage: Kubernetes CRDs (`storage.type: kubernetes`) — stateless, no DB.
 - Image: `ghcr.io/dexidp/dex:v2.45.1` (pinned).
 - Managed by the `platform-services-appset` (one Application per dir).
@@ -47,8 +47,8 @@ registers it himself — **no UA-IT, no ticket**.
    (URL: `https://github.com/organizations/UA-MIS/settings/applications`)
 2. Fill in:
    - **Application name:** `Capstone IDP — Dex`
-   - **Homepage URL:** `https://id.127-0-0-1.sslip.io`
-   - **Authorization callback URL:** `https://id.127-0-0-1.sslip.io/callback`
+   - **Homepage URL:** `https://id.capstone.uamishub.com`
+   - **Authorization callback URL:** `https://id.capstone.uamishub.com/callback`
      (this MUST match Dex's `redirectURI` exactly)
 3. Click **Register application**.
 4. Copy the **Client ID**.
@@ -108,9 +108,9 @@ kubectl -n dex rollout restart deploy/dex
 ```bash
 # Dex healthy:
 kubectl -n dex get pods
-curl -sk https://id.127-0-0-1.sslip.io/.well-known/openid-configuration | jq .issuer
-# -> "https://id.127-0-0-1.sslip.io"
+curl -sk https://id.capstone.uamishub.com/.well-known/openid-configuration | jq .issuer
+# -> "https://id.capstone.uamishub.com"
 
-# ArgoCD UI: open https://argocd.127-0-0-1.sslip.io -> "LOG IN VIA Dex (GitHub)".
+# ArgoCD UI: open https://argocd.capstone.uamishub.com -> "LOG IN VIA Dex (GitHub)".
 # A UA-MIS member lands with their mapped role; a non-member is rejected at GitHub/Dex.
 ```

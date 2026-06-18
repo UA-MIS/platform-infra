@@ -61,7 +61,7 @@ the listener can't auth (the app shows Progressing) — expected pre-credential.
 - **Harbor PUSH credential** (separate from the workload PULL robot): CI pushes with
   a per-team **push** robot scoped to **only the team's own Harbor project** (least
   privilege — it must not push to other teams' projects). Secret **`harbor-push`**
-  (dockerconfigjson), registry `harbor.127-0-0-1.sslip.io/<name>/<app>:<tag>`, robot
+  (dockerconfigjson), registry `harbor.capstone.uamishub.com/<name>/<app>:<tag>`, robot
   `robot$<name>+ci-push`, consumed by Kaniko at `/kaniko/.docker/config.json`.
   Provisioned by **`make harbor-push-robot NAME=<name> [RUNNER_NS=arc-runners] >
   harbor-push-sealed.yaml`** — mints a robot with **pull+push on project `<name>`

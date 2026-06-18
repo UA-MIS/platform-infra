@@ -1,12 +1,12 @@
 # Dex Ingress (P2.1, §1.1, §5.2). Exposes the broker at id.${PLATFORM_DOMAIN}.
 # Matches the team-app ingress convention exactly: plain Ingress, TLS host listed
 # but NO secretName — Traefik's default TLSStore serves the cert-manager wildcard
-# cert for *.127-0-0-1.sslip.io (§5.1/§5.2). Traefik is the default IngressClass
+# cert for *.capstone.uamishub.com (§5.1/§5.2). Traefik is the default IngressClass
 # on k3d; the websecure (:443) entrypoint terminates TLS and proxies HTTP to Dex
 # on :5556.
 #
-# The host `id.127-0-0-1.sslip.io` is the issuer URL clients see and the base of
-# the GitHub OAuth callback (https://id.127-0-0-1.sslip.io/callback). It is
+# The host `id.capstone.uamishub.com` is the issuer URL clients see and the base of
+# the GitHub OAuth callback (https://id.capstone.uamishub.com/callback). It is
 # covered by the wildcard cert (single-label subdomain of the apex).
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -18,7 +18,7 @@ metadata:
     app.kubernetes.io/name: dex
 spec:
   rules:
-    - host: id.127-0-0-1.sslip.io
+    - host: id.capstone.uamishub.com
       http:
         paths:
           - path: /
@@ -30,4 +30,4 @@ spec:
                   number: 5556
   tls:
     - hosts:
-        - id.127-0-0-1.sslip.io
+        - id.capstone.uamishub.com
