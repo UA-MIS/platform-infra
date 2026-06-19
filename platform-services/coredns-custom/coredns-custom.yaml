@@ -1,5 +1,22 @@
 # CoreDNS custom rewrite (P2.1-fix2) — split-horizon DNS for the OIDC issuer.
 #
+# ⚠⚠ TALOS-INERT — THIS CONFIGMAP DOES NOTHING ON THE TALOS CLUSTER (verified
+# 2026-06-19). It relies on the k3s/k3d convention where CoreDNS imports
+# `/etc/coredns/custom/*.override` into the `.:53` block. The TALOS CoreDNS is stock
+# upstream: its Corefile has NO `import` directive and this ConfigMap is NOT mounted
+# into the coredns pods (and the `coredns` ConfigMap is Talos-managed —
+# owning-inventory talos-bootstrap-manifests-inventory — so a manual Corefile edit is
+# reverted on reconcile). Proof: in-cluster, BOTH id.capstone.uamishub.com AND
+# harbor.capstone.uamishub.com resolve to Cloudflare edge IPs, NOT Traefik.
+#
+# CONSEQUENCE: in-cluster split-horizon is achieved per-workload via `hostAliases`
+# instead (harbor: ARC hook-template + the Backstage deploy → Traefik ClusterIP, to
+# dodge Cloudflare's 100MB body cap on image push/pull). The id-issuer rewrite below
+# is also inert — in-cluster OIDC discovery currently egresses via Cloudflare (fine
+# for small requests). BACKLOG: a Talos-native CoreDNS machine-config patch
+# (clusters/real-talos) would restore real cluster-wide split-horizon and retire this
+# file + the hostAliases hardcodes. Until then THIS FILE IS A NO-OP — do not trust it.
+#
 # THE PROBLEM: the dashed-sslip convention (D-003) makes id.${PLATFORM_DOMAIN}
 # resolve to 127.0.0.1 EVERYWHERE — including inside pods. That is correct for a
 # browser on the host (127.0.0.1:443 -> host-mapped Traefik), but ArgoCD-server
