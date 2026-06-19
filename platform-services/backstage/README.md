@@ -133,8 +133,19 @@ Do these **in order**, after the cluster heal + the Phase-3 domain cutover:
    "PLACEHOLDER" (annotated `platform.capstone/placeholder: "true"`). Re-seal with real
    values per the headers in those files. Keep `password` (postgresql) ==
    `POSTGRES_PASSWORD` (process-secrets), and `AUTH_OIDC_CLIENT_SECRET` == the Dex
-   `process-client-secret`. Add a `GITHUB_TOKEN` key (repo + admin:org on UA-MIS) for the
-   Scaffolder's `publish:github` + catalog org ingestion.
+   `process-client-secret`.
+
+   **M2 (GitHub-org visibility) — seal the GitHub App credential.** M2 authenticates as the
+   `ua-mis-backstage` GitHub App (NOT a PAT) for org ingestion. The App's non-secret IDs
+   (App ID `4097147`, Client ID `Iv23liRQ6d2I2mibDMbY`, Installation `141394298`) are
+   INLINED in config; only the two SECRET values are sealed into `backstage-process-secrets`:
+   - **`GITHUB_APP_PRIVATE_KEY`** — the full contents of the App `.pem` private key (multi-
+     line; seal as-is, do not strip newlines).
+   - **`GITHUB_APP_CLIENT_SECRET`** — the App client secret.
+
+   These MUST be sealed **before** the M2 image deploys: M2 removes the M1 sign-in fallback,
+   so if ingestion can't run (missing/wrong credential) NO ONE can sign in, including admins
+   (plan R1). Break-glass: roll `backstage.image.tag` back to the M1 SHA `87c9dc3a8fb8`.
    ```bash
    # audit that no placeholders remain before enabling sync:
    kubectl get sealedsecret -A -o json | jq -r \
@@ -222,6 +233,20 @@ that wired provider. Org gating is enforced UPSTREAM at Dex (UA-MIS-only, SEC-00
 - Running the template creates `UA-MIS/<app-name>`, the repo has `app/` + `.devops/`, its
   first PR builds a preview, and the new component appears in the catalog with TechDocs.
 - No SealedSecret carries `platform.capstone/placeholder: "true"` (step 3 audit).
+
+**M2 (GitHub-org per-team visibility) acceptance** — after ingestion runs (≤ the schedule):
+- The catalog shows real UA-MIS Groups (one per GitHub team, slug = `<team>`) + Users; the
+  seed `guest`/`guests` placeholders are gone.
+- A member of exactly one team sees ONLY that team's owned Components; another team's member
+  sees a disjoint set; a `labmx` admin sees everything (admin override).
+- **Backend-boundary check (the security-meaningful test):** the filtering is enforced
+  server-side, not UI-hidden. Run the checked-in script with a signed-in user's token:
+  ```bash
+  BACKSTAGE_TOKEN=<token> EXPECT_TEAM=<your-team-slug> \
+    ./scripts/m2-acceptance-backend-filter.sh
+  ```
+  It fails if `GET /api/catalog/entities` returns any component owned by a team the caller
+  is not on (a silent ALLOW-all regression — e.g. `permission.enabled` unset).
 
 ## Notes / known caveats
 

@@ -54,9 +54,20 @@ auth:
         clientSecret: ${AUTH_OIDC_CLIENT_SECRET}
         prompt: auto
 
+# ── Permission framework (M2: THE SPINE) ───────────────────────────────────────────────
+# Turn the permission framework ON so the custom CapstoneTeamPermissionPolicy
+# (packages/backend/src/modules/permissionPolicy.ts) actually enforces. WITHOUT this the
+# framework no-ops and serves every entity regardless of policy (plan R6). MUST also be
+# mirrored into the Helm appConfig (the pod loads ONLY that — see the applicationset note).
+permission:
+  enabled: true
+
 # ── Catalog ──────────────────────────────────────────────────────────────────────────
-# M1 keeps the seed example entities so the portal renders with content. Real GitHub-org
-# ingestion (one Group per GitHub team) replaces these in M2.
+# M2: real GitHub-org ingestion (one Backstage Group per GitHub team, slug = <team>; one
+# User per org member with spec.memberOf) replaces the M1 seed org.yaml. The ingested
+# Users/Groups are what make the sign-in resolver + permission policy meaningful (a User
+# carries its team memberships -> ownershipEntityRefs). The seed examples/org.yaml Location
+# is REMOVED (it would re-inject the placeholder guest/guests and shadow real ingestion).
 catalog:
   rules:
     - allow: [Component, System, API, Resource, Location, Template, Group, User]
@@ -67,15 +78,34 @@ catalog:
       target: ./examples/template/template.yaml
       rules:
         - allow: [Template]
-    - type: file
-      target: ./examples/org.yaml
-      rules:
-        - allow: [User, Group]
+  # GitHub-org provider: ingests UA-MIS teams (-> Groups) and members (-> Users). Auth is
+  # via integrations.github below (the GitHub App). Short initialDelay so the first
+  # ingestion runs quickly after boot — R1: nobody can sign in until real Users exist.
+  providers:
+    githubOrg:
+      id: production
+      githubUrl: https://github.com
+      orgs: ['UA-MIS']
+      schedule:
+        initialDelay: { seconds: 30 }
+        frequency: { hours: 1 }
+        timeout: { minutes: 10 }
 
-# GitHub integration: the Scaffolder's publish:github + catalog org ingestion need a token
-# (repo + admin:org) at M2/M4. M1 does not require it; the token env may be absent here
-# without breaking boot. Documented as a go-live dep in the README.
+# GitHub integration: authenticates as the UA-MIS GitHub App (ua-mis-backstage). M2 uses it
+# for org ingestion (Organization: Members = Read); M4's Scaffolder reuses it for repo
+# create + branch protection. App auth is preferred over a PAT (scoped, rotatable, not tied
+# to a person). The non-secret IDs are inlined; the two SECRET values arrive as env vars
+# from the backstage-process-secrets SealedSecret (devops seals them — see README/PR):
+#   GITHUB_APP_PRIVATE_KEY   — the .pem contents (multi-line)
+#   GITHUB_APP_CLIENT_SECRET — the App client secret
 integrations:
   github:
     - host: github.com
-      token: ${GITHUB_TOKEN}
+      apps:
+        - appId: 4097147
+          clientId: Iv23liRQ6d2I2mibDMbY
+          clientSecret: ${GITHUB_APP_CLIENT_SECRET}
+          privateKey: ${GITHUB_APP_PRIVATE_KEY}
+          # Installation 141394298 on the UA-MIS org. allowedInstallationOwners scopes the
+          # App to that org so credential discovery never strays to another installation.
+          allowedInstallationOwners: ['UA-MIS']

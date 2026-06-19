@@ -36,15 +36,21 @@ backend.add(
   import('@backstage/plugin-catalog-backend-module-scaffolder-entity-model'),
 );
 
+// M2: GitHub-org ingestion — one Backstage Group per GitHub team (slug = <team>) + one
+// User per org member with spec.memberOf, driven by catalog.providers.githubOrg in
+// app-config. This is what populates the ownership data the permission policy filters on.
+backend.add(import('@backstage/plugin-catalog-backend-module-github-org'));
+
 // See https://backstage.io/docs/features/software-catalog/configuration#subscribing-to-catalog-errors
 backend.add(import('@backstage/plugin-catalog-backend-module-logs'));
 
 // permission plugin
 backend.add(import('@backstage/plugin-permission-backend'));
-// See https://backstage.io/docs/permissions/getting-started for how to create your own permission policy
-backend.add(
-  import('@backstage/plugin-permission-backend-module-allow-all-policy'),
-);
+// M2: the custom CapstoneTeamPermissionPolicy (THE SPINE) — per-team catalog visibility
+// via ownership filtering, admin override on the `labmx` group. REPLACES the stock
+// allow-all policy (only one policy can be set; the allow-all module is removed and its
+// dependency dropped from package.json). Requires permission.enabled: true in app-config.
+backend.add(import('./modules/permissionPolicy'));
 
 // search plugin
 backend.add(import('@backstage/plugin-search-backend'));

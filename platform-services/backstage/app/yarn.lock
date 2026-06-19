@@ -2659,6 +2659,47 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@backstage/plugin-catalog-backend-module-github-org@npm:^0.3.23":
+  version: 0.3.23
+  resolution: "@backstage/plugin-catalog-backend-module-github-org@npm:0.3.23"
+  dependencies:
+    "@backstage/backend-plugin-api": "npm:^1.9.2"
+    "@backstage/config": "npm:^1.3.8"
+    "@backstage/plugin-catalog-backend-module-github": "npm:^0.13.3"
+    "@backstage/plugin-catalog-node": "npm:^2.2.2"
+    "@backstage/plugin-events-node": "npm:^0.4.23"
+  checksum: 10c0/435f9340db9419a2ee13d444d63f8fda20ed3ab7da1b864a8c02b902e84d8dff7364bbe245ebc39404f9957990ff77dba6d7619d74df5bfb4e329ed3c660a0e9
+  languageName: node
+  linkType: hard
+
+"@backstage/plugin-catalog-backend-module-github@npm:^0.13.3":
+  version: 0.13.3
+  resolution: "@backstage/plugin-catalog-backend-module-github@npm:0.13.3"
+  dependencies:
+    "@backstage/backend-plugin-api": "npm:^1.9.2"
+    "@backstage/catalog-model": "npm:^1.9.0"
+    "@backstage/config": "npm:^1.3.8"
+    "@backstage/errors": "npm:^1.3.1"
+    "@backstage/integration": "npm:^2.0.3"
+    "@backstage/plugin-catalog-common": "npm:^1.1.10"
+    "@backstage/plugin-catalog-node": "npm:^2.2.2"
+    "@backstage/plugin-events-node": "npm:^0.4.23"
+    "@backstage/types": "npm:^1.2.2"
+    "@octokit/auth-callback": "npm:^5.0.0"
+    "@octokit/core": "npm:^5.2.0"
+    "@octokit/graphql": "npm:^7.0.2"
+    "@octokit/plugin-retry": "npm:^6.0.0"
+    "@octokit/plugin-throttling": "npm:^8.1.3"
+    "@octokit/rest": "npm:^19.0.3"
+    "@octokit/webhooks-types": "npm:^7.6.1"
+    git-url-parse: "npm:^15.0.0"
+    lodash: "npm:^4.17.21"
+    minimatch: "npm:^10.2.1"
+    octokit: "npm:^3.0.0"
+  checksum: 10c0/49d17b678117593ca760a243aebff1b92d0d3afb5c9e5246ca7f479f5b755fd1829a82dd5633c228782d1bb9680802e86e6c8d2b83d72a44a77f8c39889a81c7
+  languageName: node
+  linkType: hard
+
 "@backstage/plugin-catalog-backend-module-logs@npm:^0.1.23":
   version: 0.1.23
   resolution: "@backstage/plugin-catalog-backend-module-logs@npm:0.1.23"
@@ -3193,18 +3234,6 @@ __metadata:
     "@types/react":
       optional: true
   checksum: 10c0/40bf54769170e68bfff447dfb98f22f0d67ab717cbf8aa880b6226e65b8e1b96c98af40293fef3b742a73db21e0a7a76e9207117b5b939f78236825c19d522bc
-  languageName: node
-  linkType: hard
-
-"@backstage/plugin-permission-backend-module-allow-all-policy@npm:^0.2.20":
-  version: 0.2.20
-  resolution: "@backstage/plugin-permission-backend-module-allow-all-policy@npm:0.2.20"
-  dependencies:
-    "@backstage/backend-plugin-api": "npm:^1.9.2"
-    "@backstage/plugin-auth-node": "npm:^0.7.2"
-    "@backstage/plugin-permission-common": "npm:^0.9.9"
-    "@backstage/plugin-permission-node": "npm:^0.11.1"
-  checksum: 10c0/3bb3001d2e0610535e87516f3a9dd4d0f8ac9db9972133003cc9cc022e8ede9f418d374f25905db684d118d2cd65acb96e343c90eb6c395907b985746fc36875
   languageName: node
   linkType: hard
 
@@ -7055,6 +7084,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@octokit/auth-callback@npm:^5.0.0":
+  version: 5.0.1
+  resolution: "@octokit/auth-callback@npm:5.0.1"
+  checksum: 10c0/851d0930aeecddc626655469ef57727654af30755264d5139d9fdf61ba9fc88c1a8685f5721f853c806c570b8529d25d262f4efe76da90c08c779d9cc1c37edf
+  languageName: node
+  linkType: hard
+
 "@octokit/auth-oauth-app@npm:^5.0.0":
   version: 5.0.6
   resolution: "@octokit/auth-oauth-app@npm:5.0.6"
@@ -7176,7 +7212,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@octokit/core@npm:^5.0.0":
+"@octokit/core@npm:^5.0.0, @octokit/core@npm:^5.2.0":
   version: 5.2.2
   resolution: "@octokit/core@npm:5.2.2"
   dependencies:
@@ -7223,7 +7259,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@octokit/graphql@npm:^7.1.0":
+"@octokit/graphql@npm:^7.0.2, @octokit/graphql@npm:^7.1.0":
   version: 7.1.1
   resolution: "@octokit/graphql@npm:7.1.1"
   dependencies:
@@ -7405,7 +7441,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@octokit/plugin-throttling@npm:^8.0.0":
+"@octokit/plugin-throttling@npm:^8.0.0, @octokit/plugin-throttling@npm:^8.1.3":
   version: 8.2.0
   resolution: "@octokit/plugin-throttling@npm:8.2.0"
   dependencies:
@@ -7550,7 +7586,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@octokit/webhooks-types@npm:7.6.1":
+"@octokit/webhooks-types@npm:7.6.1, @octokit/webhooks-types@npm:^7.6.1":
   version: 7.6.1
   resolution: "@octokit/webhooks-types@npm:7.6.1"
   checksum: 10c0/7c2cb40f9ccd2bd392cf35c23f995ae0719ef35fd3bce0264ced5518cbf0a7087bd069bf5e5963fc33d0232726968db526912df3cb017c1bd1761c8849c31a30
@@ -13106,13 +13142,14 @@ __metadata:
     "@backstage/plugin-auth-backend-module-oidc-provider": "npm:^0.4.17"
     "@backstage/plugin-auth-node": "npm:^0.7.2"
     "@backstage/plugin-catalog-backend": "npm:^3.8.0"
+    "@backstage/plugin-catalog-backend-module-github-org": "npm:^0.3.23"
     "@backstage/plugin-catalog-backend-module-logs": "npm:^0.1.23"
     "@backstage/plugin-catalog-backend-module-scaffolder-entity-model": "npm:^0.2.21"
+    "@backstage/plugin-catalog-common": "npm:^1.1.10"
     "@backstage/plugin-kubernetes-backend": "npm:^0.21.5"
     "@backstage/plugin-mcp-actions-backend": "npm:^0.1.14"
     "@backstage/plugin-notifications-backend": "npm:^0.6.6"
     "@backstage/plugin-permission-backend": "npm:^0.7.13"
-    "@backstage/plugin-permission-backend-module-allow-all-policy": "npm:^0.2.20"
     "@backstage/plugin-permission-common": "npm:^0.9.9"
     "@backstage/plugin-permission-node": "npm:^0.11.1"
     "@backstage/plugin-proxy-backend": "npm:^0.6.14"
