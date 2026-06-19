@@ -77,3 +77,22 @@ spec:
         - ports:
             - port: "8080"
               protocol: TCP
+    # Traefik (kube-system) — the image PUSH path. The build resolves
+    # harbor.capstone.uamishub.com -> Traefik ClusterIP (hostAlias, to dodge the
+    # Cloudflare 100MB cap) and pushes over TLS; Traefik terminates the wildcard cert
+    # and SNI-routes to the harbor ingress -> harbor-core. WHY THIS IS NEEDED ON TOP
+    # OF the harbor-core entry above: that entry only allows the runner to reach
+    # harbor-core DIRECTLY, but the registry endpoint the client actually dials is
+    # Traefik (the public host's in-cluster target). Without this, runner->Traefik is
+    # denied -> `dial tcp <traefik-clusterIP>:443: i/o timeout` (M1 demo blocker).
+    # PORT = Traefik's POD port 8443 (websecure Service :443 -> targetPort 8443);
+    # Cilium toEndpoints enforces the post-translation pod port (same rule as harbor
+    # above). Narrow by endpoint label, NOT `cluster` — no cross-tenant opening.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            app.kubernetes.io/name: traefik
+      toPorts:
+        - ports:
+            - port: "8443"
+              protocol: TCP
