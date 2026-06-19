@@ -1,0 +1,31 @@
+# Cilium apiserver-egress allow (CiliumNetworkPolicy) — arc-runners.
+#
+# WHY (flannel -> Cilium migration gap — see netpol-controlplane/apiserver-cnp.yaml
+# for the full rationale): Cilium matches kube-apiserver traffic by the
+# `reserved:kube-apiserver` identity, NOT by ipBlock CIDR, so the runner-netpol's
+# CIDR-based apiserver allow does not match under Cilium and apiserver egress is
+# denied. This CNP adds the apiserver-entity egress allow; the k8s runner-netpol
+# (default-deny + DNS + scoped allows) stays in force (CNP + NetworkPolicy are
+# additive/OR).
+#
+# SECURITY NOTE (arc-runners is the UNTRUSTED student-CI surface): apiserver
+# egress is REQUIRED for runners to function (registration/job lifecycle). The
+# control that fences what a runner may DO at the apiserver is RBAC (scoped
+# ServiceAccounts), NOT this netpol — the netpol never was the apiserver-authz
+# control. This CNP does NOT open cross-tenant / cross-pod egress; the runner
+# default-deny still blocks lateral movement (validate via the SEC-011 deny-test).
+#
+# Manual-sync via platform-netpol-runners (same lockout-protection policy).
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-egress-apiserver
+  namespace: arc-runners
+  labels:
+    platform.capstone/component: platform
+spec:
+  endpointSelector: {}
+  egress:
+    - toEntities:
+        - kube-apiserver

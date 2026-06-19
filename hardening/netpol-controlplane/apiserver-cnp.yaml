@@ -1,0 +1,63 @@
+# Cilium apiserver-egress allow (CiliumNetworkPolicy) — argocd / dex / harbor.
+#
+# WHY THIS EXISTS (flannel -> Cilium migration gap, SEC-009/013):
+# The zz-default-deny + allow-egress-scoped k8s NetworkPolicies in these
+# namespaces try to permit kube-apiserver egress with `ipBlock` CIDRs (the svc
+# VIP 10.96.0.1 in 10.96.0.0/12, and the apiserver host IPs in 10.237.168.0/22).
+# That worked under flannel only because flannel has NO NetworkPolicy backend —
+# the policies were INERT. Under Cilium they are ENFORCED, and Cilium classifies
+# kube-apiserver traffic by the special `reserved:kube-apiserver` IDENTITY, not by
+# IP. Per the Cilium docs: "By default, CIDR-based selectors do not match
+# in-cluster entities." => the ipBlock allows DO NOT match apiserver egress, so
+# Cilium denies it (argocd-redis secret-init / argocd-server / app-controller and
+# harbor-core/jobservice all fail `dial 10.96.0.1:443 i/o timeout`).
+#
+# A plain k8s NetworkPolicy CANNOT express the apiserver identity. The documented
+# fix is a CiliumNetworkPolicy with `toEntities: [kube-apiserver]`, which Cilium
+# states "is generally expected to work" for egress. CNP + k8s NetworkPolicy on
+# the same endpoint/direction are ADDITIVE (OR'd) — this manifest only ADDS the
+# apiserver-entity egress allow; the existing default-deny + scoped allows (DNS,
+# intra-cluster, external :443) stay in force.
+#
+# NOTE this is namespace-wide (endpointSelector: {}) and apiserver-only — it does
+# NOT widen any other egress. Lives in the `platform` AppProject; manual-sync via
+# platform-netpol-controlplane (same lockout-protection policy as the k8s netpols).
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-egress-apiserver
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+spec:
+  endpointSelector: {}
+  egress:
+    - toEntities:
+        - kube-apiserver
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-egress-apiserver
+  namespace: dex
+  labels:
+    platform.capstone/component: platform
+spec:
+  endpointSelector: {}
+  egress:
+    - toEntities:
+        - kube-apiserver
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-egress-apiserver
+  namespace: harbor
+  labels:
+    platform.capstone/component: platform
+spec:
+  endpointSelector: {}
+  egress:
+    - toEntities:
+        - kube-apiserver
