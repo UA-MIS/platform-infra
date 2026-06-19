@@ -55,14 +55,18 @@ spec:
           strategy:
             type: Recreate
           image:
-            # THE CUSTOM IMAGE built from `npx @backstage/create-app` + pushed to
-            # Harbor (see README "To go live"). PLACEHOLDER tag until that image exists.
+            # THE CUSTOM IMAGE built from the in-repo Backstage app (platform-services/
+            # backstage/app) by ARC-CI (Kaniko) + pushed to Harbor (see README "To go
+            # live"). Lives in the DEDICATED `backstage` Harbor project (ADR-029 / D-046,
+            # its own CI push robot) — NOT the shared `library` project. PLACEHOLDER tag
+            # until the first build lands; the CI build tags by commit SHA.
             registry: harbor.capstone.uamishub.com
-            repository: library/backstage-process
-            tag: v0.1.0                          # PLACEHOLDER — bump to the real built tag
+            repository: backstage/backstage-process
+            tag: v0.1.0                          # PLACEHOLDER — bump to the first built SHA
             pullPolicy: IfNotPresent
-            # Pull from the private Harbor `library` project via a robot imagePullSecret
-            # (created at go-live, same robot pattern as team workloads — see README).
+            # Pull from the private Harbor `backstage` project via a robot
+            # imagePullSecret (`harbor-pull`, minted at go-live by `make harbor-robot
+            # NAME=backstage ENV=...` — same robot pattern as team workloads, see README).
             pullSecrets:
               - harbor-pull
 
