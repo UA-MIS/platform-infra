@@ -37,3 +37,24 @@ data:
   # Filename must end in `.override` to be imported into the `.:53` block.
   id-issuer.override: |
     rewrite name exact id.capstone.uamishub.com traefik.kube-system.svc.cluster.local
+  # Registry DATA PLANE must stay in-cluster — never traverse Cloudflare. The public
+  # host `harbor.capstone.uamishub.com` resolves (externally) to the CF-proxied
+  # wildcard, and CF Free/Pro caps request bodies at 100MB. A container image push
+  # (or pull) sends layers far larger than that, so an in-cluster client pushing to
+  # the PUBLIC host goes pod -> CF edge -> tunnel and each >100MB layer gets a 413
+  # "Request Entity Too Large" (a Cloudflare HTML error page, not Harbor). This
+  # broke the first ARC/Kaniko push of the Backstage image.
+  #
+  # FIX (same split-horizon pattern as the issuer above): rewrite the host IN-CLUSTER
+  # to Traefik's service FQDN, so the ARC runner (push) and the Backstage deploy
+  # (pull) hit Traefik ClusterIP:443 directly -> Traefik routes by SNI to the Harbor
+  # ingress -> harbor-core, bypassing the CF edge + its 100MB cap. CoreDNS rewrites
+  # the answer name back to harbor.capstone.uamishub.com, so TLS SNI + the wildcard
+  # cert + the image reference all stay byte-identical (robots/tags/deploy refs
+  # unchanged). Traefik terminates TLS with the internal wildcard TLSStore cert and
+  # has NO buffering/maxRequestBodyBytes middleware (verified) -> streams the large
+  # push with no size limit. The PUBLIC host still serves the Harbor UI externally
+  # via CF (UI requests are small; only the data plane needs the internal path).
+  # Foundational: EVERY tenant build push + workload pull needs this, not just M1.
+  harbor-registry.override: |
+    rewrite name exact harbor.capstone.uamishub.com traefik.kube-system.svc.cluster.local
