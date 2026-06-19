@@ -27,6 +27,15 @@ spec:
           # reason. Applied imperatively per team, not reconciled.
           - path: platform-services/harbor-onboarding
             exclude: true
+          # EXCLUDE traefik/ (D-042/ADR-028): Traefik is no longer a kustomize-dir
+          # service configured via the (k3s-only, inert-on-Talos) HelmChartConfig.
+          # It is now a standalone Helm-source Application (applicationsets/traefik-app.yaml,
+          # modeled on harbor/backstage) installing the real traefik/traefik chart.
+          # The platform-services/traefik/ dir is DELETED in the same change; this
+          # exclude documents intent + is belt-and-suspenders so the dir-generator
+          # never re-emits a `platform-svc-traefik` if the dir reappears.
+          - path: platform-services/traefik
+            exclude: true
   template:
     metadata:
       name: 'platform-svc-{{.path.basename}}'
