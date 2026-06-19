@@ -508,10 +508,17 @@ harbor-onboard: ## (P2.2) Onboard team into Harbor: create project <name> + map 
 	@kubectl --context "$(KUBE_CONTEXT)" -n "$(HARBOR_NS)" logs job/harbor-onboard-$(NAME) --tail=20
 	@echo "harbor-onboard: DONE for '$(NAME)'. NEXT: make harbor-robot NAME=$(NAME) ENV=dev > .../harbor-pull-sealed.yaml"
 
+# Namespace the PULL secret seals into. Defaults to the tenant convention
+# <name>-<env> (where team workloads run). Override PULL_NS for a PLATFORM service
+# that runs in a fixed namespace (e.g. The Process: NAME=backstage PULL_NS=backstage),
+# mirroring the RUNNER_NS override on harbor-push-robot — the pull secret must land in
+# the namespace that actually consumes it, or the imagePullSecret is in the wrong ns.
+PULL_NS ?= $(NAME)-$(ENV)
+
 .PHONY: harbor-robot
-harbor-robot: ## (P2.2) Create a pull robot for project <name> -> SealedSecret on stdout. NAME=<name> ENV=<env>. Override KUBE_CONTEXT for non-k3d clusters.
-	@test -n "$(NAME)" || { echo "usage: make harbor-robot NAME=<team-slug> ENV=<env> > harbor-pull-sealed.yaml"; exit 1; }
-	@test -n "$(ENV)"  || { echo "usage: make harbor-robot NAME=<team-slug> ENV=<env> (e.g. dev/staging/prod)"; exit 1; }
+harbor-robot: ## (P2.2) Create a pull robot for project <name> -> SealedSecret on stdout. NAME=<name> ENV=<env> [PULL_NS=<name>-<env>]. Override KUBE_CONTEXT for non-k3d clusters.
+	@test -n "$(NAME)" || { echo "usage: make harbor-robot NAME=<team-slug> ENV=<env> [PULL_NS=<ns>] > harbor-pull-sealed.yaml"; exit 1; }
+	@test -n "$(ENV)"  || { echo "usage: make harbor-robot NAME=<team-slug> ENV=<env> (e.g. dev/staging/prod); ENV still names the robot/file even when PULL_NS is set"; exit 1; }
 	@command -v kubeseal >/dev/null || { echo "ERROR: kubeseal not found (install to ~/.local/bin)."; exit 1; }
 	@kubectl config get-contexts "$(KUBE_CONTEXT)" >/dev/null 2>&1 \
 	  || { echo "ERROR: kube-context '$(KUBE_CONTEXT)' not found. For the Talos cluster set KUBECONFIG=clusters/real-talos/talos-kubeconfig and KUBE_CONTEXT=admin@capstone." >&2; exit 1; }
@@ -549,14 +556,14 @@ harbor-robot: ## (P2.2) Create a pull robot for project <name> -> SealedSecret o
 	  rsec=$$(printf '%s'  "$$json" | sed -n 's/.*"secret":"\([^"]*\)".*/\1/p'); \
 	  kubectl --context "$$ctx" -n "$$ns" delete job "$$job" --ignore-not-found >/dev/null 2>&1 || true; \
 	  if [ -z "$$rname" ] || [ -z "$$rsec" ]; then echo "ERROR: could not parse robot {name,secret} from: $$json" >&2; exit 1; fi; \
-	  echo "==> robot '$$rname' created (pull-only on '$(NAME)'); sealing into $(NAME)-$(ENV)..." >&2; \
+	  echo "==> robot '$$rname' created (pull-only on '$(NAME)'); sealing into $(PULL_NS)..." >&2; \
 	  kubectl create secret docker-registry harbor-pull \
 	    --docker-server="$(HARBOR_HOST)" \
 	    --docker-username="$$rname" --docker-password="$$rsec" \
-	    -n "$(NAME)-$(ENV)" --dry-run=client -o yaml \
+	    -n "$(PULL_NS)" --dry-run=client -o yaml \
 	  | kubeseal --controller-namespace kube-system \
 	      --controller-name sealed-secrets-controller \
-	      --namespace "$(NAME)-$(ENV)" --format yaml
+	      --namespace "$(PULL_NS)" --format yaml
 
 # Namespace the CI PUSH secret seals into (where the ARC runner consumes it). The
 # scale set runs in arc-runners (P2.3); override RUNNER_NS if the workflow mounts it
