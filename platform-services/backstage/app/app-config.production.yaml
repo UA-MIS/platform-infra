@@ -53,6 +53,13 @@ auth:
         clientId: ${AUTH_OIDC_CLIENT_ID}
         clientSecret: ${AUTH_OIDC_CLIENT_SECRET}
         prompt: auto
+        # Login-loop fix (verdict B): request offline_access so Dex returns a refresh_token
+        # -> the OAuth frame handler sets the refresh cookie -> /api/auth/oidc/refresh
+        # succeeds (no more 401 loop). The backend unions this into the Dex authorize
+        # request server-side; no frontend change / rebuild needed. Mirrored into the Helm
+        # appConfig (the pod loads only that, PR #71). No experimentalRefreshToken flag
+        # required for the SPA refresh cookie.
+        additionalScopes: [offline_access]
 
 # ── Permission framework (M2: THE SPINE) ───────────────────────────────────────────────
 # Turn the permission framework ON so the custom CapstoneTeamPermissionPolicy

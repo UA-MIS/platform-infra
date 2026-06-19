@@ -141,6 +141,18 @@ spec:
                     clientId: ${AUTH_OIDC_CLIENT_ID}
                     clientSecret: ${AUTH_OIDC_CLIENT_SECRET}
                     prompt: auto
+                    # THE LOGIN-LOOP FIX (M2, verdict B): request offline_access so Dex
+                    # returns a refresh_token. The OAuth backend UNIONS this provider-config
+                    # `additionalScopes` into the scope sent to Dex SERVER-SIDE (CookieScope
+                    # Manager reads config.additionalScopes), so NO frontend change and NO
+                    # rebuild are needed — this appConfig add alone fixes it. Without it Dex
+                    # returns no refresh_token -> the frame handler never sets the refresh
+                    # cookie -> /api/auth/oidc/refresh 401 "Missing session cookie" -> the
+                    # sign-in popup loops (handler-frame 200, no throw). The SPA refresh
+                    # cookie needs ONLY this token; it does NOT require
+                    # auth.experimentalRefreshToken.enabled (that flag gates the separate
+                    # DB-backed offline-token service for OIDC/MCP clients, not this path).
+                    additionalScopes: [offline_access]
 
             # ── Catalog: The Process golden-path templates + seed + GitHub-org ingest ──
             # CRITICAL (PR #71): the chart launches the backend with ONLY this overlay
