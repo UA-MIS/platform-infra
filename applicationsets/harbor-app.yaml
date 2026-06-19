@@ -75,6 +75,20 @@ spec:
         trivy:
           enabled: true
 
+        # --- Deployment update strategy: Recreate (NOT the chart default
+        #     RollingUpdate). The registry + jobservice Deployments mount RWO
+        #     (ReadWriteOnce) ceph-block RBD PVCs — single-mounter volumes. Under
+        #     RollingUpdate the chart surges a NEW pod before the OLD one releases
+        #     the PVC, so the new pod hangs on `Multi-Attach error ... Volume is
+        #     already exclusively attached to one node` and every rollout (image
+        #     bump, values change, node drain) deadlocks. The Harbor chart README:
+        #     "updateStrategy.type ... should be set to Recreate if RWM for volumes
+        #     is not supported." We are RWO single-replica, so Recreate is correct.
+        #     (Revisit ONLY if we move registry to RWX/S3 + multi-replica HA, where
+        #     RollingUpdate becomes safe again — that is a Phase-4+ HA decision.)
+        updateStrategy:
+          type: Recreate
+
         # Single-replica everything for Phase-2 local (laptop). Phase-4 scales.
         portal:    { replicas: 1 }
         core:      { replicas: 1 }
