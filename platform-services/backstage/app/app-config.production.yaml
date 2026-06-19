@@ -1,0 +1,81 @@
+# Production app-config for "The Process" (UA-MIS capstone developer portal), baked into
+# the custom image. This is the source of truth for the deployed portal; the Helm values
+# in applicationsets/backstage-process-app.yaml are MERGED ON TOP at deploy (so the same
+# ${VAR} names must match). Secrets arrive as env vars from the `backstage-process-secrets`
+# SealedSecret (devops-owned): AUTH_OIDC_CLIENT_ID, AUTH_OIDC_CLIENT_SECRET, BACKEND_SECRET,
+# POSTGRES_PASSWORD (+ GITHUB_TOKEN later, M2/M4). NO plaintext secrets live in git.
+#
+# Interim host: process.capstone.uamishub.com (repo-wide domain convention, matches Dex,
+# Harbor, ArgoCD). The Dex `process` static client + redirect URI are wired in
+# platform-services/dex/configmap.yaml.
+app:
+  baseUrl: https://process.capstone.uamishub.com
+
+backend:
+  baseUrl: https://process.capstone.uamishub.com
+  listen:
+    port: 7007
+  # Backend service-to-service signing key (env from the SealedSecret).
+  auth:
+    keys:
+      - secret: ${BACKEND_SECRET}
+  csp:
+    connect-src: ["'self'", 'http:', 'https:']
+  cors:
+    origin: https://process.capstone.uamishub.com
+    methods: [GET, HEAD, PATCH, POST, PUT, DELETE]
+    credentials: true
+  # The bundled Bitnami postgresql subchart (postgresql.enabled=true). Host/user match the
+  # chart defaults in the Application values; password is env-injected from the SealedSecret.
+  database:
+    client: pg
+    connection:
+      host: backstage-postgresql
+      port: 5432
+      user: bn_backstage
+      password: ${POSTGRES_PASSWORD}
+
+# ── SSO via the shared Dex broker (issuer id.capstone.uamishub.com) ──────────────────
+# Same broker as ArgoCD/Harbor. The OIDC provider is wired in packages/backend
+# (src/modules/authOidcProcess.ts) with a custom Dex-aware sign-in resolver
+# (preferred_username -> User entity, with a catalog fallback for M1). NOTE: do NOT add a
+# signIn.resolvers list here — a code-defined resolver only takes effect when app-config
+# carries no resolvers (config resolvers win). Org gating (UA-MIS-only) is enforced
+# UPSTREAM at Dex (SEC-007); Backstage trusts the broker.
+auth:
+  environment: production
+  session:
+    secret: ${BACKEND_SECRET}
+  providers:
+    oidc:
+      production:
+        metadataUrl: https://id.capstone.uamishub.com/.well-known/openid-configuration
+        clientId: ${AUTH_OIDC_CLIENT_ID}
+        clientSecret: ${AUTH_OIDC_CLIENT_SECRET}
+        prompt: auto
+
+# ── Catalog ──────────────────────────────────────────────────────────────────────────
+# M1 keeps the seed example entities so the portal renders with content. Real GitHub-org
+# ingestion (one Group per GitHub team) replaces these in M2.
+catalog:
+  rules:
+    - allow: [Component, System, API, Resource, Location, Template, Group, User]
+  locations:
+    - type: file
+      target: ./examples/entities.yaml
+    - type: file
+      target: ./examples/template/template.yaml
+      rules:
+        - allow: [Template]
+    - type: file
+      target: ./examples/org.yaml
+      rules:
+        - allow: [User, Group]
+
+# GitHub integration: the Scaffolder's publish:github + catalog org ingestion need a token
+# (repo + admin:org) at M2/M4. M1 does not require it; the token env may be absent here
+# without breaking boot. Documented as a go-live dep in the README.
+integrations:
+  github:
+    - host: github.com
+      token: ${GITHUB_TOKEN}
