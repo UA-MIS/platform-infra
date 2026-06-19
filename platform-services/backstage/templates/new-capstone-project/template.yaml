@@ -1,6 +1,6 @@
-# "New Capstone Project" — the Relay Scaffolder GOLDEN-PATH template (P5, §1.2).
+# "New Capstone Project" — The Process Scaffolder GOLDEN-PATH template (P5, §1.2).
 #
-# This is the headline IDP feature: a student fills four fields, and Relay creates a
+# This is the headline IDP feature: a student fills four fields, and The Process creates a
 # new team app repo under UA-MIS pre-wired to the platform's `.devops/` contract
 # (the same one team-sample-app proves end-to-end: PR -> preview, merge -> dev,
 # tag -> staging, manual gate -> prod). The student then only ever edits `app/` and
@@ -18,7 +18,7 @@
 #   3. publish:github — create UA-MIS/<repo>, push, set the default branch + the
 #      branch protection the platform expects (PRs only into main; no direct pushes).
 #   4. catalog:register — register the new component's catalog-info.yaml so it shows
-#      up in the Relay software catalog immediately.
+#      up in The Process software catalog immediately.
 #
 # ⚠ REQUIRES (wired at go-live — see platform-services/backstage/README.md):
 #   - The GitHub integration token (${GITHUB_TOKEN}) with repo + admin:org on UA-MIS
@@ -153,7 +153,7 @@ spec:
         requireCodeOwnerReviews: true
         token: ${{ secrets.USER_OAUTH_TOKEN }}
 
-    # 4) Register the new component so it appears in the Relay catalog right away.
+    # 4) Register the new component so it appears in The Process catalog right away.
     - id: register
       name: Register in catalog
       action: catalog:register

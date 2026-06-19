@@ -1,5 +1,5 @@
-# Relay catalog ROOT (P5) — the single Location the Backstage app-config points at
-# (backstage.appConfig.catalog.locations in applicationsets/backstage-relay-app.yaml).
+# The Process catalog ROOT (P5) — the single Location the Backstage app-config points at
+# (backstage.appConfig.catalog.locations in applicationsets/backstage-process-app.yaml).
 # It fans out to the golden-path template(s) + the seed org entities. Adding a
 # template = adding its template.yaml target here.
 #
@@ -9,8 +9,8 @@
 apiVersion: backstage.io/v1alpha1
 kind: Location
 metadata:
-  name: relay-catalog-root
-  description: Relay golden-path templates + seed org entities.
+  name: process-catalog-root
+  description: The Process golden-path templates + seed org entities.
 spec:
   type: url
   targets:

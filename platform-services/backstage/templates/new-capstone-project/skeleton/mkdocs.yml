@@ -1,4 +1,4 @@
-# TechDocs config — Relay builds these docs from this repo (techdocs-ref: dir:.)
+# TechDocs config — The Process builds these docs from this repo (techdocs-ref: dir:.)
 # and serves them in the catalog's Docs tab.
 site_name: '${{ values.appName }}'
 site_description: '${{ values.description }}'

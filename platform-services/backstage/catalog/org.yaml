@@ -1,4 +1,4 @@
-# Seed org entities (P5) — the minimal Group/owner the Relay templates reference
+# Seed org entities (P5) — the minimal Group/owner The Process templates reference
 # (template `spec.owner: group:default/platform`, and scaffolded components
 # `spec.owner: group:default/<team>`). Real team Groups + Users are ingested at
 # go-live from the UA-MIS GitHub org via the GitHub org-data provider (wired in the
