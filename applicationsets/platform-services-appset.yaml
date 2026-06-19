@@ -36,6 +36,19 @@ spec:
           # never re-emits a `platform-svc-traefik` if the dir reappears.
           - path: platform-services/traefik
             exclude: true
+          # EXCLUDE backstage/ (P5/M1, D-046): The Process is managed SOLELY by the
+          # dedicated, gated Application (applicationsets/backstage-process-app.yaml) —
+          # NOT by this directory generator. platform-services/backstage/ holds the ns
+          # + PLACEHOLDER SealedSecrets (backstage-process-secrets / backstage-postgresql,
+          # real values sealed at go-live by the live-ops batch) + the in-repo app source
+          # (backstage/app/). Without this exclude the dir-generator emits
+          # `platform-svc-backstage`, auto-applies the placeholder SealedSecrets, and they
+          # fail-to-decrypt -> Degraded (the cloudflared #48/#49 placeholder-secret class).
+          # The single-level `platform-services/*` glob doesn't descend into backstage/app/,
+          # so excluding backstage/ is sufficient. At go-live the dedicated app's deploy-flip
+          # (+ the live-ops batch sealing the REAL secrets) brings it up cleanly.
+          - path: platform-services/backstage
+            exclude: true
   template:
     metadata:
       name: 'platform-svc-{{.path.basename}}'
