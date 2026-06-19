@@ -1,0 +1,12 @@
+# Disable kube-proxy (P4, D-036 / Cilium swap). Cluster-config patch — Cilium runs in
+# kubeProxyReplacement mode (eBPF handles Service load-balancing), so the kube-proxy
+# DaemonSet must NOT be deployed. Pairs with `cniConfig.name: none` in talconfig.yaml.
+#
+# ⚠ Applying this re-genconfig + apply removes kube-proxy and (with cni:none) leaves the
+# node WITHOUT pod networking until Cilium is installed (helm) — node goes NotReady.
+# That is expected; follow docs/cilium-cni-runbook.md (node-1-first, validate, then roll).
+# Cilium's kubeProxyReplacement points at the KubePrism apiserver proxy on localhost:7445
+# (Talos default ON ≥1.5) — the runbook sets k8sServiceHost=localhost k8sServicePort=7445.
+cluster:
+  proxy:
+    disabled: true
