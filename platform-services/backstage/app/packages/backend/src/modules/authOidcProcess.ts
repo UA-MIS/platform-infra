@@ -44,6 +44,65 @@ import {
 import { stringifyEntityRef } from '@backstage/catalog-model';
 
 /**
+ * Catalog-lookup retry tuning. The sign-in catalog lookup is an in-process loopback call
+ * (http://localhost:7007/api/catalog/...) that has been observed to intermittently drop
+ * mid-response ("Premature close") under loopback connection churn — NOT a logic error and
+ * NOT resource pressure (the entity is present + the endpoint is fast). A small
+ * retry-with-backoff makes sign-in resilient: it succeeds on a later attempt regardless of
+ * the underlying socket churn. Kept tiny so a genuinely-missing user still fails quickly.
+ */
+const LOOKUP_MAX_ATTEMPTS = 3;
+const LOOKUP_BACKOFF_MS = 150;
+
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+/**
+ * True for errors worth retrying: transient connection/stream drops on the internal catalog
+ * call. A real "User not found" (the user genuinely isn't ingested) is NOT retryable — we
+ * surface it immediately so a non-member fails fast (the §3.1 tightening).
+ */
+function isRetryableLookupError(error: unknown): boolean {
+  if (error instanceof Error && error.name === 'NotFoundError') {
+    return false;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return /premature close|socket hang up|ECONNRESET|ECONNREFUSED|EPIPE|network|fetch failed|terminated/i.test(
+    message,
+  );
+}
+
+/**
+ * Run `fn` up to LOOKUP_MAX_ATTEMPTS times, retrying only transient lookup errors with a
+ * short linear backoff. Re-throws a non-retryable error immediately; after the final failed
+ * attempt re-throws the last error (the caller wraps it with context).
+ */
+async function withLookupRetry<T>(
+  fn: () => Promise<T>,
+  login: string,
+): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= LOOKUP_MAX_ATTEMPTS; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableLookupError(error) || attempt === LOOKUP_MAX_ATTEMPTS) {
+        throw error;
+      }
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[authOidcProcess] catalog lookup attempt ${attempt}/${LOOKUP_MAX_ATTEMPTS} for ` +
+          `login=${login} failed transiently (${
+            (error as Error)?.message
+          }); retrying in ${LOOKUP_BACKOFF_MS * attempt}ms`,
+      );
+      await sleep(LOOKUP_BACKOFF_MS * attempt);
+    }
+  }
+  throw lastError;
+}
+
+/**
  * The Dex sign-in resolver, extracted as a standalone function so it is unit-testable
  * (the linchpin of the M2 spine — see *.test.ts). Resolves the OIDC profile's GitHub login
  * (Dex preferred_username, on OidcAuthResult.userinfo) to a REAL ingested catalog User;
@@ -80,31 +139,56 @@ export const processOidcSignInResolver: SignInResolver<
   // permission policy can filter by ownership. A login with no matching ingested User fails
   // sign-in by design (§3.1).
   //
-  // Done in EXPLICIT steps (rather than the one-liner ctx.signInWithCatalogUser) so we can
-  // log the resolved sub + ownership-ref count + the precise failing step. The sign-in
-  // pipeline's frame handler swallows resolver throws into a client-side web-message (the
-  // pod shows only "200 contentLength 0" with no server stack), so without this we are
-  // blind to WHY a post-by-name step fails. console.* is captured by the backend root
-  // logger, so these surface in pod logs WITHOUT a global debug-log flag. Behaviour on the
-  // success path is identical to signInWithCatalogUser (same sub + ent claims).
+  // Done in EXPLICIT steps (rather than the one-liner ctx.signInWithCatalogUser) so the
+  // lookup can be RETRIED and the resolved sub + ownership-ref count + the precise failing
+  // step can be logged. The sign-in pipeline's frame handler swallows resolver throws into a
+  // client-side web-message (the pod shows only "200 contentLength 0" with no server stack),
+  // so without this logging we are blind to WHY a step fails. console.* is captured by the
+  // backend root logger, so these surface in pod logs WITHOUT a global debug-log flag.
+  // Behaviour on the success path is identical to signInWithCatalogUser (same sub + ent
+  // claims) — the only addition is the retry around the transient loopback drop.
   try {
-    const { entity } = await ctx.findCatalogUser({ entityRef: { name: login } });
-    const { ownershipEntityRefs } = await ctx.resolveOwnershipEntityRefs(entity);
+    // RETRY the catalog lookup + ownership resolution as a unit: both are internal loopback
+    // calls subject to the same intermittent "Premature close". Retrying the pair means a
+    // drop on either one recovers on the next attempt. A genuine NotFound is not retried.
+    const { entity, ownershipEntityRefs } = await withLookupRetry(async () => {
+      const found = await ctx.findCatalogUser({ entityRef: { name: login } });
+      const ownership = await ctx.resolveOwnershipEntityRefs(found.entity);
+      return {
+        entity: found.entity,
+        ownershipEntityRefs: ownership.ownershipEntityRefs,
+      };
+    }, login);
+
     const sub = stringifyEntityRef(entity);
     // eslint-disable-next-line no-console
     console.info(
       `[authOidcProcess] resolved login=${login} -> sub=${sub} ` +
         `ownershipEntityRefs=${ownershipEntityRefs.length}`,
     );
+    // issueToken is a local operation (no catalog loopback), so it is outside the retry.
     return await ctx.issueToken({ claims: { sub, ent: ownershipEntityRefs } });
   } catch (error) {
+    const name = (error as Error)?.name ?? 'Error';
+    const message = (error as Error)?.message ?? String(error);
     // eslint-disable-next-line no-console
     console.error(
-      `[authOidcProcess] sign-in FAILED for login=${login}: ` +
-        `${(error as Error)?.name}: ${(error as Error)?.message}`,
+      `[authOidcProcess] sign-in FAILED for login=${login} after up to ` +
+        `${LOOKUP_MAX_ATTEMPTS} attempt(s): ${name}: ${message}`,
       error,
     );
-    throw error;
+    // Clearer surfaced error: distinguish "no such user" (expected for a non-member) from a
+    // persistent infrastructure failure, so the failure mode is legible in the popup + logs.
+    if (name === 'NotFoundError') {
+      throw new Error(
+        `Sign-in failed: no catalog User matches GitHub login "${login}". ` +
+          `You must be a member of an ingested UA-MIS team to sign in.`,
+      );
+    }
+    throw new Error(
+      `Sign-in failed: could not resolve catalog User for "${login}" after ` +
+        `${LOOKUP_MAX_ATTEMPTS} attempt(s) (last error: ${name}: ${message}).`,
+    );
   }
 };
 

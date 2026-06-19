@@ -4,13 +4,17 @@
  * The resolver is the linchpin: it MUST resolve strictly to a real ingested catalog User
  * (no dangerousEntityRefFallback) so ownershipEntityRefs carry the user's team groups. The
  * resolver runs the lookup in EXPLICIT steps (findCatalogUser -> resolveOwnershipEntityRefs
- * -> issueToken) so failures are logged (the sign-in frame handler otherwise swallows the
- * throw into a client-side message — "200 contentLength 0" in the pod). We assert:
+ * -> issueToken) with a RETRY around the catalog loopback call (which has been observed to
+ * intermittently drop with "Premature close"), and logs failures (the sign-in frame handler
+ * otherwise swallows the throw into a client-side message — "200 contentLength 0" in the
+ * pod). We assert:
  *  (1) preferred_username is matched, lowercased, and resolved by entityRef name;
  *  (2) the issued token carries sub = the resolved entity ref and ent = ownershipEntityRefs
  *      (identical to signInWithCatalogUser's success path, NO fallback);
- *  (3) a missing User propagates (sign-in fails) rather than minting a synthetic identity;
- *  (4) a profile with no usable claim throws before any catalog call.
+ *  (3) a TRANSIENT lookup drop is retried and sign-in succeeds on a later attempt;
+ *  (4) a persistent transient failure exhausts retries and throws a clear error;
+ *  (5) a genuinely-missing User is NOT retried and throws a clear "no catalog User" error;
+ *  (6) a profile with no usable claim throws before any catalog call.
  */
 import {
   AuthResolverContext,
@@ -19,6 +23,7 @@ import {
 } from '@backstage/plugin-auth-node';
 import { OidcAuthResult } from '@backstage/plugin-auth-backend-module-oidc-provider';
 import { Entity } from '@backstage/catalog-model';
+import { NotFoundError } from '@backstage/errors';
 import { processOidcSignInResolver } from './authOidcProcess';
 
 // Build a minimal SignInInfo whose fullProfile.userinfo carries the given claims.
@@ -100,14 +105,54 @@ describe('processOidcSignInResolver', () => {
     });
   });
 
-  it('propagates the failure when no ingested User matches (no synthetic identity)', async () => {
-    findCatalogUser.mockRejectedValueOnce(new Error('User not found'));
+  it('retries a transient "Premature close" drop and succeeds on the next attempt', async () => {
+    // First attempt drops mid-response; second attempt succeeds.
+    findCatalogUser
+      .mockRejectedValueOnce(
+        new Error(
+          'Invalid response body while trying to fetch ' +
+            'http://localhost:7007/api/catalog/entities/by-name/User/default/octocat: ' +
+            'Premature close',
+        ),
+      )
+      .mockImplementationOnce(async (q: { entityRef: { name: string } }) => ({
+        entity: userEntity(q.entityRef.name),
+      }));
+
+    const result = await processOidcSignInResolver(
+      infoWith({ preferred_username: 'octocat' }),
+      ctx,
+    );
+
+    expect(result).toEqual({ token: 'signed-in-token' });
+    expect(findCatalogUser).toHaveBeenCalledTimes(2);
+    expect(issueToken).toHaveBeenCalledTimes(1);
+  });
+
+  it('exhausts retries on a persistent transient failure and throws a clear error', async () => {
+    findCatalogUser.mockRejectedValue(new Error('socket hang up'));
+
+    await expect(
+      processOidcSignInResolver(infoWith({ preferred_username: 'octocat' }), ctx),
+    ).rejects.toThrow(/could not resolve catalog User for "octocat" after 3 attempt/);
+    // Retried up to the max (3) attempts.
+    expect(findCatalogUser).toHaveBeenCalledTimes(3);
+    expect(issueToken).not.toHaveBeenCalled();
+  });
+
+  it('does NOT retry a genuine NotFound and throws a clear non-member error', async () => {
+    findCatalogUser.mockRejectedValue(new NotFoundError('User not found'));
+
     await expect(
       processOidcSignInResolver(
         infoWith({ preferred_username: 'not-on-any-team' }),
         ctx,
       ),
-    ).rejects.toThrow('User not found');
+    ).rejects.toThrow(
+      /no catalog User matches GitHub login "not-on-any-team"/,
+    );
+    // NotFound is not retryable -> exactly one attempt.
+    expect(findCatalogUser).toHaveBeenCalledTimes(1);
     expect(issueToken).not.toHaveBeenCalled();
   });
 
