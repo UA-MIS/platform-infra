@@ -86,6 +86,14 @@ spec:
           extraEnvVarsSecrets:
             - backstage-process-secrets
 
+          # TEMPORARY DIAGNOSTIC (M2 sign-in loop): surface the sign-in resolver's
+          # thrown error, which the auth handler currently swallows into a 200
+          # popup-frame body (handler/frame 200 -> refresh 401 loop, silent in
+          # stdout). REVERT once the resolver root cause is fixed.
+          extraEnvVars:
+            - name: LOG_LEVEL
+              value: debug
+
           # app-config.production.yaml baked into the custom image is the SOURCE OF TRUTH
           # for auth + integrations; this block is MERGED on top (chart -> ConfigMap ->
           # $APP_CONFIG_*). Kept to the host/deploy seams only (app/backend/catalog) — the
