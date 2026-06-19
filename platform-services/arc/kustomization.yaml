@@ -18,7 +18,7 @@ resources:
   - namespace.yaml
   - sealedsecret-github-app.yaml   # the human's sealed GitHub App creds (arc-github-app)
   - hook-template.yaml             # container-hook: injects harbor-push into the build job pod (Option C)
-
+  - sealedsecret-harbor-push.yaml
 labels:
   - pairs:
       platform.capstone/component: platform

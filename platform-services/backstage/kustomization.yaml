@@ -15,7 +15,7 @@ resources:
   - namespace.yaml
   - sealedsecret-oidc.yaml
   - sealedsecret-postgresql.yaml
-
+  - sealedsecret-harbor-pull.yaml
 labels:
   - pairs:
       platform.capstone/component: platform
