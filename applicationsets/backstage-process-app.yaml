@@ -142,12 +142,7 @@ spec:
                     clientSecret: ${AUTH_OIDC_CLIENT_SECRET}
                     prompt: auto
 
-            # ── Catalog: The Process golden-path templates + seed + GitHub-org ingest ──
-            # CRITICAL (PR #71): the chart launches the backend with ONLY this overlay
-            # ConfigMap — it does NOT load the image's baked app-config.production.yaml. So
-            # every M2 runtime config (githubOrg provider, permission.enabled, the github
-            # integration) MUST live HERE, not only in the baked file. Mirror the baked
-            # blocks exactly.
+            # ── Catalog: The Process golden-path templates + seed entities ───────
             catalog:
               rules:
                 - allow: [Component, System, API, Resource, Location, Template, Group, User]
@@ -155,50 +150,20 @@ spec:
                 # The Scaffolder golden-path template(s), baked into the image OR
                 # served from platform-infra. Pointed at the in-repo catalog dir so
                 # the template shows up without rebuilding the image for content edits.
-                # Still needed in M2: it seeds the `platform` Group that owns the template.
                 - type: url
                   target: https://github.com/UA-MIS/platform-infra/blob/main/platform-services/backstage/catalog/all.yaml
                   rules:
                     - allow: [Template, Location, Group, System]
-              # M2: GitHub-org ingestion (one Group per GitHub team, slug = <team>; one User
-              # per member with spec.memberOf). This populates the ownership data the
-              # sign-in resolver + permission policy depend on. Auth = the GitHub App below.
-              providers:
-                githubOrg:
-                  id: production
-                  githubUrl: https://github.com
-                  orgs: ['UA-MIS']
-                  schedule:
-                    initialDelay: { seconds: 30 }
-                    frequency: { hours: 1 }
-                    timeout: { minutes: 10 }
 
-            # ── Permission framework (M2: THE SPINE) ─────────────────────────────────
-            # Turn enforcement ON so the custom CapstoneTeamPermissionPolicy filters the
-            # catalog per-team. WITHOUT this the framework no-ops and serves everything
-            # regardless of policy (plan R6, the §5 backend-API acceptance test catches it).
-            permission:
-              enabled: true
-
-            # ── Integrations: GitHub App (M2) ────────────────────────────────────────
-            # Authenticate as the UA-MIS GitHub App (ua-mis-backstage) for org ingestion
-            # (and M4 Scaffolder repo create). M1 left this absent-tolerant; M2 makes it
-            # load-bearing. Non-secret IDs inlined; the two SECRET values arrive as env
-            # vars from backstage-process-secrets (devops seals — see README/PR handoff):
-            #   GITHUB_APP_PRIVATE_KEY    — the .pem contents (multi-line)
-            #   GITHUB_APP_CLIENT_SECRET  — the App client secret
-            # These MUST be sealed into backstage-process-secrets BEFORE this image deploys,
-            # else ingestion fails on first run and (with the M2 resolver tightening) nobody
-            # can sign in (plan R1 — break-glass: roll image.tag back to the M1 SHA).
-            integrations:
-              github:
-                - host: github.com
-                  apps:
-                    - appId: 4097147
-                      clientId: Iv23liRQ6d2I2mibDMbY
-                      clientSecret: ${GITHUB_APP_CLIENT_SECRET}
-                      privateKey: ${GITHUB_APP_PRIVATE_KEY}
-                      allowedInstallationOwners: ['UA-MIS']
+            # ── Integrations: GitHub — OWNED BY THE BAKED IMAGE CONFIG (M1-optional) ──
+            # The Scaffolder's publish:github action needs a GitHub token (repo+admin:org)
+            # to create repos under UA-MIS. For M1 this is INTENTIONALLY ABSENT-TOLERANT:
+            # GITHUB_TOKEN is NOT in backstage-process-secrets, and the baked app-config
+            # makes the github integration optional so the portal boots + SSO works
+            # without it. We DO NOT set integrations.github here — injecting a bare
+            # `token: ${GITHUB_TOKEN}` with the var unset would substitute empty and can
+            # break startup. Wired in M2 when the Scaffolder publish flow lands (add the
+            # GITHUB_TOKEN key to the secret + the integration to the baked config then).
 
         # ── Ingress: process.<domain> via Traefik (matches every other service) ──
         # Plain Ingress, TLS host listed but NO secretName — Traefik's default TLSStore
