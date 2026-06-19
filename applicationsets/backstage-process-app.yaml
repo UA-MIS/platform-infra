@@ -184,7 +184,18 @@ spec:
           auth:
             username: bn_backstage
             database: backstage
-            existingSecret: backstage-postgresql   # Bitnami keys: postgres-password, password
+            existingSecret: backstage-postgresql   # our sealed keys: postgres-password, password
+            # The bundled Bitnami postgresql subchart defaults its existingSecret keys
+            # to `user-password`/`admin-password`, but our sealed `backstage-postgresql`
+            # uses the classic `password`/`postgres-password` names (what the sealed file
+            # + the live-ops batch produced). Remap so the chart reads OUR keys — this
+            # fixes BOTH the postgres pod AND the Backstage container's POSTGRES_PASSWORD
+            # env (the chart wires both from userPasswordKey), avoiding a reseal. Without
+            # it: CreateContainerConfigError "couldn't find key user-password in Secret
+            # backstage/backstage-postgresql".
+            secretKeys:
+              userPasswordKey: password            # app user (bn_backstage) — Backstage connects with this
+              adminPasswordKey: postgres-password  # postgres superuser
           primary:
             persistence:
               enabled: true
