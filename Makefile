@@ -34,13 +34,16 @@ export
 endif
 CLUSTER_NAME ?= capstone
 
-# kube-context the bootstrap/reapply targets act on. Defaults to the k3d context
-# (k3d-<cluster>, unchanged for local runs). For the real Talos cluster the context
-# is `admin@capstone`, so override on the CLI together with the Talos kubeconfig, e.g.
+# kube-context the cluster-acting targets use (bootstrap/reapply + harbor-* onboarding).
+# Defaults to the k3d context (k3d-<cluster>, unchanged for local runs). For the real
+# Talos cluster the context is `admin@capstone`, so override on the CLI together with
+# the Talos kubeconfig, e.g.
 #   make bootstrap TARGET=real-talos KUBE_CONTEXT=admin@capstone \
 #     KUBECONFIG=clusters/real-talos/talos-kubeconfig
+#   make harbor-push-robot NAME=backstage KUBE_CONTEXT=admin@capstone \
+#     KUBECONFIG=clusters/real-talos/talos-kubeconfig > harbor-push-sealed.yaml
 # (Talos is provisioned out-of-band, so the k3d cluster-up/down targets don't apply
-# there — only bootstrap + bootstrap-reapply take this override.)
+# there — only the cluster-acting targets take this override.)
 KUBE_CONTEXT ?= k3d-$(CLUSTER_NAME)
 
 # ---- container runtime auto-detection (Docker or rootless Podman) -----------
@@ -487,26 +490,31 @@ HARBOR_HOST     ?= harbor.$(PLATFORM_DOMAIN)
 HARBOR_ONBOARD_JOB := platform-services/harbor-onboarding/onboard-team-job.yaml
 
 .PHONY: harbor-onboard
-harbor-onboard: ## (P2.2) Onboard team into Harbor: create project <name> + map OIDC group -> Developer. NAME=<name>
+harbor-onboard: ## (P2.2) Onboard team into Harbor: create project <name> + map OIDC group -> Developer. NAME=<name>. Override KUBE_CONTEXT for non-k3d clusters.
 	@test -n "$(NAME)" || { echo "usage: make harbor-onboard NAME=<team-slug>"; exit 1; }
 	@command -v kubectl >/dev/null || { echo "ERROR: kubectl not found."; exit 1; }
+	@# Act on KUBE_CONTEXT (default k3d-$(CLUSTER_NAME); for Talos pass KUBE_CONTEXT=admin@capstone).
+	@kubectl config get-contexts "$(KUBE_CONTEXT)" >/dev/null 2>&1 \
+	  || { echo "ERROR: kube-context '$(KUBE_CONTEXT)' not found. For the Talos cluster set KUBECONFIG=clusters/real-talos/talos-kubeconfig and KUBE_CONTEXT=admin@capstone."; exit 1; }
 	@# Substitute the __TEAM__ token and apply the idempotent onboarding Job into
 	@# the harbor ns (admin creds stay in-cluster — read by the Job via secretKeyRef).
-	@echo "==> onboarding team '$(NAME)' into Harbor (project + OIDC Developer mapping)..."
+	@echo "==> onboarding team '$(NAME)' into Harbor (project + OIDC Developer mapping) on context '$(KUBE_CONTEXT)'..."
 	@sed 's/__TEAM__/$(NAME)/g' "$(HARBOR_ONBOARD_JOB)" \
-	  | kubectl --context "k3d-$(CLUSTER_NAME)" apply -f -
+	  | kubectl --context "$(KUBE_CONTEXT)" apply -f -
 	@echo "==> waiting for the onboarding Job to complete..."
-	@kubectl --context "k3d-$(CLUSTER_NAME)" -n "$(HARBOR_NS)" \
+	@kubectl --context "$(KUBE_CONTEXT)" -n "$(HARBOR_NS)" \
 	  wait --for=condition=complete --timeout=300s job/harbor-onboard-$(NAME) \
-	  || { echo "Job did not complete — logs:"; kubectl --context "k3d-$(CLUSTER_NAME)" -n "$(HARBOR_NS)" logs job/harbor-onboard-$(NAME) --tail=40; exit 1; }
-	@kubectl --context "k3d-$(CLUSTER_NAME)" -n "$(HARBOR_NS)" logs job/harbor-onboard-$(NAME) --tail=20
+	  || { echo "Job did not complete — logs:"; kubectl --context "$(KUBE_CONTEXT)" -n "$(HARBOR_NS)" logs job/harbor-onboard-$(NAME) --tail=40; exit 1; }
+	@kubectl --context "$(KUBE_CONTEXT)" -n "$(HARBOR_NS)" logs job/harbor-onboard-$(NAME) --tail=20
 	@echo "harbor-onboard: DONE for '$(NAME)'. NEXT: make harbor-robot NAME=$(NAME) ENV=dev > .../harbor-pull-sealed.yaml"
 
 .PHONY: harbor-robot
-harbor-robot: ## (P2.2) Create a pull robot for project <name> -> SealedSecret on stdout. NAME=<name> ENV=<env>
+harbor-robot: ## (P2.2) Create a pull robot for project <name> -> SealedSecret on stdout. NAME=<name> ENV=<env>. Override KUBE_CONTEXT for non-k3d clusters.
 	@test -n "$(NAME)" || { echo "usage: make harbor-robot NAME=<team-slug> ENV=<env> > harbor-pull-sealed.yaml"; exit 1; }
 	@test -n "$(ENV)"  || { echo "usage: make harbor-robot NAME=<team-slug> ENV=<env> (e.g. dev/staging/prod)"; exit 1; }
 	@command -v kubeseal >/dev/null || { echo "ERROR: kubeseal not found (install to ~/.local/bin)."; exit 1; }
+	@kubectl config get-contexts "$(KUBE_CONTEXT)" >/dev/null 2>&1 \
+	  || { echo "ERROR: kube-context '$(KUBE_CONTEXT)' not found. For the Talos cluster set KUBECONFIG=clusters/real-talos/talos-kubeconfig and KUBE_CONTEXT=admin@capstone." >&2; exit 1; }
 	@# Create a project-scoped PULL robot via the Harbor API from INSIDE the cluster
 	@# (a transient Job in the harbor ns) so the admin password is read from the
 	@# in-cluster Secret via secretKeyRef and never touches the host shell/argv. The
@@ -516,7 +524,7 @@ harbor-robot: ## (P2.2) Create a pull robot for project <name> -> SealedSecret o
 	@# STDOUT for the caller to redirect into the team overlay + commit. All human-
 	@# readable progress goes to STDERR so STDOUT is clean SealedSecret YAML.
 	@set -e; \
-	  job="harbor-robot-$(NAME)-$(ENV)"; ns="$(HARBOR_NS)"; ctx="k3d-$(CLUSTER_NAME)"; \
+	  job="harbor-robot-$(NAME)-$(ENV)"; ns="$(HARBOR_NS)"; ctx="$(KUBE_CONTEXT)"; \
 	  echo "==> creating pull robot for project '$(NAME)' via in-cluster Job '$$job'..." >&2; \
 	  kubectl --context "$$ctx" -n "$$ns" delete job "$$job" --ignore-not-found >/dev/null 2>&1 || true; \
 	  printf '%s\n' \
@@ -556,9 +564,11 @@ harbor-robot: ## (P2.2) Create a pull robot for project <name> -> SealedSecret o
 RUNNER_NS ?= arc-runners
 
 .PHONY: harbor-push-robot
-harbor-push-robot: ## (P2.3) Create a CI PUSH robot for project <name> -> `harbor-push` SealedSecret on stdout. NAME=<name> [RUNNER_NS=arc-runners]
+harbor-push-robot: ## (P2.3) Create a CI PUSH robot for project <name> -> `harbor-push` SealedSecret on stdout. NAME=<name> [RUNNER_NS=arc-runners]. Override KUBE_CONTEXT for non-k3d clusters.
 	@test -n "$(NAME)" || { echo "usage: make harbor-push-robot NAME=<team-slug> [RUNNER_NS=arc-runners] > harbor-push-sealed.yaml"; exit 1; }
 	@command -v kubeseal >/dev/null || { echo "ERROR: kubeseal not found (install to ~/.local/bin)."; exit 1; }
+	@kubectl config get-contexts "$(KUBE_CONTEXT)" >/dev/null 2>&1 \
+	  || { echo "ERROR: kube-context '$(KUBE_CONTEXT)' not found. For the Talos cluster set KUBECONFIG=clusters/real-talos/talos-kubeconfig and KUBE_CONTEXT=admin@capstone." >&2; exit 1; }
 	@# CI (Kaniko) PUSH robot — LEAST PRIVILEGE: scoped to project <name> ONLY, so a
 	@# build can push to its OWN team's Harbor project and NO other. Harbor requires
 	@# `pull` ALONGSIDE `push` (you can't push without pull), so the access list is
@@ -569,7 +579,7 @@ harbor-push-robot: ## (P2.3) Create a CI PUSH robot for project <name> -> `harbo
 	@# progress on STDERR). The CI robot is a CI-SYSTEM cred (not per-env): one push
 	@# robot per team, consumed by the runner that builds that team's image.
 	@set -e; \
-	  job="harbor-pushrobot-$(NAME)"; ns="$(HARBOR_NS)"; ctx="k3d-$(CLUSTER_NAME)"; \
+	  job="harbor-pushrobot-$(NAME)"; ns="$(HARBOR_NS)"; ctx="$(KUBE_CONTEXT)"; \
 	  echo "==> creating PUSH robot for project '$(NAME)' via in-cluster Job '$$job'..." >&2; \
 	  kubectl --context "$$ctx" -n "$$ns" delete job "$$job" --ignore-not-found >/dev/null 2>&1 || true; \
 	  printf '%s\n' \
