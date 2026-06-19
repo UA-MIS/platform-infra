@@ -31,6 +31,23 @@ metadata:
 data:
   content: |
     spec:
+      # Resolve the Harbor registry host to Traefik IN-CLUSTER so the Kaniko PUSH
+      # never traverses the Cloudflare edge (CF Free/Pro caps request bodies at 100MB
+      # → a >100MB image layer 413s). The public host externally resolves to the
+      # CF-proxied wildcard; this hostAlias points the build pod straight at Traefik's
+      # ClusterIP, which terminates the wildcard TLS and routes by SNI to harbor-core.
+      # The image ref stays harbor.capstone.uamishub.com (TLS/cert/tags unchanged).
+      #
+      # ⚠ HARDCODED Traefik ClusterIP (10.97.22.53) — stable unless the traefik Service
+      # is recreated. Known debt: the Talos-native CoreDNS split-horizon (backlog item
+      # B) retires this hardcode cluster-wide. coredns-custom does NOT work on Talos
+      # (k3s *.override import absent) — see platform-services/coredns-custom header.
+      # If a build 413s/cannot-resolve harbor, re-check this IP:
+      #   kubectl -n kube-system get svc traefik -o jsonpath='{.spec.clusterIP}'
+      hostAliases:
+        - ip: "10.97.22.53"
+          hostnames:
+            - harbor.capstone.uamishub.com
       containers:
         - name: "$job"
           volumeMounts:
