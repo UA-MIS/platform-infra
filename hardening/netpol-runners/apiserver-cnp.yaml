@@ -5,7 +5,7 @@
 # ipBlock CIDR ("by default, CIDR-based selectors do not match in-cluster
 # entities"). So the runner-netpol's ipBlock allows do NOT match under Cilium:
 #   - the apiserver (10.96.0.1:443 via 10.96.0.0/12) -> denied
-#   - harbor-core (push/pull, :80 via 10.96.0.0/12) -> denied
+#   - harbor-core (push/pull, svc :80 -> pod :8080 via 10.96.0.0/12) -> denied
 # This CNP adds those two as entity/endpoint selectors. The k8s runner-netpol
 # (default-deny + DNS via namespaceSelector + the external-:443 allow) stays in
 # force (CNP + NetworkPolicy are additive/OR). DNS is also re-allowed here
@@ -19,7 +19,9 @@
 #   - kube-apiserver (containerMode:kubernetes job-pod orchestration via the runner
 #     SA). RBAC (scoped ServiceAccounts) — NOT the netpol — fences what the runner
 #     may DO at the apiserver; the netpol never was the apiserver-authz control.
-#   - harbor-core :80 (image push/pull), by endpoint label, in the harbor ns ONLY.
+#   - harbor-core (image push/pull), by endpoint label, in the harbor ns ONLY, on
+#     the POD port 8080 (svc 80 -> targetPort 8080; Cilium toEndpoints enforces the
+#     pod port, not the service port).
 #   - kube-dns :53 (name resolution).
 # It does NOT grant pod->pod egress to other tenants, nor node/overlay/apiserver
 # via Tailscale (the k8s runner-netpol's except-list still blocks those off-cluster
@@ -58,8 +60,14 @@ spec:
               protocol: UDP
             - port: "53"
               protocol: TCP
-    # harbor-core ONLY (image push/pull), in the harbor namespace, :80.
+    # harbor-core ONLY (image push/pull), in the harbor namespace.
     # Narrow by design — NOT `cluster` (would open cross-tenant lateral movement).
+    # PORT = the POD containerPort 8080, NOT the Service port 80. Cilium toEndpoints
+    # enforces L4 at the DESTINATION endpoint on its ACTUAL listen port (post
+    # service->targetPort translation): harbor-core Service maps 80 -> targetPort
+    # 8080, the container listens on 8080. A `toPorts: 80` here matches NOTHING and
+    # the runner's Harbor push is DROPPED (deny-test SEC-011 row #3). Clients still
+    # dial harbor-core.harbor.svc:80; Cilium translates to pod:8080 which this allows.
     - toEndpoints:
         - matchLabels:
             k8s:io.kubernetes.pod.namespace: harbor
@@ -67,5 +75,5 @@ spec:
             component: core
       toPorts:
         - ports:
-            - port: "80"
+            - port: "8080"
               protocol: TCP
