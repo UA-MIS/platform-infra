@@ -1,0 +1,80 @@
+# Cilium intra-cluster + apiserver egress allow (CiliumNetworkPolicy)
+#   — argocd / dex / harbor (trusted control-plane namespaces).
+#
+# WHY THIS EXISTS (flannel -> Cilium migration gap, SEC-009/013):
+# The zz-default-deny + allow-egress-scoped k8s NetworkPolicies in these
+# namespaces try to permit egress to (a) the kube-apiserver and (b) intra-cluster
+# pods/services (their own redis/postgres, plus Dex/Traefik ClusterIPs) using
+# `ipBlock` CIDRs (apiserver VIP + host CIDR; pod 10.244.0.0/16; svc 10.96.0.0/12).
+# That worked under flannel ONLY because flannel has no NetworkPolicy backend —
+# the policies were INERT. Under Cilium they are ENFORCED, and per the Cilium docs
+# "by default, CIDR-based selectors do NOT match in-cluster entities." Cilium
+# identifies in-cluster traffic by IDENTITY (`reserved:kube-apiserver`, and the
+# per-pod security identities), NOT by IP. => BOTH the apiserver ipBlock AND the
+# intra-cluster pod/svc ipBlocks fail to match, so Cilium denies:
+#   - egress to the apiserver VIP 10.96.0.1:443 (argocd-redis secret-init, server,
+#     app-controller; harbor-core/jobservice) -> `dial 10.96.0.1:443 i/o timeout`
+#   - egress pod->pod/svc, e.g. argocd-server/app-controller -> argocd-redis:6379
+#     and harbor-core -> harbor-redis:6379 (Hubble: `policy-verdict:none EGRESS
+#     DENIED`) -> redis cache init FATAL / controllers can't reach redis.
+#
+# A plain k8s NetworkPolicy CANNOT express these in-cluster identities. The
+# documented fix is a CiliumNetworkPolicy using entity selectors:
+#   - `toEntities: kube-apiserver` — the apiserver (Cilium: "generally expected to
+#     work" for egress).
+#   - `toEntities: cluster` — ALL in-cluster endpoints (pods + nodes + host),
+#     i.e. the Cilium-native equivalent of the intra-cluster ipBlock allows. This
+#     restores each namespace's own component mesh (redis/pg) + reaching
+#     Dex/Traefik ClusterIPs. SAFE for these THREE namespaces because they are
+#     trusted control-plane (argocd/dex/harbor) — there is no cross-tenant concern
+#     here. (The UNTRUSTED arc-runners namespace deliberately does NOT get
+#     `cluster`; see hardening/netpol-runners/apiserver-cnp.yaml for its narrow
+#     toEndpoints set that preserves the SEC-011 lateral-movement block.)
+#
+# CNP + k8s NetworkPolicy on the same endpoint/direction are ADDITIVE (OR'd) — this
+# manifest only ADDS these entity-based egress allows; the existing default-deny +
+# the k8s scoped allows (DNS, external :443) stay in force. Namespace-wide
+# (endpointSelector: {}). Lives in the `platform` AppProject; manual-sync via
+# platform-netpol-controlplane (same lockout-protection policy as the k8s netpols).
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-egress-apiserver
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+spec:
+  endpointSelector: {}
+  egress:
+    - toEntities:
+        - kube-apiserver
+        - cluster
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-egress-apiserver
+  namespace: dex
+  labels:
+    platform.capstone/component: platform
+spec:
+  endpointSelector: {}
+  egress:
+    - toEntities:
+        - kube-apiserver
+        - cluster
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-egress-apiserver
+  namespace: harbor
+  labels:
+    platform.capstone/component: platform
+spec:
+  endpointSelector: {}
+  egress:
+    - toEntities:
+        - kube-apiserver
+        - cluster

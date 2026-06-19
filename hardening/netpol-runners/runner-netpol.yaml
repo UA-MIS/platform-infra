@@ -112,19 +112,39 @@ spec:
         - protocol: TCP
           port: 80     # harbor-core (push/pull)
     # External HTTPS:443 ONLY — GitHub (clone/Actions API/job token) + base-image
-    # pulls. Port-scoped (no FQDN egress until Cilium). The except list BLOCKS the
-    # apiserver (node LAN + overlay :6443) + all intra-cluster ranges, so "external"
-    # truly means off-cluster — no apiserver, no cross-tenant, no node, no overlay.
+    # pulls. Port-scoped (no FQDN egress until Cilium).
+    #
+    # ⚠ CILIUM ENFORCEMENT CAVEAT (deny-test SEC-011; residual-risk finding SEC-019
+    # = the Host Firewall / inert-node-except gap, tracked separately):
+    # the pod/service excepts (10.244/16, 10.96/12) DO enforce — Cilium matches
+    # those by managed-endpoint identity. BUT the node-LAN (10.237.168.0/22) and
+    # tailnet (100.64.0.0/10) excepts are INERT under Cilium's DEFAULT config:
+    # "CIDR-based selectors do not match in-cluster entities" — so an ipBlock except
+    # does NOT match node / host / apiserver IDENTITIES. Two consequences proven by
+    # the deny-test:
+    #   (a) a runner reaching the apiserver via a control-plane NODE IP (:6443) is
+    #       ALLOWED regardless (the CNP `toEntities: kube-apiserver` allows the
+    #       apiserver identity = VIP + all node-IPs by UNION; an ipBlock except can't
+    #       subtract from a CNP allow). ACCEPTED: RBAC on the runner SA is the
+    #       control, not this except. NOT closable by CIDR (see apiserver-cnp.yaml).
+    #   (b) the node-LAN/tailnet excepts only begin to enforce against OTHER-node /
+    #       remote-node POD-egress paths once Cilium `policyCIDRMatchMode: nodes` is
+    #       set; and even then a pod reaching its OWN node's host (reserved:host,
+    #       e.g. that node's tailnet IP) is NOT policy-enforced at all without Cilium
+    #       Host Firewall (`enableHostFirewall`). Both are tracked follow-ups.
+    # So: do NOT trust these two excepts as a live control today. They express
+    # INTENT + become real with policyCIDRMatchMode:nodes (other-node) + Host
+    # Firewall (own-host). The apiserver-via-node-IP path stays RBAC-gated.
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
             except:
-              - 10.244.0.0/16    # pods (cross-tenant + lateral) — blocked
-              - 10.96.0.0/12     # services (covered by the scoped allow above)
-              - 10.237.168.0/22  # NODE LAN segment incl. apiserver :6443 — BLOCKED (non-negotiable)
-              - 100.64.0.0/10    # TAILNET (Talos overlay) — the apiserver endpoint + every
-                                 # node/peer is reachable here; BLOCKED so a runner can't hit
-                                 # the apiserver (or any node) via Tailscale (new vs k3d).
+              - 10.244.0.0/16    # pods (cross-tenant + lateral) — ENFORCED (endpoint identity)
+              - 10.96.0.0/12     # services — ENFORCED (covered by the scoped allow above)
+              - 10.237.168.0/22  # NODE LAN incl. apiserver :6443 — INERT until policyCIDRMatchMode:nodes;
+                                 # apiserver-via-node-IP stays ALLOWED by CNP union (RBAC-gated). See caveat above.
+              - 100.64.0.0/10    # TAILNET (Talos overlay) — INERT until policyCIDRMatchMode:nodes (other-node)
+                                 # + Host Firewall (own-node host). See caveat above.
       ports:
         - protocol: TCP
           port: 443

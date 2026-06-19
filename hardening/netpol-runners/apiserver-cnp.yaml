@@ -1,0 +1,79 @@
+# Cilium apiserver + scoped intra-cluster egress (CiliumNetworkPolicy) — arc-runners.
+#
+# WHY (flannel -> Cilium migration gap — see netpol-controlplane/apiserver-cnp.yaml
+# for the full rationale): Cilium matches in-cluster traffic by IDENTITY, not by
+# ipBlock CIDR ("by default, CIDR-based selectors do not match in-cluster
+# entities"). So the runner-netpol's ipBlock allows do NOT match under Cilium:
+#   - the apiserver (10.96.0.1:443 via 10.96.0.0/12) -> denied
+#   - harbor-core (push/pull, svc :80 -> pod :8080 via 10.96.0.0/12) -> denied
+# This CNP adds those two as entity/endpoint selectors. The k8s runner-netpol
+# (default-deny + DNS via namespaceSelector + the external-:443 allow) stays in
+# force (CNP + NetworkPolicy are additive/OR). DNS is also re-allowed here
+# explicitly (toEndpoints kube-dns) so the runner CNP is self-contained.
+#
+# ⚠ SECURITY — arc-runners is the UNTRUSTED student-CI surface. Unlike the trusted
+# control-plane CNP (argocd/dex/harbor), this namespace deliberately does NOT get
+# `toEntities: cluster` — that would open egress to ALL in-cluster pods (every
+# other tenant) and BREAK the SEC-011 lateral-movement block / deny-test. Instead
+# egress is NARROWLY scoped to exactly what a build needs:
+#   - kube-apiserver (containerMode:kubernetes job-pod orchestration via the runner
+#     SA). RBAC (scoped ServiceAccounts) — NOT the netpol — fences what the runner
+#     may DO at the apiserver; the netpol never was the apiserver-authz control.
+#   - harbor-core (image push/pull), by endpoint label, in the harbor ns ONLY, on
+#     the POD port 8080 (svc 80 -> targetPort 8080; Cilium toEndpoints enforces the
+#     pod port, not the service port).
+#   - kube-dns :53 (name resolution).
+# It does NOT grant pod->pod egress to other tenants, nor node/overlay/apiserver
+# via Tailscale (the k8s runner-netpol's except-list still blocks those off-cluster
+# paths; this CNP only adds in-cluster identity allows, no `world`/`cluster`).
+# SEC-011 deny-test (a runner must NOT reach other tenants/pods, MUST reach
+# GitHub+Harbor+DNS+apiserver) validates this — pair it with the PR review.
+#
+# NOTE the harbor-core endpoint selector uses the Harbor chart's component label
+# `app: harbor` + `component: core`. If the live label differs, the runner build's
+# Harbor push will fail closed (denied) rather than open — verify against
+# `kubectl -n harbor get pod -l component=core --show-labels` before merge.
+#
+# Manual-sync via platform-netpol-runners (same lockout-protection policy).
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-egress-apiserver
+  namespace: arc-runners
+  labels:
+    platform.capstone/component: platform
+spec:
+  endpointSelector: {}
+  egress:
+    # kube-apiserver (job-pod orchestration; RBAC fences the verbs).
+    - toEntities:
+        - kube-apiserver
+    # DNS to CoreDNS/kube-dns (kube-system).
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    # harbor-core ONLY (image push/pull), in the harbor namespace.
+    # Narrow by design — NOT `cluster` (would open cross-tenant lateral movement).
+    # PORT = the POD containerPort 8080, NOT the Service port 80. Cilium toEndpoints
+    # enforces L4 at the DESTINATION endpoint on its ACTUAL listen port (post
+    # service->targetPort translation): harbor-core Service maps 80 -> targetPort
+    # 8080, the container listens on 8080. A `toPorts: 80` here matches NOTHING and
+    # the runner's Harbor push is DROPPED (deny-test SEC-011 row #3). Clients still
+    # dial harbor-core.harbor.svc:80; Cilium translates to pod:8080 which this allows.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: harbor
+            app: harbor
+            component: core
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
