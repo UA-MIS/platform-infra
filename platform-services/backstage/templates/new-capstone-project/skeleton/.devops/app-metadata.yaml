@@ -1,0 +1,12 @@
+# app-metadata.yaml — the ONLY file you declare values in (§1.2).
+#
+# These four fields are the single declarative input to the whole .devops/ template:
+# the chart/ overlays derive workload names, the ingress host
+# (<app-name>.<team>.<platform-domain>), the namespace prefix (<team>-<env>), the
+# cohort selector labels, and the container port. The platform's tenant
+# ApplicationSets read the same team + semester values. Everything else in .devops/
+# is platform-managed and immutable.
+team: ${{ values.team }}
+semester: ${{ values.semester }}
+app-name: ${{ values.appName }}
+port: ${{ values.port }}

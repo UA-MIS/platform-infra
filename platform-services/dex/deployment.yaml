@@ -65,6 +65,18 @@ spec:
                 secretKeyRef:
                   name: dex-github
                   key: harbor-client-secret
+            # Backstage "The Process" (P5) static-client secret. ⚠ The `process-client-secret`
+            # key must be ADDED to the dex-github SealedSecret (re-seal — see
+            # platform-services/backstage/README.md). Until then this key is absent and
+            # Dex will fail to start IF this env is required — so it is marked optional
+            # so the broker keeps serving the existing clients pre-go-live; flip to
+            # required (drop `optional`) once the key is sealed in.
+            - name: PROCESS_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: dex-github
+                  key: process-client-secret
+                  optional: true
           volumeMounts:
             - name: config
               mountPath: /etc/dex

@@ -1,0 +1,25 @@
+# Seed org entities (P5) — the minimal Group/owner The Process templates reference
+# (template `spec.owner: group:default/platform`, and scaffolded components
+# `spec.owner: group:default/<team>`). Real team Groups + Users are ingested at
+# go-live from the UA-MIS GitHub org via the GitHub org-data provider (wired in the
+# custom image's backend — see README). This file only seeds the PLATFORM group so
+# the templates resolve their owner before org ingestion is live.
+apiVersion: backstage.io/v1alpha1
+kind: Group
+metadata:
+  name: platform
+  description: UA-MIS platform engineering — owns the golden-path templates.
+spec:
+  type: team
+  children: []
+---
+# A placeholder guest user so the catalog has at least one User entity before GitHub
+# org ingestion populates the real ones. Remove once org ingestion is live.
+apiVersion: backstage.io/v1alpha1
+kind: User
+metadata:
+  name: guest
+  description: Placeholder user (replaced by GitHub org ingestion at go-live).
+spec:
+  memberOf:
+    - platform

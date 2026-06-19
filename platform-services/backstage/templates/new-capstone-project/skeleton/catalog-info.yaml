@@ -1,0 +1,25 @@
+# catalog-info.yaml — registers this app in The Process software catalog (P5).
+# catalog:register (the Scaffolder's last step) points here; The Process catalog then
+# tracks the component, its owner team, and its TechDocs.
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: ${{ values.appName }}
+  description: ${{ values.description }}
+  annotations:
+    # TechDocs built from the in-repo mkdocs.yml (techdocs-ref: dir = this repo).
+    backstage.io/techdocs-ref: dir:.
+    # Link the catalog entity back to its source for the "View Source" action.
+    github.com/project-slug: UA-MIS/${{ values.appName }}
+  tags:
+    - capstone
+    - ${{ values.semester }}
+  links:
+    - title: App (dev)
+      url: https://${{ values.appName }}.${{ values.team }}.dev.<platform-domain>
+spec:
+  type: service
+  lifecycle: experimental
+  # Owner = the team's GitHub Team / AppProject / OIDC group (the canonical <name>
+  # slug, D-026). Resolves to a Group entity ingested from the UA-MIS org.
+  owner: group:default/${{ values.team }}

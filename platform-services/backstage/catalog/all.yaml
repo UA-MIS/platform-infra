@@ -1,0 +1,24 @@
+# The Process catalog ROOT (P5) — the single Location the Backstage app-config points at
+# (backstage.appConfig.catalog.locations in applicationsets/backstage-process-app.yaml).
+# It fans out to the golden-path template(s) + the seed org entities. Adding a
+# template = adding its template.yaml target here.
+#
+# NOTE: served from platform-infra so template CONTENT can be edited without
+# rebuilding the custom image. The GitHub integration must be able to read this repo
+# (it's public; for private repos the integration token covers it).
+apiVersion: backstage.io/v1alpha1
+kind: Location
+metadata:
+  name: process-catalog-root
+  description: The Process golden-path templates + seed org entities.
+spec:
+  type: url
+  targets:
+    # The "New Capstone Project" Scaffolder template (the headline IDP feature).
+    - https://github.com/UA-MIS/platform-infra/blob/main/platform-services/backstage/templates/new-capstone-project/template.yaml
+    # Seed org entities (the platform Group that owns the templates, etc.).
+    - https://github.com/UA-MIS/platform-infra/blob/main/platform-services/backstage/catalog/org.yaml
+---
+# Note: real team Groups + Users are ingested at go-live from the UA-MIS GitHub org
+# via the GitHub org-data provider (configured in the custom image's backend; see
+# README). This file only seeds the platform-owned entities the templates reference.

@@ -1,0 +1,22 @@
+# Backstage ("The Process") PREREQS (P5) — the namespace + SealedSecrets that must exist
+# before the Backstage Helm Application (applicationsets/backstage-process-app.yaml)
+# installs into the backstage namespace. Managed by the platform-services-appset
+# (kustomize directory generator -> Application `platform-svc-backstage`); the Helm
+# chart itself is a SEPARATE Application (deploy method A, like Harbor) so it does
+# NOT render through this kustomize dir.
+#
+#   backstage-process-secrets : OIDC client id/secret + backend signing key + DB
+#                             password (env-injected into the custom Backstage image)
+#   backstage-postgresql    : the bundled Postgres credentials (Bitnami key names)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - sealedsecret-oidc.yaml
+  - sealedsecret-postgresql.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false

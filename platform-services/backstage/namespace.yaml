@@ -1,0 +1,16 @@
+# Backstage ("The Process") namespace (P5, §1.6) — the platform's developer portal:
+# software catalog + Scaffolder golden-path templates + TechDocs, with SSO via the
+# shared Dex broker (same pattern as ArgoCD/Harbor). Its own namespace scopes the
+# portal, its bundled Postgres, and its (Sealed) OIDC secret — mirroring the harbor
+# namespace convention.
+#
+# NOTE: like harbor, the Backstage *chart* installs into this namespace as a SEPARATE
+# Helm-source Application (applicationsets/backstage-process-app.yaml). THIS directory
+# (synced by the platform-services-appset) ships only the PREREQS: the namespace + the
+# OIDC SealedSecret that must exist before the chart's pods start.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: backstage
+  labels:
+    platform.capstone/component: platform
