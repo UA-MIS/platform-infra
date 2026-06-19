@@ -486,7 +486,32 @@ seal: ## (T4) kubeseal helper: make seal SECRET=path/to/secret.yaml NS=<ns> > se
 # Two steps, both keyed on the SINGLE canonical `<name>` slug (D-026). See
 # platform-services/harbor-onboarding/README.md.
 HARBOR_NS       ?= harbor
+# HARBOR_HOST is baked into the sealed docker-registry secret (--docker-server) and
+# MUST equal the registry host the image is pushed/pulled at. It derives from
+# PLATFORM_DOMAIN, which comes from the SELECTED TARGET's values.env — NOT from
+# KUBE_CONTEXT. FOOTGUN (cost a failed M1 push, 2026-06-19): running a robot target
+# with KUBE_CONTEXT=admin@capstone but WITHOUT TARGET=real-talos seals the LOCAL-k3d
+# host (harbor.127-0-0-1.sslip.io) → the cred doesn't match harbor.capstone.uamishub.com
+# → push/pull UNAUTHORIZED (anonymous fallback). The _check-harbor-target guard below
+# fails loudly on that mismatch (KUBE_CONTEXT is non-k3d but HARBOR_HOST is still the
+# k3d default).
 HARBOR_HOST     ?= harbor.$(PLATFORM_DOMAIN)
+
+# Guard: catch the "KUBE_CONTEXT points at a real cluster but TARGET (→ HARBOR_HOST)
+# still defaults to local-k3d" mismatch before sealing a wrong-host robot secret.
+.PHONY: _check-harbor-target
+_check-harbor-target:
+	@case "$(KUBE_CONTEXT)" in \
+	  k3d-*) : ;; \
+	  *) case "$(HARBOR_HOST)" in \
+	       *sslip.io|*127-0-0-1*) \
+	         echo "ERROR: KUBE_CONTEXT='$(KUBE_CONTEXT)' is a non-k3d cluster but HARBOR_HOST='$(HARBOR_HOST)'" >&2; \
+	         echo "       is still the local-k3d default — you almost certainly forgot TARGET." >&2; \
+	         echo "       The robot secret bakes --docker-server=HARBOR_HOST; a wrong host => push/pull UNAUTHORIZED." >&2; \
+	         echo "       Re-run with the matching target, e.g.: make $(MAKECMDGOALS) NAME=$(NAME) TARGET=real-talos KUBE_CONTEXT=$(KUBE_CONTEXT)" >&2; \
+	         exit 1 ;; \
+	     esac ;; \
+	esac
 HARBOR_ONBOARD_JOB := platform-services/harbor-onboarding/onboard-team-job.yaml
 
 .PHONY: harbor-onboard
@@ -516,7 +541,7 @@ harbor-onboard: ## (P2.2) Onboard team into Harbor: create project <name> + map 
 PULL_NS ?= $(NAME)-$(ENV)
 
 .PHONY: harbor-robot
-harbor-robot: ## (P2.2) Create a pull robot for project <name> -> SealedSecret on stdout. NAME=<name> ENV=<env> [PULL_NS=<name>-<env>]. Override KUBE_CONTEXT for non-k3d clusters.
+harbor-robot: _check-harbor-target ## (P2.2) Create a pull robot for project <name> -> SealedSecret on stdout. NAME=<name> ENV=<env> [PULL_NS=<name>-<env>]. Override KUBE_CONTEXT (+ TARGET) for non-k3d clusters.
 	@test -n "$(NAME)" || { echo "usage: make harbor-robot NAME=<team-slug> ENV=<env> [PULL_NS=<ns>] > harbor-pull-sealed.yaml"; exit 1; }
 	@test -n "$(ENV)"  || { echo "usage: make harbor-robot NAME=<team-slug> ENV=<env> (e.g. dev/staging/prod); ENV still names the robot/file even when PULL_NS is set"; exit 1; }
 	@command -v kubeseal >/dev/null || { echo "ERROR: kubeseal not found (install to ~/.local/bin)."; exit 1; }
@@ -571,7 +596,7 @@ harbor-robot: ## (P2.2) Create a pull robot for project <name> -> SealedSecret o
 RUNNER_NS ?= arc-runners
 
 .PHONY: harbor-push-robot
-harbor-push-robot: ## (P2.3) Create a CI PUSH robot for project <name> -> `harbor-push` SealedSecret on stdout. NAME=<name> [RUNNER_NS=arc-runners]. Override KUBE_CONTEXT for non-k3d clusters.
+harbor-push-robot: _check-harbor-target ## (P2.3) Create a CI PUSH robot for project <name> -> `harbor-push` SealedSecret on stdout. NAME=<name> [RUNNER_NS=arc-runners]. Override KUBE_CONTEXT (+ TARGET) for non-k3d clusters.
 	@test -n "$(NAME)" || { echo "usage: make harbor-push-robot NAME=<team-slug> [RUNNER_NS=arc-runners] > harbor-push-sealed.yaml"; exit 1; }
 	@command -v kubeseal >/dev/null || { echo "ERROR: kubeseal not found (install to ~/.local/bin)."; exit 1; }
 	@kubectl config get-contexts "$(KUBE_CONTEXT)" >/dev/null 2>&1 \
