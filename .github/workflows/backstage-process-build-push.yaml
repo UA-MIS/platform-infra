@@ -29,14 +29,21 @@
 #   The deploy is NOT auto-bumped: a human flips the Application's image.tag to
 #   the built <short-sha> at go-live (the deploy-enable batch). No Image Updater.
 #
-# CONTAINER-MODE SHAPE (why Kaniko is a `uses: docker://` STEP, not the job
-# container): the ARC runners are containerMode:kubernetes. The job runs on the
-# normal runner pod (which has node+git, so actions/checkout works); the Kaniko
-# build runs as a container-action STEP, which the runner-container-hooks execute
-# in a SEPARATE pod from the Kaniko image with the shared _work volume mounted —
-# so the checked-out repo is Kaniko's local context. Making Kaniko the job
-# container would break the runner (its minimal image has no node/bash for the
-# Actions runner internals). Mirrors the proven tenant golden-path workflow.
+# CONTAINER-MODE SHAPE: the ARC runners are containerMode:kubernetes, which
+# REQUIRES every job to declare a `container:` ("Jobs without a job container are
+# forbidden on this runner") — job steps run in that container pod, not on the
+# runner pod. So:
+#   - the JOB CONTAINER is a small node image (node:24-trixie-slim) — it just needs
+#     node for actions/checkout + a shell for the resolve step. (checkout has no git
+#     in this image and falls back to a REST tarball download, which is fine for a
+#     build context.) It is NOT the Kaniko image: the runner internals need node/sh,
+#     which the scratch-based Kaniko image lacks.
+#   - the KANIKO build is a `uses: docker://...` container-action STEP, which the
+#     runner-container-hooks execute in a SEPARATE pod from the Kaniko image with
+#     the shared _work volume mounted (the checked-out repo = Kaniko's context), and
+#     the container-hook template injects the harbor-push cred into THAT pod.
+# (The earlier "job runs on the runner pod, no container" shape was wrong for
+# containerMode:kubernetes — it hard-fails at "Set up job".)
 #
 # The multi-stage Dockerfile builds Backstage from source INSIDE the image
 # (yarn install + tsc + build:backend), so this is a single self-contained Kaniko
@@ -82,6 +89,11 @@ env:
 jobs:
   build-and-push:
     runs-on: ua-mis-kaniko
+    # REQUIRED by containerMode:kubernetes (see header). Small node image: node for
+    # actions/checkout + a shell for the resolve step. The Kaniko build runs in its
+    # OWN pod via the `uses: docker://` step, so this image does NOT need Kaniko/git.
+    container:
+      image: node:24-trixie-slim
     steps:
       - name: Checkout (build context = the Backstage monorepo)
         uses: actions/checkout@v4
