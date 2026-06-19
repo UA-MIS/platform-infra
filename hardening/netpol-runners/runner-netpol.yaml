@@ -114,7 +114,7 @@ spec:
     # External HTTPS:443 ONLY — GitHub (clone/Actions API/job token) + base-image
     # pulls. Port-scoped (no FQDN egress until Cilium).
     #
-    # ⚠ CILIUM ENFORCEMENT CAVEAT (deny-test SEC-011, finding <SEC-FINDING-ID>):
+    # ⚠ CILIUM ENFORCEMENT CAVEAT (deny-test SEC-011; relates to SEC-014 port-scope):
     # the pod/service excepts (10.244/16, 10.96/12) DO enforce — Cilium matches
     # those by managed-endpoint identity. BUT the node-LAN (10.237.168.0/22) and
     # tailnet (100.64.0.0/10) excepts are INERT under Cilium's DEFAULT config:
