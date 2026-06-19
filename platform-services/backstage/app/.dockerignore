@@ -1,0 +1,13 @@
+# .dockerignore tuned for the MULTI-STAGE Dockerfile (packages/backend/Dockerfile), which
+# builds from source INSIDE the image (stage 2 does `COPY . .` then yarn tsc + build:backend).
+# So — unlike the default host-build create-app .dockerignore — we must KEEP packages/*/src
+# and plugins (the build needs them). We still drop the heavy/irrelevant bits.
+.git
+.yarn/cache
+.yarn/install-state.gz
+node_modules
+packages/*/node_modules
+plugins/*/node_modules
+*.local.yaml
+dist-types
+packages/*/dist
