@@ -545,9 +545,9 @@ harbor-robot: ## (P2.2) Create a pull robot for project <name> -> SealedSecret o
 	    '        args:' \
 	    '        - >-' \
 	    '          curl -sS -u "admin:$$HARBOR_ADMIN_PASSWORD"' \
-	    '          -X POST http://harbor-core.harbor.svc:80/api/v2.0/projects/$(NAME)/robots' \
+	    '          -X POST http://harbor-core.harbor.svc:80/api/v2.0/robots' \
 	    "          -H 'Content-Type: application/json'" \
-	    "          -d '{\"name\":\"$(NAME)-pull\",\"duration\":-1,\"description\":\"per-team pull robot ($(NAME))\",\"permissions\":[{\"kind\":\"project\",\"namespace\":\"$(NAME)\",\"access\":[{\"resource\":\"repository\",\"action\":\"pull\"}]}]}'" \
+	    "          -d '{\"name\":\"$(NAME)-pull\",\"duration\":-1,\"level\":\"project\",\"description\":\"per-team pull robot ($(NAME))\",\"permissions\":[{\"kind\":\"project\",\"namespace\":\"$(NAME)\",\"access\":[{\"resource\":\"repository\",\"action\":\"pull\"}]}]}'" \
 	  | kubectl --context "$$ctx" apply -f - >&2; \
 	  kubectl --context "$$ctx" -n "$$ns" wait --for=condition=complete --timeout=120s job/"$$job" >&2 \
 	    || { echo "ERROR: robot Job failed:" >&2; kubectl --context "$$ctx" -n "$$ns" logs job/"$$job" >&2; exit 1; }; \
@@ -600,9 +600,9 @@ harbor-push-robot: ## (P2.3) Create a CI PUSH robot for project <name> -> `harbo
 	    '        args:' \
 	    '        - >-' \
 	    '          curl -sS -u "admin:$$HARBOR_ADMIN_PASSWORD"' \
-	    '          -X POST http://harbor-core.harbor.svc:80/api/v2.0/projects/$(NAME)/robots' \
+	    '          -X POST http://harbor-core.harbor.svc:80/api/v2.0/robots' \
 	    "          -H 'Content-Type: application/json'" \
-	    "          -d '{\"name\":\"$(NAME)-ci-push\",\"duration\":-1,\"description\":\"per-team CI push robot ($(NAME), Kaniko)\",\"permissions\":[{\"kind\":\"project\",\"namespace\":\"$(NAME)\",\"access\":[{\"resource\":\"repository\",\"action\":\"pull\"},{\"resource\":\"repository\",\"action\":\"push\"}]}]}'" \
+	    "          -d '{\"name\":\"$(NAME)-ci-push\",\"duration\":-1,\"level\":\"project\",\"description\":\"per-team CI push robot ($(NAME), Kaniko)\",\"permissions\":[{\"kind\":\"project\",\"namespace\":\"$(NAME)\",\"access\":[{\"resource\":\"repository\",\"action\":\"pull\"},{\"resource\":\"repository\",\"action\":\"push\"}]}]}'" \
 	  | kubectl --context "$$ctx" apply -f - >&2; \
 	  kubectl --context "$$ctx" -n "$$ns" wait --for=condition=complete --timeout=120s job/"$$job" >&2 \
 	    || { echo "ERROR: push-robot Job failed:" >&2; kubectl --context "$$ctx" -n "$$ns" logs job/"$$job" >&2; exit 1; }; \
