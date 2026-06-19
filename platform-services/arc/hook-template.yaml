@@ -54,6 +54,14 @@ data:
             - name: harbor-push
               mountPath: /kaniko/.docker
               readOnly: true
+            # Trust the PLATFORM CA so the push VERIFIES Traefik's wildcard cert
+            # (the in-cluster registry path serves the cert-manager-issued internal
+            # cert, NOT Cloudflare's). Kaniko appends any cert under /kaniko/ssl/certs
+            # to its trust store, so TLS verification stays ON (no --skip-tls-verify).
+            - name: platform-ca
+              mountPath: /kaniko/ssl/certs/platform-ca.crt
+              subPath: ca.crt
+              readOnly: true
       volumes:
         - name: harbor-push
           secret:
@@ -62,3 +70,10 @@ data:
             items:
               - key: .dockerconfigjson
                 path: config.json
+        - name: platform-ca
+          configMap:
+            name: platform-ca
+            optional: true
+            items:
+              - key: ca.crt
+                path: ca.crt

@@ -17,8 +17,9 @@ kind: Kustomization
 resources:
   - namespace.yaml
   - sealedsecret-github-app.yaml   # the human's sealed GitHub App creds (arc-github-app)
-  - hook-template.yaml             # container-hook: injects harbor-push into the build job pod (Option C)
+  - hook-template.yaml             # container-hook: injects harbor-push + platform-ca into the build job pod
   - sealedsecret-harbor-push.yaml
+  - platform-ca-configmap.yaml     # platform CA → mounted into Kaniko so the push verifies Traefik's cert
 labels:
   - pairs:
       platform.capstone/component: platform
