@@ -15,8 +15,13 @@
 # Build context = the Backstage monorepo root. Based on the official multi-stage reference:
 # https://backstage.io/docs/deployment/docker#multi-stage-build
 
+# Pinned base image: explicit registry + digest (reproducible, dodges tag drift; Kaniko
+# pulls it from docker.io over :443 — we do not mirror base images to Harbor). Bump the
+# digest deliberately when moving Node patch levels. node:24-trixie-slim as of 2026-06-19.
+ARG NODE_IMAGE=docker.io/library/node:24-trixie-slim@sha256:287c662bed62f3c7b68ea68544814eaff9d7ed2254d2fc9627f2df5957bb7401
+
 # Stage 1 — yarn install skeleton layer (just the package.json files for cache stability).
-FROM node:24-trixie-slim AS packages
+FROM ${NODE_IMAGE} AS packages
 
 WORKDIR /app
 COPY backstage.json package.json yarn.lock ./
@@ -29,11 +34,23 @@ COPY packages packages
 RUN find packages \! -name "package.json" -mindepth 2 -maxdepth 2 -exec rm -rf {} \+
 
 # Stage 2 — install all deps and build the backend bundle.
-FROM node:24-trixie-slim AS build
+FROM ${NODE_IMAGE} AS build
 
 # node-gyp toolchain (isolated-vm for the scaffolder + better-sqlite3).
+# Force apt over HTTPS (:443): the ARC runner egress netpol allows external :443 ONLY (no
+# external :80, SEC-014 port-scoping) — Debian apt defaults to http://deb… (:80), which
+# breaks the moment platform-netpol-runners syncs. So rewrite the deb822 sources to https.
+# CHICKEN-AND-EGG: node:*-trixie-slim ships NO ca-certificates bundle, so the very first
+# https fetch can't verify the (legit Let's Encrypt) Fastly cert. Bootstrap with peer-verify
+# OFF for that one update, install ca-certificates, then ALL later layers verify normally.
+# This stays :443-only (netpol-compliant); apt still verifies package integrity via the
+# Signed-By GPG keyring independently of TLS, so the bootstrap is safe.
 ENV PYTHON=/usr/bin/python3
-RUN apt-get update && \
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' \
+        /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list 2>/dev/null || true; \
+    apt-get -o Acquire::https::Verify-Peer=false update && \
+    apt-get -o Acquire::https::Verify-Peer=false install -y --no-install-recommends ca-certificates && \
+    apt-get update && \
     apt-get install -y --no-install-recommends python3 g++ build-essential libsqlite3-dev && \
     rm -rf /var/lib/apt/lists/*
 
@@ -55,10 +72,16 @@ RUN mkdir packages/backend/dist/skeleton packages/backend/dist/bundle \
     && tar xzf packages/backend/dist/bundle.tar.gz -C packages/backend/dist/bundle
 
 # Stage 3 — the runtime image: production deps + the bundle only.
-FROM node:24-trixie-slim
+FROM ${NODE_IMAGE}
 
+# Same apt-over-HTTPS rewrite + ca-certificates bootstrap as the build stage (runner egress
+# is :443-only, SEC-014; the slim base ships no CA bundle). See the build-stage comment.
 ENV PYTHON=/usr/bin/python3
-RUN apt-get update && \
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' \
+        /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list 2>/dev/null || true; \
+    apt-get -o Acquire::https::Verify-Peer=false update && \
+    apt-get -o Acquire::https::Verify-Peer=false install -y --no-install-recommends ca-certificates && \
+    apt-get update && \
     apt-get install -y --no-install-recommends python3 g++ build-essential libsqlite3-dev && \
     rm -rf /var/lib/apt/lists/*
 
