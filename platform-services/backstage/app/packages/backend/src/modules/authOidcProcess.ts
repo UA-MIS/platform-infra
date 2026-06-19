@@ -7,12 +7,21 @@
  * signs in via the shared Dex broker, which emits the GitHub login as `preferred_username`
  * (Dex `useLoginAsID`). M1 resolves that login -> a Backstage User entity.
  *
- * M1 deliberately uses a catalog FALLBACK (dangerousEntityRefFallback): real GitHub-org
- * catalog ingestion arrives in M2. Until then the seed catalog has only placeholder Users,
- * so a real UA-MIS member would not yet have a matching User entity. The fallback lets a
- * Dex-authenticated (== UA-MIS-org-gated, SEC-007) member sign in and the portal render --
- * which is exactly M1's "see it work" checkpoint. Org gating is enforced UPSTREAM at Dex;
- * Backstage trusts the broker. M2 tightens this to require a catalog User.
+ * M2 TIGHTENS THE RESOLVER (this is the linchpin of the permission spine, see
+ * artifacts/planning/M2-github-teams-visibility-plan.md §3.1). M1 used a catalog FALLBACK
+ * (dangerousEntityRefFallback) because the seed catalog had only placeholder Users. That
+ * fallback minted a synthetic identity whose ownershipEntityRefs carried ONLY the user's
+ * own ref -- NO group memberships -- which would make the M2 permission policy inert
+ * (everyone denied, no admin). M2 removes the fallback and resolves STRICTLY to a real
+ * ingested catalog User (GitHub-org ingestion, see authOidcProcess's sibling githubOrg
+ * provider) so Backstage derives ownershipEntityRefs from the User's spec.memberOf (the
+ * GitHub teams) -> the policy's isEntityOwner({ claims }) becomes meaningful.
+ *
+ * BEHAVIOR CHANGE (acknowledged): a Dex-authenticated UA-MIS member who is NOT on any
+ * ingested team can no longer sign in (signInWithCatalogUser throws "no matching entity").
+ * This is the correct tightening; all real students are on a project team, and admins
+ * (labmx) are org members on an ingested team so they resolve normally. Org gating remains
+ * enforced UPSTREAM at Dex (SEC-007); Backstage trusts the broker for org membership.
  *
  * The provider id MUST be "oidc" so it matches auth.providers.oidc in app-config and the
  * Dex redirect URI (/api/auth/oidc/handler/frame). A code-defined signInResolver takes
@@ -23,8 +32,54 @@ import { createBackendModule } from '@backstage/backend-plugin-api';
 import {
   authProvidersExtensionPoint,
   createOAuthProviderFactory,
+  OAuthAuthenticatorResult,
+  SignInResolver,
+  SignInInfo,
+  AuthResolverContext,
 } from '@backstage/plugin-auth-node';
-import { oidcAuthenticator } from '@backstage/plugin-auth-backend-module-oidc-provider';
+import {
+  oidcAuthenticator,
+  OidcAuthResult,
+} from '@backstage/plugin-auth-backend-module-oidc-provider';
+
+/**
+ * The Dex sign-in resolver, extracted as a standalone function so it is unit-testable
+ * (the linchpin of the M2 spine — see *.test.ts). Resolves the OIDC profile's GitHub login
+ * (Dex preferred_username, on OidcAuthResult.userinfo) to a REAL ingested catalog User;
+ * throws if none exists.
+ */
+export const processOidcSignInResolver: SignInResolver<
+  OAuthAuthenticatorResult<OidcAuthResult>
+> = async (
+  info: SignInInfo<OAuthAuthenticatorResult<OidcAuthResult>>,
+  ctx: AuthResolverContext,
+) => {
+  // Dex emits the GitHub login as preferred_username (useLoginAsID).
+  const userinfo = info.result.fullProfile.userinfo;
+  const rawLogin =
+    (userinfo.preferred_username as string | undefined) ??
+    (userinfo.name as string | undefined) ??
+    userinfo.sub;
+
+  if (!rawLogin) {
+    throw new Error(
+      'OIDC profile is missing preferred_username / name / sub; cannot resolve a Backstage user.',
+    );
+  }
+
+  // Login-case gotcha (M2 R2): the github-org provider normalizes ingested
+  // User.metadata.name to lowercase, but Dex's preferred_username is the GitHub login
+  // as-is. Lowercase the login before matching so a user whose GitHub login has uppercase
+  // characters still resolves to their ingested User.
+  const login = rawLogin.toLowerCase();
+
+  // Match the REAL ingested catalog User by name (GitHub login == the canonical User entity
+  // name after GitHub-org ingestion). NO dangerousEntityRefFallback: resolving to a real
+  // User is what populates ownershipEntityRefs (the user's group/team refs) so the M2
+  // permission policy can filter by ownership. A login with no matching ingested User fails
+  // sign-in by design (§3.1).
+  return ctx.signInWithCatalogUser({ entityRef: { name: login } });
+};
 
 export const authModuleOidcProcess = createBackendModule({
   // Targets the core "auth" plugin.
@@ -39,33 +94,7 @@ export const authModuleOidcProcess = createBackendModule({
           providerId: 'oidc',
           factory: createOAuthProviderFactory({
             authenticator: oidcAuthenticator,
-            async signInResolver(info, ctx) {
-              // Dex emits the GitHub login as preferred_username (useLoginAsID).
-              const userinfo = info.result.fullProfile.userinfo;
-              const login =
-                (userinfo.preferred_username as string | undefined) ??
-                (userinfo.name as string | undefined) ??
-                userinfo.sub;
-
-              if (!login) {
-                throw new Error(
-                  'OIDC profile is missing preferred_username / name / sub; cannot resolve a Backstage user.',
-                );
-              }
-
-              // Match a catalog User by name (the GitHub login == the canonical User
-              // entity name once GitHub-org ingestion lands in M2). M1: fall back to a
-              // synthetic User ref so a Dex-authenticated member can sign in before the
-              // real catalog Users exist.
-              return ctx.signInWithCatalogUser(
-                { entityRef: { name: login } },
-                {
-                  dangerousEntityRefFallback: {
-                    entityRef: { name: login },
-                  },
-                },
-              );
-            },
+            signInResolver: processOidcSignInResolver,
           }),
         });
       },
