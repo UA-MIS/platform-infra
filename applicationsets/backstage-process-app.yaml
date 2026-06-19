@@ -134,6 +134,15 @@ spec:
               environment: production
               session:
                 secret: ${BACKEND_SECRET}
+              # TEMPORARY DIAGNOSTIC (M2 sign-in loop, discriminator #1): the refresh-time
+              # catalog-presence check (NEW in auth-backend 0.29.0 — the M1->M2 delta) does
+              # getEntityByRef(session.userEntityRef) on every refresh and REVOKES the session
+              # (-> 401) if it's NotFound/errors. That reproduces handler/frame 200 -> refresh
+              # 401 -> start 302 loop. Disabling it confirms the presence check is the cause.
+              # ⚠️ This DISABLES a security check — TEST ONLY; revert and fix the underlying
+              # entity-ref mismatch (resolver `sub` vs ingested metadata.name/namespace) instead.
+              experimentalRefreshToken:
+                dangerouslyDisableCatalogPresenceCheck: true
               providers:
                 oidc:
                   production:
