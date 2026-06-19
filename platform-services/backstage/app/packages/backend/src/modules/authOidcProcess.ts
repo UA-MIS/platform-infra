@@ -41,6 +41,7 @@ import {
   oidcAuthenticator,
   OidcAuthResult,
 } from '@backstage/plugin-auth-backend-module-oidc-provider';
+import { stringifyEntityRef } from '@backstage/catalog-model';
 
 /**
  * The Dex sign-in resolver, extracted as a standalone function so it is unit-testable
@@ -73,12 +74,38 @@ export const processOidcSignInResolver: SignInResolver<
   // characters still resolves to their ingested User.
   const login = rawLogin.toLowerCase();
 
-  // Match the REAL ingested catalog User by name (GitHub login == the canonical User entity
-  // name after GitHub-org ingestion). NO dangerousEntityRefFallback: resolving to a real
-  // User is what populates ownershipEntityRefs (the user's group/team refs) so the M2
+  // Resolve the REAL ingested catalog User by name (GitHub login == the canonical User
+  // entity name after GitHub-org ingestion). NO dangerousEntityRefFallback: resolving to a
+  // real User is what populates ownershipEntityRefs (the user's group/team refs) so the M2
   // permission policy can filter by ownership. A login with no matching ingested User fails
   // sign-in by design (§3.1).
-  return ctx.signInWithCatalogUser({ entityRef: { name: login } });
+  //
+  // Done in EXPLICIT steps (rather than the one-liner ctx.signInWithCatalogUser) so we can
+  // log the resolved sub + ownership-ref count + the precise failing step. The sign-in
+  // pipeline's frame handler swallows resolver throws into a client-side web-message (the
+  // pod shows only "200 contentLength 0" with no server stack), so without this we are
+  // blind to WHY a post-by-name step fails. console.* is captured by the backend root
+  // logger, so these surface in pod logs WITHOUT a global debug-log flag. Behaviour on the
+  // success path is identical to signInWithCatalogUser (same sub + ent claims).
+  try {
+    const { entity } = await ctx.findCatalogUser({ entityRef: { name: login } });
+    const { ownershipEntityRefs } = await ctx.resolveOwnershipEntityRefs(entity);
+    const sub = stringifyEntityRef(entity);
+    // eslint-disable-next-line no-console
+    console.info(
+      `[authOidcProcess] resolved login=${login} -> sub=${sub} ` +
+        `ownershipEntityRefs=${ownershipEntityRefs.length}`,
+    );
+    return await ctx.issueToken({ claims: { sub, ent: ownershipEntityRefs } });
+  } catch (error) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[authOidcProcess] sign-in FAILED for login=${login}: ` +
+        `${(error as Error)?.name}: ${(error as Error)?.message}`,
+      error,
+    );
+    throw error;
+  }
 };
 
 export const authModuleOidcProcess = createBackendModule({
