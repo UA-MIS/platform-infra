@@ -32,22 +32,23 @@ spec:
     helm:
       releaseName: harbor
       values: |
-        # --- Exposure: Traefik ingress on harbor.${PLATFORM_DOMAIN}, wildcard TLS ---
+        # --- Exposure: Traefik ingress on harbor.${PLATFORM_DOMAIN} ---
+        # PUBLIC TLS is terminated at the Cloudflare edge (Universal SSL, D-036); the
+        # Cloudflare Tunnel routes *.capstone.uamishub.com -> Traefik. The ingress keeps
+        # tls.enabled with Traefik's internal wildcard TLSStore cert (certSource:none =
+        # no per-ingress secret) — harmless internally; the cert clients SEE is CF's.
         expose:
           type: ingress
           tls:
             enabled: true
-            # Traefik's default TLSStore serves the cert-manager wildcard cert for
-            # *.127-0-0-1.sslip.io, so no per-ingress secret is needed; tell the
-            # chart NOT to create/expect its own secret.
             certSource: none
           ingress:
             hosts:
-              core: harbor.127-0-0-1.sslip.io
+              core: harbor.capstone.uamishub.com
             className: traefik
-            # k3d Traefik serves the wildcard via the default TLSStore (§5.2).
-        # External URL clients + OIDC redirect use (HTTPS, terminated at Traefik).
-        externalURL: https://harbor.127-0-0-1.sslip.io
+        # externalURL = the PUBLIC https host (CF-edge-terminated). Drives the OIDC
+        # redirect + the registry endpoint clients pull/push against.
+        externalURL: https://harbor.capstone.uamishub.com
 
         # --- Admin password + data key from the SealedSecret (harbor-admin) ---
         existingSecretAdminPassword: harbor-admin

@@ -5,12 +5,12 @@
 # Traefik can serve it as the default cert for every <app>.<team>.<domain> host
 # (the traefik/ service wires it as the default TLS store).
 #
-# PLATFORM_DOMAIN seam (§6): the dnsNames below are the Phase-1 literal
-# 127.0.0.1.sslip.io (D-003). On the real cluster (Phase 4) this becomes the
-# Cloudflare zone — a one-line change here, mirrored from clusters/<target>/
-# values.env. Both the wildcard and the apex are listed so the domain itself and
-# any single-label subdomain resolve. (sslip.io makes *.127.0.0.1.sslip.io ->
-# 127.0.0.1 with no DNS config.)
+# PLATFORM_DOMAIN seam (§6): the dnsNames below are capstone.uamishub.com (D-036).
+# ⚠ This is now the INTERNAL self-CA cert only. PUBLIC TLS is terminated at the
+# Cloudflare edge (Universal SSL, D-036) — the Cloudflare Tunnel routes
+# *.capstone.uamishub.com -> Traefik. This wildcard cert is what Traefik's default
+# TLSStore serves on the cloudflared->Traefik / in-cluster legs; clients on the
+# internet never see it. Both the wildcard and the apex are listed.
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -28,14 +28,15 @@ spec:
     algorithm: ECDSA
     size: 256
   dnsNames:
-    # --- PLATFORM_DOMAIN seam: Phase-1 sslip.io literal, DASHED form (D-003) ---
-    # Dashed 127-0-0-1.sslip.io avoids the dotted-IP parse collision that breaks
-    # the preview host (...pr-1.127.0.0.1 -> 1.127.0.0). Traefik serves this as
-    # the default TLSStore cert for ALL hosts regardless of SAN label-depth, so
-    # the single-label wildcard is sufficient for the gateway; multi-label app
-    # hosts get the same cert (self-CA, Phase-1 — browser name-match is advisory).
-    - "*.127-0-0-1.sslip.io"               # <app>.<team>.<domain> + argocd.<domain>
-    - "127-0-0-1.sslip.io"                 # apex
+    # --- PLATFORM_DOMAIN seam (D-036): the internal Traefik TLSStore cert ---
+    # Traefik serves this as the default TLSStore cert for ALL hosts regardless of SAN
+    # label-depth (self-CA — only the in-cluster / tunnel-origin legs see it; the public
+    # cert is Cloudflare's). The single-label wildcard covers the platform tools
+    # (harbor./argocd./id.); two-level tenant-preview hosts (*.team.capstone...) reuse
+    # this same cert internally — public two-level TLS is a CF Advanced-Cert / DNS-01
+    # follow-up (D-036, deferred — not in the Phase-3 platform-tools path).
+    - "*.capstone.uamishub.com"               # harbor./argocd./id./backstage. + <app>.<team>
+    - "capstone.uamishub.com"                 # apex
   issuerRef:
     name: platform-ca-issuer
     kind: ClusterIssuer

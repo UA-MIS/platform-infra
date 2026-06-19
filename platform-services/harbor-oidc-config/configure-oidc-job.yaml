@@ -119,7 +119,7 @@ spec:
             # The OIDC endpoint Harbor STORES (public issuer; reached in-cluster via
             # the coredns-custom rewrite at login). Keep in sync with Dex issuer.
             - name: OIDC_ENDPOINT
-              value: "https://id.127-0-0-1.sslip.io"
+              value: "https://id.capstone.uamishub.com"
           command: ["/bin/sh", "-eu", "-c"]
           args:
             - |

@@ -65,10 +65,10 @@ data:
     hs.message = "Waiting for Ingress rules"
     return hs
 
-  url: https://argocd.127-0-0-1.sslip.io
+  url: https://argocd.capstone.uamishub.com
 
   # ArgoCD-server fetches the issuer's discovery doc SERVER-SIDE over the in-cluster
-  # path (id.127-0-0-1.sslip.io -> rewritten by coredns-custom to Traefik -> Dex).
+  # path (id.capstone.uamishub.com -> rewritten by coredns-custom to Traefik -> Dex).
   # That hop presents the cert-manager wildcard cert, which is signed by the
   # self-signed PLATFORM CA (Phase-1, no ACME). ArgoCD won't trust that CA, so for
   # the Phase-1 LOCAL self-signed setup we skip OIDC TLS verification — exactly the
@@ -83,7 +83,7 @@ data:
 
   oidc.config: |
     name: Dex (GitHub)
-    issuer: https://id.127-0-0-1.sslip.io
+    issuer: https://id.capstone.uamishub.com
     clientID: argocd
     clientSecret: $argocd-dex-client:oidc.dex.clientSecret
     requestedScopes:
