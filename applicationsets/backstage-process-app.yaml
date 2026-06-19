@@ -117,23 +117,30 @@ spec:
                   port: 5432
                   user: bn_backstage               # Bitnami app user
                   password: ${POSTGRES_PASSWORD}
-            # ── SSO via the shared Dex broker — OWNED BY THE BAKED IMAGE CONFIG ──
-            # The full `auth:` block (environment, providers.oidc.production with
-            # metadataUrl/clientId/clientSecret/prompt) lives in the custom image's
-            # app-config.production.yaml — that's the source of truth, and it reads the
-            # SAME env vars injected here: ${AUTH_OIDC_CLIENT_ID}/${AUTH_OIDC_CLIENT_SECRET}
-            # (from backstage-process-secrets) + the `process` Dex staticClient.
-            #
-            # We DELIBERATELY DO NOT set auth.* in this Helm overlay. The OIDC sign-in
-            # resolver is implemented as a CUSTOM code module in packages/backend (Dex
-            # preferred_username -> User, with a catalog fallback for pre-org-ingestion
-            # M1 login). Backstage gives config-driven `signIn.resolvers` PRIORITY over a
-            # code resolver — so a `signIn.resolvers` key here (the chart merges this
-            # appConfig ON TOP of the baked config) would silently override the code
-            # module and break login. Omitting the whole auth subtree keeps the code
-            # resolver authoritative. (Contract w/ backstage-dev; their PR notes this.)
-            #
+            # ── SSO via the shared Dex broker ──────────────────────────────────────
+            # The auth block MUST live HERE in the Helm appConfig: the chart launches the
+            # backend with ONLY `--config /app/app-config-from-configmap.yaml` (this
+            # overlay) — it does NOT load the image's baked app-config.production.yaml.
+            # So an earlier "defer auth to the baked config" trim left NO oidc provider
+            # registered → Sign In 404'd `No auth provider registered for 'oidc'` (+ the
+            # default env=development). Mirror the baked block exactly. Reads the injected
+            # ${AUTH_OIDC_CLIENT_ID}/${AUTH_OIDC_CLIENT_SECRET}/${BACKEND_SECRET} from
+            # backstage-process-secrets; the `process` Dex staticClient is the IdP.
+            # NO `signIn.resolvers` key — config resolvers take PRIORITY over the custom
+            # code resolver in packages/backend, so omitting it keeps the code module
+            # (Dex preferred_username -> User, catalog fallback) authoritative.
             # Org/identity gating is enforced UPSTREAM at Dex (UA-MIS org-only, SEC-007).
+            auth:
+              environment: production
+              session:
+                secret: ${BACKEND_SECRET}
+              providers:
+                oidc:
+                  production:
+                    metadataUrl: https://id.capstone.uamishub.com/.well-known/openid-configuration
+                    clientId: ${AUTH_OIDC_CLIENT_ID}
+                    clientSecret: ${AUTH_OIDC_CLIENT_SECRET}
+                    prompt: auto
 
             # ── Catalog: The Process golden-path templates + seed entities ───────
             catalog:
