@@ -1,0 +1,144 @@
+# ============================================================================
+# backstage-process-build-push.yaml — CI for "The Process" platform image
+# (P5 / ADR-029 §8, D-046). Builds the custom Backstage portal image from the
+# in-repo monorepo (platform-services/backstage/app) and pushes it to the
+# dedicated Harbor `backstage` project.
+#
+# This is a PLATFORM-COMPONENT build (not a tenant golden-path build) — The
+# Process is part of the platform, so it lives here in platform-infra rather
+# than going through the team-sample-app .devops/promotion.yaml resolver. The
+# build SHAPE is identical to the tenant golden path (team-sample-app's
+# build-and-push.yaml) because both ride the same ARC + Kaniko + Harbor robot
+# contract; only the tag policy is simpler (no semver prod-gate yet — M1 ships
+# a single mutable :<short-sha> dev image; deploy is the manual go-live flip).
+#
+# WHAT IT DOES
+#   - Builds with KANIKO (rootless, no docker daemon/socket) on the self-hosted
+#     ARC runners (runs-on: ua-mis-kaniko, containerMode:kubernetes, non-root).
+#   - Pushes to the dedicated Harbor project:
+#       harbor.capstone.uamishub.com/backstage/backstage-process:<short-sha>
+#     using the least-privilege PUSH robot secret `harbor-push` (pull+push on
+#     the `backstage` project ONLY — minted via `make harbor-push-robot
+#     NAME=backstage`), consumed at /kaniko/.docker/config.json. Harbor scans on
+#     push (D-028) — no Trivy step here (no dup).
+#
+# TAG / PUSH POLICY (M1):
+#   - push to main touching the app   -> :<short-sha>  (mutable dev image, PUSHED)
+#   - pull_request touching the app   -> BUILD ONLY (--no-push). PR code is
+#                                        untrusted; validated, never pushed.
+#   The deploy is NOT auto-bumped: a human flips the Application's image.tag to
+#   the built <short-sha> at go-live (the deploy-enable batch). No Image Updater.
+#
+# CONTAINER-MODE SHAPE (why Kaniko is a `uses: docker://` STEP, not the job
+# container): the ARC runners are containerMode:kubernetes. The job runs on the
+# normal runner pod (which has node+git, so actions/checkout works); the Kaniko
+# build runs as a container-action STEP, which the runner-container-hooks execute
+# in a SEPARATE pod from the Kaniko image with the shared _work volume mounted —
+# so the checked-out repo is Kaniko's local context. Making Kaniko the job
+# container would break the runner (its minimal image has no node/bash for the
+# Actions runner internals). Mirrors the proven tenant golden-path workflow.
+#
+# The multi-stage Dockerfile builds Backstage from source INSIDE the image
+# (yarn install + tsc + build:backend), so this is a single self-contained Kaniko
+# invocation — no host pre-build step. apt in the build stage goes over HTTPS
+# (:443) to match the :443-only runner egress (SEC-014) — see the Dockerfile.
+# ============================================================================
+name: backstage-process-build-push
+
+on:
+  push:
+    branches: [main]
+    # Only rebuild when the app source (or this workflow) changes — the platform
+    # repo holds far more than Backstage; no point rebuilding the image on a netpol
+    # or ADR edit.
+    paths:
+      - "platform-services/backstage/app/**"
+      - ".github/workflows/backstage-process-build-push.yaml"
+  pull_request:
+    paths:
+      - "platform-services/backstage/app/**"
+      - ".github/workflows/backstage-process-build-push.yaml"
+
+# Least privilege for the workflow token. `contents: read` is all actions/checkout
+# needs. The registry push is authenticated by the Harbor `harbor-push` robot —
+# NOT GITHUB_TOKEN (no packages/registry scope is granted).
+permissions:
+  contents: read
+
+# Don't pile up redundant builds for the same ref; cancel superseded runs.
+concurrency:
+  group: backstage-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The Harbor image repo for The Process (dedicated `backstage` project, D-046).
+  IMAGE_REPO: harbor.capstone.uamishub.com/backstage/backstage-process
+  # Where the Harbor push cred lands inside the Kaniko step pod (Kaniko's default
+  # DOCKER_CONFIG dir). The platform runner's container-hook template injects
+  # secret `harbor-push` (dockerconfigjson) -> config.json here. Only this value
+  # changes if the platform ever mounts the dockerconfigjson at a different path.
+  DOCKER_CONFIG_DIR: /kaniko/.docker
+
+jobs:
+  build-and-push:
+    runs-on: ua-mis-kaniko
+    steps:
+      - name: Checkout (build context = the Backstage monorepo)
+        uses: actions/checkout@v4
+
+      - name: Resolve image tag + push decision
+        id: resolve
+        run: |
+          set -eu
+          # Short SHA is the dev image tag (mutable; the human bumps the
+          # Application to this exact tag at go-live).
+          SHORT_SHA="$(echo "${GITHUB_SHA}" | cut -c1-12)"
+          IMAGE="${IMAGE_REPO}:${SHORT_SHA}"
+          # Push on real pushes to main; PR builds validate only (untrusted code).
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            PUSH=true
+          else
+            PUSH=false
+          fi
+          {
+            echo "IMAGE=${IMAGE}"
+            echo "PUSH=${PUSH}"
+          } | tee -a "$GITHUB_OUTPUT"
+
+      # --- Kaniko build as a container-action STEP (its own pod; shared _work) ---
+      # `uses: docker://` runs the Kaniko image in a separate job-step pod with the
+      # checked-out repo mounted. We override the entrypoint with a tiny sh wrapper
+      # so we can (a) fail closed if a push build is missing its cred, and (b) build
+      # vs. --no-push from the resolver's PUSH decision.
+      - name: Build (and push) with Kaniko
+        uses: docker://gcr.io/kaniko-project/executor:v1.23.2-debug
+        with:
+          entrypoint: /busybox/sh
+          args: >-
+            -c '
+            set -eu;
+            CFG="${DOCKER_CONFIG_DIR}/config.json";
+            if [ "${PUSH}" = "true" ] && [ ! -s "$CFG" ]; then
+              echo "ERROR: Harbor push credential not found at $CFG — the platform" \
+                   "runner must inject secret harbor-push (container-hook template)." \
+                   "Run: make harbor-push-robot NAME=backstage KUBE_CONTEXT=admin@capstone." \
+                   "Refusing an unauthenticated push." >&2;
+              exit 1;
+            fi;
+            COMMON="--context=dir://${GITHUB_WORKSPACE}/platform-services/backstage/app
+                    --dockerfile=packages/backend/Dockerfile
+                    --destination=${IMAGE}
+                    --reproducible
+                    --verbosity=info";
+            if [ "${PUSH}" = "true" ]; then
+              echo "==> building + pushing ${IMAGE}";
+              /kaniko/executor $COMMON;
+            else
+              echo "==> PR build-only validation for ${IMAGE} (no push)";
+              /kaniko/executor $COMMON --no-push --tar-path=/tmp/image.tar;
+            fi
+            '
+        env:
+          IMAGE: ${{ steps.resolve.outputs.IMAGE }}
+          PUSH: ${{ steps.resolve.outputs.PUSH }}
+          DOCKER_CONFIG_DIR: ${{ env.DOCKER_CONFIG_DIR }}
