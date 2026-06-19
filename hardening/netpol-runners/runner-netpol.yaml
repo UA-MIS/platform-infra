@@ -111,6 +111,19 @@ spec:
           port: 443    # kubernetes API Service (containerMode job-pod create)
         - protocol: TCP
           port: 80     # harbor-core (push/pull)
+        # CILIUM POD-PORT ENFORCEMENT (the M1 registry-push gotcha, 2026-06-19): an
+        # ipBlock egress rule is enforced against the DESTINATION POD port AFTER
+        # kube-proxy/Cilium service translation, NOT the Service port. The Backstage
+        # build pushes the image to Harbor via Traefik (hostAlias harbor.capstone ->
+        # Traefik ClusterIP, to dodge Cloudflare's 100MB cap), and Traefik's websecure
+        # Service :443 targetPorts to containerPort 8443 — so allowing only :443 above
+        # DROPS the push (observed: `dial tcp 10.97.22.53:443: i/o timeout`). Allow the
+        # Traefik pod port so the registry data plane reaches it. (8000 = Traefik's
+        # `web` :80 targetPort, allowed symmetrically for completeness/http path.)
+        - protocol: TCP
+          port: 8443   # Traefik websecure pod port (:443 svc -> :8443 pod) — image push via Traefik
+        - protocol: TCP
+          port: 8080   # harbor-core pod port (:80 svc -> :8080 pod) — direct-core fallback path
     # External HTTPS:443 ONLY — GitHub (clone/Actions API/job token) + base-image
     # pulls. Port-scoped (no FQDN egress until Cilium).
     #
