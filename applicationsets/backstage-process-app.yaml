@@ -57,7 +57,7 @@ spec:
           image:
             # THE CUSTOM IMAGE built from `npx @backstage/create-app` + pushed to
             # Harbor (see README "To go live"). PLACEHOLDER tag until that image exists.
-            registry: harbor.127-0-0-1.sslip.io
+            registry: harbor.capstone.uamishub.com
             repository: library/backstage-process
             tag: v0.1.0                          # PLACEHOLDER — bump to the real built tag
             pullPolicy: IfNotPresent
@@ -88,15 +88,15 @@ spec:
           appConfig:
             app:
               title: "The Process — UA-MIS Capstone Developer Portal"
-              baseUrl: https://process.127-0-0-1.sslip.io
+              baseUrl: https://process.capstone.uamishub.com
             organization:
               name: "UA-MIS"
             backend:
-              baseUrl: https://process.127-0-0-1.sslip.io
+              baseUrl: https://process.capstone.uamishub.com
               listen:
                 port: 7007
               cors:
-                origin: https://process.127-0-0-1.sslip.io
+                origin: https://process.capstone.uamishub.com
                 methods: [GET, HEAD, PATCH, POST, PUT, DELETE]
                 credentials: true
               # Backend auth signing key from the SealedSecret (BACKEND_SECRET).
@@ -123,7 +123,7 @@ spec:
               providers:
                 oidc:
                   production:
-                    metadataUrl: https://id.127-0-0-1.sslip.io/.well-known/openid-configuration
+                    metadataUrl: https://id.capstone.uamishub.com/.well-known/openid-configuration
                     clientId: ${AUTH_OIDC_CLIENT_ID}
                     clientSecret: ${AUTH_OIDC_CLIENT_SECRET}
                     prompt: auto
@@ -160,12 +160,12 @@ spec:
 
         # ── Ingress: process.<domain> via Traefik (matches every other service) ──
         # Plain Ingress, TLS host listed but NO secretName — Traefik's default TLSStore
-        # serves the cert-manager wildcard cert for *.127-0-0-1.sslip.io (§5.1/§5.2),
+        # serves the cert-manager wildcard cert for *.capstone.uamishub.com (§5.1/§5.2),
         # exactly like dex/harbor/argocd. className: traefik.
         ingress:
           enabled: true
           className: traefik
-          host: process.127-0-0-1.sslip.io
+          host: process.capstone.uamishub.com
           tls:
             enabled: true
             # No secretName: the wildcard cert is served via the default TLSStore.

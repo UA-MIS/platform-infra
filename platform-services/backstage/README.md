@@ -6,7 +6,7 @@ The Process is the platform's **developer portal**: a software **catalog**, **Te
 the headline IDP feature — **Scaffolder golden-path templates** that create a new team
 app repo pre-wired to the platform contract. Human SSO is via the **shared Dex broker**
 (same as ArgoCD/Harbor). At `https://process.<PLATFORM_DOMAIN>` (interim:
-`https://process.127-0-0-1.sslip.io`).
+`https://process.capstone.uamishub.com`).
 
 - Chart: `backstage` **2.8.2** (OCI: `oci://ghcr.io/backstage/charts`), pinned,
   Helm-source Application `applicationsets/backstage-process-app.yaml` (deploy method A —
@@ -109,9 +109,9 @@ to Harbor — is the eventual story; bootstrap it manually the first time.)
 
 Do these **in order**, after the cluster heal + the Phase-3 domain cutover:
 
-1. **Domain cutover.** This scaffold uses the interim `127-0-0-1.sslip.io` literal
+1. **Domain cutover.** This scaffold uses the interim `capstone.uamishub.com` literal
    everywhere (the repo-wide convention — same as Dex/Harbor/ArgoCD today). At the
-   Phase-3 cutover, the platform-wide find-replace `127-0-0-1.sslip.io` ->
+   Phase-3 cutover, the platform-wide find-replace `capstone.uamishub.com` ->
    `capstone.uamishub.com` (D-036) updates The Process's host to `process.capstone.uamishub.com`
    in lockstep with every other service. Files to update for The Process specifically:
    - `applicationsets/backstage-process-app.yaml` (ingress `host`, `baseUrl`, `cors`,
