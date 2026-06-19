@@ -56,6 +56,16 @@ spec:
             # metrics/readiness endpoint (the /ready probe target below)
             - --metrics
             - 0.0.0.0:2000
+            # Force the HTTP2 (TCP) transport instead of the default QUIC (UDP/7844).
+            # The deployment network (shared apartment wifi, D-036 / ADR-028 §1.4)
+            # BLOCKS outbound non-standard UDP, so the QUIC dial to the Cloudflare
+            # edge times out ("failed to dial a quic connection: timeout") and the
+            # tunnel never connects. http2 uses TCP (7844 → 443-TCP fallback), which
+            # the network allows. (Global flag → must precede the `run` subcommand.
+            # Revisit only if the cluster moves to a network that permits UDP egress —
+            # QUIC is otherwise Cloudflare's preferred path.)
+            - --protocol
+            - http2
             - run
           env:
             # The tunnel token. Sourced from the SealedSecret (cloudflared-tunnel-token);
@@ -65,16 +75,6 @@ spec:
                 secretKeyRef:
                   name: cloudflared-tunnel-token
                   key: token
-            # Force the HTTP2 (TCP) transport instead of the default QUIC (UDP/7844).
-            # The deployment network (shared apartment wifi, D-036 / ADR-028 §1.4)
-            # BLOCKS outbound non-standard UDP, so the QUIC dial to the Cloudflare
-            # edge times out ("failed to dial a quic connection: timeout") and the
-            # tunnel never connects. http2 uses TCP (7844 → 443-TCP fallback), which
-            # the network allows. TUNNEL_TRANSPORT_PROTOCOL is the env form of the
-            # `--protocol http2` flag. (Revisit only if the cluster moves to a network
-            # that permits UDP egress — QUIC is otherwise Cloudflare's preferred path.)
-            - name: TUNNEL_TRANSPORT_PROTOCOL
-              value: http2
           ports:
             - name: metrics
               containerPort: 2000
