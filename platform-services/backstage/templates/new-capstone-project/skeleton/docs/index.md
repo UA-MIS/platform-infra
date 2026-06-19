@@ -2,7 +2,7 @@
 
 ${{ values.description }}
 
-Scaffolded by **Relay** onto the UA-MIS capstone platform golden path.
+Scaffolded by **The Process** onto the UA-MIS capstone platform golden path.
 
 ## Quick start
 

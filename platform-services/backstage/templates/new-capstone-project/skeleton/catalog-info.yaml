@@ -1,5 +1,5 @@
-# catalog-info.yaml — registers this app in the Relay software catalog (P5).
-# catalog:register (the Scaffolder's last step) points here; the Relay catalog then
+# catalog-info.yaml — registers this app in The Process software catalog (P5).
+# catalog:register (the Scaffolder's last step) points here; The Process catalog then
 # tracks the component, its owner team, and its TechDocs.
 apiVersion: backstage.io/v1alpha1
 kind: Component

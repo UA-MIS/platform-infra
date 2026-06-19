@@ -1,4 +1,4 @@
-# Backstage "Relay" Application (P5, §1.6) — the platform's developer portal: the
+# Backstage "The Process" Application (P5, §1.6) — the platform's developer portal: the
 # software catalog + Scaffolder golden-path templates + TechDocs, with human SSO via
 # the SAME shared Dex broker as ArgoCD/Harbor. DEPLOY METHOD = (A) Helm-source
 # Application (the Harbor/ARC/Rook/metrics-server precedent, D-022/D-028): the chart
@@ -9,7 +9,7 @@
 # + SealedSecret PREREQS ship separately via the platform-services-appset
 # (platform-services/backstage/), which must sync FIRST — same split as Harbor.
 #
-# ⚠ AHEAD-OF-NEED PREP — DO NOT DEPLOY YET. Relay goes live AFTER (1) the cluster
+# ⚠ AHEAD-OF-NEED PREP — DO NOT DEPLOY YET. The Process goes live AFTER (1) the cluster
 #   heals (Cilium swap), (2) the Phase-3 domain cutover, and (3) the one-time custom
 #   Backstage image is built + pushed to Harbor. See platform-services/backstage/README.md
 #   "To go live" checklist. Until then this renders + reviews but is intentionally not synced.
@@ -19,7 +19,7 @@
 # `npx @backstage/create-app`, wire plugins (OIDC auth provider, the Scaffolder
 # actions, the catalog), `yarn build-image`, and push to Harbor. The chart's default
 # image `ghcr.io/backstage/backstage:latest` is a DEMO and has neither our Dex auth
-# provider nor the Relay templates — so `image.repository` below points at the Harbor
+# provider nor The Process templates — so `image.repository` below points at the Harbor
 # image we will build. Until that image exists the tag is a PLACEHOLDER (`v0.1.0`).
 #
 # Chart: backstage 2.8.2 (OCI: ghcr.io/backstage/charts), pinned. Bundles the Bitnami
@@ -27,7 +27,7 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: platform-backstage-relay
+  name: platform-backstage-process
   namespace: argocd
   labels:
     platform.capstone/component: platform
@@ -58,7 +58,7 @@ spec:
             # THE CUSTOM IMAGE built from `npx @backstage/create-app` + pushed to
             # Harbor (see README "To go live"). PLACEHOLDER tag until that image exists.
             registry: harbor.127-0-0-1.sslip.io
-            repository: library/backstage-relay
+            repository: library/backstage-process
             tag: v0.1.0                          # PLACEHOLDER — bump to the real built tag
             pullPolicy: IfNotPresent
             # Pull from the private Harbor `library` project via a robot imagePullSecret
@@ -80,23 +80,23 @@ spec:
           # OIDC client secret + backend signing key + DB password are env-injected
           # from the SealedSecret (platform-services/backstage/sealedsecret-oidc.yaml).
           extraEnvVarsSecrets:
-            - backstage-relay-secrets
+            - backstage-process-secrets
 
           # app-config.yaml baked into the custom image is the source of truth; this
           # block is MERGED on top (chart -> ConfigMap -> $APP_CONFIG_*). Kept minimal
           # + env-substituted so no secret lands in git and the host is the one seam.
           appConfig:
             app:
-              title: "Relay — UA-MIS Capstone Developer Portal"
-              baseUrl: https://relay.127-0-0-1.sslip.io
+              title: "The Process — UA-MIS Capstone Developer Portal"
+              baseUrl: https://process.127-0-0-1.sslip.io
             organization:
               name: "UA-MIS"
             backend:
-              baseUrl: https://relay.127-0-0-1.sslip.io
+              baseUrl: https://process.127-0-0-1.sslip.io
               listen:
                 port: 7007
               cors:
-                origin: https://relay.127-0-0-1.sslip.io
+                origin: https://process.127-0-0-1.sslip.io
                 methods: [GET, HEAD, PATCH, POST, PUT, DELETE]
                 credentials: true
               # Backend auth signing key from the SealedSecret (BACKEND_SECRET).
@@ -111,7 +111,7 @@ spec:
                   user: bn_backstage               # Bitnami app user
                   password: ${POSTGRES_PASSWORD}
             # ── SSO via the shared Dex broker (issuer id.<domain>) ──────────────
-            # Same broker as ArgoCD/Harbor. The `relay` Dex staticClient is added in
+            # Same broker as ArgoCD/Harbor. The `process` Dex staticClient is added in
             # platform-services/dex/configmap.yaml; its secret is env-injected here.
             # NOTE: the OIDC auth provider + signInResolver must be WIRED IN THE
             # CUSTOM IMAGE's packages/backend (createBackendModule / providers) — the
@@ -135,7 +135,7 @@ spec:
             # Org/identity gating is already enforced UPSTREAM at Dex (UA-MIS org-only,
             # SEC-007). Backstage trusts the broker; no second org check needed.
 
-            # ── Catalog: the Relay golden-path templates + seed entities ─────────
+            # ── Catalog: The Process golden-path templates + seed entities ───────
             catalog:
               rules:
                 - allow: [Component, System, API, Resource, Location, Template, Group, User]
@@ -158,14 +158,14 @@ spec:
                 - host: github.com
                   token: ${GITHUB_TOKEN}
 
-        # ── Ingress: relay.<domain> via Traefik (matches every other service) ────
+        # ── Ingress: process.<domain> via Traefik (matches every other service) ──
         # Plain Ingress, TLS host listed but NO secretName — Traefik's default TLSStore
         # serves the cert-manager wildcard cert for *.127-0-0-1.sslip.io (§5.1/§5.2),
         # exactly like dex/harbor/argocd. className: traefik.
         ingress:
           enabled: true
           className: traefik
-          host: relay.127-0-0-1.sslip.io
+          host: process.127-0-0-1.sslip.io
           tls:
             enabled: true
             # No secretName: the wildcard cert is served via the default TLSStore.

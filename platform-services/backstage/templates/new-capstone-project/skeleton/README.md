@@ -1,6 +1,6 @@
 # ${{ values.appName }}
 
-A UA-MIS capstone project, scaffolded by **Relay** (the developer portal) onto the
+A UA-MIS capstone project, scaffolded by **The Process** (the developer portal) onto the
 platform golden path.
 
 ## Repo layout — the `.devops/` contract
