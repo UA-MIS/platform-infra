@@ -4,20 +4,19 @@
 # `platform-svc-cloudflared`). Unlike Harbor/ARC/Rook, cloudflared is NOT a Helm chart
 # — the Deployment + namespace + tunnel-token SealedSecret all render through here.
 #
-# ⚠ THE SEALEDSECRET LINE IS COMMENTED OUT until the human seals the REAL tunnel token
-# (see sealedsecret-tunnel-token.yaml for the exact kubeseal command). Keeping it out of
-# `resources` lets this app sync cleanly (namespace + Deployment) on first apply; the
-# Deployment will sit waiting for the `cloudflared-tunnel-token` Secret. When the human
-# seals the token: replace the placeholder file with the real sealed output AND uncomment
-# the resources line below, in the SAME commit. (Committing the placeholder into resources
-# would fail the controller's decrypt and leave the app perpetually degraded.)
+# The SealedSecret IS now rendered (the real tunnel token was sealed in #48). It
+# decrypts in-cluster to Secret `cloudflared-tunnel-token`, which the Deployment
+# mounts as TUNNEL_TOKEN. (Was commented out pre-seal so the app could sync cleanly
+# with just namespace + Deployment; #48 sealed the real token but missed uncommenting
+# this line — that gap left the app Synced-but-Degraded with NO SealedSecret CR and
+# no Secret. This fix completes that step.)
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
   - namespace.yaml
   - deployment.yaml
-  # - sealedsecret-tunnel-token.yaml   # UNCOMMENT once sealed with the real token (see that file)
+  - sealedsecret-tunnel-token.yaml
 
 labels:
   - pairs:
