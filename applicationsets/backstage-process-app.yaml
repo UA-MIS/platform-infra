@@ -32,10 +32,10 @@ metadata:
   labels:
     platform.capstone/component: platform
   annotations:
-    # Explicitly OPT OUT of auto-sync until go-live (see header). The syncPolicy
-    # below carries automated:{} so this annotation documents intent for reviewers;
-    # the human enables auto-sync at cutover by uncommenting the block.
-    platform.capstone/deploy-status: "prep-do-not-deploy"
+    # GO-LIVE (M1): deploy-status flipped to live, auto-sync enabled below, image.tag
+    # set to the first CI-built SHA, and the platform-services/backstage appset-exclude
+    # removed (so the ns + REAL sealed secrets sync as prereqs — same split as Harbor).
+    platform.capstone/deploy-status: "live"
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
@@ -62,7 +62,7 @@ spec:
             # until the first build lands; the CI build tags by commit SHA.
             registry: harbor.capstone.uamishub.com
             repository: backstage/backstage-process
-            tag: v0.1.0                          # PLACEHOLDER — bump to the first built SHA
+            tag: 87c9dc3a8fb8                     # first SUCCESSFUL CI build (ARC/Kaniko run 27839922146, digest sha256:a27b13d) — #60 merge commit
             pullPolicy: IfNotPresent
             # Pull from the private Harbor `backstage` project via a robot
             # imagePullSecret (`harbor-pull`, minted at go-live by `make harbor-robot
@@ -201,11 +201,11 @@ spec:
     server: https://kubernetes.default.svc
     namespace: backstage
   syncPolicy:
-    # ⚠ AUTO-SYNC INTENTIONALLY OMITTED (prep-do-not-deploy). At go-live the human
-    # enables it by uncommenting the `automated` block below (matching Harbor):
-    #   automated:
-    #     prune: true
-    #     selfHeal: true
+    # GO-LIVE: auto-sync enabled (matches Harbor). prune+selfHeal keep the portal
+    # reconciled to git.
+    automated:
+      prune: true
+      selfHeal: true
     syncOptions:
       - CreateNamespace=false      # backstage ns ships via platform-services/backstage
       - ServerSideApply=true       # large chart objects

@@ -36,19 +36,16 @@ spec:
           # never re-emits a `platform-svc-traefik` if the dir reappears.
           - path: platform-services/traefik
             exclude: true
-          # EXCLUDE backstage/ (P5/M1, D-046): The Process is managed SOLELY by the
-          # dedicated, gated Application (applicationsets/backstage-process-app.yaml) —
-          # NOT by this directory generator. platform-services/backstage/ holds the ns
-          # + PLACEHOLDER SealedSecrets (backstage-process-secrets / backstage-postgresql,
-          # real values sealed at go-live by the live-ops batch) + the in-repo app source
-          # (backstage/app/). Without this exclude the dir-generator emits
-          # `platform-svc-backstage`, auto-applies the placeholder SealedSecrets, and they
-          # fail-to-decrypt -> Degraded (the cloudflared #48/#49 placeholder-secret class).
-          # The single-level `platform-services/*` glob doesn't descend into backstage/app/,
-          # so excluding backstage/ is sufficient. At go-live the dedicated app's deploy-flip
-          # (+ the live-ops batch sealing the REAL secrets) brings it up cleanly.
-          - path: platform-services/backstage
-            exclude: true
+          # NOTE (P5/M1, D-046): platform-services/backstage IS generated as
+          # `platform-svc-backstage` (ns + the REAL sealed secrets: backstage-process-secrets
+          # / backstage-postgresql / harbor-pull) — the prereqs the dedicated chart app
+          # `platform-backstage-process` needs, SAME SPLIT AS HARBOR. It was EXCLUDED
+          # pre-go-live (a guard so the PLACEHOLDER secrets couldn't auto-apply → fail-to-
+          # decrypt Degraded); that exclude is REMOVED at go-live now that the live-ops
+          # batch sealed the real secrets into git. The single-level glob doesn't descend
+          # into backstage/app/ (the in-repo Backstage source), and the dir's
+          # kustomization lists only the ns + sealed secrets as resources — so the app
+          # source is not applied here.
   template:
     metadata:
       name: 'platform-svc-{{.path.basename}}'
