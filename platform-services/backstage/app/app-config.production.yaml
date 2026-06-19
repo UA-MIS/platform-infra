@@ -52,7 +52,11 @@ auth:
         metadataUrl: https://id.capstone.uamishub.com/.well-known/openid-configuration
         clientId: ${AUTH_OIDC_CLIENT_ID}
         clientSecret: ${AUTH_OIDC_CLIENT_SECRET}
-        prompt: auto
+        # FIX-TEST (refresh residual): force fresh consent so Dex mints a new refresh_token
+        # instead of replaying a stale server-side offline session. NOTE: may be a NO-OP on
+        # Dex v2.45.1 (prompt session support is a later enhancement). Revert to `auto` once
+        # the refresh residual is resolved (mirrors the Helm appConfig — the pod loads that).
+        prompt: consent
 
 # ── Permission framework (M2: THE SPINE) ───────────────────────────────────────────────
 # Turn the permission framework ON so the custom CapstoneTeamPermissionPolicy

@@ -148,7 +148,15 @@ spec:
                     metadataUrl: https://id.capstone.uamishub.com/.well-known/openid-configuration
                     clientId: ${AUTH_OIDC_CLIENT_ID}
                     clientSecret: ${AUTH_OIDC_CLIENT_SECRET}
-                    prompt: auto
+                    # FIX-TEST (refresh residual): force a fresh consent/grant so Dex mints +
+                    # returns a new refresh_token instead of replaying a stale server-side
+                    # offline session (which survives even an incognito browser). NOTE: Dex
+                    # v2.45.1 may treat prompt=consent as a NO-OP (prompt=login/consent
+                    # session support is a later Dex enhancement) — if so this won't change
+                    # behavior and the real fix is clearing the stale offline session (Dex
+                    # gRPC RevokeRefresh) / a Dex upgrade. Was `prompt: auto`; revert to auto
+                    # once the refresh residual is resolved (consent-every-login is a UX cost).
+                    prompt: consent
                     # LOGIN-LOOP FIX: request offline_access so Dex returns a refresh_token.
                     # The OAuth backend reads this per-provider `additionalScopes` from config
                     # (CookieScopeManager) and UNIONS it into the Dex authorize request
