@@ -62,7 +62,7 @@ spec:
             # until the first build lands; the CI build tags by commit SHA.
             registry: harbor.capstone.uamishub.com
             repository: backstage/backstage-process
-            tag: 87c9dc3a8fb8                     # first SUCCESSFUL CI build (ARC/Kaniko run 27839922146, digest sha256:a27b13d) — #60 merge commit
+            tag: 7db91f28499c                     # CI build (ARC/Kaniko run 27845161042) — #72 merge commit: removes NotificationsSidebarItem render crash
             pullPolicy: IfNotPresent
             # Pull from the private Harbor `backstage` project via a robot
             # imagePullSecret (`harbor-pull`, minted at go-live by `make harbor-robot
