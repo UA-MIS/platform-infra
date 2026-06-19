@@ -79,12 +79,23 @@ spec:
 
         # --- Service = ClusterIP (D-043). cloudflared reaches it in-cluster; NO
         #     external IP / LAN VIP / LoadBalancer.
+        #     ⚠ v40 chart: the type lives under service.SPEC.type — a top-level
+        #     `service.type` is silently ignored (values.schema.json) and the Service
+        #     renders as the chart-default LoadBalancer (sits <pending> on Talos +
+        #     violates D-043). Verified by rendering traefik/traefik 40.2.0.
         service:
-          type: ClusterIP
+          spec:
+            type: ClusterIP
 
-        # --- Entrypoints (carried over verbatim from the old helmchartconfig.yaml):
-        #     web :80, websecure :443 (TLS). cloudflared hits web:80; websecure
-        #     serves in-cluster TLS consumers (e.g. the OIDC id.<domain> path).
+        # --- Entrypoints (carried over from the old helmchartconfig.yaml):
+        #     web :80, websecure :443. cloudflared hits web:80; websecure serves
+        #     in-cluster TLS consumers (the OIDC id.<domain> path, ADR §10b).
+        #     ⚠ v40 chart: do NOT set ports.websecure.tls — the schema is
+        #     additionalProperties:false there and HARD-REJECTS it (ArgoCD sync
+        #     errors, Traefik never installs). websecure already emits
+        #     `--entryPoints.websecure.http.tls=true` BY DEFAULT in v40, so omitting
+        #     the block is behavior-identical (in-cluster TLS preserved). Verified by
+        #     rendering traefik/traefik 40.2.0.
         ports:
           web:
             port: 8000
@@ -96,8 +107,6 @@ spec:
             exposedPort: 443
             expose:
               default: true
-            tls:
-              enabled: true
 
         # --- 2 replicas for the 3-node cluster (was 1 on the k3d laptop), spread
         #     across nodes via soft anti-affinity so they don't co-schedule.
