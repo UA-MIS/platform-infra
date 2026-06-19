@@ -86,9 +86,12 @@ spec:
           extraEnvVarsSecrets:
             - backstage-process-secrets
 
-          # app-config.yaml baked into the custom image is the source of truth; this
-          # block is MERGED on top (chart -> ConfigMap -> $APP_CONFIG_*). Kept minimal
-          # + env-substituted so no secret lands in git and the host is the one seam.
+          # app-config.production.yaml baked into the custom image is the SOURCE OF TRUTH
+          # for auth + integrations; this block is MERGED on top (chart -> ConfigMap ->
+          # $APP_CONFIG_*). Kept to the host/deploy seams only (app/backend/catalog) — the
+          # auth + github subtrees are DELIBERATELY OMITTED here so the baked config's
+          # custom OIDC code resolver stays authoritative (see notes below). No secret
+          # lands in git; secrets arrive via extraEnvVarsSecrets above.
           appConfig:
             app:
               title: "The Process — UA-MIS Capstone Developer Portal"
@@ -114,30 +117,23 @@ spec:
                   port: 5432
                   user: bn_backstage               # Bitnami app user
                   password: ${POSTGRES_PASSWORD}
-            # ── SSO via the shared Dex broker (issuer id.<domain>) ──────────────
-            # Same broker as ArgoCD/Harbor. The `process` Dex staticClient is added in
-            # platform-services/dex/configmap.yaml; its secret is env-injected here.
-            # NOTE: the OIDC auth provider + signInResolver must be WIRED IN THE
-            # CUSTOM IMAGE's packages/backend (createBackendModule / providers) — the
-            # demo image does not ship it. This app-config drives that wired provider.
-            auth:
-              environment: production
-              session:
-                secret: ${BACKEND_SECRET}
-              providers:
-                oidc:
-                  production:
-                    metadataUrl: https://id.capstone.uamishub.com/.well-known/openid-configuration
-                    clientId: ${AUTH_OIDC_CLIENT_ID}
-                    clientSecret: ${AUTH_OIDC_CLIENT_SECRET}
-                    prompt: auto
-                    # Map the Dex token to a Backstage user. Dex emits the GitHub login
-                    # as preferred_username (useLoginAsID) — resolve to a User entity.
-                    signIn:
-                      resolvers:
-                        - resolver: preferredUsernameMatchingUserEntityName
-            # Org/identity gating is already enforced UPSTREAM at Dex (UA-MIS org-only,
-            # SEC-007). Backstage trusts the broker; no second org check needed.
+            # ── SSO via the shared Dex broker — OWNED BY THE BAKED IMAGE CONFIG ──
+            # The full `auth:` block (environment, providers.oidc.production with
+            # metadataUrl/clientId/clientSecret/prompt) lives in the custom image's
+            # app-config.production.yaml — that's the source of truth, and it reads the
+            # SAME env vars injected here: ${AUTH_OIDC_CLIENT_ID}/${AUTH_OIDC_CLIENT_SECRET}
+            # (from backstage-process-secrets) + the `process` Dex staticClient.
+            #
+            # We DELIBERATELY DO NOT set auth.* in this Helm overlay. The OIDC sign-in
+            # resolver is implemented as a CUSTOM code module in packages/backend (Dex
+            # preferred_username -> User, with a catalog fallback for pre-org-ingestion
+            # M1 login). Backstage gives config-driven `signIn.resolvers` PRIORITY over a
+            # code resolver — so a `signIn.resolvers` key here (the chart merges this
+            # appConfig ON TOP of the baked config) would silently override the code
+            # module and break login. Omitting the whole auth subtree keeps the code
+            # resolver authoritative. (Contract w/ backstage-dev; their PR notes this.)
+            #
+            # Org/identity gating is enforced UPSTREAM at Dex (UA-MIS org-only, SEC-007).
 
             # ── Catalog: The Process golden-path templates + seed entities ───────
             catalog:
@@ -152,15 +148,15 @@ spec:
                   rules:
                     - allow: [Template, Location, Group, System]
 
-            # ── Integrations: GitHub (Scaffolder publishes team repos to UA-MIS) ──
-            # The Scaffolder's publish:github action needs a token with repo+admin:org
-            # to create repos under UA-MIS. Injected at go-live (GITHUB_TOKEN env via
-            # the SealedSecret — add the key when wiring the Scaffolder). Documented in
-            # README; left out of the placeholder secret to avoid implying it's set.
-            integrations:
-              github:
-                - host: github.com
-                  token: ${GITHUB_TOKEN}
+            # ── Integrations: GitHub — OWNED BY THE BAKED IMAGE CONFIG (M1-optional) ──
+            # The Scaffolder's publish:github action needs a GitHub token (repo+admin:org)
+            # to create repos under UA-MIS. For M1 this is INTENTIONALLY ABSENT-TOLERANT:
+            # GITHUB_TOKEN is NOT in backstage-process-secrets, and the baked app-config
+            # makes the github integration optional so the portal boots + SSO works
+            # without it. We DO NOT set integrations.github here — injecting a bare
+            # `token: ${GITHUB_TOKEN}` with the var unset would substitute empty and can
+            # break startup. Wired in M2 when the Scaffolder publish flow lands (add the
+            # GITHUB_TOKEN key to the secret + the integration to the baked config then).
 
         # ── Ingress: process.<domain> via Traefik (matches every other service) ──
         # Plain Ingress, TLS host listed but NO secretName — Traefik's default TLSStore
