@@ -134,13 +134,6 @@ spec:
               environment: production
               session:
                 secret: ${BACKEND_SECRET}
-              # Enable refresh tokens — the sign-in popup refreshes via
-              # /api/auth/oidc/refresh, which needs a refresh cookie -> Dex must return a
-              # refresh_token (requested via offline_access in the backend module + frontend
-              # SignInPage). Without it: 401 refresh loop. MUST be here (pod loads only this
-              # appConfig, PR #71), mirrored from the baked app-config.
-              experimentalRefreshToken:
-                enabled: true
               providers:
                 oidc:
                   production:

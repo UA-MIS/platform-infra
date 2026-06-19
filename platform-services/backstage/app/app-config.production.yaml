@@ -46,13 +46,6 @@ auth:
   environment: production
   session:
     secret: ${BACKEND_SECRET}
-  # Enable refresh tokens. The sign-in popup refreshes the session via
-  # /api/auth/oidc/refresh, which needs a refresh cookie -> Dex must return a refresh_token
-  # (requested via offline_access, wired in the backend module + frontend SignInPage). This
-  # flag also turns on Backstage's offline-token service for OIDC/MCP clients. Without
-  # refresh, sessions can't renew -> 401 refresh loop.
-  experimentalRefreshToken:
-    enabled: true
   providers:
     oidc:
       production:

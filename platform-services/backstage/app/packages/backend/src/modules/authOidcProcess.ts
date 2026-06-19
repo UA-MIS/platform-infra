@@ -288,13 +288,6 @@ export const authModuleOidcProcess = createBackendModule({
           providerId: 'oidc',
           factory: createOAuthProviderFactory({
             authenticator: oidcAuthenticator,
-            // Request offline_access so Dex returns a REFRESH TOKEN. Without it Dex issues
-            // no refresh_token -> the OAuth frame handler never sets the refresh cookie ->
-            // every /api/auth/oidc/refresh is 401 "Missing session cookie" -> the sign-in
-            // popup loops (handler-frame 200, no throw). additionalScopes is unioned into
-            // the scope sent to Dex regardless of what the frontend requests; the frontend
-            // SignInPage also adds it to defaultScopes (packages/app/src/modules/signIn).
-            additionalScopes: ['offline_access'],
             signInResolver: createProcessOidcSignInResolver({ catalog, auth }),
           }),
         });

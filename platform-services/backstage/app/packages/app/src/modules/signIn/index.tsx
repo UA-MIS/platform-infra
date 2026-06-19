@@ -54,11 +54,7 @@ const oidcAuthApi = ApiBlueprint.make({
             title: 'The Process (Dex)',
             icon: () => null,
           },
-          // offline_access makes Dex issue a refresh token so the session can be refreshed
-          // (without it: no refresh cookie -> /api/auth/oidc/refresh 401 -> sign-in loop).
-          // The backend provider also sets additionalScopes:['offline_access'] (the two are
-          // unioned); keeping both in sync makes the requested scope explicit on each side.
-          defaultScopes: ['openid', 'profile', 'email', 'offline_access'],
+          defaultScopes: ['openid', 'profile', 'email'],
         }),
     }),
 });
