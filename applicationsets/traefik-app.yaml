@@ -1,0 +1,129 @@
+# Traefik ingress Application (D-042 / ADR-028) — the Talos ingress controller.
+#
+# WHY THIS EXISTS: k3s/k3d bundled Traefik via its helm-controller; Talos does NOT.
+# The old `platform-services/traefik/` (a HelmChartConfig + a standalone TLSStore)
+# was INERT on Talos (no helm.cattle.io controller, no traefik.io CRDs) and is
+# DELETED in this change. This installs the REAL traefik/traefik Helm chart as a
+# first-class Application (modeled on harbor/backstage), bringing the Traefik
+# Deployment, the traefik.io CRDs (IngressRoute/TLSStore/Middleware/...), the
+# `traefik` IngressClass, and a Service.
+#
+# EXPOSURE = Cloudflare Tunnel over the Traefik ClusterIP (D-043) — NO LoadBalancer,
+# NO Cilium L2/LB-IPAM, NO LAN IP (shared-apartment-wifi constraint, ADR-028 §1.4).
+# cloudflared dials traefik.kube-system.svc:80 in-cluster; the edge serves public TLS.
+#
+# ⚠ HARD CONSTRAINT — Traefik MUST run in `kube-system` with Service name `traefik`
+# (ADR-028 §8). THREE consumers hardcode `traefik.kube-system.svc.cluster.local`:
+#   1. coredns OIDC rewrite id.${PLATFORM_DOMAIN} -> traefik.kube-system.svc
+#      (coredns-custom/coredns-custom.yaml:39) — moving Traefik breaks Dex SSO.
+#   2. cloudflared tunnel origin (cloudflared/deployment.yaml) -> ...svc:80.
+#   3. control-plane netpols admit Traefik via `from: kube-system`.
+# The Service name is the Helm RELEASE name, so releaseName MUST be `traefik`.
+#
+# Chart pinned traefik/traefik 40.2.0 (appVersion v3.7.1). Repo is allowlisted in
+# the platform AppProject sourceRepos (bootstrap/platform-appproject.yaml) — that
+# add is INSTALL-OWNED (re-apply via `make bootstrap-reapply` + verify after merge,
+# or this app InvalidSpecErrors "repo not permitted").
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-traefik
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://traefik.github.io/charts    # PINNED chart repo (sourceRepos allowlist)
+    chart: traefik
+    targetRevision: 40.2.0                        # pinned chart version (appVersion v3.7.1); no ^/~/latest
+    helm:
+      releaseName: traefik                        # => Service/traefik in kube-system (the hardcoded contract)
+      values: |
+        # Traefik runs in kube-system (netpol + cloudflared + coredns contract, §8).
+        # destination.namespace below is the AUTHORITATIVE install namespace; this
+        # value is belt-and-suspenders. (If `namespaceOverride` is not the v40 chart
+        # key, it is harmlessly ignored — destination.namespace still installs here.)
+        namespaceOverride: kube-system
+
+        # --- IngressClass: register it NAMED `traefik` AND as the cluster DEFAULT.
+        #     className-less Ingresses (argocd, dex) bind via the DEFAULT class;
+        #     explicit `className: traefik` Ingresses (harbor, Backstage) bind by name.
+        ingressClass:
+          enabled: true
+          isDefaultClass: true
+          name: traefik
+
+        # --- Providers: watch both Ingress + the traefik.io CRDs.
+        #     ⚠ DO NOT set providers.kubernetesIngress.ingressClass (nor
+        #     providers.kubernetesCRD.ingressClass). The Traefik chart's EXAMPLES.md
+        #     shows setting it to "traefik" — that makes Traefik process ONLY
+        #     Ingresses whose className == traefik, which ORPHANS the className-LESS
+        #     Ingresses (argocd, dex) that rely on the DEFAULT class (silent break,
+        #     no error). Leaving these UNSET serves BOTH styles. (ADR-028 §5.2.)
+        providers:
+          kubernetesIngress:
+            enabled: true
+          kubernetesCRD:
+            enabled: true
+
+        # --- Default TLSStore -> the cert-manager wildcard secret (unchanged from
+        #     the old tlsstore.yaml; serves the wildcard for any SNI with no per-
+        #     router cert). Same secret, just chart-native instead of a standalone CRD.
+        tlsStore:
+          default:
+            defaultCertificate:
+              secretName: wildcard-platform-tls
+
+        # --- Service = ClusterIP (D-043). cloudflared reaches it in-cluster; NO
+        #     external IP / LAN VIP / LoadBalancer.
+        service:
+          type: ClusterIP
+
+        # --- Entrypoints (carried over verbatim from the old helmchartconfig.yaml):
+        #     web :80, websecure :443 (TLS). cloudflared hits web:80; websecure
+        #     serves in-cluster TLS consumers (e.g. the OIDC id.<domain> path).
+        ports:
+          web:
+            port: 8000
+            exposedPort: 80
+            expose:
+              default: true
+          websecure:
+            port: 8443
+            exposedPort: 443
+            expose:
+              default: true
+            tls:
+              enabled: true
+
+        # --- 2 replicas for the 3-node cluster (was 1 on the k3d laptop), spread
+        #     across nodes via soft anti-affinity so they don't co-schedule.
+        deployment:
+          replicas: 2
+        affinity:
+          podAntiAffinity:
+            preferredDuringSchedulingIgnoredDuringExecution:
+              - weight: 100
+                podAffinityTerm:
+                  topologyKey: kubernetes.io/hostname
+                  labelSelector:
+                    matchLabels:
+                      app.kubernetes.io/name: traefik
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system                         # AUTHORITATIVE install namespace (the §8 contract)
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true                       # the traefik.io CRDs need SSA
+      # NOTE: if a prior attempt left orphaned traefik.io CRDs, the FIRST sync may
+      # hit a field-manager adoption conflict (kubectl-client-side-apply vs argocd);
+      # if so, one-time-add Force=true to this list to adopt, then remove it.
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }
