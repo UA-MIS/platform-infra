@@ -8,6 +8,8 @@
 export { capstoneScaffolderModule, capstoneScaffolderModule as default } from './module';
 export { createSealSecretAction } from './actions/sealSecret';
 export type { SealSecretActionDeps } from './actions/sealSecret';
+export { createRenderTenantAction } from './actions/renderTenant';
+export type { RenderTenantActionDeps } from './actions/renderTenant';
 export {
   sealSecretPermission,
   capstoneSecretsPermissions,

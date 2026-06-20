@@ -17,6 +17,7 @@ import {
 import { scaffolderActionsExtensionPoint } from '@backstage/plugin-scaffolder-node';
 import { catalogServiceRef } from '@backstage/plugin-catalog-node';
 import { createSealSecretAction } from './actions/sealSecret';
+import { createRenderTenantAction } from './actions/renderTenant';
 
 export const capstoneScaffolderModule = createBackendModule({
   pluginId: 'scaffolder',
@@ -30,8 +31,18 @@ export const capstoneScaffolderModule = createBackendModule({
         catalog: catalogServiceRef,
         permissions: coreServices.permissions,
         auth: coreServices.auth,
+        // M4: capstone:render-tenant reads the tenants/_template/ tree over HTTP.
+        urlReader: coreServices.urlReader,
       },
-      async init({ scaffolder, config, logger, catalog, permissions, auth }) {
+      async init({
+        scaffolder,
+        config,
+        logger,
+        catalog,
+        permissions,
+        auth,
+        urlReader,
+      }) {
         scaffolder.addActions(
           createSealSecretAction({
             config,
@@ -40,7 +51,8 @@ export const capstoneScaffolderModule = createBackendModule({
             permissions,
             auth,
           }),
-          // M4: add createRenderTenantAction({ ... }) here (m4-dev owns renderTenant.ts).
+          // M4 — capstone:render-tenant (m4-dev owns renderTenant.ts).
+          createRenderTenantAction({ reader: urlReader }),
         );
       },
     });
