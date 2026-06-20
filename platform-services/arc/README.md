@@ -14,6 +14,24 @@ Modern **scale-set** ARC (`gha-runner-scale-set`), NOT the legacy summerwind CRD
   (`ghcr.io/actions/actions-runner-controller-charts`) — install-owned, re-apply
   after merge (`make bootstrap-reapply`).
 
+## Version bump cadence (#D1, devops)
+The ARC charts are **pinned** (no `^`/`~`/`latest`) and bumped DELIBERATELY:
+- **INVARIANT: controller and scale-set chart versions MUST match** (both `0.14.2`
+  today). The listener the controller deploys is version-coupled to the scale-set
+  chart; a skew (`arc-controller-app.yaml` ≠ `arc-runner-scaleset-app.yaml`
+  targetRevision) breaks runner registration. Bump BOTH in one PR.
+- **Cadence:** review the upstream release quarterly (or on a security advisory).
+  `gha-runner-scale-set` follows the Actions runner binary; pinning avoids a silent
+  runner-image change mid-semester. The runner IMAGE itself is also pinned by the
+  scale-set values — bump it with the chart.
+- **Process:** bump both targetRevisions → `make bootstrap-reapply` if the OCI
+  allowlist/version changed → watch one real workflow run register + build+push to
+  Harbor before declaring the bump good (the netpol :443-only + harbor-push robot
+  path is the thing a bad bump breaks). Roll back = revert both targetRevisions.
+- ⚠ Node-version coupling (M2 lesson): the runner image is separate from the
+  Backstage IMAGE base — the Node 24.17 keepAlive bug (#84) was in the *app* image
+  (`node:24.16` pin), NOT the runner. Bumping ARC does not touch that pin.
+
 ## containerMode: kubernetes (the rootless / no-docker-socket model)
 Workflow job steps run as **separate Kubernetes pods**, not inside a privileged
 dind container. No docker daemon, no docker socket, not privileged — exactly what
