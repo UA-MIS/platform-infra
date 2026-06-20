@@ -60,15 +60,24 @@ export class CapstoneTeamPermissionPolicy implements PermissionPolicy {
       return { result: AuthorizeResult.ALLOW };
     }
 
-    // 2. CATALOG ENTITIES — conditional ownership filter. The actor may read/act on a
-    //    catalog entity iff its spec.owner is one of their ownershipEntityRefs (their
-    //    user ref + their GitHub-team Group refs). With an empty ownershipRefs this
-    //    resolves to "owns nothing" (NOT ALLOW-all) — the spine stays closed.
+    // 2. CATALOG ENTITIES — conditional filter: the actor may read/act on an entity if
+    //    EITHER (a) its spec.owner is one of their ownershipEntityRefs (owned Components/
+    //    APIs/Systems/Templates — the per-team boundary, the spine), OR (b) it is a User or
+    //    Group entity (the org graph). The org graph is non-sensitive (who's on which team)
+    //    and a user MUST be able to read their OWN User/Group entities — otherwise, under
+    //    permission.enabled, isEntityOwner alone DENIES them (a github-org User has no
+    //    `ownedBy` relation, so `isEntityOwner` never matches it) → broken profile page /
+    //    "my groups", and any code path that reads the user's own entity as the USER
+    //    principal fails. The owned-boundary (a) still scopes the entities that actually
+    //    matter (Components/APIs/templates per ADR-029 §6.2). With empty ownershipRefs this
+    //    still resolves to "User/Group only" (NOT ALLOW-all) — the spine stays closed.
     if (isResourcePermission(request.permission, RESOURCE_TYPE_CATALOG_ENTITY)) {
-      return createCatalogConditionalDecision(
-        request.permission,
-        catalogConditions.isEntityOwner({ claims: ownershipRefs }),
-      );
+      return createCatalogConditionalDecision(request.permission, {
+        anyOf: [
+          catalogConditions.isEntityOwner({ claims: ownershipRefs }),
+          catalogConditions.isEntityKind({ kinds: ['User', 'Group'] }),
+        ],
+      });
     }
 
     // 3. SCAFFOLDER EXECUTE — left ALLOW in M2 (falls through to the default below). The

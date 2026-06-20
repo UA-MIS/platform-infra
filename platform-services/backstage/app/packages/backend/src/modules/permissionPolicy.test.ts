@@ -51,7 +51,7 @@ describe('CapstoneTeamPermissionPolicy', () => {
     expect(decision.result).toBe(AuthorizeResult.ALLOW);
   });
 
-  it('returns a CONDITIONAL isEntityOwner decision for a non-admin catalog read', async () => {
+  it('returns a CONDITIONAL anyOf(isEntityOwner, isEntityKind User/Group) for a non-admin catalog read', async () => {
     const claims = ['user:default/bob', 'group:default/team-a'];
     const request: PolicyQuery = { permission: catalogEntityReadPermission };
     const decision = await policy.handle(request, userWith(claims));
@@ -60,15 +60,24 @@ describe('CapstoneTeamPermissionPolicy', () => {
     if (decision.result !== AuthorizeResult.CONDITIONAL) {
       throw new Error('expected a conditional decision');
     }
-    // The conditional must scope to the CATALOG plugin and be the IS_ENTITY_OWNER rule
-    // carrying the user's claims — i.e. the EXACT server-side filter the catalog applies
-    // per-entity (this is what makes list views + the catalog API honor ownership, not a
-    // blanket allow). Asserting the serialized rule shape proves the wiring is real.
+    // The conditional scopes to the CATALOG plugin and is an anyOf of: the IS_ENTITY_OWNER
+    // rule carrying the user's claims (the per-team boundary — the spine), OR IS_ENTITY_KIND
+    // User/Group (self/org-graph read so the user can see their own User/Groups under
+    // permission.enabled). Asserting the serialized shape proves the wiring is real.
     expect(decision.pluginId).toBe('catalog');
     expect(decision.conditions).toMatchObject({
-      rule: 'IS_ENTITY_OWNER',
-      resourceType: 'catalog-entity',
-      params: { claims: ['user:default/bob', 'group:default/team-a'] },
+      anyOf: [
+        {
+          rule: 'IS_ENTITY_OWNER',
+          resourceType: 'catalog-entity',
+          params: { claims: ['user:default/bob', 'group:default/team-a'] },
+        },
+        {
+          rule: 'IS_ENTITY_KIND',
+          resourceType: 'catalog-entity',
+          params: { kinds: ['User', 'Group'] },
+        },
+      ],
     });
   });
 
@@ -76,14 +85,16 @@ describe('CapstoneTeamPermissionPolicy', () => {
     const request: PolicyQuery = { permission: catalogEntityReadPermission };
     const decision = await policy.handle(request, userWith([]));
 
-    // The key guard (plan R4): empty ownership must still be a CONDITIONAL "owns nothing",
-    // never AuthorizeResult.ALLOW.
+    // The key guard (plan R4): empty ownership must still be a CONDITIONAL, never ALLOW.
     expect(decision.result).toBe(AuthorizeResult.CONDITIONAL);
     expect(decision.result).not.toBe(AuthorizeResult.ALLOW);
-    // Empty claims array -> the IS_ENTITY_OWNER filter matches no entities (NOT allow-all).
+    // Empty claims -> the IS_ENTITY_OWNER arm matches no owned entities; only the
+    // User/Group org-graph arm remains. NOT allow-all (Components/APIs stay filtered).
     expect((decision as ConditionalPolicyDecision).conditions).toMatchObject({
-      rule: 'IS_ENTITY_OWNER',
-      params: { claims: [] },
+      anyOf: [
+        { rule: 'IS_ENTITY_OWNER', params: { claims: [] } },
+        { rule: 'IS_ENTITY_KIND', params: { kinds: ['User', 'Group'] } },
+      ],
     });
   });
 
