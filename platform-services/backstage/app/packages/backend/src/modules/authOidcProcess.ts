@@ -92,14 +92,11 @@ function isRetryableLookupError(error: unknown): boolean {
 }
 
 /**
- * Run `fn` up to LOOKUP_MAX_ATTEMPTS times, retrying only transient lookup errors with a
- * short linear backoff. Re-throws a non-retryable error immediately; after the final failed
+ * Run `fn` up to LOOKUP_MAX_ATTEMPTS times, retrying only transient lookup errors with an
+ * exponential backoff. Re-throws a non-retryable error immediately; after the final failed
  * attempt re-throws the last error (the caller wraps it with context).
  */
-async function withLookupRetry<T>(
-  fn: () => Promise<T>,
-  login: string,
-): Promise<T> {
+async function withLookupRetry<T>(fn: () => Promise<T>): Promise<T> {
   let lastError: unknown;
   for (let attempt = 1; attempt <= LOOKUP_MAX_ATTEMPTS; attempt++) {
     try {
@@ -109,15 +106,10 @@ async function withLookupRetry<T>(
       if (!isRetryableLookupError(error) || attempt === LOOKUP_MAX_ATTEMPTS) {
         throw error;
       }
-      const backoff = backoffForAttempt(attempt);
-      // eslint-disable-next-line no-console
-      console.warn(
-        `[authOidcProcess] catalog lookup attempt ${attempt}/${LOOKUP_MAX_ATTEMPTS} for ` +
-          `login=${login} failed transiently (${
-            (error as Error)?.message
-          }); retrying in ${backoff}ms`,
-      );
-      await sleep(backoff);
+      // Quietly back off and retry a transient catalog drop ("Premature close"). The final
+      // outcome is reported once below (success line / sign-in FAILED line); per-attempt
+      // logging was diagnostic noise, removed after the loop root cause was fixed.
+      await sleep(backoffForAttempt(attempt));
     }
   }
   throw lastError;
@@ -212,34 +204,6 @@ export function createProcessOidcSignInResolver(deps: {
     // characters still resolves to their ingested User.
     const login = rawLogin.toLowerCase();
 
-    // ── TEMP DIAGNOSTIC (refresh-loop): what did Backstage RECEIVE from Dex's /token? ──
-    // The sign-in popup loops because no refresh cookie is set -> session.refreshToken is
-    // empty at the frame handler. This splits the two remaining causes WITHOUT logging any
-    // secret: did Dex RETURN refresh_token in the /token response (parsed into tokenset), and
-    // did it propagate to session.refreshToken? Logs ONLY key names + booleans — NO token
-    // VALUES. Remove this with the rest of the diagnostic logging once the loop is fixed.
-    try {
-      const tokenset = (info.result.fullProfile as { tokenset?: Record<string, unknown> })
-        .tokenset;
-      // eslint-disable-next-line no-console
-      console.info(
-        `[authOidcProcess][diag] login=${login} ` +
-          `tokensetKeys=${tokenset ? JSON.stringify(Object.keys(tokenset)) : 'none'} ` +
-          `tokenset.refresh_token=${!!tokenset?.refresh_token} ` +
-          `tokenset.id_token=${!!tokenset?.id_token} ` +
-          `tokenset.access_token=${!!tokenset?.access_token} ` +
-          `session.refreshToken=${!!info.result.session?.refreshToken} ` +
-          `session.scope=${info.result.session?.scope ?? 'none'}`,
-      );
-    } catch (diagErr) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        `[authOidcProcess][diag] could not introspect tokenset: ${
-          (diagErr as Error)?.message
-        }`,
-      );
-    }
-
     // Resolve the REAL ingested catalog User by name (GitHub login == the canonical User
     // entity name after GitHub-org ingestion). NO dangerousEntityRefFallback: resolving to a
     // real User is what populates ownershipEntityRefs (the user's group/team refs) so the M2
@@ -264,7 +228,7 @@ export function createProcessOidcSignInResolver(deps: {
           entity: found.entity,
           ownershipEntityRefs: ownership.ownershipEntityRefs,
         };
-      }, login);
+      });
 
       // F1: augment with groups that list this user via spec.members (robust to the
       // relation-stitching lag — see resolveGroupsByMembership). Unioned + de-duped with the

@@ -28,13 +28,6 @@ data:
     # ingress; Dex itself listens HTTP on :5556 behind Traefik.
     issuer: https://id.capstone.uamishub.com
 
-    # TEMPORARY DIAGNOSTIC (M2 sign-in loop): debug logging to surface the
-    # token-endpoint exchange — specifically whether Dex MINTS a refresh_token
-    # on the offline_access grant (info level only logs "login successful", not
-    # token issuance). REVERT once the refresh-token residual is diagnosed.
-    logger:
-      level: debug
-
     storage:
       type: kubernetes
       config:
