@@ -50,6 +50,14 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+          # readOnlyRootFilesystem:true makes / (incl /tmp) read-only, but the
+          # script writes curl response bodies to /tmp/p.out + /tmp/m.out. Without
+          # a writable /tmp, curl -o /tmp/p.out fails with exit 23 ("client
+          # returned ERROR on write") and the Job never completes. Mount a tmpfs
+          # emptyDir at /tmp so curl can write while keeping the root FS read-only.
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
           env:
             - name: HARBOR_ADMIN_PASSWORD
               valueFrom:
@@ -99,3 +107,9 @@ spec:
               echo "==> onboarding for team '$T' complete (project + OIDC Developer mapping)."
               echo "    NEXT (one-time, imperative — token is Harbor-generated):"
               echo "      make harbor-robot NAME=$T   # create pull robot -> sealed imagePullSecret"
+      volumes:
+        # Writable /tmp for curl -o (root FS is read-only). emptyDir, ephemeral,
+        # destroyed with the pod — no persistence needed (only holds transient
+        # curl response bodies p.out/m.out).
+        - name: tmp
+          emptyDir: {}
