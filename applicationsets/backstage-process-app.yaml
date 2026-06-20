@@ -62,7 +62,7 @@ spec:
             # until the first build lands; the CI build tags by commit SHA.
             registry: harbor.capstone.uamishub.com
             repository: backstage/backstage-process
-            tag: 73c24563a724                     # M2 image (ARC/Kaniko run 27845914917, #74 merge commit) — GitHub-teams visibility + permission spine. Break-glass M1: 7db91f28499c.
+            tag: 7c6be886c358                     # M2 F1+Fix#2 image (ARC/Kaniko run 27854170964, #81 merge commit) — ownership relations-lag + org-graph self-read + [authOidcProcess][diag] tokenset logging. Break-glass M1: 7db91f28499c; prev M2 spine: 73c24563a724.
             pullPolicy: IfNotPresent
             # Pull from the private Harbor `backstage` project via a robot
             # imagePullSecret (`harbor-pull`, minted at go-live by `make harbor-robot
