@@ -524,6 +524,12 @@ harbor-onboard: ## (P2.2) Onboard team into Harbor: create project <name> + map 
 	@# Substitute the __TEAM__ token and apply the idempotent onboarding Job into
 	@# the harbor ns (admin creds stay in-cluster — read by the Job via secretKeyRef).
 	@echo "==> onboarding team '$(NAME)' into Harbor (project + OIDC Developer mapping) on context '$(KUBE_CONTEXT)'..."
+	@# Delete any prior onboard Job first: a Job's .spec.template/.selector are
+	@# IMMUTABLE, so `kubectl apply` over an existing Job is REJECTED ("field is
+	@# immutable"). Delete-then-apply makes the target safely re-runnable (e.g. after
+	@# a fixed template), matching the harbor-robot/harbor-push-robot targets.
+	@kubectl --context "$(KUBE_CONTEXT)" -n "$(HARBOR_NS)" \
+	  delete job "harbor-onboard-$(NAME)" --ignore-not-found >/dev/null 2>&1 || true
 	@sed 's/__TEAM__/$(NAME)/g' "$(HARBOR_ONBOARD_JOB)" \
 	  | kubectl --context "$(KUBE_CONTEXT)" apply -f -
 	@echo "==> waiting for the onboarding Job to complete..."
