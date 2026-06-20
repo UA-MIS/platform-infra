@@ -149,10 +149,11 @@ describe('createProcessOidcSignInResolver', () => {
 
     await expect(
       resolver(infoWith({ preferred_username: 'octocat' }), ctx),
-    ).rejects.toThrow(/could not resolve catalog User for "octocat" after 3 attempt/);
-    expect(findCatalogUser).toHaveBeenCalledTimes(3);
+    ).rejects.toThrow(/could not resolve catalog User for "octocat" after 5 attempt/);
+    expect(findCatalogUser).toHaveBeenCalledTimes(5);
     expect(issueToken).not.toHaveBeenCalled();
-  });
+    // 5 attempts = 4 real backoffs (250+500+1000+2000 ≈ 3.75s); allow headroom over the 5s default.
+  }, 10000);
 
   it('does NOT retry a genuine NotFound and throws a clear non-member error', async () => {
     findCatalogUser.mockRejectedValue(new NotFoundError('User not found'));

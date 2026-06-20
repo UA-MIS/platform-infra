@@ -17,8 +17,18 @@
 
 # Pinned base image: explicit registry + digest (reproducible, dodges tag drift; Kaniko
 # pulls it from docker.io over :443 — we do not mirror base images to Harbor). Bump the
-# digest deliberately when moving Node patch levels. node:24-trixie-slim as of 2026-06-19.
-ARG NODE_IMAGE=docker.io/library/node:24-trixie-slim@sha256:287c662bed62f3c7b68ea68544814eaff9d7ed2254d2fc9627f2df5957bb7401
+# digest deliberately when moving Node patch levels.
+#
+# PINNED TO 24.16 (NOT the floating `24` tag) — DELIBERATE: Node 24.17's CVE-2026-48931
+# keep-alive socket fix breaks @backstage/catalog-client's localhost fetches with
+# "Invalid response body ... http://localhost:7007/api/catalog/...: Premature close",
+# which made the OIDC sign-in resolver's catalog lookup fail → infinite sign-in loop
+# (Backstage issue #34651). The earlier floating `24-trixie-slim` digest resolved to 24.17+
+# and shipped that regression in the M2 image. 24.16-trixie-slim is the last pre-patch 24.x.
+# (24.16 keeps us on Node 24 per engines "22 || 24"; revisit once Backstage ships the
+# node-fetch keepAlive fix, then we can move back to a current 24.x.)
+# node:24.16-trixie-slim manifest-list digest, resolved 2026-06-19.
+ARG NODE_IMAGE=docker.io/library/node:24.16-trixie-slim@sha256:45fbb3ca3b6c7e6646cd2889d0ac7bf314bb180036da792221fc2f48fe4d43fb
 
 # Stage 1 — yarn install skeleton layer (just the package.json files for cache stability).
 FROM ${NODE_IMAGE} AS packages
