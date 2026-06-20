@@ -62,17 +62,23 @@ jest.mock('@backstage/integration', () => ({
 }));
 
 // ── Mock @octokit/rest: record the PR/file calls ─────────────────────────────────────────
+// Loosely typed (Promise<any>, any[]) so .mockImplementation can take varied option shapes
+// and .mock.calls index freely — this is a mock surface, not the real Octokit contract.
 const octokitCalls = {
-  reposGet: jest.fn(async () => ({ data: { default_branch: 'main' } })),
-  getRef: jest.fn(async () => ({ data: { object: { sha: 'basesha' } } })),
-  createRef: jest.fn(async () => ({})),
-  getContent: jest.fn(async () => {
+  reposGet: jest.fn<Promise<any>, any[]>(async () => ({
+    data: { default_branch: 'main' },
+  })),
+  getRef: jest.fn<Promise<any>, any[]>(async () => ({
+    data: { object: { sha: 'basesha' } },
+  })),
+  createRef: jest.fn<Promise<any>, any[]>(async () => ({})),
+  getContent: jest.fn<Promise<any>, any[]>(async () => {
     const e = new Error('Not Found') as Error & { status: number };
     e.status = 404;
     throw e;
   }),
-  createOrUpdateFileContents: jest.fn(async () => ({})),
-  pullsCreate: jest.fn(async (opts: { head: string }) => ({
+  createOrUpdateFileContents: jest.fn<Promise<any>, any[]>(async () => ({})),
+  pullsCreate: jest.fn<Promise<any>, any[]>(async (opts: { head: string }) => ({
     data: { html_url: `https://github.com/UA-MIS/my-app/pull/${opts.head}` },
   })),
 };
@@ -187,7 +193,10 @@ function ctxFor(input: {
   key: string;
   value: string;
   envs: string[];
-}) {
+}): any {
+  // Returned as `any`: the action's handler is typed to its specific input schema, while the
+  // generic mock context is ActionContext<JsonObject>. The cast keeps the test ergonomic; the
+  // real input shape is exercised by the action-shape tests above + the runtime assertions.
   return createMockActionContext({
     input,
     getInitiatorCredentials: (async () => ({

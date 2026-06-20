@@ -22,7 +22,6 @@ import type {
   AuthService,
   LoggerService,
   PermissionsService,
-  UserInfoService,
 } from '@backstage/backend-plugin-api';
 import type { CatalogService } from '@backstage/plugin-catalog-node';
 import type { Config } from '@backstage/config';

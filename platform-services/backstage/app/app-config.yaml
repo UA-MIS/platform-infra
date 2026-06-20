@@ -143,3 +143,19 @@ permission:
 mcpActions:
   name: 'My Company Backstage' # defaults to "backstage"
   description: 'Tools for managing your software catalog, creating new services from templates, and exploring your developer portal' # optional
+
+# ── M3 (local dev): the secrets capability (capstone:seal-secret) ───────────────────────
+# Local-dev variant of capstone.secrets.* (prod values live in app-config.production.yaml).
+# To exercise the seal action locally you need (a) a dev-exported PUBLIC sealing cert at
+# sealingCertPath and (b) kubeseal on PATH (`kubesealBin: kubeseal`). The action requires a
+# real signed-in user whose catalog Groups own the target Component (no guest bypass — the
+# owner re-check fails closed by design), so local end-to-end needs a dev catalog with a User
+# + owning Group, or run the unit tests (which mock kubeseal + Octokit) instead.
+capstone:
+  secrets:
+    sealingCertPath: ./sealing-cert.dev.pem
+    kubesealBin: kubeseal
+    defaultBranchPrefix: secrets/
+    secretsDir: .devops/secrets
+    overlayRelPath: ../../secrets
+    overlaysDir: .devops/chart/overlays
