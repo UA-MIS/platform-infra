@@ -89,6 +89,12 @@ spec:
         #     RollingUpdate becomes safe again — that is a Phase-4+ HA decision.)
         updateStrategy:
           type: Recreate
+          # NULL the chart's default rollingUpdate sub-block: the goharbor template
+          # renders strategy.rollingUpdate from the chart default even when type=Recreate,
+          # which k8s REJECTS ("spec.strategy.rollingUpdate: Forbidden when type is
+          # 'Recreate'") → registry+jobservice Deployments fail to apply → platform-harbor
+          # stuck OutOfSync. Explicit null emits `type: Recreate` alone.
+          rollingUpdate: null
 
         # Single-replica everything for Phase-2 local (laptop). Phase-4 scales.
         portal:    { replicas: 1 }
