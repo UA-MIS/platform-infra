@@ -19,11 +19,23 @@
 #      branch protection the platform expects (PRs only into main; no direct pushes).
 #   4. catalog:register — register the new component's catalog-info.yaml so it shows
 #      up in The Process software catalog immediately.
+#   5a. capstone:render-tenant — render tenants/team-<name>/ from the canonical
+#      tenants/_template/ blueprint (D-M4-2: render the single source, no fork;
+#      substitutes the literal __TEAM__/__SEMESTER__ tokens the built-in nunjucks
+#      fetch:template cannot).
+#   5b. publish:github:pull-request — open a REVIEW-GATED PR to UA-MIS/platform-infra
+#      adding those tenant manifests, with an operator onboarding CHECKLIST PR body
+#      (the TARGET=real-talos Harbor commands, lesson #1). A reviewer merges to GRANT
+#      (D-049): a student opens the request, the merge is the gate — no student mints
+#      cluster RBAC/quota/Harbor robots directly.
 #
 # ⚠ REQUIRES (wired at go-live — see platform-services/backstage/README.md):
-#   - The GitHub integration token (${GITHUB_TOKEN}) with repo + admin:org on UA-MIS
-#     (the Scaffolder's publish:github action). Injected via the SealedSecret.
-#   - The reference .devops/ source repo URL (REFERENCE_DEVOPS_URL below) confirmed.
+#   - The GitHub integration token (${GITHUB_TOKEN}, the UA-MIS GitHub App) with repo
+#     + admin:org. Used by publish:github (repo create) AND publish:github:pull-request
+#     (the platform-infra onboarding PR — so ANY member can open it; merge is the gate).
+#   - The capstone:render-tenant custom scaffolder action registered in the backend
+#     (plugins/scaffolder-backend-module-capstone, shared with capstone:seal-secret).
+#   - The reference .devops/ source repo URL (pinned at /tree/v1/.devops below).
 #   - The OIDC sign-in so the acting user (a UA-MIS member) is the repo author.
 apiVersion: scaffolder.backstage.io/v1beta3
 kind: Template
@@ -127,16 +139,22 @@ spec:
 
     # 2) Overlay the CANONICAL platform .devops/ contract verbatim (immutable; every
     #    team gets the SAME CI workflow, chart base/overlays, promotion.yaml, scripts).
-    #    Pinned to a ref so the scaffold is reproducible. See README to confirm the
-    #    reference repo URL at go-live.
+    #    PINNED to the `v1` contract tag (A3) so the scaffold is REPRODUCIBLE and a
+    #    push to the source repo's `main` can never silently change every future
+    #    tenant's golden-path contract. Bump this ref deliberately (v2, …) when the
+    #    contract changes and you want new scaffolds to pick it up.
     - id: fetch-devops
       name: Overlay platform .devops/ contract
       action: fetch:plain
       input:
         targetPath: ./.devops
-        # REFERENCE golden-path .devops tree (the team-sample-app contract). Pin a
-        # tag/sha at go-live for reproducibility (e.g. .../tree/v1/.devops).
-        url: https://github.com/UA-MIS/team-sample-app/tree/main/.devops
+        # PINNED golden-path .devops tree (the sample-app contract @ tag v1). NOTE:
+        # the GitHub repo is UA-MIS/sample-app (the local checkout dir is named
+        # team-sample-app; the earlier `team-sample-app` URL here was a non-existent
+        # repo — corrected). The `v1` tag is cut on UA-MIS/sample-app at the reviewed
+        # contract commit; do NOT point this back at /tree/main (re-introduces the
+        # silent-drift risk).
+        url: https://github.com/UA-MIS/sample-app/tree/v1/.devops
 
     # 3) Create UA-MIS/<repo>, push, protect main (PRs only — matches platform policy).
     - id: publish
@@ -161,6 +179,120 @@ spec:
         repoContentsUrl: ${{ steps['publish'].output.repoContentsUrl }}
         catalogInfoPath: '/catalog-info.yaml'
 
+    # =====================================================================
+    # PLATFORM SIDE — the D-049 review-gated grant path (B1 + B2).
+    # The steps above created the STUDENT's own repo (automatic — they own it).
+    # The steps below open a *request* (a PR to platform-infra) that a reviewer
+    # *grants* (merge) — a student must NEVER silently mint cluster RBAC, quotas,
+    # namespaces, or Harbor robots. The merge is the gate.
+    # =====================================================================
+
+    # 5a) Render the tenant manifests from the SINGLE canonical blueprint
+    #     tenants/_template/ (D-M4-2: render, do NOT fork — there is one source
+    #     of truth for the tenant fence, no divergent copy to drift). The
+    #     _template/ files carry literal __TEAM__/__SEMESTER__ tokens (the make/sed
+    #     convention), NOT nunjucks ${{ }}, so the built-in fetch:template can't
+    #     render them — hence the custom capstone:render-tenant action, which
+    #     fetches _template/ at a pinned ref and substitutes the tokens.
+    - id: render-tenant
+      name: Render tenant manifests (tenants/team-<name>/)
+      action: capstone:render-tenant
+      input:
+        # Pinned platform-infra ref for the _template/ blueprint (reproducible;
+        # bump deliberately like the .devops contract pin above).
+        templateUrl: https://github.com/UA-MIS/platform-infra/tree/main/tenants/_template
+        team: ${{ parameters.team }}
+        semester: ${{ parameters.semester }}
+        # Write the rendered tree under this workspace subdir; the PR step picks
+        # it up as the PR's sourcePath. The action lays it out at the final repo
+        # path tenants/team-<team>/ so the PR diff is review-ready.
+        targetPath: ./tenant-pr
+
+    # 5b) Open the PR to platform-infra adding tenants/team-<name>/. Uses the
+    #     PLATFORM GitHub App token (the integrations.github `${GITHUB_TOKEN}`),
+    #     NOT the student's USER_OAUTH_TOKEN — so ANY signed-in UA-MIS member can
+    #     OPEN the request even without platform-infra collaborator rights. The
+    #     branch-protection on platform-infra/main is the gate: they can open, only
+    #     a reviewer (CODEOWNERS on tenants/**) can MERGE. (ADR-029 §9 #1; D-049.)
+    - id: tenant-pr
+      name: Open platform onboarding PR (platform-infra)
+      action: publish:github:pull-request
+      input:
+        repoUrl: github.com?owner=UA-MIS&repo=platform-infra
+        branchName: onboard-team-${{ parameters.team }}
+        targetBranchName: main
+        title: "onboard tenant: team-${{ parameters.team }} (${{ parameters.semester }})"
+        sourcePath: ./tenant-pr
+        # B2 — the operator onboarding CHECKLIST is the PR body. Every Harbor
+        # command shows TARGET=real-talos explicitly (lesson #1: omitting TARGET
+        # bakes the k3d-default registry host into the sealed robot -> docker auth
+        # host-mismatch -> push/pull 403; it cost a failed M1 push 2026-06-19). The
+        # non-empty-seal guard (lesson #6) is baked into each seal command so a
+        # duplicate-robot 409 can never commit an empty SealedSecret.
+        description: |
+          ## Tenant onboarding request — `team-${{ parameters.team }}` (`${{ parameters.semester }}`)
+
+          Scaffolded by **The Process** ("New Capstone Project") for app
+          **${{ parameters.appName }}** (repo: ${{ steps['publish'].output.remoteUrl }}).
+
+          This PR adds `tenants/team-${{ parameters.team }}/` (rendered from the
+          canonical `tenants/_template/` blueprint — namespaces, AppProject, RBAC,
+          quotas, env + preview ApplicationSets). **Merging is the grant**: on merge
+          the `tenants-appset` git generator reconciles the team's namespaces and
+          ApplicationSets. No cluster RBAC/quota is created until a reviewer merges.
+
+          ---
+
+          ### Reviewer checklist
+          - [ ] Manifests render cleanly (`make validate` on `tenants/team-${{ parameters.team }}/`).
+          - [ ] AppProject is team-scoped (empty `clusterResourceWhitelist`; destinations limited to `team-${{ parameters.team }}-*`).
+          - [ ] `__TEAM__`/`__SEMESTER__` fully substituted (no leftover tokens).
+
+          ### Operator steps (run AFTER merge — imperative Harbor provisioning)
+          Harbor robot tokens are Harbor-generated, one-time, and **cannot** be
+          expressed declaratively, so these are run by an operator post-merge.
+          **Run them with `TARGET=real-talos` exactly as shown** (omitting `TARGET`
+          seals the wrong registry host → push/pull 403). All seals use the
+          non-empty guard so a duplicate-robot 409 never commits an empty secret.
+
+          ```bash
+          # 0) cluster context (Talos)
+          export KUBECONFIG=clusters/real-talos/talos-kubeconfig
+
+          # 1) Harbor project + OIDC group -> Developer mapping
+          make harbor-onboard NAME=${{ parameters.team }} \
+            TARGET=real-talos KUBE_CONTEXT=admin@capstone
+
+          # 2) CI PUSH robot -> sealed `harbor-push` into arc-runners (guarded write)
+          make harbor-push-robot NAME=${{ parameters.team }} \
+            TARGET=real-talos KUBE_CONTEXT=admin@capstone \
+            > /tmp/${{ parameters.team }}-push.yaml \
+            && test -s /tmp/${{ parameters.team }}-push.yaml \
+            && grep -q 'kind: SealedSecret' /tmp/${{ parameters.team }}-push.yaml \
+            && mv /tmp/${{ parameters.team }}-push.yaml \
+                  tenants/team-${{ parameters.team }}/harbor-push-sealed.yaml
+
+          # 3) per-env PULL robots -> sealed `harbor-pull` into <team>-<env> (guarded)
+          for ENV in dev staging prod; do
+            make harbor-robot NAME=${{ parameters.team }} ENV=$ENV \
+              TARGET=real-talos KUBE_CONTEXT=admin@capstone \
+              > /tmp/${{ parameters.team }}-pull-$ENV.yaml \
+              && test -s /tmp/${{ parameters.team }}-pull-$ENV.yaml \
+              && grep -q 'kind: SealedSecret' /tmp/${{ parameters.team }}-pull-$ENV.yaml \
+              && mv /tmp/${{ parameters.team }}-pull-$ENV.yaml \
+                    tenants/team-${{ parameters.team }}/harbor-pull-$ENV-sealed.yaml
+          done
+
+          # 4) commit the sealed robot secrets (a follow-up PR; tokens are one-time)
+          git add tenants/team-${{ parameters.team }}/harbor-*-sealed.yaml \
+            && git commit -m "harbor robots: team-${{ parameters.team }}"
+          ```
+
+          > Robot-mint automation (a merge-triggered devops action) is a planned
+          > fast-follow (D-M4-1); for now these run by an operator who holds the
+          > Harbor-admin/seal-controller trust (kept off the Backstage backend).
+        token: ${{ secrets.GITHUB_TOKEN }}
+
   output:
     links:
       - title: Repository
@@ -168,6 +300,9 @@ spec:
       - title: Open in catalog
         icon: catalog
         entityRef: ${{ steps['register'].output.entityRef }}
+      - title: Platform onboarding PR (awaiting reviewer merge)
+        icon: github
+        url: ${{ steps['tenant-pr'].output.remoteUrl }}
     text:
       - title: Next steps
         content: |
@@ -177,3 +312,9 @@ spec:
           3. Merge to `main` -> **dev** auto-deploys.
           4. Tag `vX.Y.Z` -> **staging** auto-deploys; **prod** waits on the manual gate.
           Your app will be at `https://${{ parameters.appName }}.${{ parameters.team }}.<platform-domain>`.
+
+          **One thing is gated:** a **platform onboarding PR** was opened against
+          `UA-MIS/platform-infra` to stand up your team's namespaces/RBAC/Harbor
+          (link above). A platform reviewer must **merge** it before your app can
+          deploy — your repo builds previews immediately, but dev/staging/prod wait
+          on that merge + the operator's Harbor steps (listed in the PR).
