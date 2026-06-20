@@ -555,6 +555,14 @@ harbor-robot: _check-harbor-target ## (P2.2) Create a pull robot for project <na
 	@# build a docker-registry Secret, and kubeseal it (strict to <name>-<env>) to
 	@# STDOUT for the caller to redirect into the team overlay + commit. All human-
 	@# readable progress goes to STDERR so STDOUT is clean SealedSecret YAML.
+	@# ⚠ REGRESSION GUARD (#C2): use the UNIFIED endpoint POST /api/v2.0/robots with
+	@#   level:project + permissions[].namespace — Harbor v2.15 REMOVED the legacy
+	@#   per-project POST /api/v2.0/projects/<name>/robots (returns NOT_FOUND even when
+	@#   the project exists). The returned name is PREFIXED `<project>+<robot>` (that IS
+	@#   the docker username). Do NOT switch back to the project-scoped path.
+	@# ⚠ EMPTY-SEAL GUARD (#6): the seal is written to a tempfile + validated (non-empty
+	@#   AND `kind: SealedSecret`) BEFORE anything reaches STDOUT, so a robot 409/parse
+	@#   failure exits non-zero and emits NOTHING — never commits an empty/partial seal.
 	@set -e; \
 	  job="harbor-robot-$(NAME)-$(ENV)"; ns="$(HARBOR_NS)"; ctx="$(KUBE_CONTEXT)"; \
 	  echo "==> creating pull robot for project '$(NAME)' via in-cluster Job '$$job'..." >&2; \
@@ -582,13 +590,17 @@ harbor-robot: _check-harbor-target ## (P2.2) Create a pull robot for project <na
 	  kubectl --context "$$ctx" -n "$$ns" delete job "$$job" --ignore-not-found >/dev/null 2>&1 || true; \
 	  if [ -z "$$rname" ] || [ -z "$$rsec" ]; then echo "ERROR: could not parse robot {name,secret} from: $$json" >&2; exit 1; fi; \
 	  echo "==> robot '$$rname' created (pull-only on '$(NAME)'); sealing into $(PULL_NS)..." >&2; \
+	  out=$$(mktemp); trap 'rm -f "$$out"' EXIT; \
 	  kubectl create secret docker-registry harbor-pull \
 	    --docker-server="$(HARBOR_HOST)" \
 	    --docker-username="$$rname" --docker-password="$$rsec" \
 	    -n "$(PULL_NS)" --dry-run=client -o yaml \
 	  | kubeseal --controller-namespace kube-system \
 	      --controller-name sealed-secrets-controller \
-	      --namespace "$(PULL_NS)" --format yaml
+	      --namespace "$(PULL_NS)" --format yaml > "$$out"; \
+	  test -s "$$out" || { echo "ERROR: kubeseal produced EMPTY output — refusing to emit (would commit an empty seal). Check kubeseal/controller." >&2; exit 1; }; \
+	  grep -q 'kind: SealedSecret' "$$out" || { echo "ERROR: kubeseal output is not a SealedSecret — refusing to emit. Got:" >&2; head -3 "$$out" >&2; exit 1; }; \
+	  cat "$$out"
 
 # Namespace the CI PUSH secret seals into (where the ARC runner consumes it). The
 # scale set runs in arc-runners (P2.3); override RUNNER_NS if the workflow mounts it
@@ -637,13 +649,17 @@ harbor-push-robot: _check-harbor-target ## (P2.3) Create a CI PUSH robot for pro
 	  kubectl --context "$$ctx" -n "$$ns" delete job "$$job" --ignore-not-found >/dev/null 2>&1 || true; \
 	  if [ -z "$$rname" ] || [ -z "$$rsec" ]; then echo "ERROR: could not parse robot {name,secret} from: $$json" >&2; exit 1; fi; \
 	  echo "==> robot '$$rname' created (pull+push on '$(NAME)' ONLY); sealing as 'harbor-push' into $(RUNNER_NS)..." >&2; \
+	  out=$$(mktemp); trap 'rm -f "$$out"' EXIT; \
 	  kubectl create secret docker-registry harbor-push \
 	    --docker-server="$(HARBOR_HOST)" \
 	    --docker-username="$$rname" --docker-password="$$rsec" \
 	    -n "$(RUNNER_NS)" --dry-run=client -o yaml \
 	  | kubeseal --controller-namespace kube-system \
 	      --controller-name sealed-secrets-controller \
-	      --namespace "$(RUNNER_NS)" --format yaml
+	      --namespace "$(RUNNER_NS)" --format yaml > "$$out"; \
+	  test -s "$$out" || { echo "ERROR: kubeseal produced EMPTY output — refusing to emit (would commit an empty seal). Check kubeseal/controller." >&2; exit 1; }; \
+	  grep -q 'kind: SealedSecret' "$$out" || { echo "ERROR: kubeseal output is not a SealedSecret — refusing to emit. Got:" >&2; head -3 "$$out" >&2; exit 1; }; \
+	  cat "$$out"
 
 # ---- validation gate (T12 hardening) ---------------------------------------
 # Catches the failure classes security flagged so they can't ship again:
