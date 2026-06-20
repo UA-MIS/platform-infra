@@ -16,6 +16,7 @@ resources:
   - sealedsecret-oidc.yaml
   - sealedsecret-postgresql.yaml
   - sealedsecret-harbor-pull.yaml
+  - configmap-sealing-cert.yaml   # M3: public sealing cert for capstone:seal-secret (offline seal, D-047 A2)
 labels:
   - pairs:
       platform.capstone/component: platform

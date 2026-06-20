@@ -86,6 +86,20 @@ spec:
           extraEnvVarsSecrets:
             - backstage-process-secrets
 
+          # M3 (D-047 A2): mount the PUBLIC sealing cert (ConfigMap backstage-sealing-cert,
+          # platform-services/backstage/configmap-sealing-cert.yaml) read-only so the
+          # capstone:seal-secret scaffolder action seals OFFLINE via `kubeseal --cert
+          # /etc/backstage/sealing-cert/sealing-cert.pem` — zero controller egress.
+          # chart 2.8.2 keys: backstage.extraVolumes + backstage.extraVolumeMounts.
+          extraVolumes:
+            - name: sealing-cert
+              configMap:
+                name: backstage-sealing-cert
+          extraVolumeMounts:
+            - name: sealing-cert
+              mountPath: /etc/backstage/sealing-cert
+              readOnly: true
+
           # app-config.production.yaml baked into the custom image is the SOURCE OF TRUTH
           # for auth + integrations; this block is MERGED on top (chart -> ConfigMap ->
           # $APP_CONFIG_*). Kept to the host/deploy seams only (app/backend/catalog) — the

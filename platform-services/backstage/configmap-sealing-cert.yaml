@@ -1,0 +1,47 @@
+# Sealing cert for the M3 secrets plugin (M3 §3, D-047 A2 — OFFLINE seal).
+#
+# The sealed-secrets controller's PUBLIC sealing cert, exported ONCE by devops via:
+#   kubeseal --controller-namespace kube-system --controller-name sealed-secrets-controller --fetch-cert
+# run from an operator context (admin@capstone), NOT from the backstage pod. PUBLIC key —
+# safe in git / a ConfigMap (NOT a Secret/SealedSecret).
+#
+# Mounted read-only into the backstage pod at /etc/backstage/sealing-cert/sealing-cert.pem
+# (Helm extraVolumes/extraVolumeMounts in applicationsets/backstage-process-app.yaml) so the
+# capstone:seal-secret scaffolder action runs `kubeseal --cert <this>` with ZERO controller
+# egress (A2). Refresh = optional hygiene (v0.37.0 retains old keys; stale cert still seals).
+# The platform.capstone/component label is applied by kustomization.yaml's labels: block.
+apiVersion: v1
+data:
+  sealing-cert.pem: |
+    -----BEGIN CERTIFICATE-----
+    MIIEzDCCArSgAwIBAgIQTjmO0aOhP5O/je1XEdSFAzANBgkqhkiG9w0BAQsFADAA
+    MB4XDTI2MDYxODAzMDUxMloXDTM2MDYxNTAzMDUxMlowADCCAiIwDQYJKoZIhvcN
+    AQEBBQADggIPADCCAgoCggIBALZyLnh8eE270tXg+wwgOIuaJw4T/9aMxRZ06QG8
+    GA2qWGxZE+qlUweOIOS0/kgN7wr9liOnLidsOnE6W8PqoQQJW9QjngqnuTFOGNi4
+    v/Q/73+r2euJgAbMc/TAU1xd2pwSX71qotFcvVSXspIm8wj5Sg4977HYOszpdpSa
+    oaxldKelWRvqrN7dNXDSdxmyFHsrE3no3/cEDR5O3yBRZ33t8pfHfiDf3l5tfO70
+    Txn+dewt2GW14wXXWbnnrxajGL2FmyS523F9kmp/KdZAL73dEcmxlZPTGLAADffp
+    AmxiY+KRsRKDDbhUUP5oNxk7E7Hpbdne/x1zK1MfslDO0fAAgNW2d2HywoNJxq2t
+    iDnKwSyCkEsyNSeGwb+3NGc2uh5KcpB773DMFg1/Zazi0eOB6IzwcRiCNwicF+Z4
+    wUTzee6w27QY8p3I/Cya9H+XHPuWU88VldXf1l2fV/W8EJ73UZDAPkXFa439C4Q+
+    GeWiAsJborogLrBZjQO4iYVbYL2nW2XzzEZSYi0XGmerNA9ZYLhOGAm5FbqAPDi+
+    zJIG1BaDkVs88Kofvjj4wkrVzPpdfCaG3ukAeLo1MTq54YiHswweh6whfxfSIJlK
+    qbT71ClEJtYkp+RStzhRg32J8y3K1T+VLzOySt17D+wq8rp91A+ruT1JQkzub7WY
+    KCtVAgMBAAGjQjBAMA4GA1UdDwEB/wQEAwIAATAPBgNVHRMBAf8EBTADAQH/MB0G
+    A1UdDgQWBBSdSQtzdpCpaltwdBis33rxJMAVWzANBgkqhkiG9w0BAQsFAAOCAgEA
+    STOKMsjMWVLHZgF+3rthQEmHvj+cw7fz9DfY4CjGk0W342MpgLv11RbrviKDEcs4
+    lwJcXflzr7YN33rIs7RVOvvXVYeF8zW8X8VVpWmnDc5tvK3SOHpLE1nP6xZD21dg
+    v1E989GtxImTP0GHv++eN6URg/YlkL1mOeip9O+7gwTvfiBFC6Q/eY6QwIZp5IVY
+    //K4B3PUaCtSQCPXbpP4HRlv2YB7JjgSbO8W9FhaG4nx/fBudvrvPnQX28UjCZOz
+    yw0O+YZPEa9Wr5m/yfIQ4v5w1wh8QoUdkGo1hJkSTisV76UGc7YNxy7Y0Qp0HXe4
+    5FblK7S3EpMLKKqbzrQcpkHZj1uxc+Lu7luV+KiO6Vfd2mTeGIDKaUXCjo190/Mq
+    615SmYjEOdF6nuaRnPlcL4aW+0TXoiEfgYiyc4loLjbDbF0ZEZzG74dBOuWqgS/D
+    IPbvs0AIgq5cTnD+/lPEJThACMjtAO2AKv+h7MbC+Mw8toP38w3ukan0eTlwOkTk
+    u/pOIq3RNn2TElDx5Rk0YClre1EneOQ50eSwJBRajMWhid1mDougHxy87Pmy3Gdi
+    LQ8Ep4wwafDBVUcsW9GnGXeVfelJldaacI6RwC6KbnGIKu+6SwGPzR3ouExdMq+u
+    Lk3xDilmnrT2SB0QSEOBEorqwXIZkgyFEVCNJe39WAg=
+    -----END CERTIFICATE-----
+kind: ConfigMap
+metadata:
+  name: backstage-sealing-cert
+  namespace: backstage
