@@ -19,6 +19,13 @@ backend.add(import('@backstage/plugin-scaffolder-backend-module-github'));
 backend.add(
   import('@backstage/plugin-scaffolder-backend-module-notifications'),
 );
+// The SHARED capstone scaffolder actions module: M3 `capstone:seal-secret` (secrets
+// sealing -> PR) + M4 `capstone:render-tenant` (onboarding). One module, multiple actions
+// (plugins/scaffolder-backend-module-capstone). Must come AFTER the scaffolder plugin so
+// its extension point exists.
+backend.add(
+  import('@internal/backstage-plugin-scaffolder-backend-module-capstone'),
+);
 
 // techdocs plugin
 backend.add(import('@backstage/plugin-techdocs-backend'));
