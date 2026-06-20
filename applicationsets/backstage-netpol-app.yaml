@@ -1,0 +1,51 @@
+# Backstage-namespace NetworkPolicies Application (M3 §3) — MANUAL SYNC.
+#
+# Same rationale as platform-netpol-runners (SEC-011) / platform-netpol-controlplane:
+# applying default-deny to the `backstage` namespace while the portal is serving could
+# sever live sessions / the catalog + Octokit egress, so this is a STANDALONE Application
+# with a MANUAL sync policy. Merging it only makes the manifests present + tracked (ArgoCD
+# shows OutOfSync, harmless — nothing applied); enforcement is the explicit watched sync:
+#
+#     argocd app sync platform-netpol-backstage
+#     # VERIFY (after the Cilium swap — netpols are INERT on flannel today):
+#     #   - the portal still loads + SSO login still completes (Dex :443 + GitHub :443);
+#     #   - the M3 capstone:seal-secret action still opens its PR (GitHub :443);
+#     #   - githubOrg catalog ingestion still runs;
+#     #   - the bundled Postgres connection still works (:5432, same ns).
+#     # ROLL BACK on any break:
+#     #   kubectl -n backstage delete netpol \
+#     #     zz-default-deny allow-ingress-traefik-and-probes allow-egress-scoped
+#
+# ⚠ MERGE != ENFORCEMENT — and on Talos/flannel these are INERT regardless. Do NOT promote
+# to `automated:` until (1) the Cilium swap is clean AND (2) the live-enforcement validation
+# above passes (else default-deny lands on the running portal unattended). Phase-3 follow-up:
+# tighten :443 to GitHub/Dex FQDNs once the CNI is FQDN-capable.
+#
+# Lives in the `platform` AppProject. Root-app recurses applicationsets/, so this
+# Application is registered automatically; only its SYNC is manual.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-netpol-backstage
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/UA-MIS/platform-infra
+    targetRevision: HEAD
+    path: hardening/netpol-backstage
+  destination:
+    server: https://kubernetes.default.svc
+    # Neutral default; the NetworkPolicies pin their own namespace (backstage).
+    namespace: kube-system
+  syncPolicy:
+    # NO automated: block — MANUAL sync ONLY (see header). selfHeal/prune off.
+    syncOptions:
+      - ServerSideApply=true
+    retry:
+      limit: 3
+      backoff: { duration: 5s, factor: 2, maxDuration: 1m }
