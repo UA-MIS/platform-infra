@@ -39,6 +39,28 @@ The `Secret` name matches what the Secrets tab shows. Never commit a raw `Secret
 plaintext value to this repo — the tenant AppProject does not even permit raw `Secret`
 objects (only `SealedSecret`), so a plaintext secret would be rejected on sync.
 
+### The starter's `APP_SECRET` wiring (read this if your app stays "secret loaded: false")
+
+The starter ships with **zero required secrets** — a freshly-scaffolded app deploys with
+no secrets at all. The Go starter does, however, *optionally* read one env var,
+`APP_SECRET`, which `.devops/chart/base/deployment.yaml` wires from a Kubernetes Secret
+named **`sample-secret`**, key **`app-secret`** (with `optional: true`, so a missing
+secret never blocks startup — the app just reports `secret loaded: false`).
+
+So the base only auto-populates `APP_SECRET` if you seal a secret whose **name is
+`sample-secret`** with **key `app-secret`**. The Secrets tab names the `SealedSecret`
+after the **KEY you type** — so if you seal a key called `DATABASE_URL`, you get a Secret
+named `database-url`, and `APP_SECRET` stays empty (the base is looking for `sample-secret`,
+not `database-url`). To populate `APP_SECRET`, either:
+
+- seal a secret with the key the base expects (so the Secret ends up named `sample-secret`
+  / `app-secret`), **or**
+- edit `.devops/chart/base/deployment.yaml` to point its `secretKeyRef.name`/`key` at
+  whatever you sealed (e.g. `database-url` / the key you used).
+
+Most teams just add their own env vars in the chart pointing at the secrets they seal,
+and ignore the starter's `APP_SECRET` demo entirely.
+
 ## What NOT to do
 
 - Don't run `kubeseal` locally and commit the output here — use the Secrets tab so the
