@@ -12,3 +12,16 @@ export {
   sealSecretPermission,
   capstoneSecretsPermissions,
 } from './permissions';
+// The SHARED seal core (also used by the capstone-secrets backend route, so the action and
+// the route enforce ONE authz + seal implementation — team-lead's Option A requirement).
+export {
+  sealAndPublish,
+  listSecrets,
+  ADMIN_GROUP_REF,
+} from './sealCore';
+export type {
+  CapstoneSecretsDeps,
+  SealRequest,
+  ListRequest,
+  SecretSummary,
+} from './sealCore';

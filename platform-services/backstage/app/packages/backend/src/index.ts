@@ -59,6 +59,12 @@ backend.add(import('@backstage/plugin-permission-backend'));
 // dependency dropped from package.json). Requires permission.enabled: true in app-config.
 backend.add(import('./modules/permissionPolicy'));
 
+// M3: the capstone-secrets backend route (POST /seal, GET /list) the Secrets page posts to.
+// A thin HTTP front for the shared sealCore (in the scaffolder module), so the route + the
+// scaffolder action enforce ONE capstone.secret.seal authz + owner-check + fail-closed path.
+// Must come AFTER the permission plugin (it calls the permission framework).
+backend.add(import('@internal/backstage-plugin-capstone-secrets-backend'));
+
 // search plugin
 backend.add(import('@backstage/plugin-search-backend'));
 

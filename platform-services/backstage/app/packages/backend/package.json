@@ -50,6 +50,7 @@
     "@backstage/plugin-search-backend-node": "^1.4.5",
     "@backstage/plugin-signals-backend": "^0.3.16",
     "@backstage/plugin-techdocs-backend": "^2.2.1",
+    "@internal/backstage-plugin-capstone-secrets-backend": "workspace:^",
     "@internal/backstage-plugin-scaffolder-backend-module-capstone": "workspace:^",
     "app": "link:../app",
     "better-sqlite3": "^12.0.0",
