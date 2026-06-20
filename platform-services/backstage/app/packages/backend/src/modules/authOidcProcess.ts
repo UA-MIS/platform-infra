@@ -51,16 +51,30 @@ import { stringifyEntityRef } from '@backstage/catalog-model';
 
 /**
  * Catalog-lookup retry tuning. The sign-in catalog lookup is an in-process loopback call
- * (http://localhost:7007/api/catalog/...) that has been observed to intermittently drop
- * mid-response ("Premature close") under loopback connection churn — NOT a logic error and
- * NOT resource pressure (the entity is present + the endpoint is fast). A small
- * retry-with-backoff makes sign-in resilient: it succeeds on a later attempt regardless of
- * the underlying socket churn. Kept tiny so a genuinely-missing user still fails quickly.
+ * (http://localhost:7007/api/catalog/by-name/...). PROVEN ROOT CAUSE of the sign-in loop
+ * (M2 diag): this call fails with "Premature close" — the loopback HTTP response is cut off
+ * mid-body — and at the sign-in moment it fails for a SUSTAINED window (observed 3/3 within
+ * ~450ms), not a single blip. It coincides with heavy catalog activity (initial ingestion +
+ * relation stitching of ~500 org entities; the search collators hit the same "Premature
+ * close"), and is the classic Node keepAlive race — a pooled socket the in-process HTTP
+ * server has already half-closed is reused on the next request → reset. Each retry attempt
+ * opens a FRESH connection, so retrying is the correct client-side cure; it just needs
+ * enough attempts + total time to ride out the busy window.
+ *
+ * Tuned to 5 attempts, EXPONENTIAL backoff (250/500/1000/2000ms ≈ 3.75s max) — long enough
+ * to outlast a multi-second catalog-busy window, while a genuinely-missing user (NotFound)
+ * still fails fast (not retried). devops is separately addressing the server-side root
+ * (httpServer keepAliveTimeout / catalog DB pool under ingestion load); this retry is the
+ * resilient client behaviour that should exist regardless.
  */
-const LOOKUP_MAX_ATTEMPTS = 3;
-const LOOKUP_BACKOFF_MS = 150;
+const LOOKUP_MAX_ATTEMPTS = 5;
+const LOOKUP_BASE_BACKOFF_MS = 250;
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Exponential backoff for attempt N (1-based): 250, 500, 1000, 2000 ms before attempts 2-5.
+const backoffForAttempt = (attempt: number) =>
+  LOOKUP_BASE_BACKOFF_MS * 2 ** (attempt - 1);
 
 /**
  * True for errors worth retrying: transient connection/stream drops on the internal catalog
@@ -95,14 +109,15 @@ async function withLookupRetry<T>(
       if (!isRetryableLookupError(error) || attempt === LOOKUP_MAX_ATTEMPTS) {
         throw error;
       }
+      const backoff = backoffForAttempt(attempt);
       // eslint-disable-next-line no-console
       console.warn(
         `[authOidcProcess] catalog lookup attempt ${attempt}/${LOOKUP_MAX_ATTEMPTS} for ` +
           `login=${login} failed transiently (${
             (error as Error)?.message
-          }); retrying in ${LOOKUP_BACKOFF_MS * attempt}ms`,
+          }); retrying in ${backoff}ms`,
       );
-      await sleep(LOOKUP_BACKOFF_MS * attempt);
+      await sleep(backoff);
     }
   }
   throw lastError;
