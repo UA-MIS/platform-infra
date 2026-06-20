@@ -113,4 +113,45 @@ describe('CapstoneTeamPermissionPolicy', () => {
     );
     expect(decision.result).toBe(AuthorizeResult.ALLOW);
   });
+
+  // ── M3: capstone.secret.seal — the COARSE half of the spine (team-membership gate). The
+  //    FINE per-Component owner check lives in the action handler (it has the entityRef).
+  describe('capstone.secret.seal (M3 secrets gate)', () => {
+    const sealPermission = createPermission({
+      name: 'capstone.secret.seal',
+      attributes: { action: 'create' },
+    });
+
+    it('ALLOWs a team member (has at least one Group membership)', async () => {
+      const decision = await policy.handle(
+        { permission: sealPermission },
+        userWith(['user:default/dave', 'group:default/team-a']),
+      );
+      expect(decision.result).toBe(AuthorizeResult.ALLOW);
+    });
+
+    it('ALLOWs an admin (labmx) via the override (branch 1)', async () => {
+      const decision = await policy.handle(
+        { permission: sealPermission },
+        userWith(['user:default/erin', ADMIN_GROUP_REF]),
+      );
+      expect(decision.result).toBe(AuthorizeResult.ALLOW);
+    });
+
+    it('DENIES a non-member (no Group memberships) — fails closed', async () => {
+      const decision = await policy.handle(
+        { permission: sealPermission },
+        userWith(['user:default/frank']),
+      );
+      expect(decision.result).toBe(AuthorizeResult.DENY);
+    });
+
+    it('DENIES when there is no identity at all', async () => {
+      const decision = await policy.handle(
+        { permission: sealPermission },
+        undefined,
+      );
+      expect(decision.result).toBe(AuthorizeResult.DENY);
+    });
+  });
 });
