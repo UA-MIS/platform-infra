@@ -32,11 +32,14 @@
     "@backstage/plugin-catalog-node": "^2.2.2",
     "@backstage/plugin-permission-common": "^0.9.9",
     "@backstage/plugin-scaffolder-node": "^0.13.4",
-    "@octokit/rest": "^19.0.13"
+    "@octokit/rest": "^19.0.13",
+    "fs-extra": "^11.2.0"
   },
   "devDependencies": {
     "@backstage/backend-test-utils": "^1.7.0",
-    "@backstage/cli": "^0.36.3"
+    "@backstage/cli": "^0.36.3",
+    "@backstage/plugin-scaffolder-node-test-utils": "^0.2.0",
+    "@types/fs-extra": "^11.0.4"
   },
   "files": [
     "dist"
