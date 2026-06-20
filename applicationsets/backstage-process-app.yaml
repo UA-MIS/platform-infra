@@ -110,6 +110,19 @@ spec:
               baseUrl: https://process.capstone.uamishub.com
               listen:
                 port: 7007
+              # HTTP server keep-alive tuning (defense-in-depth for the sign-in "Premature
+              # close"). The in-process catalog-client (node-fetch) reuses pooled keep-alive
+              # sockets to localhost:7007; if the server closes an idle socket before the
+              # client's next request, the reuse resets mid-response → "Premature close" →
+              # the OIDC resolver's catalog lookup throws → sign-in loop. The PRIMARY cure is
+              # pinning Node 24.16 (the Node 24.17 CVE-2026-48931 keep-alive change is the
+              # root, Backstage #34651 — see the Dockerfile). These timeouts are a belt: keep
+              # server sockets alive longer than the client reuse window, and headersTimeout >
+              # keepAliveTimeout (Node requirement). app-config-settable since backend-defaults
+              # 0.13.0 / Backstage 1.44; takes effect on appConfig sync (no rebuild for THIS).
+              server:
+                keepAliveTimeout: { seconds: 60 }
+                headersTimeout: { seconds: 65 }
               cors:
                 origin: https://process.capstone.uamishub.com
                 methods: [GET, HEAD, PATCH, POST, PUT, DELETE]

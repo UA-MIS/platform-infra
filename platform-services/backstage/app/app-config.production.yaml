@@ -15,6 +15,14 @@ backend:
   baseUrl: https://process.capstone.uamishub.com
   listen:
     port: 7007
+  # HTTP keep-alive tuning — defense-in-depth for the sign-in "Premature close" (the
+  # in-process catalog-client reuses keep-alive sockets to localhost:7007). PRIMARY cure is
+  # the Node 24.16 pin (Dockerfile; Node 24.17 CVE keep-alive regression, Backstage #34651);
+  # this keeps server sockets alive longer than the client reuse window. headersTimeout >
+  # keepAliveTimeout (Node requirement). Mirrored into the Helm appConfig (pod loads that).
+  server:
+    keepAliveTimeout: { seconds: 60 }
+    headersTimeout: { seconds: 65 }
   # Backend service-to-service signing key (env from the SealedSecret).
   auth:
     keys:
