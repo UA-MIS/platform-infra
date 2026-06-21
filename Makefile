@@ -573,7 +573,7 @@ harbor-robot: _check-harbor-target ## (P2.2) Create a pull robot for project <na
 	  kubectl --context "$$ctx" -n "$$ns" delete job "$$job" --ignore-not-found >/dev/null 2>&1 || true; \
 	  printf '%s\n' \
 	    'apiVersion: batch/v1' 'kind: Job' 'metadata:' "  name: $$job" "  namespace: $$ns" \
-	    'spec:' '  backoffLimit: 3' '  ttlSecondsAfterFinished: 120' '  template:' '    spec:' \
+	    'spec:' '  backoffLimit: 0' '  ttlSecondsAfterFinished: 120' '  template:' '    spec:' \
 	    '      restartPolicy: Never' '      containers:' '      - name: robot' \
 	    '        image: curlimages/curl:8.11.1' \
 	    '        env:' '        - name: HARBOR_ADMIN_PASSWORD' '          valueFrom:' \
@@ -635,7 +635,7 @@ harbor-push-robot: _check-harbor-target ## (P2.3) Create a CI PUSH robot for pro
 	  kubectl --context "$$ctx" -n "$$ns" delete job "$$job" --ignore-not-found >/dev/null 2>&1 || true; \
 	  printf '%s\n' \
 	    'apiVersion: batch/v1' 'kind: Job' 'metadata:' "  name: $$job" "  namespace: $$ns" \
-	    'spec:' '  backoffLimit: 3' '  ttlSecondsAfterFinished: 120' '  template:' '    spec:' \
+	    'spec:' '  backoffLimit: 0' '  ttlSecondsAfterFinished: 120' '  template:' '    spec:' \
 	    '      restartPolicy: Never' '      containers:' '      - name: robot' \
 	    '        image: curlimages/curl:8.11.1' \
 	    '        env:' '        - name: HARBOR_ADMIN_PASSWORD' '          valueFrom:' \
