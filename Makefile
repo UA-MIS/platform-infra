@@ -601,6 +601,13 @@ harbor-robot: _check-harbor-target ## (P2.2) Create a pull robot for project <na
 # elsewhere (contract with developer).
 RUNNER_NS ?= arc-runners
 
+# Robot-name suffix (the part after "<project>-"). Default `ci-push`. Override to
+# ROTATE around a stale/unrecoverable Harbor robot whose secret can't be re-fetched
+# and whose old account can't be listed/deleted (e.g. ROBOT_SUFFIX=ci-push2). The
+# runner consumes the SealedSecret named `harbor-push` regardless of the robot's own
+# name, so the suffix is cosmetic to the consumer — only the cred matters.
+PUSH_ROBOT_SUFFIX ?= ci-push
+
 .PHONY: harbor-push-robot
 harbor-push-robot: _check-harbor-target ## (P2.3) Create a CI PUSH robot for project <name> -> `harbor-push` SealedSecret on stdout. NAME=<name> [RUNNER_NS=arc-runners]. Override KUBE_CONTEXT (+ TARGET) for non-k3d clusters.
 	@test -n "$(NAME)" || { echo "usage: make harbor-push-robot NAME=<team-slug> [RUNNER_NS=arc-runners] > harbor-push-sealed.yaml"; exit 1; }
@@ -633,7 +640,7 @@ harbor-push-robot: _check-harbor-target ## (P2.3) Create a CI PUSH robot for pro
 	    '          curl -sS -u "admin:$$HARBOR_ADMIN_PASSWORD"' \
 	    '          -X POST http://harbor-core.harbor.svc:80/api/v2.0/robots' \
 	    "          -H 'Content-Type: application/json'" \
-	    "          -d '{\"name\":\"$(NAME)-ci-push\",\"duration\":-1,\"level\":\"project\",\"description\":\"per-team CI push robot ($(NAME), Kaniko)\",\"permissions\":[{\"kind\":\"project\",\"namespace\":\"$(NAME)\",\"access\":[{\"resource\":\"repository\",\"action\":\"pull\"},{\"resource\":\"repository\",\"action\":\"push\"}]}]}'" \
+	    "          -d '{\"name\":\"$(NAME)-$(PUSH_ROBOT_SUFFIX)\",\"duration\":-1,\"level\":\"project\",\"description\":\"per-team CI push robot ($(NAME), Kaniko)\",\"permissions\":[{\"kind\":\"project\",\"namespace\":\"$(NAME)\",\"access\":[{\"resource\":\"repository\",\"action\":\"pull\"},{\"resource\":\"repository\",\"action\":\"push\"}]}]}'" \
 	  | kubectl --context "$$ctx" apply -f - >&2; \
 	  kubectl --context "$$ctx" -n "$$ns" wait --for=condition=complete --timeout=120s job/"$$job" >&2 \
 	    || { echo "ERROR: push-robot Job failed:" >&2; kubectl --context "$$ctx" -n "$$ns" logs job/"$$job" >&2; exit 1; }; \
