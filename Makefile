@@ -546,6 +546,12 @@ harbor-onboard: ## (P2.2) Onboard team into Harbor: create project <name> + map 
 # the namespace that actually consumes it, or the imagePullSecret is in the wrong ns.
 PULL_NS ?= $(NAME)-$(ENV)
 
+# Pull-robot name suffix (mirrors PUSH_ROBOT_SUFFIX). Default `pull`. Override to
+# rotate around a stale/unlistable pull robot (e.g. PULL_ROBOT_SUFFIX=pull2). The
+# workload's imagePullSecrets references the SECRET name (harbor-pull), not the
+# robot's own name, so the suffix is cosmetic to the consumer.
+PULL_ROBOT_SUFFIX ?= pull
+
 .PHONY: harbor-robot
 harbor-robot: _check-harbor-target ## (P2.2) Create a pull robot for project <name> -> SealedSecret on stdout. NAME=<name> ENV=<env> [PULL_NS=<name>-<env>]. Override KUBE_CONTEXT (+ TARGET) for non-k3d clusters.
 	@test -n "$(NAME)" || { echo "usage: make harbor-robot NAME=<team-slug> ENV=<env> [PULL_NS=<ns>] > harbor-pull-sealed.yaml"; exit 1; }
@@ -578,7 +584,7 @@ harbor-robot: _check-harbor-target ## (P2.2) Create a pull robot for project <na
 	    '          curl -sS -u "admin:$$HARBOR_ADMIN_PASSWORD"' \
 	    '          -X POST http://harbor-core.harbor.svc:80/api/v2.0/robots' \
 	    "          -H 'Content-Type: application/json'" \
-	    "          -d '{\"name\":\"$(NAME)-pull\",\"duration\":-1,\"level\":\"project\",\"description\":\"per-team pull robot ($(NAME))\",\"permissions\":[{\"kind\":\"project\",\"namespace\":\"$(NAME)\",\"access\":[{\"resource\":\"repository\",\"action\":\"pull\"}]}]}'" \
+	    "          -d '{\"name\":\"$(NAME)-$(PULL_ROBOT_SUFFIX)\",\"duration\":-1,\"level\":\"project\",\"description\":\"per-team pull robot ($(NAME))\",\"permissions\":[{\"kind\":\"project\",\"namespace\":\"$(NAME)\",\"access\":[{\"resource\":\"repository\",\"action\":\"pull\"}]}]}'" \
 	  | kubectl --context "$$ctx" apply -f - >&2; \
 	  kubectl --context "$$ctx" -n "$$ns" wait --for=condition=complete --timeout=120s job/"$$job" >&2 \
 	    || { echo "ERROR: robot Job failed:" >&2; kubectl --context "$$ctx" -n "$$ns" logs job/"$$job" >&2; exit 1; }; \
