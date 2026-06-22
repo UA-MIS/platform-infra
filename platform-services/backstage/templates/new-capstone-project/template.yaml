@@ -9,12 +9,14 @@
 # WHAT IT DOES (steps below):
 #   1. fetch:template — render the ./skeleton (app/ starter + .devops/app-metadata.yaml
 #      + catalog-info.yaml + mkdocs/TechDocs) with the four collected values.
-#   2. fetch:plain    — overlay the CANONICAL, immutable .devops/ tree (CI workflow,
-#      chart/ base+overlays, promotion.yaml, ci/ scripts) copied verbatim from the
-#      reference golden-path repo so every team gets the SAME platform contract. Pinned
-#      by ref so the template is reproducible. (Alternative at go-live: a GitHub
-#      template repo + publish:github:pull-request — see README; fetch:plain keeps the
-#      single source of truth in one reference repo.)
+#   2. fetch:plain    — overlay the CANONICAL, immutable .devops/ tree (chart/
+#      base+overlays, promotion.yaml, ci/ scripts) copied verbatim from the reference
+#      golden-path repo so every team gets the SAME platform contract. Pinned by ref so
+#      the template is reproducible.
+#   2b. fetch:plain   — overlay the .github/ tree (the build-and-push.yaml CI workflow +
+#      actionlint). The workflow MUST live at .github/workflows/ (GitHub requirement), so
+#      it is NOT under .devops/ and needs its own overlay — without this a scaffolded repo
+#      would have NO CI. Same canonical source repo + same pin.
 #   3. publish:github — create UA-MIS/<repo>, push, set the default branch + the
 #      branch protection the platform expects (PRs only into main; no direct pushes).
 #   4. catalog:register — register the new component's catalog-info.yaml so it shows
@@ -155,6 +157,23 @@ spec:
         # contract commit; do NOT point this back at /tree/main (re-introduces the
         # silent-drift risk).
         url: https://github.com/UA-MIS/sample-app/tree/v1/.devops
+
+    # 2b) Overlay the CI workflow (+ actionlint config). The build-and-push.yaml CI
+    #     workflow lives at `.github/workflows/` (GitHub requires workflows there), NOT
+    #     under `.devops/` — so the `.devops` fetch above does NOT deliver it. Without
+    #     this step a scaffolded repo would have the chart/promotion/scripts but NO CI
+    #     workflow → no build/push/deploy at all. This 2nd fetch:plain overlays the
+    #     pinned `.github/` tree from the same canonical source repo (single source,
+    #     same `v1` pin) so every tenant inherits the SAME, immutable CI workflow —
+    #     including the push-to-main auto-bump job that makes merge→deploy hands-free
+    #     (D-030). Bump this ref in lockstep with the .devops pin above.
+    - id: fetch-github
+      name: Overlay platform CI workflow (.github/)
+      action: fetch:plain
+      input:
+        targetPath: ./.github
+        # PINNED `.github/` tree (sample-app @ tag v1): build-and-push.yaml + actionlint.
+        url: https://github.com/UA-MIS/sample-app/tree/v1/.github
 
     # 3) Create UA-MIS/<repo>, push, protect main (PRs only — matches platform policy).
     - id: publish
