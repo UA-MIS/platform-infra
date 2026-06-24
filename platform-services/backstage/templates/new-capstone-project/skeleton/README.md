@@ -11,12 +11,14 @@ ${{ values.appName }}/
 └── .devops/    ←  DO NOT EDIT.     Platform-managed deployment template.
 ```
 
+Cohort: **${{ values.semesterDisplay }}**.
+
 You own `app/`. The platform owns `.devops/`. The **only** values you declare are the
 four fields in `.devops/app-metadata.yaml` (already filled in for you):
 
 ```yaml
 team: ${{ values.team }}
-semester: ${{ values.semester }}
+semester: ${{ values.semester }}   # cohort slug (${{ values.semesterDisplay }})
 app-name: ${{ values.appName }}
 port: ${{ values.port }}
 ```
