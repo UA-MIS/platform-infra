@@ -101,30 +101,16 @@ spec:
           description: One-line description of your project (shown in the catalog).
           default: A UA-MIS capstone project.
 
-    - title: Repository
-      required:
-        - repoUrl
-      properties:
-        repoUrl:
-          title: Repository location
-          type: string
-          description: >-
-            Where to create the repo. Org is fixed to UA-MIS; the repo name defaults
-            to your app name.
-          ui:field: RepoUrlPicker
-          ui:options:
-            allowedHosts:
-              - github.com
-            allowedOwners:
-              - UA-MIS
-            # NO requestUserCredentials: that option makes RepoUrlPicker start a USER
-            # GitHub OAuth flow (/api/auth/github/start) to mint a per-user token — but The
-            # Process has NO `github` auth provider (D-017: Dex/OIDC sign-in + the GitHub
-            # App for all API calls), so it 404'd "Unknown auth provider 'github'" and
-            # blocked the Repository step. The owner/repo dropdowns render fine from
-            # allowedHosts/allowedOwners alone; repo creation runs as the platform GitHub
-            # App via integrations.github (see the publish:github step — no token input),
-            # matching the publish:github:pull-request step's App-token model.
+    # NOTE: there is intentionally NO separate "Repository" page / repoUrl input.
+    # The repo is created at github.com/UA-MIS/<appName> — owner is fixed to UA-MIS and
+    # the repo name IS the app name (enter once on the page above; no double-entry). The
+    # repoUrl is constructed inline at the publish steps below as
+    # `github.com?owner=UA-MIS&repo=${{ parameters.appName }}`. We dropped the
+    # RepoUrlPicker entirely (rather than just defaulting it) because it added a redundant
+    # field AND, with `requestUserCredentials`, would start a USER GitHub OAuth flow
+    # (/api/auth/github/start) — but The Process has NO `github` auth provider (D-017:
+    # Dex/OIDC sign-in + the GitHub App for all API calls). Repo creation runs as the
+    # platform GitHub App via integrations.github (see publish:github — no token input).
 
   steps:
     # 1) Render the per-team starter (app/ + the 4-field app-metadata.yaml + catalog).
@@ -139,7 +125,7 @@ spec:
           semester: ${{ parameters.semester }}
           port: ${{ parameters.port }}
           description: ${{ parameters.description }}
-          destination: ${{ parameters.repoUrl | parseRepoUrl }}
+          destination: ${{ ("github.com?owner=UA-MIS&repo=" + parameters.appName) | parseRepoUrl }}
 
     # 2) Overlay the CANONICAL platform .devops/ contract verbatim (immutable; every
     #    team gets the SAME CI workflow, chart base/overlays, promotion.yaml, scripts).
@@ -187,7 +173,8 @@ spec:
       name: Publish to GitHub (UA-MIS)
       action: publish:github
       input:
-        repoUrl: ${{ parameters.repoUrl }}
+        # Repo = github.com/UA-MIS/<appName> (owner fixed, name = app name; no repoUrl input).
+        repoUrl: github.com?owner=UA-MIS&repo=${{ parameters.appName }}
         description: ${{ parameters.description }}
         defaultBranch: main
         repoVisibility: private
