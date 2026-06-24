@@ -1,0 +1,49 @@
+# RBAC for the cohort-gc CronJobs (DRAFT). The jobs need to:
+#   - list namespaces (to find preview/cohort namespaces by label)
+#   - delete namespaces (cohort cleanup + preview teardown fallback)
+#   - list/delete ArgoCD Applications (preview teardown — deleting only the ns is
+#     futile while the owning App has selfHeal:true; the App must go first so its
+#     resources-finalizer cascades the ns).
+#
+# Scope: cluster-wide (namespaces are cluster-scoped; Applications live in argocd).
+# This is a privileged maintenance identity — kept OFF tenant runners and scoped to
+# exactly these verbs. No create/patch on workloads, no secret access.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cohort-gc
+  namespace: cohort-gc
+  labels:
+    platform.capstone/component: platform
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cohort-gc
+  labels:
+    platform.capstone/component: platform
+rules:
+  # Find + delete tenant namespaces by label.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "delete"]
+  # Find + delete ArgoCD Applications (preview teardown — delete the App so its
+  # finalizer cascades the namespace; deleting the ns alone is reverted by selfHeal).
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    verbs: ["get", "list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cohort-gc
+  labels:
+    platform.capstone/component: platform
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cohort-gc
+subjects:
+  - kind: ServiceAccount
+    name: cohort-gc
+    namespace: cohort-gc

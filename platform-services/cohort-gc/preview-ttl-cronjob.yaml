@@ -1,0 +1,116 @@
+# Preview-TTL CronJob (DRAFT — design, not yet reviewed/merged).
+#
+# PURPOSE: reap ephemeral PREVIEW environments older than a TTL (default 12h) so
+# stale per-PR previews don't accumulate namespaces/quota. Previews are
+# <team>-pr-<n> namespaces carrying `platform.capstone/env: preview`, created by
+# each tenant's `<team>-preview` ApplicationSet (tenants/_template/applicationset-preview.yaml).
+#
+# ⚠ WHY IT DELETES THE ArgoCD APPLICATION, NOT JUST THE NAMESPACE:
+# the preview App has syncPolicy.automated.selfHeal:true + prune:true, and the
+# ApplicationSet owns it. Deleting only the namespace is futile — ArgoCD recreates
+# it on the next sync. So the job deletes the App named `<ns>` (the appset template
+# names the App identically to the ns: `__TEAM__-pr-{{.number}}`); the App's
+# `resources-finalizer.argocd.argoproj.io` then cascades the namespace + workloads.
+#
+# ⚠ INTERACTION WITH THE LIVE PR GENERATOR (post-v1): once previews come from the
+# ArgoCD `pullRequest` generator, that generator is the PRIMARY lifecycle owner —
+# it deletes the App when the PR closes. If the TTL deletes an App that the
+# generator STILL wants (PR still open but preview >12h), the ApplicationSet will
+# RECREATE it within minutes. So this TTL is a SAFETY NET for orphaned/long-lived
+# previews, not the primary teardown. For it to truly remove an actively-generated
+# preview, pair it with a max-PR-age in the generator, OR scope this job to delete
+# only previews whose owning ApplicationSet element is gone. v1 ships with an EMPTY
+# list generator (no live previews), so today this job is a no-op guard; it becomes
+# load-bearing when live previews are wired. (Documented seam, like the appset.)
+#
+# DRY-RUN: set DRY_RUN=true (default here is "true" for the DRAFT — flip to "false"
+# at go-live after the human reviews) to log what WOULD be deleted without deleting.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: preview-ttl
+  namespace: cohort-gc
+  labels:
+    platform.capstone/component: platform
+spec:
+  # Hourly. Previews are checked against TTL_HOURS each run.
+  schedule: "0 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 300
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 600
+      ttlSecondsAfterFinished: 3600
+      template:
+        metadata:
+          labels:
+            platform.capstone/component: platform
+        spec:
+          serviceAccountName: cohort-gc
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: preview-ttl
+              # Pinned kubectl image (bitnami publishes versioned, non-root-friendly
+              # kubectl images). Pin to a digest at go-live (advisory, like the CI
+              # workflow's digest-pins).
+              image: bitnami/kubectl:1.31.5
+              imagePullPolicy: IfNotPresent
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              env:
+                - name: TTL_HOURS
+                  value: "12"
+                - name: DRY_RUN
+                  value: "true"   # DRAFT default — flip to "false" at go-live
+                - name: HOME
+                  value: /tmp     # kubectl writes cache/config under $HOME; /tmp is the emptyDir
+              command: ["/bin/sh", "-eu", "-c"]
+              args:
+                - |
+                  echo "==> preview-ttl: TTL_HOURS=$TTL_HOURS DRY_RUN=$DRY_RUN"
+                  CUTOFF=$(date -u -d "-${TTL_HOURS} hours" +%s 2>/dev/null \
+                    || date -u -v-"${TTL_HOURS}"H +%s)
+                  echo "==> deleting previews created before epoch $CUTOFF"
+
+                  # List preview namespaces: name + creationTimestamp (RFC3339).
+                  kubectl get ns -l platform.capstone/env=preview \
+                    -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.metadata.creationTimestamp}{"\n"}{end}' \
+                  | while read -r NS TS; do
+                      [ -z "$NS" ] && continue
+                      CREATED=$(date -u -d "$TS" +%s 2>/dev/null || echo 0)
+                      if [ "$CREATED" -gt 0 ] && [ "$CREATED" -lt "$CUTOFF" ]; then
+                        AGE_H=$(( ( $(date -u +%s) - CREATED ) / 3600 ))
+                        echo "==> EXPIRED: ns=$NS age=${AGE_H}h (App=$NS)"
+                        if [ "$DRY_RUN" = "true" ]; then
+                          echo "    [dry-run] would: kubectl -n argocd delete application $NS ; kubectl delete ns $NS"
+                        else
+                          # Delete the owning ArgoCD App first (finalizer cascades the ns).
+                          kubectl -n argocd delete application "$NS" --ignore-not-found --wait=false || true
+                          # Fallback: delete the ns directly in case no App backs it.
+                          kubectl delete ns "$NS" --ignore-not-found --wait=false || true
+                        fi
+                      else
+                        echo "==> keep: ns=$NS (within TTL)"
+                      fi
+                    done
+                  echo "==> preview-ttl: done"
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            # readOnlyRootFilesystem:true + kubectl needs a writable $HOME for its
+            # cache/config — emptyDir at /tmp (HOME=/tmp). (Lesson: readOnlyRootFilesystem
+            # + a tool that writes to disk ALWAYS needs a writable emptyDir.)
+            - name: tmp
+              emptyDir: {}

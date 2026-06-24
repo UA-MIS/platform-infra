@@ -1,0 +1,117 @@
+# Cohort-cleanup CronJob (DRAFT — design, not yet reviewed/merged).
+#
+# PURPOSE: graduate a cohort — tear down every tenant namespace for one semester,
+# selected by the universal label `platform.capstone/semester=<cohort-slug>`
+# (e.g. 2026-fall). Every tenant object carries this label (see tenants/_template).
+#
+# ⚠ THIS IS `suspend: true` (never fires on a schedule). Graduating a cohort is a
+# DELIBERATE, destructive admin act, so this CronJob is a parameterized, on-demand
+# RUNNER, not an automatic reaper. To run it:
+#   1. Set COHORT_SLUG below (or override per-run, see step 3).
+#   2. Confirm DRY_RUN; first run with DRY_RUN=true and READ the output.
+#   3. Trigger a one-off Job from it:
+#        kubectl -n cohort-gc create job cohort-cleanup-<slug> \
+#          --from=cronjob/cohort-cleanup
+#      (override the cohort/dry-run by editing the env or patching the one-off Job).
+#
+# ⚠ GITOPS SOURCE OF TRUTH IS `git rm`, NOT THIS JOB. The canonical way to graduate
+# a cohort is to `git rm -r tenants/team-<...>` for that semester and commit — the
+# `tenants` ApplicationSet (a git directory generator over tenants/*) then PRUNES
+# the Apps + namespaces. If you `kubectl delete ns` WITHOUT removing the tenant dirs
+# from git, the tenants ApplicationSet + the tenant Apps (selfHeal:true) will
+# RECREATE the namespaces within minutes. So this job is the IMPERATIVE convenience/
+# emergency path the _template README documents — to make it stick, ALSO delete the
+# tenant ArgoCD Applications (this job does) AND git rm the dirs (human, in git).
+# This job deletes Apps + namespaces for fast teardown; the git rm makes it durable.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cohort-cleanup
+  namespace: cohort-gc
+  labels:
+    platform.capstone/component: platform
+spec:
+  # Suspended: this never runs on its own. `schedule` is a required field; the value
+  # is irrelevant while suspend:true (kept as a yearly placeholder).
+  suspend: true
+  schedule: "0 0 1 1 *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 900
+      ttlSecondsAfterFinished: 86400   # keep the record a day (audit the teardown)
+      template:
+        metadata:
+          labels:
+            platform.capstone/component: platform
+        spec:
+          serviceAccountName: cohort-gc
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: cohort-cleanup
+              image: bitnami/kubectl:1.31.5
+              imagePullPolicy: IfNotPresent
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              env:
+                - name: COHORT_SLUG
+                  value: ""        # REQUIRED — set the semester slug, e.g. "2026-fall"
+                - name: DRY_RUN
+                  value: "true"    # run with true first; flip per-run when ready
+                - name: HOME
+                  value: /tmp
+              command: ["/bin/sh", "-eu", "-c"]
+              args:
+                - |
+                  if [ -z "${COHORT_SLUG}" ]; then
+                    echo "ERROR: COHORT_SLUG is empty — set the semester slug (e.g. 2026-fall)." >&2
+                    exit 2
+                  fi
+                  echo "==> cohort-cleanup: COHORT_SLUG=$COHORT_SLUG DRY_RUN=$DRY_RUN"
+                  echo "==> REMINDER: also 'git rm -r tenants/team-*' for this cohort so the"
+                  echo "    tenants ApplicationSet doesn't recreate these namespaces."
+
+                  SEL="platform.capstone/semester=${COHORT_SLUG}"
+
+                  # 1) Delete the tenant ArgoCD Applications for the cohort (so selfHeal
+                  #    can't recreate the namespaces before/while we delete them).
+                  APPS=$(kubectl -n argocd get applications -l "$SEL" \
+                           -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' || true)
+                  # 2) Delete the namespaces for the cohort.
+                  NSS=$(kubectl get ns -l "$SEL" \
+                          -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' || true)
+
+                  echo "==> Applications matching $SEL:"; echo "${APPS:-（none）}"
+                  echo "==> Namespaces matching $SEL:";  echo "${NSS:-（none）}"
+
+                  if [ "$DRY_RUN" = "true" ]; then
+                    echo "    [dry-run] would delete the Applications then the namespaces above."
+                    exit 0
+                  fi
+
+                  for A in $APPS; do
+                    echo "==> deleting Application $A"
+                    kubectl -n argocd delete application "$A" --ignore-not-found --wait=false || true
+                  done
+                  for N in $NSS; do
+                    echo "==> deleting namespace $N"
+                    kubectl delete ns "$N" --ignore-not-found --wait=false || true
+                  done
+                  echo "==> cohort-cleanup: done (remember the git rm for durability)"
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir: {}
