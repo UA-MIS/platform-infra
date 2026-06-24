@@ -87,8 +87,8 @@ const CFG: VaultClientConfig = {
   addr: 'https://vault.vault.svc.cluster.local:8200',
   mount: 'secret',
   authMount: 'kubernetes',
-  role: 'backstage-secrets',
-  saTokenPath: '/var/run/secrets/vault/token',
+  role: 'backstage-writer',
+  saTokenPath: '/var/run/secrets/vault/vault-token',
   caPath: '/etc/backstage/vault-ca/ca.crt',
 };
 
@@ -116,7 +116,7 @@ describe('VaultClient login', () => {
     expect(login.path).toBe('/v1/auth/kubernetes/login');
     expect(JSON.parse(login.body!)).toEqual({
       jwt: 'SA-JWT-TOKEN',
-      role: 'backstage-secrets',
+      role: 'backstage-writer',
     });
     // The CA bundle is passed for TLS verification.
     expect(login.ca).toBe('CA-PEM');

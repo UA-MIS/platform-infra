@@ -137,14 +137,14 @@ function readSecretsConfig(config: Config): SecretsConfig {
         'https://vault.vault.svc.cluster.local:8200',
       mount: v?.getOptionalString('mount') ?? 'secret',
       authMount: v?.getOptionalString('authMount') ?? 'kubernetes',
-      role: v?.getOptionalString('role') ?? 'backstage-secrets',
+      role: v?.getOptionalString('role') ?? 'backstage-writer',
       // A projected SA token with audience=vault (NOT the default API-server-audience token):
       // the Vault role is bound to audience "vault", so a login with the DEFAULT token 403s
       // ("invalid audience"). The deploy mounts a serviceAccountToken projected volume
       // (audience: vault) at this path (eso-vault confirmed). See app-config.production.
       saTokenPath:
         v?.getOptionalString('saTokenPath') ??
-        '/var/run/secrets/vault/token',
+        '/var/run/secrets/vault/vault-token',
       caPath:
         v?.getOptionalString('caPath') ??
         '/etc/backstage/vault-ca/ca.crt',

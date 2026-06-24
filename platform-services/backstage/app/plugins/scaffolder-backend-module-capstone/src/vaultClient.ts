@@ -7,8 +7,8 @@
  * AUTH: Backstage authenticates to Vault with its OWN Kubernetes ServiceAccount JWT
  * (a projected token with audience=vault, mounted by the deploy at saTokenPath) via k8s-auth
  * (POST /v1/auth/<mount>/login {jwt, role}) and uses the returned client_token for the KV-v2
- * call. The Vault role `backstage-secrets` (eso-vault domain, vault-policies) binds ONLY the
- * dedicated Backstage SA (backstage-secrets) to a WRITE-ONLY policy over
+ * call. The Vault role `backstage-writer` (eso-vault domain, vault-policies) binds ONLY the
+ * dedicated Backstage SA (backstage-vault-writer) to a WRITE-ONLY policy over
  * secret/data/tenants/* (create/update/patch — NO read) + read/list on secret/metadata/tenants/*
  * — least privilege. The token can write ANY tenant path (coarse by design); per-tenant authz
  * is enforced in sealCore BEFORE the write. There is deliberately no value-read here.
