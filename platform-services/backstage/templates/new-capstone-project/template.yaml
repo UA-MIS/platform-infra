@@ -67,12 +67,18 @@ spec:
           title: App name
           type: string
           description: >-
-            Short slug for your app + repo (lowercase, digits, hyphens). Becomes the
-            repo name, workload names, and the ingress host
-            <app-name>.<team>.<platform-domain>.
-          pattern: '^[a-z]([-a-z0-9]*[a-z0-9])?$'
+            Short slug for your app + repo (lowercase letters, digits, hyphens — no
+            spaces, uppercase, or dots). Becomes the repo name, the Kubernetes
+            workload names, and the ingress host <app-name>.<team>.<platform-domain>,
+            so it MUST be a DNS-1123 label.
+          # DNS-1123 label: lowercase alphanumerics + hyphens, must start AND end with
+          # an alphanumeric (so a hyphen can't be first/last). Same charset as a repo
+          # name, a k8s object name, and a DNS hostname segment — all three derive from
+          # this one value, so enforce the strictest (DNS) form here.
+          pattern: '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'
           maxLength: 30
           ui:autofocus: true
+          ui:help: 'Lowercase letters, digits, and hyphens only; must start and end with a letter or digit (e.g. my-capstone-app).'
         team:
           title: Team slug
           type: string
@@ -182,6 +188,19 @@ spec:
         # branch-protection the golden path assumes; reviewers/CI gate merges).
         protectDefaultBranch: true
         requireCodeOwnerReviews: true
+        # Grant repo access by GitHub TEAM (not by creator/individual) so permissions are
+        # role-based and don't depend on who clicked "create":
+        #   - the project team gets PUSH (read/write — develop + open PRs, NOT admin).
+        #   - labmx (platform staff) gets ADMIN (settings/protection/transfer).
+        # So a normal member never gets admin merely for being the creator. NOTE: each
+        # team must already exist on the UA-MIS org for the grant to apply; if the team
+        # slug is wrong/missing GitHub skips that collaborator (publish:github does not
+        # hard-fail the scaffold on an unknown team — graceful, per design).
+        collaborators:
+          - team: ${{ parameters.team }}
+            access: push
+          - team: labmx
+            access: admin
         # No `token:` — publish:github authenticates via the configured integrations.github
         # (the platform GitHub App, sealed in backstage-process-secrets), the same App used
         # by catalog ingestion + capstone:render-tenant. Repo creation runs as the App, not
