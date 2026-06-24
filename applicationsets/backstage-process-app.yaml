@@ -62,7 +62,7 @@ spec:
             # until the first build lands; the CI build tags by commit SHA.
             registry: harbor.capstone.uamishub.com
             repository: backstage/backstage-process
-            tag: 89955061bd37                     # M2 DURABLE FIX image (ARC/Kaniko run 27855396126, #84 merge 8995506) — Node 24.16 pin (cures Node 24.17 keepAlive Premature-close, Backstage #34651) + 5x retry; keepAlive appConfig is defense-in-depth. Break-glass M1: 7db91f28499c; prev: 7c6be886c358 (F1+Fix#2).
+            tag: ca6ce4e9784d                     # M3+M4 GO-LIVE image (capstone:seal-secret + capstone:render-tenant; combined PR #94 ca6ce4e). Built+pushed by backstage-process-build-push run 28067774139 (re-run after #95 restored the backstage harbor-push robot). prev: 89955061bd37 (M2 durable fix — Node 24.16 pin, Backstage #34651); break-glass M1: 7db91f28499c.
             pullPolicy: IfNotPresent
             # Pull from the private Harbor `backstage` project via a robot
             # imagePullSecret (`harbor-pull`, minted at go-live by `make harbor-robot
