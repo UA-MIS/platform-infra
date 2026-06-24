@@ -1,0 +1,54 @@
+# preview overlay — ephemeral PR preview (§2.4). Smallest footprint (1 replica,
+# half-quota namespace). The preview ApplicationSet sets the image tag to
+# pull-<sha> at sync time. The Git-branch stand-in (D-009) provides the Phase-1
+# trigger, instantiated against namespace sample-pr-1.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Phase-1 preview stand-in namespace (D-009). The base Deployment requires Secret
+# ${{ values.appName }}-secret, so the overlay MUST ship a matching per-namespace SealedSecret
+# (sealedsecret.yaml, sealed for sample-pr-1) or preview pods won't start (SEC-004).
+# For the live PR generator the ApplicationSet templates sample-pr-<number> and a
+# real seal is needed per preview namespace — see .devops/README.md (Phase-2 wrinkle).
+namespace: ${{ values.team }}-pr-1
+
+resources:
+  - ../../base
+  # ${{ values.appName }}-secret placeholder (demonstrates the secret path; APP_SECRET in base is
+  # optional so a fresh repo with no secret still deploys — M4 zero-config).
+  - sealedsecret.yaml
+  - harbor-pull.sealedsecret.yaml   # image-pull cred for SA imagePullSecrets:[harbor-pull] (#C3)
+  # capstone:secrets — The Process "Secrets" tab (capstone:seal-secret) appends
+  # per-key SealedSecrets here as `- ../../secrets/<key>.sealedsecret.yaml` (M3,
+  # ADR-029 §4.3). Keep this marker line last in resources: so the append is
+  # deterministic; do not remove it.
+
+labels:
+  - pairs:
+      platform.capstone/env: preview
+      platform.capstone/semester: 2026-fall
+    includeSelectors: false
+
+# Image seam: preview tracks the PR head build (promotion.yaml: preview=pull-<sha>).
+images:
+  - name: ${{ values.appName }}
+    newName: harbor.capstone.uamishub.com/${{ values.team }}/${{ values.appName }}
+    newTag: preview
+
+replicas:
+  - name: ${{ values.appName }}
+    count: 1
+
+patches:
+  - target:
+      kind: Ingress
+      name: ${{ values.appName }}
+    # Preview host carries the PR number; the ApplicationSet substitutes <n>.
+    # Stand-in host for the sample-pr-1 D-009 proof / standalone render validation.
+    patch: |
+      - op: replace
+        path: /spec/rules/0/host
+        value: ${{ values.appName }}.${{ values.team }}.pr-1.capstone.uamishub.com
+      - op: replace
+        path: /spec/tls/0/hosts/0
+        value: ${{ values.appName }}.${{ values.team }}.pr-1.capstone.uamishub.com

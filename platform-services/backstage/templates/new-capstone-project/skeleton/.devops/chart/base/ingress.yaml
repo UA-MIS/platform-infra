@@ -1,0 +1,31 @@
+# Ingress for the app. Host pattern is <app>.<team>.${PLATFORM_DOMAIN}
+# (§5.2): the base carries the real PLATFORM_DOMAIN (capstone.uamishub.com) and is
+# the canonical/prod host; each non-prod overlay patches the host with its env
+# prefix so the same manifest ports across clusters by re-pointing PLATFORM_DOMAIN.
+# TLS is served at the Cloudflare edge (Universal/Advanced cert for
+# *.capstone.uamishub.com); the tunnel publishes to in-cluster Traefik (§5.1/§5.2).
+# (Phase-1 used 127-0-0-1.sslip.io for the local k3d host; that does not resolve on
+# the real cluster — moved to the live domain so the deployed app is reachable.)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ${{ values.appName }}
+  labels:
+    app.kubernetes.io/name: ${{ values.appName }}
+spec:
+  rules:
+    # Base = canonical/prod host. Non-prod overlays patch in their env prefix
+    # (e.g. sample.sample.dev.capstone.uamishub.com for dev).
+    - host: ${{ values.appName }}.${{ values.team }}.capstone.uamishub.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ${{ values.appName }}
+                port:
+                  name: http
+  tls:
+    - hosts:
+        - ${{ values.appName }}.${{ values.team }}.capstone.uamishub.com

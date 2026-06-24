@@ -1,0 +1,8 @@
+# actionlint config — declares the platform's self-hosted runner scale-set label
+# so `runs-on: ua-mis-kaniko` lints clean. `ua-mis-kaniko` is the ARC
+# gha-runner-scale-set name (helm releaseName in platform-infra
+# applicationsets/arc-runner-scaleset-app.yaml); in the scale-set model the
+# workflow selects the set by THIS name (CI ↔ workflow contract, D-032).
+self-hosted-runner:
+  labels:
+    - ua-mis-kaniko

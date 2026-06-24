@@ -1,0 +1,42 @@
+# staging overlay — tracks release tags, auto-synced by the env ApplicationSet
+# (§2.3). Image seam: staging follows the pushed semver tag (promotion.yaml:
+# staging=tags/v*).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: ${{ values.team }}-staging
+resources:
+  - ../../base
+  # ${{ values.appName }}-secret placeholder (demonstrates the secret path; APP_SECRET in base is
+  # optional so a fresh repo with no secret still deploys — M4 zero-config).
+  - sealedsecret.yaml
+  - harbor-pull.sealedsecret.yaml   # image-pull cred for SA imagePullSecrets:[harbor-pull] (#C3)
+  # capstone:secrets — The Process "Secrets" tab (capstone:seal-secret) appends
+  # per-key SealedSecrets here as `- ../../secrets/<key>.sealedsecret.yaml` (M3,
+  # ADR-029 §4.3). Keep this marker line last in resources: so the append is
+  # deterministic; do not remove it.
+labels:
+  - pairs:
+      platform.capstone/env: staging
+      platform.capstone/semester: 2026-fall
+    includeSelectors: false
+images:
+  - name: ${{ values.appName }}
+    newName: harbor.capstone.uamishub.com/${{ values.team }}/${{ values.appName }}
+    # Bare semver (NO 'v' prefix) — matches what CI pushes: resolve-image.sh strips
+    # the git tag's 'v' (refs/tags/v0.1.0 -> image tag 0.1.0). A v-prefixed newTag
+    # here would reference an image CI never pushed -> ImagePullBackOff.
+    newTag: 0.1.0
+replicas:
+  - name: ${{ values.appName }}
+    count: 2
+patches:
+  - target:
+      kind: Ingress
+      name: ${{ values.appName }}
+    patch: |
+      - op: replace
+        path: /spec/rules/0/host
+        value: ${{ values.appName }}.${{ values.team }}.staging.capstone.uamishub.com
+      - op: replace
+        path: /spec/tls/0/hosts/0
+        value: ${{ values.appName }}.${{ values.team }}.staging.capstone.uamishub.com
