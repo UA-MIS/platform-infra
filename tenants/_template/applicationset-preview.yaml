@@ -27,15 +27,17 @@ spec:
   goTemplate: true
   goTemplateOptions: ["missingkey=error"]
   generators:
-    # ---- PHASE-1 STAND-IN: list generator over known feature branch(es) -------
-    # Add an element to "open" a preview; remove it to tear the preview down
-    # (the ApplicationSet prunes the App, whose prune policy deletes the ns).
-    # Ephemeral-by-construction, exactly like the PR generator — just triggered
-    # by editing this list instead of by GitHub PR events.
+    # ---- list generator: EMPTY by default (no previews until opted in) ---------
+    # v1: ships with NO elements, so a fresh tenant creates ZERO preview Apps (an
+    # empty list generator is valid and produces nothing). This is deliberate — the
+    # PRODUCTION trigger is the ArgoCD pullRequest generator (commented seam at the
+    # bottom); the list is only a stand-in. A demo element here (number:1 +
+    # branch:preview-demo) would make a real tenant try to deploy a preview from a
+    # branch that doesn't exist → a crash-loop, so it is NOT shipped. To demo a
+    # preview manually, add an element (number + an existing branch); to wire live
+    # PR previews, swap to the pullRequest generator below (post-v1).
     - list:
-        elements:
-          - number: "1"               # stand-in "PR number" -> __TEAM__-pr-1
-            branch: preview-demo       # the feature branch to deploy
+        elements: []
   template:
     metadata:
       name: '__TEAM__-pr-{{.number}}'
