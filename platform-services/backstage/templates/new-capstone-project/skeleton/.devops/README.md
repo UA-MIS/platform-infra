@@ -14,7 +14,7 @@ instead of editing these files.
 | --- | --- |
 | `app-metadata.yaml` | The **only** file you (the student) set values in: `team`, `semester`, `app-name`, `port`. Everything below derives from it. |
 | `chart/base/` | Kustomize base: `Deployment`, `Service`, `Ingress`, `ServiceAccount`. Environment-agnostic. |
-| `chart/overlays/{dev,staging,prod,preview}/` | Per-environment diffs: image tag seam, replicas, ingress host, env label, and the per-namespace ESO `SecretStore` + the app-secret `ExternalSecret` (harbor-pull ES is shipped but commented out — v1 uses an out-of-band SealedSecret). |
+| `chart/overlays/{dev,staging,prod,preview}/` | Per-environment diffs: image tag seam, replicas, ingress host, env label, the per-namespace ESO `SecretStore` + app-secret `ExternalSecret`, and the `harbor-pull` SealedSecret (v1; ESO reserved for post-v1). |
 | `promotion.yaml` | **The single configured place** (§4.1): trigger→env→tag-convention→overlay→gate. The CI scripts read only this. |
 | `ci/build-and-push.sh` | Build `app/` and push to the k3d registry; tag computed from `promotion.yaml`. |
 | `ci/bump-image.sh` | Image-bump seam: write the new tag into the env overlay's `images[].newTag` and (with `COMMIT=1`) commit it — the GitOps signal. |
@@ -48,8 +48,10 @@ ships, alongside its workload:
 - an **`ExternalSecret`** (`app-secret.externalsecret.yaml`) that points `APP_SECRET`
   at Vault key `APP_SECRET` under `secret/tenants/<team>/<env>/app` and materializes
   the in-namespace `Secret` `sample-secret` (key `app-secret`), which the Deployment
-  envs into `APP_SECRET`. The app proves it read the secret on `/` without leaking it;
-The image-pull cred (`harbor-pull`) is **NOT** on ESO in v1 — see below.
+  envs into `APP_SECRET`. The app proves it read the secret on `/` without leaking it.
+
+The image-pull cred (`harbor-pull`) is **NOT** on ESO in v1 — it stays a SealedSecret
+(see the dedicated section below).
 
 No value is ever committed here — the committed manifests carry only **key names +
 Vault pointers**. Values are written to Vault by the platform (onboarding) or by The
@@ -57,16 +59,18 @@ Process "Secrets" tab; ESO syncs them into real `Secret`s.
 
 ### harbor-pull image-pull cred (v1: SealedSecret, ESO reserved)
 
-In v1 the `harbor-pull` `kubernetes.io/dockerconfigjson` Secret is delivered
-**out-of-band**: the platform mints a Harbor pull robot at onboarding
-(`make harbor-robot`) and applies it as a SealedSecret into `<team>-<env>` — it is NOT
-wired into the kustomize overlay (so it can't collide with the onboarding-applied
-Secret). A reserved ESO model ships alongside it
-(`overlays/<env>/harbor-pull.externalsecret.yaml`, Vault path
-`secret/tenants/<team>/<env>/harbor-pull` with key `.dockerconfigjson`) but is
-**commented out** in each overlay's `kustomization.yaml`, pending the user-scope
-decision on moving robot creds into Vault (ADR-030 follow-on). Flipping to ESO later =
-uncomment the resource line + have onboarding write the robot creds to that Vault path.
+In v1 the `harbor-pull` `kubernetes.io/dockerconfigjson` Secret is a **SealedSecret**:
+the platform mints a Harbor pull robot at onboarding (`make harbor-robot`) and the
+per-namespace SealedSecret is committed at `overlays/<env>/harbor-pull.sealedsecret.yaml`.
+The ciphertext shipped in the skeleton is a non-functional **placeholder** so the chart
+renders; the operator regenerates it with the real robot cred (`kubeseal`, per-namespace
+strict scope) at onboarding. It is NOT on ESO in v1 because a real ESO `harbor-pull` needs
+onboarding to write the robot creds to Vault first (the `make-harbor-robot` migration is
+on HOLD) — an ExternalSecret pointed at an unpopulated Vault path would be broken. A
+post-v1 ESO flip is **RESERVED** at Vault path
+`secret/data/tenants/<team>/<env>/harbor-pull` (key `.dockerconfigjson`); flipping later
+= add the ExternalSecret + have onboarding write the robot creds to that path
+(ADR-030 follow-on, coordinated with eso-vault).
 
 ### Where the values come from (out-of-band, NOT the student build)
 
