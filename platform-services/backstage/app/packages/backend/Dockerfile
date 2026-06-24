@@ -39,9 +39,15 @@ COPY .yarn ./.yarn
 COPY .yarnrc.yml ./
 
 COPY packages packages
+# M3: the root workspaces glob is ["packages/*", "plugins/*"], and packages/{app,backend}
+# now depend on the local @internal/* plugin workspaces via `workspace:^`. The skeleton
+# install resolves those workspace refs, so plugins/ MUST be copied here too — otherwise
+# `yarn install --immutable` fails with "Workspace not found" (the M1/M2 image had no
+# plugins/ so this line is new for M3).
+COPY plugins plugins
 
-# Keep only package.json under each package dir so the install layer is cache-stable.
-RUN find packages \! -name "package.json" -mindepth 2 -maxdepth 2 -exec rm -rf {} \+
+# Keep only package.json under each package/plugin dir so the install layer is cache-stable.
+RUN find packages plugins \! -name "package.json" -mindepth 2 -maxdepth 2 -exec rm -rf {} \+
 
 # Stage 2 — install all deps and build the backend bundle.
 FROM ${NODE_IMAGE} AS build
@@ -81,6 +87,40 @@ RUN mkdir packages/backend/dist/skeleton packages/backend/dist/bundle \
     && tar xzf packages/backend/dist/skeleton.tar.gz -C packages/backend/dist/skeleton \
     && tar xzf packages/backend/dist/bundle.tar.gz -C packages/backend/dist/bundle
 
+# Stage 2b — kubeseal binary (M3, plan §2.1). The `capstone:seal-secret` scaffolder action
+# shells out to `kubeseal` to seal team secrets OFFLINE against the exported public cert
+# (D-047 A2 — no controller egress). We bundle the OFFICIAL, version-matched binary rather
+# than reimplement the sealing crypto in TS (a wrong impl yields a SealedSecret the controller
+# silently won't decrypt). PINNED to v0.37.0 — the SAME version as the in-cluster
+# sealed-secrets controller (ADR-029 §11.5); a kubeseal/controller skew can produce
+# undecryptable secrets, so this MUST track the controller version.
+#
+# Isolated single-purpose stage: only the download + checksum gate run here, so it is cache-
+# stable (independent of the Node build) and the runtime image COPYs just the verified binary.
+# SECURITY: the download is checksum-verified against the sha256 published in the official
+# sealed-secrets_0.37.0_checksums.txt — `sha256sum -c` FAILS THE BUILD on any mismatch
+# (supply-chain integrity). Fetch is over :443 only (netpol-compliant, SEC-014), same as the
+# base-image pull; we do not mirror it to Harbor. ca-certificates bootstrap mirrors the build
+# stage (the slim base ships no CA bundle, runner egress is :443-only).
+FROM ${NODE_IMAGE} AS kubeseal
+ARG KUBESEAL_VERSION=0.37.0
+# linux-amd64 tarball sha256 from sealed-secrets_0.37.0_checksums.txt (verified against the
+# downloaded artifact). Bump BOTH the version and this digest together when tracking a new
+# controller version.
+ARG KUBESEAL_SHA256=dd598209cc8b8398ce3234487609f5ba31f963a4547e8561f10739cb66a75262
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' \
+        /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list 2>/dev/null || true; \
+    apt-get -o Acquire::https::Verify-Peer=false update && \
+    apt-get -o Acquire::https::Verify-Peer=false install -y --no-install-recommends ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/* && \
+    curl -fsSL -o /tmp/kubeseal.tar.gz \
+      "https://github.com/bitnami-labs/sealed-secrets/releases/download/v${KUBESEAL_VERSION}/kubeseal-${KUBESEAL_VERSION}-linux-amd64.tar.gz" && \
+    echo "${KUBESEAL_SHA256}  /tmp/kubeseal.tar.gz" | sha256sum -c - && \
+    tar -xzf /tmp/kubeseal.tar.gz -C /tmp kubeseal && \
+    install -o root -g root -m 0755 /tmp/kubeseal /usr/local/bin/kubeseal && \
+    rm -f /tmp/kubeseal.tar.gz /tmp/kubeseal && \
+    kubeseal --version
+
 # Stage 3 — the runtime image: production deps + the bundle only.
 FROM ${NODE_IMAGE}
 
@@ -94,6 +134,12 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' \
     apt-get update && \
     apt-get install -y --no-install-recommends python3 g++ build-essential libsqlite3-dev && \
     rm -rf /var/lib/apt/lists/*
+
+# M3: the version-pinned, checksum-verified kubeseal binary (from the isolated kubeseal
+# stage). root-owned 0755 so the least-privileged `node` user can execute but not modify it;
+# the `capstone:seal-secret` action invokes it via execFile (plan §2.1). Static Go binary,
+# no runtime deps.
+COPY --from=kubeseal /usr/local/bin/kubeseal /usr/local/bin/kubeseal
 
 # Least-privileged node user.
 USER node

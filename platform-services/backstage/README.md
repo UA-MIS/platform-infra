@@ -180,34 +180,69 @@ Do these **in order**, after the cluster heal + the Phase-3 domain cutover:
 ## The golden-path Scaffolder template
 
 `templates/new-capstone-project/template.yaml` is the headline feature. A student fills
-**four fields** (`appName`, `team`, `semester`, `port`) + picks the repo location, and The Process:
+**four fields** (`appName`, `team`, `semester`, `port`) + picks the repo location, and The
+Process runs a **two-sided** flow (D-049): the repo side is automatic (the student owns it);
+the platform side is a **review-gated PR** (a reviewer grants it by merging).
 
+**Repo side (automatic):**
 1. **`fetch:template`** renders `skeleton/` — a starter Go `app/`, the 4-field
-   `.devops/app-metadata.yaml`, `catalog-info.yaml`, and TechDocs.
+   `.devops/app-metadata.yaml`, `catalog-info.yaml`, TechDocs, and a `.devops/secrets/`
+   home (the landing path for the Secrets tab; see below).
 2. **`fetch:plain`** overlays the **canonical, immutable** `.devops/` contract (CI
-   workflow, `chart/` base+overlays, `promotion.yaml`, `ci/` scripts) copied verbatim
-   from the reference golden-path repo — so every team gets the SAME platform contract.
+   workflow, `chart/` base+overlays, `promotion.yaml`, `ci/` scripts) from the reference
+   golden-path repo — so every team gets the SAME platform contract. **Pinned to the
+   `v1` tag** on `UA-MIS/sample-app` (`/tree/v1/.devops`) so scaffolds are reproducible
+   and a push to the contract repo's `main` can't silently change every future tenant.
 3. **`publish:github`** creates `UA-MIS/<app-name>` (private, branch-protected: PRs into
    `main`, no direct pushes — mirrors the live platform policy).
 4. **`catalog:register`** registers the new component so it appears in The Process catalog.
 
-The result is a repo identical in shape to `team-sample-app`: the student edits only
-`app/` + the four `app-metadata.yaml` fields; everything else is platform-managed. The
-scaffolded `app/` ships with passing `go test` so CI is green on the first PR.
+**Platform side (review-gated — the D-049 grant path):**
+5. **`capstone:render-tenant`** renders `tenants/team-<name>/` from the single canonical
+   `tenants/_template/` blueprint (custom action — the blueprint uses literal
+   `__TEAM__`/`__SEMESTER__` tokens that the built-in nunjucks `fetch:template` can't
+   render; D-M4-2 renders the one source, no fork).
+6. **`publish:github:pull-request`** opens a PR to `UA-MIS/platform-infra` adding those
+   tenant manifests, with an **operator onboarding checklist** as the PR body (the
+   `make harbor-onboard`/`harbor-push-robot`/`harbor-robot` commands — every one shown
+   with `TARGET=real-talos`, lesson #1). The PR is opened with the **platform GitHub App
+   token** so any signed-in UA-MIS member can open it without platform-infra write rights;
+   **the merge is the gate.** On merge, `tenants-appset` reconciles the team's namespaces
+   and ApplicationSets.
 
-### Follow-up: full two-sided onboarding (not yet automated)
+The repo result is identical in shape to `sample-app`: the student edits only `app/` +
+the four `app-metadata.yaml` fields; everything else is platform-managed. The scaffolded
+`app/` ships with passing `go test` so CI is green on the first PR, and the first PR builds
+a **preview** image (Kaniko `--no-push`); merge to `main` pushes the dev image.
 
-Creating the **repo** is half of onboarding. The **platform side** still needs:
-- the tenant manifests `tenants/team-<name>/` (from `tenants/_template/`, `__TEAM__`/
-  `__SEMESTER__` sed-replace) — namespaces, AppProject, RBAC, quotas, the env
-  ApplicationSets. This is a **commit to platform-infra** (PR-gated), so it can't be a
-  silent Scaffolder write.
-- the Harbor project + OIDC group mapping: `make harbor-onboard NAME=<name>`.
+### Secrets (the `.devops/secrets/` home)
 
-The clean next iteration is a second Scaffolder step that opens a **pull request to
-platform-infra** adding `tenants/team-<name>/` (action `publish:github:pull-request`) plus
-a documented `make harbor-onboard`. Tracked as a follow-up; the repo-creation half is the
-solid, reviewable skeleton delivered here.
+Every scaffolded repo ships an empty `.devops/secrets/` with a README. A team adds a secret
+from the **Secrets** tab on its Component (the `capstone:seal-secret` action, M3), which
+seals the value and opens a PR adding `.devops/secrets/<key>.sealedsecret.yaml` (per-env
+strict scope) + wiring it into the env overlay. Write-only by design — sealed values can't
+be read back. The skeleton ships the home so the pattern is already in place the first time
+a team uses the UI.
+
+### Operator onboarding (the imperative half — post-merge)
+
+Robot tokens are Harbor-generated, one-time, and not declarative, so after the platform PR
+merges an operator runs the Harbor provisioning (the exact commands are in the PR body):
+
+```bash
+export KUBECONFIG=clusters/real-talos/talos-kubeconfig
+make harbor-onboard     NAME=<name> TARGET=real-talos KUBE_CONTEXT=admin@capstone
+make harbor-push-robot  NAME=<name> TARGET=real-talos KUBE_CONTEXT=admin@capstone  # -> sealed harbor-push (guarded)
+make harbor-robot       NAME=<name> ENV=<dev|staging|prod> TARGET=real-talos …     # -> sealed harbor-pull per env
+```
+
+`TARGET=real-talos` is mandatory on every command (omitting it seals the k3d-default
+registry host → docker auth mismatch → push/pull 403; the `_check-harbor-target` Makefile
+guard is the backstop). Each seal is written through a non-empty guard
+(`> tmp && test -s tmp && grep -q 'kind: SealedSecret' tmp && mv tmp final`) so a
+duplicate-robot 409 can never commit an empty secret. Full robot-mint automation (a
+merge-triggered action) is a planned fast-follow (D-M4-1) — kept off the Backstage backend
+so Harbor-admin/seal-controller creds stay out of the portal's trust domain.
 
 ---
 

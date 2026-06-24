@@ -117,3 +117,29 @@ integrations:
           # Installation 141394298 on the UA-MIS org. allowedInstallationOwners scopes the
           # App to that org so credential discovery never strays to another installation.
           allowedInstallationOwners: ['UA-MIS']
+
+# ── M3: the secrets capability (capstone:seal-secret, ADR-029 §4) ───────────────────────
+# Tells the capstone:seal-secret backend action where to find the OFFLINE sealing cert + the
+# bundled kubeseal binary, and the repo-write conventions. The cert is the controller's
+# PUBLIC key (D-047 A2): the action seals OFFLINE (`kubeseal --cert <path>`), so there is NO
+# backstage->controller egress. The cert is mounted by the Helm extraVolume/extraVolumeMount
+# in applicationsets/backstage-process-app.yaml (devops, m2-deploy) at sealingCertPath; the
+# kubeseal binary is baked into the image (packages/backend/Dockerfile, pinned v0.37.0). These
+# values must be mirrored into the Helm appConfig IF the pod loads only that (same pattern as
+# permission.enabled) — confirm with devops.
+capstone:
+  secrets:
+    # The mounted public sealing cert (read-only ConfigMap, m2-deploy). Action seals offline.
+    sealingCertPath: /etc/backstage/sealing-cert/sealing-cert.pem
+    # The bundled kubeseal binary (Dockerfile COPY); 'kubeseal' on PATH also works.
+    kubesealBin: /usr/local/bin/kubeseal
+    # PR branch name prefix for each seal (branch = <prefix><key>-<env>-<timestamp>).
+    defaultBranchPrefix: secrets/
+    # Where the SealedSecret lands in the team app repo (per-key file).
+    secretsDir: .devops/secrets
+    # Relative path FROM an env overlay's kustomization.yaml TO the secrets dir (Option A,
+    # coordinated with M4): .devops/chart/overlays/<env>/ -> .devops/secrets/.
+    overlayRelPath: ../../secrets
+    # Parent dir holding the per-env overlay kustomizations the action appends the SealedSecret
+    # reference to (dev/staging/prod; preview/pr-<n> are ephemeral and out of scope).
+    overlaysDir: .devops/chart/overlays

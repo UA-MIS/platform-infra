@@ -84,10 +84,28 @@ export class CapstoneTeamPermissionPolicy implements PermissionPolicy {
     //    shared "New Capstone Project" template is meant for ALL teams; M4's PR-gating is
     //    the real per-team control. Template READ is already filtered by (2). Revisit only
     //    if a team-private template appears.
-    //
-    // 4. M3 HOOK POINT — `capstone:seal-secret` will add a branch here that checks
-    //    ownership of the target Component before sealing (reuses ownershipRefs +
-    //    ADMIN_GROUP_REF). M2 leaves the structure ready; it does not implement that branch.
+
+    // 4. M3 — `capstone.secret.seal` (the secrets capability, ADR-029 §4/§6). This is the
+    //    COARSE half of the spine: `capstone.secret.seal` is a BASIC permission, so the
+    //    framework hands us the permission + the actor's ownershipEntityRefs but NOT the
+    //    target Component (a basic permission carries no resource), so the policy cannot
+    //    itself check "does the actor own THIS Component". So the split is:
+    //      - POLICY (here): allow only an actual TEAM MEMBER — someone with at least one
+    //        Group membership. A non-member (no groups; only their own User ref, or empty
+    //        ownership) is DENIED outright. Admins (labmx) already short-circuited to ALLOW
+    //        in branch 1.
+    //      - HANDLER (the action's belt-and-suspenders owner re-check, plan §2.3): with the
+    //        entityRef in hand, requires the actor's groups to INTERSECT the target's owner.
+    //    Together they are the single per-team gate (no parallel authz). DENY here fails the
+    //    action closed before any seal/publish.
+    if (request.permission.name === 'capstone.secret.seal') {
+      const belongsToATeam = ownershipRefs.some(ref => ref.startsWith('group:'));
+      return {
+        result: belongsToATeam
+          ? AuthorizeResult.ALLOW
+          : AuthorizeResult.DENY,
+      };
+    }
 
     // 5. DEFAULT — ALLOW everything not explicitly scoped above (search, techdocs,
     //    scaffolder execute, etc.). We do not lock down read-only platform features
