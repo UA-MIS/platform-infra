@@ -1,0 +1,110 @@
+# Control-plane NetworkPolicies — vault namespace (ADR-030 B1, SEC-ESO-1).
+#
+# Vault is the secrets store; it must be reachable ONLY by ESO (the
+# external-secrets namespace) + the node (kubelet probes) + itself (raft peers, if
+# scaled to 3-node HA). Everything else is denied. This brings Vault under the same
+# default-deny + scoped-allow posture as argocd/dex/harbor.
+#
+# Lives in hardening/netpol-controlplane/ so it inherits the MANUAL-SYNC Application
+# (platform-netpol-controlplane) — default-deny is applied to the vault namespace
+# only via the deliberate, watched `argocd app sync`, never auto-applied (same
+# lockout-avoidance + SEC-011 live-apply gate as the other control-plane netpols).
+# NetworkPolicies are ADDITIVE (OR); these sit alongside the Cilium CNPs.
+#
+# Talos/Cilium CIDRs (proven-enforced, SEC-011): pods 10.244.0.0/16,
+# services 10.96.0.0/12, nodes 10.237.168.0/22 (apiserver :6443 binds a node IP).
+# NO external egress is granted to Vault: it has no public ingress and (in B1) does
+# NOT round-trip to any external issuer — only the apiserver (TokenReview for the
+# k8s auth method + service_registration) and DNS. (If Transit auto-unseal points
+# at an EXTERNAL unsealer Vault later, add a scoped egress; the recommended unsealer
+# is IN-CLUSTER, covered by the intra-cluster CIDRs.)
+
+# --- default-deny (ingress + egress) for every pod in vault ---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: zz-default-deny
+  namespace: vault
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# --- INGRESS: from ESO (the only client), intra-namespace (raft peers when 3-node),
+#     and kubelet probes from the node. ---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-eso-and-raft
+  namespace: vault
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    # ESO controller (external-secrets ns) -> vault API :8200. This is the ONLY
+    # application client of Vault (the ExternalSecret pull path). The human reaches
+    # the UI/API via `kubectl port-forward` (apiserver path), not a netpol-gated route.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: external-secrets
+      ports:
+        - protocol: TCP
+          port: 8200
+    # Intra-namespace: raft peer traffic (:8201) + active/standby (:8200) when
+    # scaled to 3-node HA. Harmless at single-node; required if ha.replicas -> 3.
+    - from:
+        - podSelector: {}
+    # Kubelet readiness/liveness probes originate from the NODE IP (not a
+    # pod/namespace) — without this, default-deny fails Vault's probes and the
+    # StatefulSet never goes Ready.
+    - from:
+        - ipBlock:
+            cidr: 10.237.168.0/22
+---
+# --- EGRESS: DNS, intra-cluster (raft peers + the in-cluster unsealer Vault if
+#     Transit auto-unseal is adopted), and the apiserver (TokenReview for k8s auth +
+#     service_registration "kubernetes"). NO external egress. ---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-scoped
+  namespace: vault
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # DNS to CoreDNS (kube-system), UDP+TCP 53.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Intra-cluster: any pod (10.244/16) or service (10.96/12) — covers raft peers
+    # + an in-cluster Transit unsealer Vault (the recommended auto-unseal source).
+    - to:
+        - ipBlock:
+            cidr: 10.244.0.0/16
+        - ipBlock:
+            cidr: 10.96.0.0/12
+    # kube-apiserver on the node IPs (:6443) — TokenReview (k8s auth method) +
+    # service_registration "kubernetes" both call the apiserver.
+    - to:
+        - ipBlock:
+            cidr: 10.237.168.0/22
+      ports:
+        - protocol: TCP
+          port: 6443

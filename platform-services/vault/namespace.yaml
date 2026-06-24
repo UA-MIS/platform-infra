@@ -1,0 +1,12 @@
+# Vault namespace (ADR-030 B1). HashiCorp Vault — the secrets store behind ESO
+# (Raft on a Ceph PVC, TLS on). Its own namespace keeps Vault + its StatefulSet,
+# PVCs, the server-TLS Secret, and the netpols scoped. The Helm chart itself is a
+# SEPARATE Application (applicationsets/vault-app.yaml, method A) — this kustomize
+# dir ships ONLY the namespace (the prereq the chart app installs into), same split
+# as harbor (platform-services/harbor ships ns + secrets; the chart is its own app).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vault
+  labels:
+    platform.capstone/component: platform

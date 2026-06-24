@@ -1,0 +1,12 @@
+# External Secrets Operator namespace (ADR-030 B1). ESO reads from Vault and
+# materializes namespaced Kubernetes Secrets from `ExternalSecret` declarations.
+# Its own namespace scopes the controller + webhook + cert-controller and the
+# ESO->Vault egress netpol. The Helm chart is a SEPARATE Application
+# (applicationsets/external-secrets-app.yaml, method A) — this kustomize dir ships
+# ONLY the namespace (the prereq the chart app installs into), same split as harbor.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: external-secrets
+  labels:
+    platform.capstone/component: platform

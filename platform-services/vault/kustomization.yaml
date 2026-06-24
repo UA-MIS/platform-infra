@@ -1,0 +1,19 @@
+# Vault PREREQ (ADR-030 B1) — the namespace the Vault Helm Application
+# (applicationsets/vault-app.yaml) installs into. Managed by the
+# platform-services-appset (kustomize directory generator); the Helm chart itself
+# is a SEPARATE Application (method A) so it does NOT render through this dir.
+#
+# The server-TLS Secret (vault-server-tls) and the audit device are created OUT-OF-
+# BAND by the human runbook (vault/README.md §C) — a server cert is generated at
+# init time and is NOT committed (no secret material in git; that is the whole point
+# of B1). So this dir ships only the namespace.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false
