@@ -117,12 +117,14 @@ spec:
               - github.com
             allowedOwners:
               - UA-MIS
-            # Default the repo name to the app slug (BEP-0010 parameter templating).
-            requestUserCredentials:
-              secretsKey: USER_OAUTH_TOKEN
-              additionalScopes:
-                github:
-                  - repo
+            # NO requestUserCredentials: that option makes RepoUrlPicker start a USER
+            # GitHub OAuth flow (/api/auth/github/start) to mint a per-user token — but The
+            # Process has NO `github` auth provider (D-017: Dex/OIDC sign-in + the GitHub
+            # App for all API calls), so it 404'd "Unknown auth provider 'github'" and
+            # blocked the Repository step. The owner/repo dropdowns render fine from
+            # allowedHosts/allowedOwners alone; repo creation runs as the platform GitHub
+            # App via integrations.github (see the publish:github step — no token input),
+            # matching the publish:github:pull-request step's App-token model.
 
   steps:
     # 1) Render the per-team starter (app/ + the 4-field app-metadata.yaml + catalog).
@@ -193,7 +195,11 @@ spec:
         # branch-protection the golden path assumes; reviewers/CI gate merges).
         protectDefaultBranch: true
         requireCodeOwnerReviews: true
-        token: ${{ secrets.USER_OAUTH_TOKEN }}
+        # No `token:` — publish:github authenticates via the configured integrations.github
+        # (the platform GitHub App, sealed in backstage-process-secrets), the same App used
+        # by catalog ingestion + capstone:render-tenant. Repo creation runs as the App, not
+        # a user OAuth token (which we removed from the RepoUrlPicker above). Mirrors the
+        # publish:github:pull-request step (5b), which already uses the App token.
 
     # 4) Register the new component so it appears in The Process catalog right away.
     - id: register
