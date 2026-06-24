@@ -26,7 +26,6 @@ jest.mock('../vaultClient', () => ({
       if (vaultShouldFail) throw new Error('vault boom (HTTP 500)');
     }),
     deleteKey: jest.fn(async () => {}),
-    listKeys: jest.fn(async () => []),
   })),
 }));
 

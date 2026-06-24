@@ -69,7 +69,7 @@ export interface Config {
          */
         authMount?: string;
         /**
-         * Vault k8s-auth role bound to the dedicated Backstage SA. Default: 'backstage-writer'.
+         * Vault k8s-auth role bound to the dedicated Backstage SA. Default: 'backstage-secrets'.
          * @visibility backend
          */
         role?: string;

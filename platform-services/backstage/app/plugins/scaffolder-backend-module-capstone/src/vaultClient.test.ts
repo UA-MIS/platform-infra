@@ -6,8 +6,10 @@
  *    plaintext VALUE is only ever in the request BODY (never a header value, never logged),
  *  - setKey rotates one key (merge-patch) and falls back to create on a 404/405 path,
  *  - deleteKey uses a merge-patch null and treats 404 as a no-op,
- *  - listKeys returns KEY NAMES ONLY (never the values), and [] on 404,
  *  - errors carry the HTTP status + path but NEVER the request body (no value leak).
+ *
+ * NB: there is no listKeys/read test because the client has NO data-read method — the writer
+ * policy grants no `read` on secret/data, and List sources names from git (sealCore), not Vault.
  *
  * We mock node:https (the single httpRequest seam) + fs/promises (token + CA reads).
  */
@@ -85,7 +87,7 @@ const CFG: VaultClientConfig = {
   addr: 'https://vault.vault.svc.cluster.local:8200',
   mount: 'secret',
   authMount: 'kubernetes',
-  role: 'backstage-writer',
+  role: 'backstage-secrets',
   saTokenPath: '/var/run/secrets/vault/token',
   caPath: '/etc/backstage/vault-ca/ca.crt',
 };
@@ -114,7 +116,7 @@ describe('VaultClient login', () => {
     expect(login.path).toBe('/v1/auth/kubernetes/login');
     expect(JSON.parse(login.body!)).toEqual({
       jwt: 'SA-JWT-TOKEN',
-      role: 'backstage-writer',
+      role: 'backstage-secrets',
     });
     // The CA bundle is passed for TLS verification.
     expect(login.ca).toBe('CA-PEM');
@@ -201,27 +203,11 @@ describe('VaultClient deleteKey', () => {
   });
 });
 
-describe('VaultClient listKeys', () => {
-  it('returns the key NAMES only — never the values', async () => {
-    queue({
-      status: 200,
-      json: {
-        data: { data: { DATABASE_URL: 'postgres://secret', API_KEY: 'abc' } },
-      },
-    });
-    const c = new VaultClient(CFG);
-    const keys = await c.listKeys('tenants/t/dev/app');
-
-    expect(keys.sort()).toEqual(['API_KEY', 'DATABASE_URL']);
-    // None of the recorded requests returned a value to the caller; the values stay in Vault.
-    // (We assert the contract: listKeys returns only strings that are the map KEYS.)
-    expect(keys).not.toContain('postgres://secret');
-    expect(keys).not.toContain('abc');
-  });
-
-  it('returns [] for a path that does not exist yet (404)', async () => {
-    queue({ status: 404 });
-    const c = new VaultClient(CFG);
-    await expect(c.listKeys('tenants/t/dev/app')).resolves.toEqual([]);
+describe('VaultClient has no data-read method (write-only, least privilege)', () => {
+  it('does not expose a values read/list API', () => {
+    const c = new VaultClient(CFG) as unknown as Record<string, unknown>;
+    expect(c.listKeys).toBeUndefined();
+    expect(c.getSecret).toBeUndefined();
+    expect(c.read).toBeUndefined();
   });
 });

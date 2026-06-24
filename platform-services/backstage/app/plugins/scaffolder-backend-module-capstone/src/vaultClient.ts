@@ -7,10 +7,11 @@
  * AUTH: Backstage authenticates to Vault with its OWN Kubernetes ServiceAccount JWT
  * (a projected token with audience=vault, mounted by the deploy at saTokenPath) via k8s-auth
  * (POST /v1/auth/<mount>/login {jwt, role}) and uses the returned client_token for the KV-v2
- * call. The Vault role `backstage-writer` (eso-vault domain, vault-policies) binds ONLY the
- * dedicated Backstage SA (backstage-vault-writer) to a write-scoped policy over
- * secret/data/tenants/* (create/update/read/patch) — least privilege. The token can write ANY
- * tenant path (coarse by design); per-tenant authz is enforced in sealCore BEFORE the write.
+ * call. The Vault role `backstage-secrets` (eso-vault domain, vault-policies) binds ONLY the
+ * dedicated Backstage SA (backstage-secrets) to a WRITE-ONLY policy over secret/data/tenants/*
+ * (create/update/patch — NO read) + read/list on secret/metadata/tenants/* — least privilege.
+ * The token can write ANY tenant path (coarse by design); per-tenant authz is enforced in
+ * sealCore BEFORE the write. There is deliberately no value-read here (values are write-only).
  *
  * SECURITY INVARIANTS (mirror sealCore R2): the plaintext VALUE is only ever in the request
  * BODY (never an argv, never a path, never a log line); the client_token + the value are NEVER
@@ -210,31 +211,9 @@ export class VaultClient {
     );
   }
 
-  /**
-   * List the KEY NAMES present at a KV-v2 path — NAMES ONLY (the value bytes are read from
-   * Vault to enumerate the map keys but are NEVER returned to the caller; this preserves the
-   * write-only contract). A 404 path returns [] (nothing set yet).
-   */
-  async listKeys(secretPath: string): Promise<string[]> {
-    const token = await this.login();
-    const res = await this.httpRequest(
-      'GET',
-      `/v1/${this.cfg.mount}/data/${secretPath}`,
-      { 'x-vault-token': token },
-    );
-    if (res.status === 404) {
-      return [];
-    }
-    if (res.status < 200 || res.status >= 300) {
-      throw new Error(
-        `Vault KV-v2 read failed (HTTP ${res.status}) at ` +
-          `${this.cfg.mount}/data/${secretPath}.`,
-      );
-    }
-    const data = (
-      res.body as { data?: { data?: Record<string, unknown> } } | undefined
-    )?.data?.data;
-    // Return ONLY the key names — never the values.
-    return Object.keys(data ?? {});
-  }
+  // NB: there is intentionally NO read-the-value method here. The writer policy
+  // (backstage-secrets-writer) grants create/update/patch on secret/data/tenants/* but NOT
+  // read — values are write-only and never read back. The Secrets tab's List sources key NAMES
+  // from the committed ExternalSecret declarations in git (sealCore.listSecrets), NOT from
+  // Vault, so no data read is needed anywhere.
 }
