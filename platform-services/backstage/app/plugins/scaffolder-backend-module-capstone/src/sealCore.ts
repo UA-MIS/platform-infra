@@ -75,6 +75,27 @@ export interface SecretSummary {
   lastUpdated?: string;
 }
 
+/** Request to list the projects (Components) the actor may manage secrets for. */
+export interface ListProjectsRequest {
+  credentials: BackstageCredentials;
+}
+
+/** A project the actor can manage secrets for (the access-scoped picker, secrets-UX v1). */
+export interface ProjectSummary {
+  entityRef: string;
+  /** Display title (metadata.title || metadata.name). */
+  title: string;
+  /** The owning team slug (for display). */
+  owner: string;
+}
+
+/** Request to delete (un-seal) a secret key from a Component's repo. */
+export interface DeleteRequest {
+  credentials: BackstageCredentials;
+  entityRef: string;
+  key: string;
+}
+
 /** Resolved capstone.secrets.* config (plan §2.2). `kubesealBin` defaults to PATH lookup. */
 interface SecretsConfig {
   sealingCertPath: string;
@@ -640,6 +661,226 @@ async function appendToOverlayKustomization(
     branch,
     path,
     message: `chore(secrets): reference ${resourceRelPath} in ${branch}`,
+    content: Buffer.from(updated, 'utf8').toString('base64'),
+    sha,
+  });
+}
+
+/**
+ * List the projects (Components) the signed-in actor may manage secrets for (secrets-UX v1,
+ * the access-scoped picker). Access scoping is IDENTICAL to the per-Component seal gate: a
+ * Component is included iff the actor's catalog Groups intersect its owner — or the actor is
+ * the `labmx` admin, who sees ALL Components. So the picker shows exactly the projects the
+ * actor could seal into (no more, no less), reusing resolveActorOwnership + entityOwnerRefs.
+ */
+export async function listMyProjects(
+  deps: CapstoneSecretsDeps,
+  request: ListProjectsRequest,
+): Promise<ProjectSummary[]> {
+  const { credentials } = request;
+
+  // Authenticated user only (no service principal) — same as seal.
+  const actorUserRef = requireUserRef(credentials);
+  const serviceCreds = await deps.auth.getOwnServiceCredentials();
+  const actorOwnership = await resolveActorOwnership(
+    deps,
+    serviceCreds,
+    actorUserRef,
+  );
+  const isAdmin = actorOwnership.includes(ADMIN_GROUP_REF);
+
+  const { items } = await deps.catalog.getEntities(
+    {
+      filter: [{ kind: 'Component' }],
+      fields: [
+        'kind',
+        'metadata.name',
+        'metadata.namespace',
+        'metadata.title',
+        'spec.owner',
+        'relations',
+      ],
+    },
+    { credentials: serviceCreds },
+  );
+
+  const projects: ProjectSummary[] = [];
+  for (const entity of items) {
+    const ownerRefs = entityOwnerRefs(entity);
+    const owned = ownerRefs.some(o => actorOwnership.includes(o));
+    if (!isAdmin && !owned) {
+      continue;
+    }
+    const ownerSlug = parseEntityRef(
+      ownerRefs.find(r => r.startsWith('group:')) ?? ownerRefs[0] ?? '',
+    ).name;
+    projects.push({
+      entityRef: stringifyEntityRef(entity),
+      title: (entity.metadata.title as string | undefined) ?? entity.metadata.name,
+      owner: ownerSlug,
+    });
+  }
+  // Stable, human-friendly ordering.
+  projects.sort((a, b) => a.title.localeCompare(b.title));
+  return projects;
+}
+
+/**
+ * Delete (un-seal) a secret key from a Component's app repo via a PR — the inverse of
+ * sealAndPublish. Removes BOTH the `<secretsDir>/<key>.sealedsecret.yaml` file AND its
+ * `- <overlayRelPath>/<key>.sealedsecret.yaml` reference from every env overlay's
+ * kustomization, so a merge cleanly drops the SealedSecret from GitOps (the controller then
+ * GCs the decrypted Secret on the next sync). ENFORCES the same capstone.secret.seal authz +
+ * owner re-check + fail-closed as seal (you can only delete what you could seal). Like seal,
+ * it is PR-by-default — the secret is gone once the team merges, not instantly.
+ */
+export async function deleteSecret(
+  deps: CapstoneSecretsDeps,
+  request: DeleteRequest,
+): Promise<{ pullRequestUrl: string }> {
+  const { credentials, entityRef, key } = request;
+  const cfg = readSecretsConfig(deps.config);
+
+  deps.logger.info(
+    `capstone delete-secret requested for key="${key}" target=${entityRef}`,
+  );
+
+  const { target } = await authorizeAndResolveTarget(
+    deps,
+    credentials,
+    entityRef,
+  );
+  const { owner, repo } = repoForTarget(target);
+  const octokit = await octokitForRepo(deps.config, owner, repo);
+
+  const resourceName = toResourceName(key);
+  const secretFilePath = `${cfg.secretsDir}/${resourceName}.sealedsecret.yaml`;
+
+  // Locate the file (404 -> nothing to delete; surface a clear error).
+  let fileSha: string | undefined;
+  try {
+    const { data } = await octokit.repos.getContent({ owner, repo, path: secretFilePath });
+    if (!Array.isArray(data) && 'sha' in data) {
+      fileSha = data.sha;
+    }
+  } catch (e) {
+    if ((e as { status?: number }).status === 404) {
+      throw new NotFoundError(
+        `No sealed secret "${key}" found for ${entityRef} (nothing to delete).`,
+      );
+    }
+    throw e;
+  }
+
+  const { data: repoInfo } = await octokit.repos.get({ owner, repo });
+  const baseBranch = repoInfo.default_branch;
+  const { data: baseRef } = await octokit.git.getRef({
+    owner,
+    repo,
+    ref: `heads/${baseBranch}`,
+  });
+  const branch = `${cfg.defaultBranchPrefix}delete-${resourceName}-${Date.now()}`;
+  await octokit.git.createRef({
+    owner,
+    repo,
+    ref: `refs/heads/${branch}`,
+    sha: baseRef.object.sha,
+  });
+
+  // 1) Delete the SealedSecret file on the branch.
+  await octokit.repos.deleteFile({
+    owner,
+    repo,
+    branch,
+    path: secretFilePath,
+    message: `chore(secrets): delete ${key}`,
+    sha: fileSha!,
+  });
+
+  // 2) Remove the resource reference from each env overlay's kustomization (best-effort per
+  //    env: an overlay that never referenced it is simply skipped).
+  const resourceRelPath = `${cfg.overlayRelPath}/${resourceName}.sealedsecret.yaml`;
+  for (const env of ['dev', 'staging', 'prod']) {
+    await removeFromOverlayKustomization(
+      octokit,
+      owner,
+      repo,
+      branch,
+      `${cfg.overlaysDir}/${env}/kustomization.yaml`,
+      resourceRelPath,
+    );
+  }
+
+  const { data: pr } = await octokit.pulls.create({
+    owner,
+    repo,
+    base: baseBranch,
+    head: branch,
+    title: `chore(secrets): delete ${key}`,
+    body: [
+      `Removes the sealed secret \`${key}\` from \`${entityRef}\`.`,
+      '',
+      'Deletes the SealedSecret file + its overlay references. On merge: ArgoCD prunes the',
+      'SealedSecret -> the sealed-secrets controller removes the decrypted Secret on sync.',
+      '',
+      '**The secret is not gone until this PR is merged** (PR-by-default, like sealing).',
+    ].join('\n'),
+  });
+  deps.logger.info(
+    `capstone delete-secret opened PR for key="${key}": ${pr.html_url}`,
+  );
+  return { pullRequestUrl: pr.html_url };
+}
+
+/**
+ * Idempotently REMOVE a `- <resourceRelPath>` line from an env overlay's kustomization
+ * resources list (the inverse of appendToOverlayKustomization). No-op if the overlay or the
+ * line is absent — so deleting a secret an env never referenced is safe.
+ */
+async function removeFromOverlayKustomization(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  branch: string,
+  path: string,
+  resourceRelPath: string,
+): Promise<void> {
+  let existing = '';
+  let sha: string | undefined;
+  try {
+    const { data } = await octokit.repos.getContent({
+      owner,
+      repo,
+      path,
+      ref: branch,
+    });
+    if (!Array.isArray(data) && 'content' in data && data.content) {
+      existing = Buffer.from(data.content, 'base64').toString('utf8');
+      sha = data.sha;
+    }
+  } catch (e) {
+    if ((e as { status?: number }).status === 404) {
+      return; // no overlay -> nothing to remove
+    }
+    throw e;
+  }
+
+  if (!existing.includes(resourceRelPath) || !sha) {
+    return; // not referenced here
+  }
+
+  // Drop the resources entry line(s) for this path (handles `- path` and `  - path`).
+  const updated = existing
+    .split('\n')
+    .filter(line => line.trim() !== `- ${resourceRelPath}`)
+    .join('\n');
+
+  await octokit.repos.createOrUpdateFileContents({
+    owner,
+    repo,
+    branch,
+    path,
+    message: `chore(secrets): unreference ${resourceRelPath} in ${branch}`,
     content: Buffer.from(updated, 'utf8').toString('base64'),
     sha,
   });

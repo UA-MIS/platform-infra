@@ -12,4 +12,7 @@ export type {
   SecretSummary,
   SealSecretRequest,
   SealSecretResult,
+  ProjectSummary,
+  DeleteSecretRequest,
+  DeleteSecretResult,
 } from './api';

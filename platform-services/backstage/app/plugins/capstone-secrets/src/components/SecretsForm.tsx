@@ -37,11 +37,24 @@ export function SecretsForm(props: {
   }) => Promise<SealSecretResult>;
   disabled?: boolean;
   disabledReason?: string;
+  /**
+   * EDIT mode: when set, the form pre-fills + locks the key (you're re-sealing an existing
+   * secret) and targets the given env(s). "Edit" is a transparent re-seal — enter a new value
+   * → the same POST /seal overwrites the SealedSecret (write-only, so the old value is never
+   * shown; you just set a new one).
+   */
+  initialKey?: string;
+  initialEnvs?: string[];
 }) {
   const classes = useStyles();
-  const [key, setKey] = useState('');
+  const editMode = Boolean(props.initialKey);
+  const [key, setKey] = useState(props.initialKey ?? '');
   const [value, setValue] = useState('');
-  const [envs, setEnvs] = useState<string[]>(['dev']);
+  const [envs, setEnvs] = useState<string[]>(
+    props.initialEnvs && props.initialEnvs.length > 0
+      ? props.initialEnvs
+      : ['dev'],
+  );
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | undefined>();
   const [result, setResult] = useState<SealSecretResult | undefined>();
@@ -75,7 +88,7 @@ export function SecretsForm(props: {
   };
 
   return (
-    <InfoCard title="Seal a secret">
+    <InfoCard title={editMode ? `Edit secret: ${props.initialKey}` : 'Seal a secret'}>
       <Typography variant="body2" color="textSecondary" gutterBottom>
         Secrets are <strong>write-only</strong> here — sealed values cannot be
         read back. To change a secret, set it again. On submit, a pull request is
@@ -95,10 +108,15 @@ export function SecretsForm(props: {
         placeholder="DATABASE_URL"
         fullWidth
         value={key}
-        disabled={props.disabled || submitting}
+        // In edit mode the key is fixed (you're re-sealing THIS secret) — lock it.
+        disabled={props.disabled || submitting || editMode}
         onChange={e => setKey(e.target.value)}
         inputProps={{ 'aria-label': 'secret key' }}
-        helperText="The secret key (becomes the SealedSecret name + data key)."
+        helperText={
+          editMode
+            ? 'Re-sealing this key — enter a new value below.'
+            : 'The secret key (becomes the SealedSecret name + data key).'
+        }
       />
 
       <TextField

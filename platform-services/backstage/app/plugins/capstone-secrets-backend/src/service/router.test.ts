@@ -14,9 +14,13 @@ import { MiddlewareFactory } from '@backstage/backend-defaults/rootHttpRouter';
 
 const sealAndPublish = jest.fn();
 const listSecrets = jest.fn();
+const listMyProjects = jest.fn();
+const deleteSecret = jest.fn();
 jest.mock('@internal/backstage-plugin-scaffolder-backend-module-capstone', () => ({
   sealAndPublish: (...args: unknown[]) => sealAndPublish(...args),
   listSecrets: (...args: unknown[]) => listSecrets(...args),
+  listMyProjects: (...args: unknown[]) => listMyProjects(...args),
+  deleteSecret: (...args: unknown[]) => deleteSecret(...args),
 }));
 
 // eslint-disable-next-line import/first
@@ -45,6 +49,8 @@ async function buildApp() {
 beforeEach(() => {
   sealAndPublish.mockReset();
   listSecrets.mockReset();
+  listMyProjects.mockReset();
+  deleteSecret.mockReset();
 });
 
 describe('capstone-secrets router', () => {
@@ -134,6 +140,66 @@ describe('capstone-secrets router', () => {
       const res = await request(app).get('/list');
       expect(res.status).toBe(400);
       expect(listSecrets).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('GET /my-projects', () => {
+    it('returns the access-scoped project list (user creds forwarded)', async () => {
+      listMyProjects.mockResolvedValue([
+        { entityRef: 'component:default/my-app', title: 'My App', owner: 'team-a' },
+      ]);
+      const app = await buildApp();
+      const res = await request(app).get('/my-projects');
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        projects: [
+          { entityRef: 'component:default/my-app', title: 'My App', owner: 'team-a' },
+        ],
+      });
+      expect(listMyProjects).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ credentials: expect.anything() }),
+      );
+    });
+  });
+
+  describe('POST /delete', () => {
+    it('forwards {entityRef,key}+creds to deleteSecret and returns the PR url', async () => {
+      deleteSecret.mockResolvedValue({
+        pullRequestUrl: 'https://github.com/x/y/pull/7',
+      });
+      const app = await buildApp();
+      const res = await request(app)
+        .post('/delete')
+        .send({ entityRef: 'component:default/my-app', key: 'DATABASE_URL' });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ pullRequestUrl: 'https://github.com/x/y/pull/7' });
+      expect(deleteSecret).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          entityRef: 'component:default/my-app',
+          key: 'DATABASE_URL',
+          credentials: expect.anything(),
+        }),
+      );
+    });
+
+    it('400s when key is missing (no delete attempted)', async () => {
+      const app = await buildApp();
+      const res = await request(app)
+        .post('/delete')
+        .send({ entityRef: 'component:default/my-app' });
+      expect(res.status).toBe(400);
+      expect(deleteSecret).not.toHaveBeenCalled();
+    });
+
+    it('400s when entityRef is missing (no delete attempted)', async () => {
+      const app = await buildApp();
+      const res = await request(app).post('/delete').send({ key: 'K' });
+      expect(res.status).toBe(400);
+      expect(deleteSecret).not.toHaveBeenCalled();
     });
   });
 });

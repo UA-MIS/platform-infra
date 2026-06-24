@@ -32,11 +32,31 @@ export interface SealSecretResult {
   pullRequestUrls: string[];
 }
 
+/** A project the signed-in user can manage secrets for (the access-scoped picker). */
+export interface ProjectSummary {
+  entityRef: string;
+  title: string;
+  owner: string;
+}
+
+export interface DeleteSecretRequest {
+  entityRef: string;
+  key: string;
+}
+
+export interface DeleteSecretResult {
+  pullRequestUrl: string;
+}
+
 export interface CapstoneSecretsApi {
+  /** Projects (Components) the signed-in user can manage secrets for (labmx admin = all). */
+  listMyProjects(): Promise<ProjectSummary[]>;
   /** List existing secret key names + last-updated for a Component's repo. Never values. */
   listSecrets(entityRef: string): Promise<SecretSummary[]>;
   /** Seal a secret and open the PR(s). The value is write-only; it is never returned. */
   sealSecret(request: SealSecretRequest): Promise<SealSecretResult>;
+  /** Delete (un-seal) a secret key — opens a PR removing it. Not instant (PR-by-default). */
+  deleteSecret(request: DeleteSecretRequest): Promise<DeleteSecretResult>;
 }
 
 export const capstoneSecretsApiRef = createApiRef<CapstoneSecretsApi>({
@@ -55,6 +75,18 @@ export class CapstoneSecretsClient implements CapstoneSecretsApi {
 
   private async baseUrl(): Promise<string> {
     return this.discoveryApi.getBaseUrl('capstone-secrets');
+  }
+
+  async listMyProjects(): Promise<ProjectSummary[]> {
+    const base = await this.baseUrl();
+    const res = await this.fetchApi.fetch(`${base}/my-projects`);
+    if (!res.ok) {
+      throw new Error(
+        `Failed to list projects (${res.status}): ${await res.text()}`,
+      );
+    }
+    const body = (await res.json()) as { projects: ProjectSummary[] };
+    return body.projects ?? [];
   }
 
   async listSecrets(entityRef: string): Promise<SecretSummary[]> {
@@ -85,5 +117,22 @@ export class CapstoneSecretsClient implements CapstoneSecretsApi {
       );
     }
     return (await res.json()) as SealSecretResult;
+  }
+
+  async deleteSecret(
+    request: DeleteSecretRequest,
+  ): Promise<DeleteSecretResult> {
+    const base = await this.baseUrl();
+    const res = await this.fetchApi.fetch(`${base}/delete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+    });
+    if (!res.ok) {
+      throw new Error(
+        `Failed to delete secret (${res.status}): ${await res.text()}`,
+      );
+    }
+    return (await res.json()) as DeleteSecretResult;
   }
 }
