@@ -14,40 +14,18 @@ export interface Config {
        */
       defaultBranchPrefix?: string;
       /**
-       * Where the ExternalSecret declaration lands in the team app repo
-       * (externalsecret-<env>.yaml). Default: '.devops/secrets'.
-       * @visibility backend
-       */
-      secretsDir?: string;
-      /**
-       * Relative path from an env overlay's kustomization.yaml to the secrets dir.
-       * Default: '../../secrets'.
-       * @visibility backend
-       */
-      overlayRelPath?: string;
-      /**
-       * Parent dir holding the per-env overlay kustomizations.
+       * Parent dir holding the per-env overlay dirs (dev/staging/prod).
        * Default: '.devops/chart/overlays'.
        * @visibility backend
        */
       overlaysDir?: string;
       /**
-       * The k8s Secret the ExternalSecret materializes (target.name + the ExternalSecret name).
-       * Must match the per-tenant SecretStore contract. Default: 'app-secrets'.
+       * The ExternalSecret file the M4 scaffolder ships inside each overlay dir — the Secrets tab
+       * upserts data[] entries into it (already a kustomization resource, so no overlay edit + no
+       * kustomize load-restrictor escape). Default: 'app-secret.externalsecret.yaml'.
        * @visibility backend
        */
-      targetSecretName?: string;
-      /**
-       * The per-tenant SecretStore the ExternalSecret references. Default: 'vault-tenant'.
-       * @visibility backend
-       */
-      secretStoreName?: string;
-      /**
-       * The SecretStore kind referenced (SecretStore | ClusterSecretStore).
-       * Default: 'SecretStore'.
-       * @visibility backend
-       */
-      secretStoreKind?: string;
+      overlayEsFile?: string;
       /**
        * Vault connection — where the secret VALUE is written (KV-v2 over k8s-auth).
        * @visibility backend

@@ -138,19 +138,13 @@ capstone:
   secrets:
     # PR branch name prefix for each set (branch = <prefix><key>-<env>-<timestamp>).
     defaultBranchPrefix: secrets/
-    # Where the ExternalSecret declaration lands in the team app repo (externalsecret-<env>.yaml).
-    secretsDir: .devops/secrets
-    # Relative path FROM an env overlay's kustomization.yaml TO the secrets dir (Option A,
-    # coordinated with M4): .devops/chart/overlays/<env>/ -> .devops/secrets/.
-    overlayRelPath: ../../secrets
-    # Parent dir holding the per-env overlay kustomizations the action references the
-    # ExternalSecret from (dev/staging/prod; preview/pr-<n> are ephemeral and out of scope).
+    # Parent dir holding the per-env overlay dirs (dev/staging/prod; preview/pr-<n> are
+    # ephemeral and out of scope for the Secrets tab).
     overlaysDir: .devops/chart/overlays
-    # The k8s Secret the ExternalSecret materializes + the per-tenant SecretStore it references
-    # (MUST match platform-services/external-secrets/secretstore-template.yaml — eso-vault/m4).
-    targetSecretName: app-secrets
-    secretStoreName: vault-tenant
-    secretStoreKind: SecretStore
+    # The ExternalSecret the M4 scaffolder ships INSIDE each overlay dir — the Secrets tab
+    # UPSERTS a data[] entry into it per env (it's already a kustomization resource, so no
+    # overlay edit + no kustomize load-restrictor escape). MUST match the scaffolder (#106).
+    overlayEsFile: app-secret.externalsecret.yaml
     # Vault connection — the value-write path (k8s-auth -> KV-v2 PATCH).
     vault:
       addr: https://vault.vault.svc.cluster.local:8200

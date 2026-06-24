@@ -89,18 +89,81 @@ function mockConfig(): any {
               (
                 {
                   defaultBranchPrefix: 'secrets/',
-                  secretsDir: '.devops/secrets',
-                  overlayRelPath: '../../secrets',
                   overlaysDir: '.devops/chart/overlays',
-                  targetSecretName: 'app-secrets',
-                  secretStoreName: 'vault-tenant',
-                  secretStoreKind: 'SecretStore',
+                  overlayEsFile: 'app-secret.externalsecret.yaml',
                 } as Record<string, string>
               )[k],
             getOptionalConfig: (_vk: string) => undefined, // vault.* -> defaults
           }
         : undefined,
   };
+}
+
+/** The per-env overlay ExternalSecret path the scaffolder ships (what the Secrets tab edits). */
+function overlayEs(env: string): string {
+  return `.devops/chart/overlays/${env}/app-secret.externalsecret.yaml`;
+}
+
+/**
+ * A realistic RENDERED (placeholders already substituted) overlay ExternalSecret like the M4
+ * scaffolder ships (#106) — shipped with the demo `app-secret` <- APP_SECRET entry. Tests mount
+ * this via getContent so the upsert/remove operate on the real shape.
+ */
+function shippedEs(env: string, extraKeys: string[] = []): string {
+  const lines = [
+    '# App secret — ESO ExternalSecret (ADR-030 B1).',
+    'apiVersion: external-secrets.io/v1',
+    'kind: ExternalSecret',
+    'metadata:',
+    '  name: my-app-secret',
+    `  namespace: team-alpha-${env}`,
+    'spec:',
+    '  refreshInterval: "1h"',
+    '  secretStoreRef:',
+    '    name: vault-tenant',
+    '    kind: SecretStore',
+    '  target:',
+    '    name: my-app-secret',
+    '    creationPolicy: Owner',
+    '    deletionPolicy: Delete',
+    '  data:',
+    '    - secretKey: app-secret',
+    '      remoteRef:',
+    `        key: tenants/team-alpha/${env}/app`,
+    '        property: APP_SECRET',
+  ];
+  for (const k of extraKeys) {
+    lines.push(
+      `    - secretKey: ${k}`,
+      '      remoteRef:',
+      `        key: tenants/team-alpha/${env}/app`,
+      `        property: ${k}`,
+    );
+  }
+  lines.push('');
+  return lines.join('\n');
+}
+
+/** A getContent mock that serves the shipped overlay ES for the given envs, 404 elsewhere. */
+function serveShippedEs(envs: string[], extraKeys: Record<string, string[]> = {}) {
+  octokitCalls.getContent.mockImplementation(async (opts: any) => {
+    for (const env of envs) {
+      if (opts.path === overlayEs(env)) {
+        return {
+          data: {
+            sha: `sha-${env}`,
+            content: Buffer.from(
+              shippedEs(env, extraKeys[env] ?? []),
+              'utf8',
+            ).toString('base64'),
+          },
+        } as any;
+      }
+    }
+    const e = new Error('Not Found') as Error & { status: number };
+    e.status = 404;
+    throw e;
+  });
 }
 
 // The target Component: owned by team-alpha, source repo UA-MIS/my-app.
@@ -233,6 +296,7 @@ describe('capstone:seal-secret action shape', () => {
 describe('capstone:seal-secret write + publish (owner)', () => {
   it('writes the value to Vault per env and opens one PR per env', async () => {
     const { deps } = makeDeps({ actorGroups: [OWNER_GROUP] });
+    serveShippedEs(['dev', 'prod']);
     const action = createSealSecretAction(deps);
     const ctx = ctxFor({
       entityRef: TARGET_REF,
@@ -243,7 +307,8 @@ describe('capstone:seal-secret write + publish (owner)', () => {
 
     await action.handler(ctx);
 
-    // One Vault write per env, at the per-env path, under the KEY, with the value.
+    // One Vault write per env, at the per-env path (reused from the shipped ES remoteRef.key),
+    // under the KEY, with the value.
     expect(vaultSetCalls).toEqual([
       {
         path: 'tenants/team-alpha/dev/app',
@@ -257,26 +322,25 @@ describe('capstone:seal-secret write + publish (owner)', () => {
       },
     ]);
 
-    // One PR per env.
+    // One PR per env, each upserting the overlay ES (NOT a new file, NOT a kustomization edit).
     expect(octokitCalls.pullsCreate).toHaveBeenCalledTimes(2);
-
-    // The ExternalSecret committed per env (names only); + overlay reference.
     const files = writtenFiles();
-    expect(files['.devops/secrets/externalsecret-dev.yaml']).toBeDefined();
-    expect(files['.devops/secrets/externalsecret-prod.yaml']).toBeDefined();
-    expect(
-      files['.devops/chart/overlays/dev/kustomization.yaml'],
-    ).toBeDefined();
+    expect(files[overlayEs('dev')]).toBeDefined();
+    expect(files[overlayEs('prod')]).toBeDefined();
+    // No file outside the overlay (no .devops/secrets/, no kustomization.yaml edit).
+    for (const p of Object.keys(files)) {
+      expect(p).toMatch(/overlays\/(dev|prod)\/app-secret\.externalsecret\.yaml$/);
+    }
 
-    // Output: two PR URLs.
     expect(ctx.output).toHaveBeenCalledWith(
       'pullRequestUrls',
       expect.arrayContaining([expect.stringContaining('/pull/')]),
     );
   });
 
-  it('the committed ExternalSecret contains NO secret value — only names + Vault pointers', async () => {
+  it('upserts a data[] entry (names only) + PRESERVES the shipped app-secret entry', async () => {
     const { deps } = makeDeps({ actorGroups: [OWNER_GROUP] });
+    serveShippedEs(['dev']);
     const action = createSealSecretAction(deps);
     await action.handler(
       ctxFor({
@@ -287,17 +351,43 @@ describe('capstone:seal-secret write + publish (owner)', () => {
       }),
     );
 
-    const es = writtenFiles()['.devops/secrets/externalsecret-dev.yaml'];
-    expect(es).toContain('kind: ExternalSecret');
-    expect(es).toContain('secretKey: "API_KEY"');
+    const es = writtenFiles()[overlayEs('dev')];
+    // The new entry — names + Vault pointer only.
+    expect(es).toContain('- secretKey: "API_KEY"');
     expect(es).toContain('key: "tenants/team-alpha/dev/app"');
     expect(es).toContain('property: "API_KEY"');
-    // The VALUE is never in git.
+    // The shipped demo entry is preserved (not clobbered).
+    expect(es).toContain('secretKey: app-secret');
+    expect(es).toContain('property: APP_SECRET');
+    // Document scaffolding preserved + the VALUE never in git.
+    expect(es).toContain('kind: ExternalSecret');
+    expect(es).toContain('deletionPolicy: Delete');
     expect(es).not.toContain(SECRET_VALUE);
+  });
+
+  it('is idempotent — re-setting an existing key rewrites no git (only Vault)', async () => {
+    const { deps } = makeDeps({ actorGroups: [OWNER_GROUP] });
+    // The dev overlay already declares API_KEY.
+    serveShippedEs(['dev'], { dev: ['API_KEY'] });
+    const action = createSealSecretAction(deps);
+    await action.handler(
+      ctxFor({
+        entityRef: TARGET_REF,
+        key: 'API_KEY',
+        value: 'new-rotated-value',
+        envs: ['dev'],
+      }),
+    );
+    // Vault is still written (rotation), but no file is committed (the declaration is unchanged).
+    expect(vaultSetCalls).toHaveLength(1);
+    expect(octokitCalls.createOrUpdateFileContents).not.toHaveBeenCalled();
+    // A PR is still opened (no-op-safe; the value did change in Vault).
+    expect(octokitCalls.pullsCreate).toHaveBeenCalledTimes(1);
   });
 
   it('NEVER logs the plaintext value', async () => {
     const { deps, loggerCalls } = makeDeps({ actorGroups: [OWNER_GROUP] });
+    serveShippedEs(['dev', 'prod']);
     const action = createSealSecretAction(deps);
     await action.handler(
       ctxFor({
@@ -314,51 +404,22 @@ describe('capstone:seal-secret write + publish (owner)', () => {
     expect(loggerCalls.join('\n')).toMatch(/TOKEN/);
   });
 
-  it('merges a second key into an existing env ExternalSecret (keeps the first)', async () => {
+  it('fails CLOSED (no Vault write, no PR) if the overlay ExternalSecret is missing', async () => {
     const { deps } = makeDeps({ actorGroups: [OWNER_GROUP] });
-    // The dev ExternalSecret already declares EXISTING_KEY.
-    const existingEs = [
-      'apiVersion: external-secrets.io/v1',
-      'kind: ExternalSecret',
-      'spec:',
-      '  data:',
-      '    - secretKey: "EXISTING_KEY"',
-      '      remoteRef:',
-      '        key: "tenants/team-alpha/dev/app"',
-      '        property: "EXISTING_KEY"',
-      '',
-    ].join('\n');
-    octokitCalls.getContent.mockImplementation(async (opts: any) => {
-      if (opts.path.endsWith('externalsecret-dev.yaml')) {
-        return {
-          data: {
-            sha: 'essha',
-            content: Buffer.from(existingEs, 'utf8').toString('base64'),
-          },
-        } as any;
-      }
-      const e = new Error('Not Found') as Error & { status: number };
-      e.status = 404;
-      throw e;
-    });
+    // getContent 404s for everything (default) -> not an M4 tenant repo.
     const action = createSealSecretAction(deps);
-    await action.handler(
-      ctxFor({
-        entityRef: TARGET_REF,
-        key: 'NEW_KEY',
-        value: SECRET_VALUE,
-        envs: ['dev'],
-      }),
-    );
-
-    const es = writtenFiles()['.devops/secrets/externalsecret-dev.yaml'];
-    expect(es).toContain('property: "EXISTING_KEY"');
-    expect(es).toContain('property: "NEW_KEY"');
-    // It overwrote the existing file (passed its sha).
-    const esWrite = octokitCalls.createOrUpdateFileContents.mock.calls.find(
-      (c: any) => c[0].path.endsWith('externalsecret-dev.yaml'),
-    );
-    expect(esWrite?.[0].sha).toBe('essha');
+    await expect(
+      action.handler(
+        ctxFor({
+          entityRef: TARGET_REF,
+          key: 'K',
+          value: SECRET_VALUE,
+          envs: ['dev'],
+        }),
+      ),
+    ).rejects.toThrow(/ExternalSecret/);
+    expect(vaultSetCalls).toHaveLength(0);
+    expect(octokitCalls.pullsCreate).not.toHaveBeenCalled();
   });
 
   it('fails CLOSED (no Vault write, no Octokit) if a Component has no source-location', async () => {
@@ -387,6 +448,7 @@ describe('capstone:seal-secret write + publish (owner)', () => {
 describe('capstone:seal-secret authorization (fails closed)', () => {
   it('admin (labmx) override: writes even without owning the Component', async () => {
     const { deps } = makeDeps({ actorGroups: [ADMIN_GROUP_REF] });
+    serveShippedEs(['dev']);
     const action = createSealSecretAction(deps);
     await action.handler(
       ctxFor({

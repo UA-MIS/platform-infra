@@ -1,65 +1,70 @@
-# `.devops/secrets/` — your team's secret declarations live here
+# `.devops/secrets/` — your team's sealed secrets live here
 
-This directory holds your app's **`ExternalSecret`** declarations. You do not edit
-these files by hand — **The Process creates them for you** from the **Secrets** tab
-on your component (the `capstone:seal-secret` action).
-
-> **No secret material is ever stored in this repo.** These files contain only the
-> **key names** and a pointer to where the value lives in **HashiCorp Vault**. The
-> actual values are written to Vault by The Process and read by the **External
-> Secrets Operator (ESO)** at deploy time.
+This directory is the home for your app's **SealedSecrets**. You do not edit these
+files by hand and you do not run `kubeseal` yourself — **The Process creates them for
+you** from the **Secrets** tab on your component (the `capstone:seal-secret` action).
 
 ## How it works (write-only, by design)
 
 1. Open your component in The Process and go to the **Secrets** tab.
 2. Pick the target environment(s) (`dev`, `staging`, `prod`), type a `KEY` and a `VALUE`.
-3. The Backstage backend **writes the value to Vault** (at
-   `secret/data/tenants/<team>/<env>/app` under your `KEY`) and opens a **pull
-   request** that adds/updates a declaration file here:
+3. The Backstage backend **seals** the value against the platform's Sealed-Secrets
+   controller and opens a **pull request** that adds/updates a file here:
 
    ```
-   .devops/secrets/externalsecret-<env>.yaml
+   .devops/secrets/<key>.sealedsecret.yaml
    ```
 
-4. You review and merge the PR. ArgoCD applies the `ExternalSecret`; ESO reads the
-   value from Vault and materializes a real Kubernetes `Secret` in your namespace.
+4. You review and merge the PR. ArgoCD applies the SealedSecret; the controller
+   decrypts it into a real Kubernetes `Secret` in your namespace.
 
-> **Secrets are write-only here.** A value **cannot be read back** — Backstage never
-> shows it and never commits it to git. The Secrets tab shows you the **key names and
-> when each was last updated**, never the values. To change a secret, just **set it
-> again** (overwrite); the value in Vault is replaced.
+> **Secrets are write-only here.** A sealed value **cannot be read back** — Backstage
+> never holds the private key. The Secrets tab shows you the **key names and when each
+> was last updated**, never the values. To change a secret, just **set it again**
+> (overwrite); the next PR re-seals it.
 
-## Scope: one Secret per environment namespace
+## Scope: one SealedSecret per environment namespace
 
-Each env gets one `ExternalSecret` (named `app-secrets`) targeting one Kubernetes
-`Secret` (`app-secrets`) in `<team>-<env>`. All the keys you set for an env live
-under the same Vault path (`tenants/<team>/<env>/app`), one Vault property per key.
-A value you want in dev *and* prod is set once per env (The Process does this when
-you select multiple envs) — and a value set for `dev` lives only in `<team>-dev`.
-This is the platform's least-privilege secret contract: a per-tenant Vault policy
-fences each team to its own subtree, and ESO reads it through the per-tenant
-`SecretStore` (`vault-tenant`).
+SealedSecrets are sealed with **strict scope** (namespace + name): a secret sealed for
+`<team>-dev` decrypts **only** in `<team>-dev`. So a value you want in dev *and* prod is
+sealed once per env (The Process does this when you select multiple envs). This is the
+platform's least-privilege secret contract — a leaked dev secret cannot be applied to
+prod.
 
 ## Referencing a secret from your app
 
-Reference the materialized `Secret` (`app-secrets`) from your workload the normal
-Kubernetes way (env `valueFrom.secretKeyRef` or a mounted volume) in your
-`.devops/chart` overlay. The key names match what the Secrets tab shows. Never
-commit a raw `Secret` or a plaintext value to this repo.
+Reference the materialized `Secret` from your workload the normal Kubernetes way
+(env `valueFrom.secretKeyRef` or a mounted volume) in your `.devops/chart` overlay.
+The `Secret` name matches what the Secrets tab shows. Never commit a raw `Secret` or a
+plaintext value to this repo — the tenant AppProject does not even permit raw `Secret`
+objects (only `SealedSecret`), so a plaintext secret would be rejected on sync.
 
-### Wiring a secret into your workload
+### The starter's `APP_SECRET` wiring (read this if your app stays "secret loaded: false")
 
-The starter ships with **zero required secrets** — a freshly-scaffolded app deploys
-with no secrets at all. To consume a secret you set in the Secrets tab, reference the
-materialized `app-secrets` Secret from your `.devops/chart` overlay via
-`valueFrom.secretKeyRef` (`name: app-secrets`, `key: <the KEY you set>`). Use
-`optional: true` if your app should start even when the secret is absent.
+The starter ships with **zero required secrets** — a freshly-scaffolded app deploys with
+no secrets at all. The Go starter does, however, *optionally* read one env var,
+`APP_SECRET`, which `.devops/chart/base/deployment.yaml` wires from a Kubernetes Secret
+named **`sample-secret`**, key **`app-secret`** (with `optional: true`, so a missing
+secret never blocks startup — the app just reports `secret loaded: false`).
+
+So the base only auto-populates `APP_SECRET` if you seal a secret whose **name is
+`sample-secret`** with **key `app-secret`**. The Secrets tab names the `SealedSecret`
+after the **KEY you type** — so if you seal a key called `DATABASE_URL`, you get a Secret
+named `database-url`, and `APP_SECRET` stays empty (the base is looking for `sample-secret`,
+not `database-url`). To populate `APP_SECRET`, either:
+
+- seal a secret with the key the base expects (so the Secret ends up named `sample-secret`
+  / `app-secret`), **or**
+- edit `.devops/chart/base/deployment.yaml` to point its `secretKeyRef.name`/`key` at
+  whatever you sealed (e.g. `database-url` / the key you used).
+
+Most teams just add their own env vars in the chart pointing at the secrets they seal,
+and ignore the starter's `APP_SECRET` demo entirely.
 
 ## What NOT to do
 
-- Don't hand-edit `externalsecret-<env>.yaml` to add a value — there is no value
-  field; use the Secrets tab so the value is written to Vault correctly.
-- Don't delete an `externalsecret-<env>.yaml` to "rotate" — set the key again
-  (overwrite) or use the Secrets tab's **Delete** to remove a key.
-- Don't move these files into `.devops/chart/` or anywhere else — this directory is
-  the one path The Process writes to.
+- Don't run `kubeseal` locally and commit the output here — use the Secrets tab so the
+  seal is done against the live controller and the per-env scope is correct.
+- Don't delete a `*.sealedsecret.yaml` to "rotate" — set the key again (overwrite).
+- Don't move these files into `.devops/chart/` or anywhere else — this directory is the
+  one path The Process writes to.
