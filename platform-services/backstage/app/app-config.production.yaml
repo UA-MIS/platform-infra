@@ -122,12 +122,12 @@ integrations:
 # Tells the secrets backend where to WRITE the value (Vault) + the repo-write conventions for
 # the ExternalSecret declaration it commits. The value is written to Vault over the k8s-auth
 # method; NOTHING secret is committed to git. DEPLOY DEPENDENCIES — ALL owned by eso-vault on
-# the deploy side (confirmed): (1) a Vault `backstage-writer` k8s-auth role (audience `vault`)
-# bound to a DEDICATED SA `backstage-vault-writer` in ns `backstage` (NOT the default SA) with
-# policy `backstage-writer`: create/update/patch (NO read) on secret/data/tenants/* + read/list
+# the deploy side (confirmed): (1) a Vault `backstage-secrets` k8s-auth role (audience `vault`)
+# bound to a DEDICATED SA `backstage-secrets` in ns `backstage` (NOT the default SA) with
+# policy `backstage-secrets-writer`: create/update/patch (NO read) on secret/data/tenants/* + read/list
 # on secret/metadata/tenants/*; (2) the Vault CA bundle (the vault-server-tls issuing CA, same
 # ESO uses) mounted at vault.caPath; (3) the Deployment serviceAccountName set to
-# backstage-vault-writer + a PROJECTED serviceAccountToken volume (audience: vault) mounted at
+# backstage-secrets + a PROJECTED serviceAccountToken volume (audience: vault) mounted at
 # vault.saTokenPath — the default API-server-audience token 403s ("invalid audience"); + netpol
 # egress to vault.vault.svc:8200 (paired with the vault-netpol ingress allow). SECURITY: this
 # token can write ANY tenant path (coarse by design) — per-tenant authz is enforced in the
@@ -149,8 +149,8 @@ capstone:
       addr: https://vault.vault.svc.cluster.local:8200
       mount: secret
       authMount: kubernetes
-      role: backstage-writer
+      role: backstage-secrets
       # Projected SA token with audience=vault (deploy mounts a serviceAccountToken projected
       # volume here; the default API-server-audience token will NOT satisfy the Vault role).
-      saTokenPath: /var/run/secrets/vault/vault-token
+      saTokenPath: /var/run/secrets/vault/token
       caPath: /etc/backstage/vault-ca/ca.crt
