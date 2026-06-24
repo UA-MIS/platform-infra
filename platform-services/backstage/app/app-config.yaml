@@ -147,7 +147,7 @@ mcpActions:
 # ── M3 (local dev): the secrets capability (capstone:seal-secret), ESO+Vault model ──────
 # Local-dev variant of capstone.secrets.* (prod values live in app-config.production.yaml).
 # End-to-end locally needs a reachable Vault (capstone.secrets.vault.*) with the
-# `backstage-secrets` k8s-auth role + write policy, plus a real signed-in user whose catalog
+# `backstage-writer` k8s-auth role + write policy, plus a real signed-in user whose catalog
 # Groups own the target Component (no guest bypass — the owner re-check fails closed by
 # design). Most local work runs the unit tests instead (they mock the VaultClient + Octokit).
 # The vault.* block falls back to the in-cluster defaults below if omitted.
@@ -167,6 +167,6 @@ capstone:
       addr: https://vault.vault.svc.cluster.local:8200
       mount: secret
       authMount: kubernetes
-      role: backstage-secrets
+      role: backstage-writer
       saTokenPath: /var/run/secrets/kubernetes.io/serviceaccount/token
       caPath: /etc/backstage/vault-ca/ca.crt

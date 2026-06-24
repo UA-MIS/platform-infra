@@ -140,7 +140,7 @@ function readSecretsConfig(config: Config): SecretsConfig {
         'https://vault.vault.svc.cluster.local:8200',
       mount: v?.getOptionalString('mount') ?? 'secret',
       authMount: v?.getOptionalString('authMount') ?? 'kubernetes',
-      role: v?.getOptionalString('role') ?? 'backstage-secrets',
+      role: v?.getOptionalString('role') ?? 'backstage-writer',
       saTokenPath:
         v?.getOptionalString('saTokenPath') ??
         '/var/run/secrets/kubernetes.io/serviceaccount/token',

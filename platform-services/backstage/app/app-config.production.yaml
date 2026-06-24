@@ -121,13 +121,17 @@ integrations:
 # ── M3: the secrets capability (capstone:seal-secret), ESO+Vault model (ADR-030 B1) ─────
 # Tells the secrets backend where to WRITE the value (Vault) + the repo-write conventions for
 # the ExternalSecret declaration it commits. The value is written to Vault over the k8s-auth
-# method; NOTHING secret is committed to git. DEPLOY DEPENDENCIES (devops/eso-vault, see the
-# message to eso-vault): (1) a Vault `backstage-secrets` k8s-auth role bound to the Backstage
-# pod SA with a write policy on secret/data/tenants/* (vault-policies); (2) the Vault CA
-# bundle mounted at vault.caPath (e.g. from the vault-server-tls Secret's ca.crt, a Helm
-# extraVolume/extraVolumeMount in applicationsets/backstage-process-app.yaml); (3) backstage
-# netpol egress to vault.vault.svc:8200. These values may need mirroring into the Helm
-# appConfig (same pattern as permission.enabled) — confirm with devops.
+# method; NOTHING secret is committed to git. DEPLOY DEPENDENCIES (eso-vault owns the Vault
+# side): (1) a Vault `backstage-writer` k8s-auth role (audience `vault`) bound to a DEDICATED
+# Backstage SA `backstage-vault-writer` in ns `backstage` (NOT the default SA) with policy
+# create/update/read/patch on secret/data/tenants/* + read/list on secret/metadata/tenants/*
+# (eso-vault adds this to the Vault runbook, mirroring eso-role.sh); (2) the Vault CA bundle
+# (the vault-server-tls issuing CA, same ESO uses) mounted at vault.caPath via a Helm
+# extraVolume/extraVolumeMount in applicationsets/backstage-process-app.yaml; (3) the
+# deployment serviceAccountName set to backstage-vault-writer + netpol egress to
+# vault.vault.svc:8200. SECURITY: this token can write ANY tenant path (coarse by design) —
+# per-tenant authz is enforced in the Backstage layer (the capstone.secret.seal owner
+# re-check, BEFORE the Vault write). These may need mirroring into the Helm appConfig — devops.
 capstone:
   secrets:
     # PR branch name prefix for each set (branch = <prefix><key>-<env>-<timestamp>).
@@ -150,6 +154,6 @@ capstone:
       addr: https://vault.vault.svc.cluster.local:8200
       mount: secret
       authMount: kubernetes
-      role: backstage-secrets
+      role: backstage-writer
       saTokenPath: /var/run/secrets/kubernetes.io/serviceaccount/token
       caPath: /etc/backstage/vault-ca/ca.crt
