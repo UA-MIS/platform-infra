@@ -139,13 +139,19 @@ spec:
       # ingress host, image name, labels) so a fresh scaffold is correct for ITS OWN
       # team/app on the first build — fixing the old fetch:plain bug where every tenant
       # inherited sample's hardcoded `sample-dev`/`harbor.../sample/sample` values.
+      # Protect the GitHub-Actions workflow (`${{ github.* }}`/`${{ secrets.* }}` — the
+      # SAME `${{ }}` nunjucks uses) AND the .devops/ci/ shell scripts from nunjucks.
+      # The workflow is the only file that strictly NEEDS it (it's the only `${{` file,
+      # and it self-derives registry+app from promotion.yaml at runtime — no per-team
+      # templating); the scripts use `${VAR}` (single brace, nunjucks-safe) but are
+      # belt-and-suspenders protected so the whole CI surface is shipped VERBATIM and a
+      # future `${{`-using edit can't silently break. Broad globs cover both subtrees.
+      # NOTE (Backstage 1.52): the current key is `copyWithoutTemplating`;
+      # `copyWithoutRender` (the older name) was deprecated in 1.40 — if the deployed
+      # action rejects this key, rename to `copyWithoutRender` (same semantics).
       copyWithoutTemplating:
-        # The GitHub Actions workflow uses `${{ github.* }}` / `${{ secrets.* }}` — the
-        # SAME `${{ }}` nunjucks uses. It is the ONLY file in the embedded tree with
-        # `${{`, and it needs NO per-team templating (it self-derives registry+app from
-        # promotion.yaml at runtime). Copy it VERBATIM so nunjucks never touches it.
-        # (Backstage 1.52 key: copyWithoutTemplating; copyWithoutRender was deprecated in 1.40.)
-        - .github/workflows/build-and-push.yaml
+        - '**/.github/**'
+        - '**/.devops/ci/**'
 
     # 3) Create UA-MIS/<repo>, push, protect main (PRs only — matches platform policy).
     - id: publish

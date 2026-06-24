@@ -47,15 +47,23 @@ Rendering `.github/workflows/build-and-push.yaml` through `fetch:template` would
 `${{` — `.github/workflows/build-and-push.yaml`. The `.devops` shell scripts use `${VAR}`
 (single brace, nunjucks ignores); nothing else collides.
 
-**Fix:** `fetch:template` with **`copyWithoutTemplating`** (Backstage **1.52** — the key
-is `copyWithoutTemplating`; `copyWithoutRender` was deprecated in 1.40). Protect:
+**Fix:** `fetch:template` with broad copy-without-templating globs over the whole CI
+surface (the workflow + the ci/ scripts), so nothing in those subtrees is ever
+nunjucks-rendered:
 ```yaml
-copyWithoutTemplating:
-  - .github/workflows/build-and-push.yaml   # GitHub Actions ${{ }} — copy verbatim
+copyWithoutTemplating:        # Backstage 1.52 key; older name copyWithoutRender (dep. 1.40)
+  - '**/.github/**'           # GitHub Actions ${{ }} (build-and-push.yaml) + actionlint
+  - '**/.devops/ci/**'        # shell scripts (${VAR}, nunjucks-safe — belt-and-suspenders)
 ```
-The workflow needs **no** per-team templating anyway: it self-derives registry + app
-from `promotion.yaml` at runtime (`resolve-image.sh` reads `.registry` / `.app` via yq).
-So templatizing `promotion.yaml`'s two scalars makes the static workflow correct per team.
+Only `build-and-push.yaml` strictly NEEDS protection (the only `${{` file), but the broad
+globs ship the entire CI surface VERBATIM so a future `${{`-using edit can't silently
+break. **Verified safe:** nothing under `.github/` or `.devops/ci/` uses `${{ values.* }}`
+— so protecting both subtrees never suppresses a needed substitution. The workflow needs
+no per-team templating anyway: it self-derives registry + app from `promotion.yaml` at
+runtime (`resolve-image.sh` reads `.registry`/`.app` via yq); templatizing promotion.yaml's
+two scalars makes the static workflow correct per team. **Key-name caveat:** if the
+deployed 1.52 action rejects `copyWithoutTemplating`, rename to `copyWithoutRender` (same
+semantics) — confirm at e2e.
 
 ### 2.2 What gets templatized (the `sample` → `${{ values.* }}` map)
 Render these files (substitute by KEY/context — team==app=="sample" in the source, so
