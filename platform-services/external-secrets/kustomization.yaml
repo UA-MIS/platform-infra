@@ -1,0 +1,20 @@
+# External Secrets Operator PREREQ (ADR-030 B1) — the namespace the ESO Helm
+# Application (applicationsets/external-secrets-app.yaml) installs into. Managed by
+# the platform-services-appset (kustomize directory generator); the Helm chart
+# itself is a SEPARATE Application (method A) so it does NOT render through this dir.
+#
+# The ClusterSecretStore + per-tenant SecretStores are NOT shipped here: the
+# ClusterSecretStore cannot reconcile until Vault is init+unsealed and its k8s auth
+# role exists (it would sit SecretSyncError). They are applied by the human runbook
+# (external-secrets/README.md) once Vault is live, then can be moved into a
+# follow-on GitOps app. This dir ships only the namespace.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false

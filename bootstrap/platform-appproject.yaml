@@ -67,6 +67,16 @@ spec:
     # bootstrap`/`make bootstrap-reapply` — re-apply after merge or platform-backstage-process
     # will InvalidSpecError "repo not permitted". (NOT needed until The Process go-live.)
     - ghcr.io/backstage/charts                            # Backstage The Process (platform-backstage-process Application)
+    # ESO + Vault (ADR-030 B1, the v1 secrets model "no secret material in git"):
+    # the External Secrets Operator chart repo + the HashiCorp Vault chart repo. TWO
+    # named sources, chart versions pinned in the Applications (external-secrets @
+    # 2.6.0, vault @ 0.33.0). ⚠ INSTALL-OWNED (same as the Harbor/ARC/Rook/metrics-
+    # server/Traefik/Backstage adds): reaches the live `platform` AppProject only via
+    # `make bootstrap`/`make bootstrap-reapply` + VERIFY (the AppProject is
+    # bootstrap-managed, not GitOps-reconciled) or platform-external-secrets /
+    # platform-vault will InvalidSpecError "repo not permitted".
+    - https://charts.external-secrets.io                  # ESO (platform-external-secrets Application)
+    - https://helm.releases.hashicorp.com                 # Vault (platform-vault Application)
 
   # Platform services are cluster-wide; allow any namespace on the in-cluster API.
   destinations:

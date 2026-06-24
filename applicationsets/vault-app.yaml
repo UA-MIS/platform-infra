@@ -1,0 +1,163 @@
+# HashiCorp Vault Application (ADR-030 model B1 — the secrets store behind ESO).
+# Raft integrated storage on a persistent Ceph PVC, TLS on the listener. Helm-source
+# Application, deploy method A (D-028): pinned chart + the chart repo added to the
+# `platform` AppProject sourceRepos allowlist (bootstrap/platform-appproject.yaml in
+# this PR; security audits the addition).
+#
+# Chart: hashicorp/vault 0.33.0 (appVersion Vault 1.21.2 — pinned to the chart's
+# tested image rather than the chart-default; bump deliberately).
+# Root-app recurses applicationsets/, so this Application is registered.
+#
+# =============================================================================
+# ⚠⚠⚠  TWO DECISIONS THE HUMAN MUST READ  ⚠⚠⚠  (full writeup: vault/README.md §A, §B)
+# =============================================================================
+#
+# (B) TOPOLOGY — SINGLE-NODE RAFT (ha.replicas: 1) is configured here.
+#   WHY: a homelab student-capstone platform optimizing for "works + low operating
+#   burden" (Finish-functional-before-polish). Single-node Raft still gives the
+#   Raft storage engine (real snapshots/restore, the supported path), persists to a
+#   replica-3 Ceph RBD PVC (survives a NODE loss — the data is on Ceph, not the
+#   node's local disk), and needs only ONE pod unsealed after a restart instead of
+#   three. TRADEOFF: no Vault-process HA — if the single Vault pod is down, secret
+#   SYNC pauses (ESO keeps serving already-materialized k8s Secrets, so running apps
+#   are NOT impacted; only NEW/refreshed secrets wait). To go 3-node HA later: set
+#   ha.replicas: 3, re-init is NOT needed (add raft peers via `vault operator raft
+#   join`), and unseal all three. Flagged for the human in vault/README.md §B.
+#
+# (A) ⚠ THE KEY OPERATIONAL DECISION — UNSEAL STRATEGY. Vault boots SEALED; it
+#   cannot serve secrets until unsealed, and it re-seals on every pod restart
+#   (reboot, image bump, node drain, OOM). There is NO cloud KMS on Talos, so
+#   cloud auto-unseal (awskms/gcpckms/azurekeyvault) is off the table.
+#   RECOMMENDATION = **Transit auto-unseal from a tiny second "unsealer" Vault**
+#   (see vault/README.md §A for the full options table + the recommended setup).
+#   This file ships MANUAL unseal (the zero-extra-infra default) so the platform
+#   is operable on day one; the runbook documents promoting to Transit auto-unseal
+#   so the user is not hand-unsealing after every reboot. DECIDE in §A.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-vault
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"   # Vault before ESO (external-secrets-app = wave 1)
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://helm.releases.hashicorp.com   # PINNED chart repo (sourceRepos allowlist)
+    chart: vault
+    targetRevision: 0.33.0                          # pinned chart version (appVersion 1.21.2); no ^/~/latest
+    helm:
+      releaseName: vault
+      values: |
+        # --- TLS ON the listener. The server cert lives in the `vault-server-tls`
+        #     Secret (built by the human runbook, vault/README.md §C — a SAN-correct
+        #     self-signed/CA cert for the in-cluster vault svc names). Public TLS is
+        #     NOT relevant: Vault has no public ingress — only ESO (in-cluster) and
+        #     the human (via `kubectl port-forward`) talk to it. ESO trusts this cert
+        #     via the caBundle on the ClusterSecretStore.
+        global:
+          tlsDisable: false
+
+        # --- Agent Injector OFF. We use ESO (the ExternalSecret pull model), not the
+        #     Vault Agent sidecar injection model — running both is redundant. ESO is
+        #     the single integration path (ADR-030 B1).
+        injector:
+          enabled: false
+
+        server:
+          # Pin the Vault image to the chart's tested appVersion (no floating tag).
+          image:
+            repository: hashicorp/vault
+            tag: "1.21.2"
+
+          # --- Persistence: Raft data on a Ceph RBD PVC (the cluster default SC,
+          #     replica-3 — survives a node loss; same SC Harbor uses). 5Gi is ample
+          #     for KV metadata + raft snapshots at capstone scale.
+          dataStorage:
+            enabled: true
+            size: 5Gi
+            storageClass: ceph-block
+            accessMode: ReadWriteOnce
+          # Audit log on its own PVC (Vault audit device written by the runbook).
+          auditStorage:
+            enabled: true
+            size: 2Gi
+            storageClass: ceph-block
+            accessMode: ReadWriteOnce
+          # Keep the data PVC if the StatefulSet is deleted/scaled (Raft state +
+          # the unseal keys' encrypted blob live here — losing it = unrecoverable).
+          persistentVolumeClaimRetentionPolicy:
+            whenDeleted: Retain
+            whenScaled: Retain
+
+          # --- Mount the server-cert Secret into the pod (referenced by the raft
+          #     config tls_cert_file/tls_key_file paths below).
+          extraVolumes:
+            - type: secret
+              name: vault-server-tls
+
+          # --- HA Raft, SINGLE node (decision B above). Raft storage engine, one
+          #     replica. setNodeId gives a stable raft node id. The Pod still gets a
+          #     Ceph PVC, so node loss is survivable (re-schedules + reuses the RBD).
+          ha:
+            enabled: true
+            replicas: 1
+            raft:
+              enabled: true
+              setNodeId: true
+              # TLS listener (tls on). cluster_address = raft peer port (8201).
+              # To go 3-node HA later, bump ha.replicas to 3 (see README §B) — the
+              # retry_join block becomes relevant then; single-node ignores it.
+              config: |
+                ui = true
+
+                listener "tcp" {
+                  address         = "[::]:8200"
+                  cluster_address = "[::]:8201"
+                  tls_cert_file   = "/vault/userconfig/vault-server-tls/tls.crt"
+                  tls_key_file    = "/vault/userconfig/vault-server-tls/tls.key"
+                }
+
+                storage "raft" {
+                  path = "/vault/data"
+                }
+
+                service_registration "kubernetes" {}
+
+                # --- AUTO-UNSEAL (decision A): MANUAL by default — leave the seal
+                #     stanza commented. To promote to Transit auto-unseal from the
+                #     unsealer Vault (RECOMMENDED, vault/README.md §A), UNCOMMENT and
+                #     fill, then re-sync + `vault operator unseal -migrate` once:
+                #
+                #     seal "transit" {
+                #       address    = "https://vault-unsealer.vault-unsealer.svc:8200"
+                #       token      = "<auto-unseal-token>"   # via extraSecretEnvironmentVars, NOT inline
+                #       disable_renewal = "false"
+                #       key_name   = "autounseal"
+                #       mount_path = "transit/"
+                #       tls_skip_verify = "false"
+                #     }
+
+        # --- UI enabled, ClusterIP only (D-043 — NO LoadBalancer on Talos). The
+        #     human reaches the UI via `kubectl -n vault port-forward svc/vault 8200`.
+        ui:
+          enabled: true
+          serviceType: ClusterIP
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: vault
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false   # vault ns ships via platform-services/vault
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }
