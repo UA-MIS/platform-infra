@@ -14,7 +14,7 @@ instead of editing these files.
 | --- | --- |
 | `app-metadata.yaml` | The **only** file you (the student) set values in: `team`, `semester`, `app-name`, `port`. Everything below derives from it. |
 | `chart/base/` | Kustomize base: `Deployment`, `Service`, `Ingress`, `ServiceAccount`. Environment-agnostic. |
-| `chart/overlays/{dev,staging,prod,preview}/` | Per-environment diffs: image tag seam, replicas, ingress host, env label, and the per-namespace ESO `SecretStore` + `ExternalSecret`s (app-secret + harbor-pull). |
+| `chart/overlays/{dev,staging,prod,preview}/` | Per-environment diffs: image tag seam, replicas, ingress host, env label, and the per-namespace ESO `SecretStore` + the app-secret `ExternalSecret` (harbor-pull ES is shipped but commented out — v1 uses an out-of-band SealedSecret). |
 | `promotion.yaml` | **The single configured place** (§4.1): trigger→env→tag-convention→overlay→gate. The CI scripts read only this. |
 | `ci/build-and-push.sh` | Build `app/` and push to the k3d registry; tag computed from `promotion.yaml`. |
 | `ci/bump-image.sh` | Image-bump seam: write the new tag into the env overlay's `images[].newTag` and (with `COMMIT=1`) commit it — the GitOps signal. |
@@ -49,12 +49,24 @@ ships, alongside its workload:
   at Vault key `APP_SECRET` under `secret/tenants/<team>/<env>/app` and materializes
   the in-namespace `Secret` `sample-secret` (key `app-secret`), which the Deployment
   envs into `APP_SECRET`. The app proves it read the secret on `/` without leaking it;
-- an **`ExternalSecret`** (`harbor-pull.externalsecret.yaml`) that materializes the
-  `kubernetes.io/dockerconfigjson` image-pull `Secret` `harbor-pull` from Vault.
+The image-pull cred (`harbor-pull`) is **NOT** on ESO in v1 — see below.
 
 No value is ever committed here — the committed manifests carry only **key names +
 Vault pointers**. Values are written to Vault by the platform (onboarding) or by The
 Process "Secrets" tab; ESO syncs them into real `Secret`s.
+
+### harbor-pull image-pull cred (v1: SealedSecret, ESO reserved)
+
+In v1 the `harbor-pull` `kubernetes.io/dockerconfigjson` Secret is delivered
+**out-of-band**: the platform mints a Harbor pull robot at onboarding
+(`make harbor-robot`) and applies it as a SealedSecret into `<team>-<env>` — it is NOT
+wired into the kustomize overlay (so it can't collide with the onboarding-applied
+Secret). A reserved ESO model ships alongside it
+(`overlays/<env>/harbor-pull.externalsecret.yaml`, Vault path
+`secret/tenants/<team>/<env>/harbor-pull` with key `.dockerconfigjson`) but is
+**commented out** in each overlay's `kustomization.yaml`, pending the user-scope
+decision on moving robot creds into Vault (ADR-030 follow-on). Flipping to ESO later =
+uncomment the resource line + have onboarding write the robot creds to that Vault path.
 
 ### Where the values come from (out-of-band, NOT the student build)
 
@@ -68,19 +80,14 @@ kubectl -n vault exec -i vault-0 -- sh -s -- <team> <env> \
 
 # Land the Vault CA in each tenant namespace (ConfigMap vault-ca, key ca.crt) so the
 # namespaced SecretStore can verify Vault's TLS (a namespaced SecretStore cannot read
-# the vault-server-tls Secret across namespaces).
-
-# Write the image-pull robot creds to Vault (registry/username/password):
-kubectl -n vault exec -it vault-0 -- vault kv put \
-  secret/tenants/<team>/<env>/harbor-pull \
-  registry=harbor.capstone.uamishub.com username='<robot>' password='<token>'
+# the vault-server-tls Secret across namespaces). Owned by the ESO/Vault onboarding.
 ```
 
 `app-secret` is **zero-config**: `APP_SECRET` is `optional: true` in the base and the
 ExternalSecret uses `deletionPolicy: Delete`, so a fresh app with nothing in Vault
-deploys fine (it reports `secret loaded: false`). `harbor-pull` is **required** for
-image pull — it keeps the default `deletionPolicy: Retain` so a missing value surfaces
-as `SecretSyncError` (a signal to run onboarding), not a silent failure.
+deploys fine (it reports `secret loaded: false`). (`harbor-pull` is delivered out-of-band
+as a SealedSecret in v1 — see the harbor-pull section above — so it has no ESO value step
+here.)
 
 ### Preview / dynamic namespaces
 
