@@ -7,11 +7,15 @@
  * AUTH: Backstage authenticates to Vault with its OWN Kubernetes ServiceAccount JWT
  * (a projected token with audience=vault, mounted by the deploy at saTokenPath) via k8s-auth
  * (POST /v1/auth/<mount>/login {jwt, role}) and uses the returned client_token for the KV-v2
- * call. The Vault role `backstage-secrets` (eso-vault domain, vault-policies) binds ONLY the
- * dedicated Backstage SA (backstage-secrets) to a WRITE-ONLY policy over secret/data/tenants/*
- * (create/update/patch — NO read) + read/list on secret/metadata/tenants/* — least privilege.
- * The token can write ANY tenant path (coarse by design); per-tenant authz is enforced in
- * sealCore BEFORE the write. There is deliberately no value-read here (values are write-only).
+ * call. The Vault role `backstage-writer` (eso-vault domain, vault-policies) binds ONLY the
+ * dedicated Backstage SA (backstage-vault-writer) to a WRITE-ONLY policy over
+ * secret/data/tenants/* (create/update/patch — NO read) + read/list on secret/metadata/tenants/*
+ * — least privilege. The token can write ANY tenant path (coarse by design); per-tenant authz
+ * is enforced in sealCore BEFORE the write. There is deliberately no value-read here.
+ *
+ * AUDIENCE: the Vault role is bound to audience "vault", so the default API-server-audience SA
+ * token would 403 ("invalid audience"). The deploy mounts a PROJECTED serviceAccountToken
+ * volume (audience: vault) and saTokenPath points at it (eso-vault confirmed).
  *
  * SECURITY INVARIANTS (mirror sealCore R2): the plaintext VALUE is only ever in the request
  * BODY (never an argv, never a path, never a log line); the client_token + the value are NEVER
