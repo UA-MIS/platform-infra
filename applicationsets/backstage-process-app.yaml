@@ -62,7 +62,7 @@ spec:
             # until the first build lands; the CI build tags by commit SHA.
             registry: harbor.capstone.uamishub.com
             repository: backstage/backstage-process
-            tag: ca6ce4e9784d                     # M3+M4 GO-LIVE image (capstone:seal-secret + capstone:render-tenant; combined PR #94 ca6ce4e). Built+pushed by backstage-process-build-push run 28067774139 (re-run after #95 restored the backstage harbor-push robot). prev: 89955061bd37 (M2 durable fix — Node 24.16 pin, Backstage #34651); break-glass M1: 7db91f28499c.
+            tag: 251ce97987db                     # M3+M4+scaffolder-route image: ca6ce4e (M3 seal-secret + M4 render-tenant) + #98 251ce97 (mount Scaffolder frontend = /create route + Create nav, fixes the §7 re-verify 404). Built+pushed by backstage-process-build-push run 28073825393 (digest sha256:788c21bf…). prev: ca6ce4e9784d (M3+M4 PR #94); 89955061bd37 (M2 Node 24.16 fix); break-glass M1: 7db91f28499c.
             pullPolicy: IfNotPresent
             # Pull from the private Harbor `backstage` project via a robot
             # imagePullSecret (`harbor-pull`, minted at go-live by `make harbor-robot
