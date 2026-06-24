@@ -13,9 +13,12 @@ resources:
   # deploys — M4 zero-config).
   - app-secret.externalsecret.yaml
   - harbor-pull.externalsecret.yaml   # image-pull cred for SA imagePullSecrets:[harbor-pull] (#C3)
-  # capstone:secrets — The Process "Secrets" tab appends per-key ExternalSecrets here
-  # as `- ../../secrets/<key>.externalsecret.yaml` (M3 ESO rework, ADR-030 §5). Keep
-  # this marker line last in resources: so the append is deterministic; do not remove it.
+  # capstone:secrets — The Process "Secrets" tab (M3 ESO rework, ADR-030 §5) adds user
+  # secret keys by APPENDING a `data[]` entry to app-secret.externalsecret.yaml above
+  # (one ExternalSecret / one k8s Secret `${{ values.appName }}-secret` per env; all keys
+  # share the Vault object `tenants/${{ values.team }}/<env>/app`) — it does NOT add files
+  # here. Manifests must stay INSIDE this overlay dir: a kustomize resource that escapes
+  # the chart/ root (e.g. ../../../secrets/...) fails ArgoCD's default load restrictor.
 # env-specific selector label (§3.1). semester comes from app-metadata via the
 # tenant; set here for the workload's own label contract.
 labels:

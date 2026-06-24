@@ -1,22 +1,24 @@
-# `.devops/secrets/` — your team's secret declarations live here
+# `.devops/secrets/` — how your team's secrets work (docs)
 
-This directory is the home for your app's **`ExternalSecret` declarations**. You do not
-edit these files by hand and you do not put any values in them — **The Process creates
-them for you** from the **Secrets** tab on your component. Each file is a pointer into
-your team's HashiCorp Vault path; the value itself **never** lives in git.
+This directory documents the secrets flow. You do not put any values in git and you do
+not edit secret manifests by hand — **The Process manages them for you** from the
+**Secrets** tab on your component. The values live in your team's HashiCorp Vault path;
+the repo holds only **key names + Vault pointers**, never the value.
+
+> **Where the manifest actually lives:** the `ExternalSecret` that ESO reads is
+> `.devops/chart/overlays/<env>/app-secret.externalsecret.yaml` (inside the kustomize
+> overlay — a manifest under `.devops/secrets/` would escape the chart root and fail
+> ArgoCD's kustomize build). This dir is the human-facing doc home, not where the
+> referenced manifests sit.
 
 ## How it works (write-only, by design)
 
 1. Open your component in The Process and go to the **Secrets** tab.
 2. Pick the target environment(s) (`dev`, `staging`, `prod`), type a `KEY` and a `VALUE`.
 3. The Backstage backend **writes the value into Vault** (under your team's path
-   `secret/tenants/<team>/<env>/…`) and opens a **pull request** that adds/updates an
-   `ExternalSecret` declaration here:
-
-   ```
-   .devops/secrets/<key>.externalsecret.yaml
-   ```
-
+   `secret/tenants/<team>/<env>/app`) and opens a **pull request** that adds/updates a
+   `data[]` entry (key name + Vault pointer, no value) in the per-env
+   `app-secret.externalsecret.yaml`.
 4. You review and merge the PR. ArgoCD applies the `ExternalSecret`; the External
    Secrets Operator (ESO) reads the value from Vault and materializes a real Kubernetes
    `Secret` in your namespace.
@@ -68,8 +70,10 @@ and ignore the starter's `APP_SECRET` demo entirely.
 
 ## What NOT to do
 
-- Don't put a value in any file here — these are **pointers only**. Use the Secrets tab
+- Don't put a value in any manifest — they are **pointers only**. Use the Secrets tab
   so the value is written to Vault and the per-team/per-env scope is correct.
-- Don't delete a `*.externalsecret.yaml` to "rotate" — set the key again (overwrite).
-- Don't move these files into `.devops/chart/` or anywhere else — this directory is the
-  one path The Process writes to.
+- Don't remove a `data[]` entry to "rotate" a key — set it again (overwrite).
+- Don't hand-edit `app-secret.externalsecret.yaml` in the overlays — the Secrets tab is
+  the one writer; manual edits will conflict with its next PR.
+- Don't move the ExternalSecret out of `.devops/chart/overlays/<env>/` — a manifest under
+  `.devops/secrets/` (or any path that escapes `chart/`) fails ArgoCD's kustomize build.
