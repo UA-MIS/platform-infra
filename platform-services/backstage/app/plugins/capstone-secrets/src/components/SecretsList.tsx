@@ -1,7 +1,7 @@
 /*
  * The write-only listing: existing secret key NAMES + last-updated, per env. NEVER values
- * (plan §2.4). There is no reveal affordance by design — the values are sealed and cannot be
- * read back.
+ * (plan §2.4). There is no reveal affordance by design — the values live in Vault and cannot
+ * be read back here.
  */
 import { Button } from '@material-ui/core';
 import {

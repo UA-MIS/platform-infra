@@ -17,7 +17,7 @@ export interface SecretSummary {
   key: string;
   /** Target env this entry exists in (dev/staging/prod). */
   env: string;
-  /** ISO timestamp of the last commit that touched the SealedSecret, if known. */
+  /** ISO timestamp of the last commit that touched the ExternalSecret declaration, if known. */
   lastUpdated?: string;
 }
 

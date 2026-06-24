@@ -4,8 +4,9 @@
  *      sealCore — owned Components; labmx admin = ALL). Pick one.
  *   2. For the picked project: list its secret key NAMES (never values), seal/edit, delete.
  *
- * Write-only throughout: values are never shown. "Edit" is a transparent re-seal (set a new
- * value → overwrites). "Delete" opens a PR removing the SealedSecret (not instant).
+ * Write-only throughout: values are never shown. "Edit" is a transparent re-set (set a new
+ * value → overwrites it in Vault). "Delete" removes the Vault value + opens a PR dropping the
+ * key from the ExternalSecret declaration.
  */
 import { useCallback, useEffect, useState } from 'react';
 import { Button, Grid, Link, Typography } from '@material-ui/core';
@@ -219,9 +220,9 @@ export function SecretsPage() {
       <Content>
         <ContentHeader title="Team secrets">
           <SupportButton>
-            Secrets are sealed with kubeseal and committed to your app repo as a
-            SealedSecret via a pull request. Values are write-only — they are
-            never shown.
+            Secret values are written to Vault; an ExternalSecret declaration
+            (key names only, no values) is committed to your app repo via a pull
+            request. Values are write-only — they are never shown.
           </SupportButton>
         </ContentHeader>
         {picked ? (

@@ -1,7 +1,8 @@
 /*
- * sealCore — the SHARED implementation of the M3 secrets capability (ADR-029 §4/§6).
+ * sealCore — the SHARED implementation of the M3 secrets capability (ADR-029 §4/§6, reworked
+ * for the ESO+Vault v1 model, ADR-030 B1).
  *
- * Both entry points call this ONE module, so there is a single sealing + authz path (never a
+ * Both entry points call this ONE module, so there is a single write + authz path (never a
  * softer back-door):
  *   - the `capstone:seal-secret` scaffolder action (src/actions/sealSecret.ts), and
  *   - the `capstone-secrets` backend route POST /seal (src/service/router.ts) the frontend
@@ -10,15 +11,16 @@
  * sealAndPublish() does, in order: authorize `capstone.secret.seal` via the permission
  * framework (M2's policy decides) -> a belt-and-suspenders owner re-check (the actor's catalog
  * Groups must intersect the target Component's owner; `labmx` admin override) -> per env,
- * build a k8s Secret IN MEMORY -> seal OFFLINE with kubeseal (value piped to STDIN, never a
- * tempfile, never an argv, never logged; D-047 A2 no controller egress) -> open a PR to the
- * team app repo committing the SealedSecret (+ append it to the env overlay kustomization).
+ * WRITE the value into Vault (KV-v2 at secret/data/tenants/<team>/<env>/app under the KEY, via
+ * the VaultClient — the value never touches git) -> open a PR to the team app repo committing
+ * an `ExternalSecret` declaration (key NAMES + remoteRef pointers ONLY, NO values; + append it
+ * to the env overlay kustomization). This is the "no secret material in git" v1 contract.
  *
- * SECURITY INVARIANTS (plan R2 / R1): the plaintext is stdin-only; it never reaches a logger
- * or a thrown error (only the KEY + env); the flow fails CLOSED on an authz miss OR an owner
- * miss (no kubeseal, no Octokit) — enforced HERE so the action and the route share it.
+ * SECURITY INVARIANTS (plan R2 / R1): the plaintext only ever reaches the Vault request body;
+ * it never reaches a logger, a thrown error, or git (only the KEY + env); the flow fails
+ * CLOSED on an authz miss OR an owner miss (no Vault write, no Octokit) — enforced HERE so the
+ * action and the route share it.
  */
-import { execFile } from 'child_process';
 import type {
   AuthService,
   LoggerService,
@@ -42,6 +44,7 @@ import {
 } from '@backstage/integration';
 import { Octokit } from '@octokit/rest';
 import { sealSecretPermission } from './permissions';
+import { VaultClient, type VaultClientConfig } from './vaultClient';
 
 /** The platform admin group ref (D-027) — kept in sync with M2's permissionPolicy.ts. */
 export const ADMIN_GROUP_REF = 'group:default/labmx';
@@ -96,89 +99,120 @@ export interface DeleteRequest {
   key: string;
 }
 
-/** Resolved capstone.secrets.* config (plan §2.2). `kubesealBin` defaults to PATH lookup. */
+/**
+ * Resolved capstone.secrets.* config (ADR-030 B1). The Vault block (capstone.secrets.vault.*)
+ * tells the VaultClient where + how to write the value; the rest govern the ExternalSecret
+ * committed to the tenant repo. `secretStoreName`/`secretStoreKind`/`targetSecretName` MUST
+ * match the per-tenant SecretStore the eso-vault/m4 contract renders
+ * (external-secrets/secretstore-template.yaml: SecretStore `vault-tenant`, Secret `app-secrets`).
+ */
 interface SecretsConfig {
-  sealingCertPath: string;
-  kubesealBin: string;
   defaultBranchPrefix: string;
   secretsDir: string;
   overlayRelPath: string;
   overlaysDir: string;
+  /** The k8s Secret the ExternalSecret materializes (target.name + the ES name). */
+  targetSecretName: string;
+  /** The per-tenant SecretStore the ExternalSecret references (kind defaults to SecretStore). */
+  secretStoreName: string;
+  secretStoreKind: string;
+  /** Vault connection (the VaultClient writes the value here). */
+  vault: VaultClientConfig;
 }
 
 function readSecretsConfig(config: Config): SecretsConfig {
   const c = config.getOptionalConfig('capstone.secrets');
+  const v = c?.getOptionalConfig('vault');
   return {
-    sealingCertPath:
-      c?.getOptionalString('sealingCertPath') ??
-      '/etc/backstage/sealing-cert/sealing-cert.pem',
-    kubesealBin: c?.getOptionalString('kubesealBin') ?? 'kubeseal',
     defaultBranchPrefix:
       c?.getOptionalString('defaultBranchPrefix') ?? 'secrets/',
     secretsDir: c?.getOptionalString('secretsDir') ?? '.devops/secrets',
     overlayRelPath: c?.getOptionalString('overlayRelPath') ?? '../../secrets',
     overlaysDir:
       c?.getOptionalString('overlaysDir') ?? '.devops/chart/overlays',
+    targetSecretName:
+      c?.getOptionalString('targetSecretName') ?? 'app-secrets',
+    secretStoreName: c?.getOptionalString('secretStoreName') ?? 'vault-tenant',
+    secretStoreKind: c?.getOptionalString('secretStoreKind') ?? 'SecretStore',
+    vault: {
+      addr:
+        v?.getOptionalString('addr') ??
+        'https://vault.vault.svc.cluster.local:8200',
+      mount: v?.getOptionalString('mount') ?? 'secret',
+      authMount: v?.getOptionalString('authMount') ?? 'kubernetes',
+      role: v?.getOptionalString('role') ?? 'backstage-secrets',
+      saTokenPath:
+        v?.getOptionalString('saTokenPath') ??
+        '/var/run/secrets/kubernetes.io/serviceaccount/token',
+      caPath:
+        v?.getOptionalString('caPath') ??
+        '/etc/backstage/vault-ca/ca.crt',
+    },
   };
 }
 
-/**
- * Seal a k8s Secret OFFLINE with kubeseal. The plaintext manifest is piped to STDIN and the
- * sealed YAML captured from stdout — the plaintext NEVER touches disk and is NEVER an argv.
- * On failure we surface kubeseal's STDERR only (it never contains the value); we never include
- * stdin in the error. Returns the sealed SealedSecret YAML.
- */
-function kubesealStdin(
-  bin: string,
-  args: string[],
-  plaintextManifest: string,
-): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const child = execFile(
-      bin,
-      args,
-      { maxBuffer: 10 * 1024 * 1024 },
-      (error, stdout, stderr) => {
-        if (error) {
-          // NB: never include plaintextManifest / stdin in the error (R2).
-          reject(
-            new Error(
-              `kubeseal failed (exit ${
-                (error as NodeJS.ErrnoException).code ?? 'unknown'
-              }): ${stderr?.toString().trim() || error.message}`,
-            ),
-          );
-          return;
-        }
-        resolve(stdout.toString());
-      },
-    );
-    // Pipe the plaintext to stdin then close it; discard the reference immediately after.
-    child.stdin?.end(plaintextManifest);
-  });
+/** The Vault KV-v2 path that holds ALL of a tenant env's secret keys (one path per env). */
+function vaultPathFor(teamSlug: string, env: string): string {
+  return `tenants/${teamSlug}/${env}/app`;
 }
 
-/** Build the in-memory k8s Secret manifest for a single key/value in a target namespace. */
-function buildSecretManifest(
-  name: string,
-  namespace: string,
-  key: string,
-  value: string,
+/**
+ * Build an ExternalSecret manifest for a tenant env — key NAMES + remoteRef pointers ONLY, NO
+ * values (the "nothing in git" win). One ExternalSecret per `<team>-<env>` namespace, named +
+ * targeting `targetSecretName`, referencing the per-tenant SecretStore. Each `keys[]` entry
+ * maps a secret KEY to the Vault property at the single per-env path (tenants/<team>/<env>/app).
+ * JSON.stringify every interpolated value so no key can break the YAML document shape.
+ */
+function buildExternalSecret(
+  cfg: SecretsConfig,
+  teamSlug: string,
+  env: string,
+  keys: string[],
 ): string {
-  // stringData lets kubeseal base64 the value itself; the manifest exists only in memory and
-  // in kubeseal's stdin buffer. JSON.stringify both key and value so any YAML-special chars
-  // (colons, quotes, newlines) are safely quoted — no value can break the document shape.
-  return [
-    'apiVersion: v1',
-    'kind: Secret',
+  const namespace = `${teamSlug}-${env}`;
+  const vaultKey = vaultPathFor(teamSlug, env);
+  const lines = [
+    'apiVersion: external-secrets.io/v1',
+    'kind: ExternalSecret',
     'metadata:',
-    `  name: ${JSON.stringify(name)}`,
+    `  name: ${JSON.stringify(cfg.targetSecretName)}`,
     `  namespace: ${JSON.stringify(namespace)}`,
-    'type: Opaque',
-    'stringData:',
-    `  ${JSON.stringify(key)}: ${JSON.stringify(value)}`,
-    '',
-  ].join('\n');
+    'spec:',
+    '  refreshInterval: "1h"',
+    '  secretStoreRef:',
+    `    name: ${JSON.stringify(cfg.secretStoreName)}`,
+    `    kind: ${JSON.stringify(cfg.secretStoreKind)}`,
+    '  target:',
+    `    name: ${JSON.stringify(cfg.targetSecretName)}`,
+    '    creationPolicy: Owner',
+    '  data:',
+  ];
+  for (const key of [...keys].sort()) {
+    lines.push(
+      `    - secretKey: ${JSON.stringify(key)}`,
+      '      remoteRef:',
+      `        key: ${JSON.stringify(vaultKey)}`,
+      `        property: ${JSON.stringify(key)}`,
+    );
+  }
+  lines.push('');
+  return lines.join('\n');
+}
+
+/**
+ * Parse the secret KEY NAMES out of an existing ExternalSecret manifest (the `property:` of each
+ * data entry). Best-effort line scan (we never need full YAML parsing) — used to merge a new
+ * key into an existing ExternalSecret idempotently without disturbing the others.
+ */
+function parseExternalSecretKeys(yaml: string): string[] {
+  const keys = new Set<string>();
+  for (const line of yaml.split('\n')) {
+    const m = line.match(/^\s*property:\s*["']?([^"'\s]+)["']?\s*$/);
+    if (m) {
+      keys.add(m[1]);
+    }
+  }
+  return Array.from(keys);
 }
 
 /** k8s/RFC-1123 name from a secret key (lowercase, non-alnum -> '-', trimmed). */
@@ -363,9 +397,17 @@ function repoForTarget(target: Entity): { owner: string; repo: string } {
   return parseGithubRepo(sourceLocation);
 }
 
+/** The ExternalSecret file path for an env in the tenant repo. */
+function externalSecretPath(cfg: SecretsConfig, env: string): string {
+  return `${cfg.secretsDir}/externalsecret-${env}.yaml`;
+}
+
 /**
- * Seal a secret for each env and open a PR per env. Returns the PR URLs. ENFORCES the same
- * authz + owner re-check + fail-closed as everywhere (via authorizeAndResolveTarget).
+ * Set a secret for each env: WRITE the value into Vault (KV-v2, per-env path) and open a PR per
+ * env committing/merging the ExternalSecret declaration (NAMES only) + its overlay reference.
+ * Returns the PR URLs. ENFORCES the same authz + owner re-check + fail-closed as everywhere
+ * (via authorizeAndResolveTarget). The value reaches ONLY the Vault request body — never git,
+ * never a log, never a thrown error.
  */
 export async function sealAndPublish(
   deps: CapstoneSecretsDeps,
@@ -376,7 +418,7 @@ export async function sealAndPublish(
 
   // NEVER log the value — only the key + envs + target.
   deps.logger.info(
-    `capstone seal-secret requested for key="${key}" envs=[${envs.join(
+    `capstone set-secret requested for key="${key}" envs=[${envs.join(
       ',',
     )}] target=${entityRef}`,
   );
@@ -389,9 +431,7 @@ export async function sealAndPublish(
 
   const { owner, repo } = repoForTarget(target);
   const octokit = await octokitForRepo(deps.config, owner, repo);
-
-  const resourceName = toResourceName(key);
-  const secretFilePath = `${cfg.secretsDir}/${resourceName}.sealedsecret.yaml`;
+  const vault = new VaultClient(cfg.vault);
 
   const { data: repoInfo } = await octokit.repos.get({ owner, repo });
   const baseBranch = repoInfo.default_branch;
@@ -406,27 +446,13 @@ export async function sealAndPublish(
 
   for (const env of envs) {
     const namespace = `${teamSlug}-${env}`;
-    const manifest = buildSecretManifest(resourceName, namespace, key, value);
 
-    // Seal OFFLINE (R2: stdin only; the exact `make seal` invocation, strict scope).
-    const sealedYaml = await kubesealStdin(
-      cfg.kubesealBin,
-      [
-        '--cert',
-        cfg.sealingCertPath,
-        '--format',
-        'yaml',
-        '--scope',
-        'strict',
-        '--namespace',
-        namespace,
-        '--name',
-        resourceName,
-      ],
-      manifest,
-    );
+    // 1) WRITE the value into Vault (the only place the plaintext lands). Idempotent set/rotate
+    //    of one key at the per-env path; the other keys at that path are preserved.
+    await vault.setKey(vaultPathFor(teamSlug, env), key, value);
 
-    const branch = `${cfg.defaultBranchPrefix}${resourceName}-${env}-${Date.now()}`;
+    // 2) Commit/merge the ExternalSecret declaration (names only) + overlay ref via a PR.
+    const branch = `${cfg.defaultBranchPrefix}${toResourceName(key)}-${env}-${Date.now()}`;
     await octokit.git.createRef({
       owner,
       repo,
@@ -434,14 +460,22 @@ export async function sealAndPublish(
       sha: baseSha,
     });
 
+    const esPath = externalSecretPath(cfg, env);
+    // Merge the new key into any existing ExternalSecret for this env (idempotent), so adding a
+    // second key never drops the first. Read the current file on the branch (if any).
+    const existing = await getFileContent(octokit, owner, repo, branch, esPath);
+    const existingKeys = existing ? parseExternalSecretKeys(existing) : [];
+    const mergedKeys = Array.from(new Set([...existingKeys, key]));
+    const esYaml = buildExternalSecret(cfg, teamSlug, env, mergedKeys);
+
     await putFile(
       octokit,
       owner,
       repo,
       branch,
-      secretFilePath,
-      sealedYaml,
-      `chore(secrets): seal ${key} for ${env}`,
+      esPath,
+      esYaml,
+      `chore(secrets): declare ${key} for ${env}`,
     );
 
     await appendToOverlayKustomization(
@@ -450,7 +484,7 @@ export async function sealAndPublish(
       repo,
       branch,
       `${cfg.overlaysDir}/${env}/kustomization.yaml`,
-      `${cfg.overlayRelPath}/${resourceName}.sealedsecret.yaml`,
+      `${cfg.overlayRelPath}/externalsecret-${env}.yaml`,
     );
 
     const { data: pr } = await octokit.pulls.create({
@@ -458,19 +492,22 @@ export async function sealAndPublish(
       repo,
       base: baseBranch,
       head: branch,
-      title: `chore(secrets): seal ${key} for ${env}`,
+      title: `chore(secrets): set ${key} for ${env}`,
       body: [
-        `Seals the secret \`${key}\` for environment \`${env}\` (namespace \`${namespace}\`).`,
+        `Declares the secret \`${key}\` for environment \`${env}\` (namespace \`${namespace}\`).`,
         '',
-        '**Write-only:** sealed values cannot be read back. To change this secret, set it again.',
+        '**Write-only:** the value was written to Vault and cannot be read back here. To change',
+        'this secret, set it again. This PR adds **no secret material** — only an',
+        '`ExternalSecret` declaration (key names + Vault pointers).',
         '',
-        'On merge: ArgoCD applies the SealedSecret -> the sealed-secrets controller decrypts',
-        'it into a Kubernetes Secret in the target namespace -> your workload can consume it.',
+        'On merge: ArgoCD applies the ExternalSecret -> the External Secrets Operator reads the',
+        'value from Vault -> materializes a Kubernetes Secret in the target namespace -> your',
+        'workload can consume it.',
       ].join('\n'),
     });
     pullRequestUrls.push(pr.html_url);
     deps.logger.info(
-      `capstone seal-secret opened PR for key="${key}" env=${env}: ${pr.html_url}`,
+      `capstone set-secret opened PR for key="${key}" env=${env}: ${pr.html_url}`,
     );
   }
 
@@ -498,9 +535,10 @@ export async function listSecrets(
   const { owner, repo } = repoForTarget(target);
   const octokit = await octokitForRepo(deps.config, owner, repo);
 
-  // List the per-key SealedSecret files. The strict-scope namespace is inside each file, not
-  // the path, so we report the KEY (filename) for every env the repo declares overlays for.
-  let files: Array<{ name: string; path: string }> = [];
+  // List the per-env ExternalSecret files (externalsecret-<env>.yaml). Each declares its KEY
+  // NAMES as the `property:` of its data entries — we report those (NAMES only, never values;
+  // we never read Vault here). Each key's last-updated is the file's last commit date.
+  let files: Array<{ name: string; path: string; env: string }> = [];
   try {
     const { data } = await octokit.repos.getContent({
       owner,
@@ -509,41 +547,28 @@ export async function listSecrets(
     });
     if (Array.isArray(data)) {
       files = data
-        .filter(f => f.type === 'file' && f.name.endsWith('.sealedsecret.yaml'))
-        .map(f => ({ name: f.name, path: f.path }));
+        .filter(f => f.type === 'file')
+        .map(f => {
+          const m = f.name.match(/^externalsecret-(dev|staging|prod)\.yaml$/);
+          return m ? { name: f.name, path: f.path, env: m[1] } : undefined;
+        })
+        .filter((f): f is { name: string; path: string; env: string } => !!f);
     }
   } catch (e) {
-    // No secrets dir yet -> nothing sealed.
+    // No secrets dir yet -> nothing declared.
     if ((e as { status?: number }).status === 404) {
       return [];
     }
     throw e;
   }
 
-  // For each file, read the strict-scope namespace (-> env) + the last commit date. We open
-  // the file ONLY to read its metadata.namespace (NOT the encrypted data — never decrypted).
   const summaries: SecretSummary[] = [];
   for (const file of files) {
-    const key = file.name.replace(/\.sealedsecret\.yaml$/, '');
-    let env = 'unknown';
     let lastUpdated: string | undefined;
-    try {
-      const { data: content } = await octokit.repos.getContent({
-        owner,
-        repo,
-        path: file.path,
-      });
-      if (!Array.isArray(content) && 'content' in content && content.content) {
-        const text = Buffer.from(content.content, 'base64').toString('utf8');
-        const nsMatch = text.match(
-          /namespace:\s*["']?[a-z0-9-]+-(dev|staging|prod)["']?/i,
-        );
-        if (nsMatch) {
-          env = nsMatch[1];
-        }
-      }
-    } catch {
-      // best-effort; leave env=unknown
+    let keys: string[] = [];
+    const text = await getFileContent(octokit, owner, repo, undefined, file.path);
+    if (text) {
+      keys = parseExternalSecretKeys(text);
     }
     try {
       const { data: commits } = await octokit.repos.listCommits({
@@ -556,9 +581,42 @@ export async function listSecrets(
     } catch {
       // best-effort; leave lastUpdated undefined
     }
-    summaries.push({ key, env, lastUpdated });
+    for (const key of keys) {
+      summaries.push({ key, env: file.env, lastUpdated });
+    }
   }
   return summaries;
+}
+
+/**
+ * Read a file's UTF-8 content from a branch (or the default branch when `branch` is undefined).
+ * Returns undefined for a 404 (file absent). Used to merge into an existing ExternalSecret and
+ * to read its declared key names for List.
+ */
+async function getFileContent(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  branch: string | undefined,
+  path: string,
+): Promise<string | undefined> {
+  try {
+    const { data } = await octokit.repos.getContent({
+      owner,
+      repo,
+      path,
+      ...(branch ? { ref: branch } : {}),
+    });
+    if (!Array.isArray(data) && 'content' in data && data.content) {
+      return Buffer.from(data.content, 'base64').toString('utf8');
+    }
+    return undefined;
+  } catch (e) {
+    if ((e as { status?: number }).status === 404) {
+      return undefined;
+    }
+    throw e;
+  }
 }
 
 /** Create or update a file on a branch (idempotent overwrite/rotate). */
@@ -600,7 +658,7 @@ async function putFile(
 
 /**
  * Idempotently add `resourceRelPath` to the `resources:` list of an env overlay's
- * kustomization.yaml so the team's overlay actually applies the new SealedSecret (Option A).
+ * kustomization.yaml so the team's overlay actually applies the new ExternalSecret (Option A).
  * Tolerant: creates/extends the file + the resources block; never duplicates an existing entry.
  */
 async function appendToOverlayKustomization(
@@ -726,13 +784,13 @@ export async function listMyProjects(
 }
 
 /**
- * Delete (un-seal) a secret key from a Component's app repo via a PR — the inverse of
- * sealAndPublish. Removes BOTH the `<secretsDir>/<key>.sealedsecret.yaml` file AND its
- * `- <overlayRelPath>/<key>.sealedsecret.yaml` reference from every env overlay's
- * kustomization, so a merge cleanly drops the SealedSecret from GitOps (the controller then
- * GCs the decrypted Secret on the next sync). ENFORCES the same capstone.secret.seal authz +
- * owner re-check + fail-closed as seal (you can only delete what you could seal). Like seal,
- * it is PR-by-default — the secret is gone once the team merges, not instantly.
+ * Delete a secret key from a Component via a PR — the inverse of sealAndPublish. Removes the
+ * Vault key (KV-v2 merge-patch null at each env path where it was declared) AND drops it from
+ * the per-env ExternalSecret: if the key was the env's last, the `externalsecret-<env>.yaml`
+ * file + its overlay reference are removed; otherwise the ExternalSecret is rewritten with the
+ * remaining keys. ENFORCES the same capstone.secret.seal authz + owner re-check + fail-closed
+ * as seal (you can only delete what you could seal). PR-by-default for the git side — the
+ * Vault value, however, is removed IMMEDIATELY (it is not gated on the merge).
  */
 export async function deleteSecret(
   deps: CapstoneSecretsDeps,
@@ -745,32 +803,14 @@ export async function deleteSecret(
     `capstone delete-secret requested for key="${key}" target=${entityRef}`,
   );
 
-  const { target } = await authorizeAndResolveTarget(
+  const { target, teamSlug } = await authorizeAndResolveTarget(
     deps,
     credentials,
     entityRef,
   );
   const { owner, repo } = repoForTarget(target);
   const octokit = await octokitForRepo(deps.config, owner, repo);
-
-  const resourceName = toResourceName(key);
-  const secretFilePath = `${cfg.secretsDir}/${resourceName}.sealedsecret.yaml`;
-
-  // Locate the file (404 -> nothing to delete; surface a clear error).
-  let fileSha: string | undefined;
-  try {
-    const { data } = await octokit.repos.getContent({ owner, repo, path: secretFilePath });
-    if (!Array.isArray(data) && 'sha' in data) {
-      fileSha = data.sha;
-    }
-  } catch (e) {
-    if ((e as { status?: number }).status === 404) {
-      throw new NotFoundError(
-        `No sealed secret "${key}" found for ${entityRef} (nothing to delete).`,
-      );
-    }
-    throw e;
-  }
+  const vault = new VaultClient(cfg.vault);
 
   const { data: repoInfo } = await octokit.repos.get({ owner, repo });
   const baseBranch = repoInfo.default_branch;
@@ -779,7 +819,7 @@ export async function deleteSecret(
     repo,
     ref: `heads/${baseBranch}`,
   });
-  const branch = `${cfg.defaultBranchPrefix}delete-${resourceName}-${Date.now()}`;
+  const branch = `${cfg.defaultBranchPrefix}delete-${toResourceName(key)}-${Date.now()}`;
   await octokit.git.createRef({
     owner,
     repo,
@@ -787,28 +827,69 @@ export async function deleteSecret(
     sha: baseRef.object.sha,
   });
 
-  // 1) Delete the SealedSecret file on the branch.
-  await octokit.repos.deleteFile({
-    owner,
-    repo,
-    branch,
-    path: secretFilePath,
-    message: `chore(secrets): delete ${key}`,
-    sha: fileSha!,
-  });
-
-  // 2) Remove the resource reference from each env overlay's kustomization (best-effort per
-  //    env: an overlay that never referenced it is simply skipped).
-  const resourceRelPath = `${cfg.overlayRelPath}/${resourceName}.sealedsecret.yaml`;
+  // Find every env whose ExternalSecret declares this key, on the base branch.
+  const envsWithKey: string[] = [];
   for (const env of ['dev', 'staging', 'prod']) {
-    await removeFromOverlayKustomization(
-      octokit,
-      owner,
-      repo,
-      branch,
-      `${cfg.overlaysDir}/${env}/kustomization.yaml`,
-      resourceRelPath,
+    const esPath = externalSecretPath(cfg, env);
+    const existing = await getFileContent(octokit, owner, repo, undefined, esPath);
+    if (existing && parseExternalSecretKeys(existing).includes(key)) {
+      envsWithKey.push(env);
+    }
+  }
+  if (envsWithKey.length === 0) {
+    throw new NotFoundError(
+      `No secret "${key}" found for ${entityRef} (nothing to delete).`,
     );
+  }
+
+  for (const env of envsWithKey) {
+    // 1) Remove the value from Vault immediately (merge-patch null; other keys preserved).
+    await vault.deleteKey(vaultPathFor(teamSlug, env), key);
+
+    // 2) Update the ExternalSecret on the branch: drop this key. If it was the last key, remove
+    //    the file + its overlay reference; otherwise rewrite with the remaining keys.
+    const esPath = externalSecretPath(cfg, env);
+    const existing = await getFileContent(octokit, owner, repo, branch, esPath);
+    const remaining = (existing ? parseExternalSecretKeys(existing) : []).filter(
+      k => k !== key,
+    );
+    if (remaining.length === 0) {
+      // Delete the file (read its sha on the branch first).
+      const { data } = await octokit.repos.getContent({
+        owner,
+        repo,
+        path: esPath,
+        ref: branch,
+      });
+      if (!Array.isArray(data) && 'sha' in data) {
+        await octokit.repos.deleteFile({
+          owner,
+          repo,
+          branch,
+          path: esPath,
+          message: `chore(secrets): remove ${key} for ${env}`,
+          sha: data.sha,
+        });
+      }
+      await removeFromOverlayKustomization(
+        octokit,
+        owner,
+        repo,
+        branch,
+        `${cfg.overlaysDir}/${env}/kustomization.yaml`,
+        `${cfg.overlayRelPath}/externalsecret-${env}.yaml`,
+      );
+    } else {
+      await putFile(
+        octokit,
+        owner,
+        repo,
+        branch,
+        esPath,
+        buildExternalSecret(cfg, teamSlug, env, remaining),
+        `chore(secrets): remove ${key} for ${env}`,
+      );
+    }
   }
 
   const { data: pr } = await octokit.pulls.create({
@@ -818,12 +899,13 @@ export async function deleteSecret(
     head: branch,
     title: `chore(secrets): delete ${key}`,
     body: [
-      `Removes the sealed secret \`${key}\` from \`${entityRef}\`.`,
+      `Removes the secret \`${key}\` from \`${entityRef}\`.`,
       '',
-      'Deletes the SealedSecret file + its overlay references. On merge: ArgoCD prunes the',
-      'SealedSecret -> the sealed-secrets controller removes the decrypted Secret on sync.',
+      'The value has been removed from Vault. This PR drops the key from the',
+      '`ExternalSecret` declaration(s) + overlay references. On merge: ArgoCD applies the',
+      'change -> the External Secrets Operator drops the key (or the whole Secret) on sync.',
       '',
-      '**The secret is not gone until this PR is merged** (PR-by-default, like sealing).',
+      '**The Vault value is gone now; the GitOps declaration updates on merge.**',
     ].join('\n'),
   });
   deps.logger.info(
