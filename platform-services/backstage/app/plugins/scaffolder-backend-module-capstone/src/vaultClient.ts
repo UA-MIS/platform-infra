@@ -37,7 +37,7 @@ export interface VaultClientConfig {
   mount: string;
   /** k8s-auth mount path, e.g. "kubernetes". */
   authMount: string;
-  /** Vault k8s-auth role bound to the Backstage SA, e.g. "backstage-secrets". */
+  /** Vault k8s-auth role bound to the Backstage SA, e.g. "backstage-writer". */
   role: string;
   /** Path to the projected SA JWT (default the standard projected-token path). */
   saTokenPath: string;
@@ -216,7 +216,7 @@ export class VaultClient {
   }
 
   // NB: there is intentionally NO read-the-value method here. The writer policy
-  // (backstage-secrets-writer) grants create/update/patch on secret/data/tenants/* but NOT
+  // (backstage-writer) grants create/update/patch on secret/data/tenants/* but NOT
   // read — values are write-only and never read back. The Secrets tab's List sources key NAMES
   // from the committed ExternalSecret declarations in git (sealCore.listSecrets), NOT from
   // Vault, so no data read is needed anywhere.
