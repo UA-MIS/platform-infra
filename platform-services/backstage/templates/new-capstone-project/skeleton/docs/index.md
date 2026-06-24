@@ -16,9 +16,9 @@ Scaffolded by **The Process** onto the UA-MIS capstone platform golden path.
 
 | Environment | URL |
 | --- | --- |
-| dev | `https://${{ values.appName }}.${{ values.team }}.dev.<platform-domain>` |
-| staging | `https://${{ values.appName }}.${{ values.team }}.staging.<platform-domain>` |
-| prod | `https://${{ values.appName }}.${{ values.team }}.<platform-domain>` |
+| dev | `https://${{ values.appName }}.dev.<platform-domain>` |
+| staging | `https://${{ values.appName }}.staging.<platform-domain>` |
+| prod | `https://${{ values.appName }}.<platform-domain>` |
 
 ## The `.devops/` contract
 
@@ -27,11 +27,13 @@ The platform owns everything under `.devops/`. Your only knobs are the four fiel
 
 ## Secrets
 
-Your team's secrets live as **SealedSecrets** under `.devops/secrets/`. You do **not**
-run `kubeseal` yourself — open the **Secrets** tab on your component in The Process,
-enter a key/value and the target env(s), and it opens a PR that adds
-`.devops/secrets/<key>.sealedsecret.yaml`. Merge it and ArgoCD applies it. Secrets are
-**write-only** (you can't read a sealed value back; to change one, set it again). See
+Your team's secrets live as **`ExternalSecret` declarations** under `.devops/secrets/`
+(External Secrets Operator + Vault). You do **not** put values in git — open the
+**Secrets** tab on your component in The Process, enter a key/value and the target
+env(s), and it writes the value to your team's Vault path and opens a PR that adds
+`.devops/secrets/<key>.externalsecret.yaml`. Merge it and ArgoCD applies it; ESO reads
+the value from Vault and materializes the Kubernetes Secret. Secrets are **write-only**
+(you can't read a value back; to change one, set it again). See
 `.devops/secrets/README.md` for the full pattern.
 
 ## Switching to a Debian/Ubuntu base image (apt) — read before you do

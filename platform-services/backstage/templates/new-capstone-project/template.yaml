@@ -67,7 +67,7 @@ spec:
           description: >-
             Short slug for your app + repo (lowercase letters, digits, hyphens — no
             spaces, uppercase, or dots). Becomes the repo name, the Kubernetes
-            workload names, and the ingress host <app-name>.<team>.<platform-domain>,
+            workload names, and the ingress host <app-name>.<platform-domain>,
             so it MUST be a DNS-1123 label.
           # DNS-1123 label: lowercase alphanumerics + hyphens, must start AND end with
           # an alphanumeric (so a hyphen can't be first/last). Same charset as a repo
@@ -326,7 +326,8 @@ spec:
           2. Open a PR -> a **preview** environment is built automatically.
           3. Merge to `main` -> **dev** auto-deploys.
           4. Tag `vX.Y.Z` -> **staging** auto-deploys; **prod** waits on the manual gate.
-          Your app will be at `https://${{ parameters.appName }}.${{ parameters.team }}.<platform-domain>`.
+          Your app will be at `https://${{ parameters.appName }}.capstone.uamishub.com`
+          (dev/staging add a `.dev`/`.staging` segment before the domain).
 
           **One thing is gated:** a **platform onboarding PR** was opened against
           `UA-MIS/platform-infra` to stand up your team's namespaces/RBAC/Harbor

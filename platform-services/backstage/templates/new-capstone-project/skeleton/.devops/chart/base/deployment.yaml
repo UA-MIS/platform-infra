@@ -5,8 +5,8 @@
 # override driven by promotion.yaml (dev=main digest, staging=tag, prod=gated tag).
 #
 # Secret: APP_SECRET is sourced from the in-namespace Secret `${{ values.appName }}-secret`,
-# which the sealed-secrets controller produces by decrypting the committed
-# SealedSecret (§5.3, D-006). The app reads it and proves the read on "/".
+# which the External Secrets Operator materializes from Vault via the per-env
+# app-secret ExternalSecret (ADR-030 B1). The app reads it and proves the read on "/".
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -43,14 +43,15 @@ spec:
             # Container port — single source is app-metadata.yaml (port: 8080).
             - name: PORT
               value: "8080"
-            # Proof-of-secret-path: value injected from the decrypted Secret.
+            # Proof-of-secret-path: value injected from the ESO-materialized Secret.
             # optional: true makes this the SAME base for two cases (M4 zero-config):
-            #   - the sample app (ships the ${{ values.appName }}-secret placeholder) -> APP_SECRET
-            #     loads, the secret path is demonstrated;
-            #   - a freshly-scaffolded repo (no secret yet) -> the env is simply unset,
-            #     the pod still starts (no CreateContainerConfigError), so a new app
-            #     deploys with ZERO manual secret setup. Teams add secrets via The
-            #     Process "Secrets" tab (capstone:seal-secret) only when they need one.
+            #   - APP_SECRET set in Vault -> the app-secret ExternalSecret materializes
+            #     ${{ values.appName }}-secret, APP_SECRET loads, the secret path is demonstrated;
+            #   - a freshly-scaffolded repo (nothing in Vault) -> the app-secret
+            #     ExternalSecret (deletionPolicy: Delete) creates no Secret, the env is
+            #     simply unset, the pod still starts (no CreateContainerConfigError), so a
+            #     new app deploys with ZERO manual secret setup. Teams add secrets via The
+            #     Process "Secrets" tab only when they need one.
             - name: APP_SECRET
               valueFrom:
                 secretKeyRef:

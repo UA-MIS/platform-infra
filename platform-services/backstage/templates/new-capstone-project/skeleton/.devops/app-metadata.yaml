@@ -2,7 +2,8 @@
 #
 # These four fields are the single declarative input to the whole .devops/ template:
 # the chart/ overlays derive workload names, the ingress host
-# (<app-name>.<team>.<platform-domain>), the namespace prefix (<team>-<env>), the
+# (<app-name>.<platform-domain>; appName is globally unique so no team segment),
+# the namespace prefix (<team>-<env>), the
 # cohort selector labels, and the container port. The platform's tenant
 # ApplicationSets read the same team + semester values. Everything else in .devops/
 # is platform-managed and immutable.

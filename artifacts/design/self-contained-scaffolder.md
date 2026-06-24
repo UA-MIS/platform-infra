@@ -76,25 +76,29 @@ the distinction is by field, not value):
 | `app: sample` | `${{ values.appName }}` | promotion.yaml |
 | `newName: harbor.…/sample/sample` | `harbor.…/${{ values.team }}/${{ values.appName }}` | 4 overlays |
 | `images: - name: sample` + base `image:`/workload `name: sample` | `${{ values.appName }}` | base + overlays |
-| host `sample.sample.<env>.<domain>` | `${{ values.appName }}.${{ values.team }}.<env>.capstone.uamishub.com` | base ingress + overlays |
+| host `sample.sample.<env>.<domain>` | `${{ values.appName }}.<env>.capstone.uamishub.com` (prod: no `<env>` segment) — team dropped, see §4 | base ingress + overlays |
 | `platform.capstone/team: sample` | `${{ values.team }}` | base + overlays |
 | `app.kubernetes.io/name: sample` | `${{ values.appName }}` | base + overlays |
 | Secret name `sample-secret` | `${{ values.appName }}-secret` | base deployment + dev overlay |
 
-### 2.3 Sealed secrets — minted at onboarding, NOT shipped as sample ciphertext
-`overlays/*/sealedsecret.yaml` + `harbor-pull.sealedsecret.yaml` hold REAL ciphertext
-**cryptographically bound (strict mode) to namespace `sample-dev` + name `sample-secret`/
-`harbor-pull`** — they decrypt ONLY in sample's namespaces, useless for any other tenant.
-So they CANNOT be templatized (the ciphertext is namespace-locked). Design:
-- Ship them as **templatized placeholder stubs**: correct `metadata.namespace`
-  `${{ values.team }}-<env>` + name, with a clearly-fake placeholder ciphertext + a
-  comment "minted live at onboarding (`make harbor-robot …`)". This matches today's
-  reality (the committed values are placeholders; real robots are minted per-tenant).
-- `APP_SECRET` is already `optional: true` in base (M4 zero-config), so a fresh repo with
-  no real app-secret still deploys. `harbor-pull` IS required for image pull, but it is
-  minted by the **platform-side onboarding step** in the tenant-PR checklist — not the
-  student build. (The skeleton's stub keeps the overlay structurally valid for kustomize
-  build; the operator replaces the ciphertext at onboarding.)
+### 2.3 Secrets — ESO + Vault (RECONCILED to ADR-030 B1; supersedes SealedSecrets)
+The user chose ESO + Vault for v1 (#107 merged), so the embedded secrets contract is the
+**ExternalSecret** model, not SealedSecrets. Each overlay ships three rendered files
+(NO ciphertext, NO secret material in git — just names + Vault pointers):
+- `secretstore.yaml` — a per-namespace `SecretStore` (`vault-tenant`) + SA (`eso-tenant`)
+  authenticating to Vault via role `tenant-${{ values.team }}`, scoped to
+  `secret/data/tenants/${{ values.team }}/*` ONLY (per #107's secretstore-template.yaml).
+- `app-secret.externalsecret.yaml` — `APP_SECRET` ← Vault `tenants/<team>/<env>/app`
+  (`deletionPolicy: Delete` so a missing value is NOT an error → M4 zero-config preserved
+  alongside the base's `optional: true`).
+- `harbor-pull.externalsecret.yaml` — `kubernetes.io/dockerconfigjson` templated from
+  Vault `tenants/<team>/<env>/harbor-pull` (default `Retain`: required for image pull, so
+  a missing value surfaces SecretSyncError to prompt onboarding).
+
+The Vault CA reaches the tenant namespace as an in-ns ConfigMap `vault-ca` (a namespaced
+SecretStore cannot cross-namespace `caProvider` the `vault`-ns cert). Values are written
+to Vault by the platform onboarding step / The Process Secrets tab — NOT the student
+build. (Vault-path convention coordinated with the eso-vault agent.)
 
 ### 2.4 What stays the same
 - `app-metadata.yaml` — the skeleton ALREADY ships a templated one (`${{ values.* }}`); keep it.
@@ -114,14 +118,20 @@ So they CANNOT be templatized (the ciphertext is namespace-locked). Design:
   values vs the fetch steps) — trivial merge.
 - **#104 (cohort-gc draft)** — unrelated (platform-services), no interaction.
 
-## 4. Separate flag (NOT in this PR) — host-depth TLS
-Ingress hosts are 3–4 labels deep (`foo.acme.dev.capstone.uamishub.com`). CF free wildcard
-covers ONE level; paid Advanced TWO. So these hosts get no edge TLS as-is. Fix option:
-**flatten to a single label** `${{ values.appName }}-${{ values.team }}-<env>.capstone.uamishub.com`
-(fits `*.capstone.uamishub.com`). That's a contract change to the ingress host scheme —
-since the contract is NOW embedded in the skeleton, it's just a skeleton edit (no external
-tag/repo), which is a nice side benefit of this re-architecture. **Flagged, not baked** —
-team-lead decides separately.
+## 4. Host scheme — RECONCILED: team dropped from the host
+The new tenant host drops the team segment (appName is globally unique via
+`UA-MIS/<appName>`, so it's unambiguous; team stays the namespace/AppProject/RBAC key,
+not the public host):
+- prod (base, canonical): `${{ values.appName }}.capstone.uamishub.com`  ← chosen "cleaner"
+  form over `${{ values.appName }}.prod.…` (prod = the bare public URL students share;
+  fits the paid `*.capstone.uamishub.com` wildcard at ONE level).
+- dev/staging/preview overlays patch in the env prefix:
+  `${{ values.appName }}.{dev,staging,pr-1}.capstone.uamishub.com` (2 levels deep —
+  needs `*.<env>.capstone.uamishub.com` cert depth; the user holds the paid multi-level
+  cert). Dropping team REDUCES depth by one label vs the old 3–4 label scheme.
+
+The #103 catalog-info link is reconciled to the same scheme
+(`${{ values.appName }}.dev.capstone.uamishub.com`, rendered real domain).
 
 ## 5. Build-time validation
 - `kustomize build` each overlay with sample values substituted → must render the same
