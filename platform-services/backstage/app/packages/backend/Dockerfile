@@ -39,9 +39,15 @@ COPY .yarn ./.yarn
 COPY .yarnrc.yml ./
 
 COPY packages packages
+# M3: the root workspaces glob is ["packages/*", "plugins/*"], and packages/{app,backend}
+# now depend on the local @internal/* plugin workspaces via `workspace:^`. The skeleton
+# install resolves those workspace refs, so plugins/ MUST be copied here too — otherwise
+# `yarn install --immutable` fails with "Workspace not found" (the M1/M2 image had no
+# plugins/ so this line is new for M3).
+COPY plugins plugins
 
-# Keep only package.json under each package dir so the install layer is cache-stable.
-RUN find packages \! -name "package.json" -mindepth 2 -maxdepth 2 -exec rm -rf {} \+
+# Keep only package.json under each package/plugin dir so the install layer is cache-stable.
+RUN find packages plugins \! -name "package.json" -mindepth 2 -maxdepth 2 -exec rm -rf {} \+
 
 # Stage 2 — install all deps and build the backend bundle.
 FROM ${NODE_IMAGE} AS build
