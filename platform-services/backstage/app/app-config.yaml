@@ -168,5 +168,6 @@ capstone:
       mount: secret
       authMount: kubernetes
       role: backstage-writer
-      saTokenPath: /var/run/secrets/kubernetes.io/serviceaccount/token
+      # Projected SA token with audience=vault (deploy mounts it; NOT the default token).
+      saTokenPath: /var/run/secrets/vault/token
       caPath: /etc/backstage/vault-ca/ca.crt

@@ -128,7 +128,8 @@ integrations:
 # (eso-vault adds this to the Vault runbook, mirroring eso-role.sh); (2) the Vault CA bundle
 # (the vault-server-tls issuing CA, same ESO uses) mounted at vault.caPath via a Helm
 # extraVolume/extraVolumeMount in applicationsets/backstage-process-app.yaml; (3) the
-# deployment serviceAccountName set to backstage-vault-writer + netpol egress to
+# deployment serviceAccountName set to backstage-vault-writer, a projected serviceAccountToken
+# volume (audience: vault) mounted at vault.saTokenPath, + netpol egress to
 # vault.vault.svc:8200. SECURITY: this token can write ANY tenant path (coarse by design) —
 # per-tenant authz is enforced in the Backstage layer (the capstone.secret.seal owner
 # re-check, BEFORE the Vault write). These may need mirroring into the Helm appConfig — devops.
@@ -155,5 +156,7 @@ capstone:
       mount: secret
       authMount: kubernetes
       role: backstage-writer
-      saTokenPath: /var/run/secrets/kubernetes.io/serviceaccount/token
+      # Projected SA token with audience=vault (deploy mounts a serviceAccountToken projected
+      # volume here; the default API-server-audience token will NOT satisfy the Vault role).
+      saTokenPath: /var/run/secrets/vault/token
       caPath: /etc/backstage/vault-ca/ca.crt

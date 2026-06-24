@@ -5,7 +5,7 @@
  * remoteRef pointers, NO values) is committed to the tenant repo by sealCore.
  *
  * AUTH: Backstage authenticates to Vault with its OWN Kubernetes ServiceAccount JWT
- * (projected at /var/run/secrets/kubernetes.io/serviceaccount/token) via the k8s-auth method
+ * (a projected token with audience=vault, mounted by the deploy at saTokenPath) via k8s-auth
  * (POST /v1/auth/<mount>/login {jwt, role}) and uses the returned client_token for the KV-v2
  * call. The Vault role `backstage-writer` (eso-vault domain, vault-policies) binds ONLY the
  * dedicated Backstage SA (backstage-vault-writer) to a write-scoped policy over

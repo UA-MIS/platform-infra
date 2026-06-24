@@ -86,7 +86,7 @@ const CFG: VaultClientConfig = {
   mount: 'secret',
   authMount: 'kubernetes',
   role: 'backstage-writer',
-  saTokenPath: '/var/run/secrets/kubernetes.io/serviceaccount/token',
+  saTokenPath: '/var/run/secrets/vault/token',
   caPath: '/etc/backstage/vault-ca/ca.crt',
 };
 

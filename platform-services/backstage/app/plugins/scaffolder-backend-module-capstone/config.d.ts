@@ -74,8 +74,9 @@ export interface Config {
          */
         role?: string;
         /**
-         * Path to the projected SA JWT.
-         * Default: /var/run/secrets/kubernetes.io/serviceaccount/token.
+         * Path to a projected SA token whose audience matches the Vault role's bound audience
+         * ("vault") — NOT the default API-server token. The deploy mounts a serviceAccountToken
+         * projected volume (audience: vault). Default: /var/run/secrets/vault/token.
          * @visibility backend
          */
         saTokenPath?: string;

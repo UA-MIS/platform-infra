@@ -141,9 +141,11 @@ function readSecretsConfig(config: Config): SecretsConfig {
       mount: v?.getOptionalString('mount') ?? 'secret',
       authMount: v?.getOptionalString('authMount') ?? 'kubernetes',
       role: v?.getOptionalString('role') ?? 'backstage-writer',
+      // A projected SA token with audience=vault (NOT the default API-server-audience token):
+      // Vault's backstage-writer role is bound to audience "vault", so the deploy mounts a
+      // serviceAccountToken projected volume (audience: vault) here. See app-config.production.
       saTokenPath:
-        v?.getOptionalString('saTokenPath') ??
-        '/var/run/secrets/kubernetes.io/serviceaccount/token',
+        v?.getOptionalString('saTokenPath') ?? '/var/run/secrets/vault/token',
       caPath:
         v?.getOptionalString('caPath') ??
         '/etc/backstage/vault-ca/ca.crt',
