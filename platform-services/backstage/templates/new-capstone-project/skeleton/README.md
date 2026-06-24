@@ -34,7 +34,8 @@ RBAC, network policy, CI — is derived from those values by the platform.
 | Approve the gate | Promotes to **prod** (manual gate) |
 
 Your app will be reachable at
-`https://${{ values.appName }}.${{ values.team }}.<env>.<platform-domain>`.
+`https://${{ values.appName }}.${{ values.team }}.<env>.capstone.uamishub.com`
+(prod drops the `<env>` segment: `${{ values.appName }}.${{ values.team }}.capstone.uamishub.com`).
 
 ## The app (`app/`)
 

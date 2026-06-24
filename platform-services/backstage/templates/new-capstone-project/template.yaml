@@ -347,7 +347,8 @@ spec:
           2. Open a PR -> a **preview** environment is built automatically.
           3. Merge to `main` -> **dev** auto-deploys.
           4. Tag `vX.Y.Z` -> **staging** auto-deploys; **prod** waits on the manual gate.
-          Your app will be at `https://${{ parameters.appName }}.${{ parameters.team }}.<platform-domain>`.
+          Your app will be at `https://${{ parameters.appName }}.${{ parameters.team }}.capstone.uamishub.com`
+          (dev/staging add a `.dev`/`.staging` segment before the domain).
 
           **One thing is gated:** a **platform onboarding PR** was opened against
           `UA-MIS/platform-infra` to stand up your team's namespaces/RBAC/Harbor

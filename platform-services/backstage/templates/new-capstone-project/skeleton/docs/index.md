@@ -16,9 +16,9 @@ Scaffolded by **The Process** onto the UA-MIS capstone platform golden path.
 
 | Environment | URL |
 | --- | --- |
-| dev | `https://${{ values.appName }}.${{ values.team }}.dev.<platform-domain>` |
-| staging | `https://${{ values.appName }}.${{ values.team }}.staging.<platform-domain>` |
-| prod | `https://${{ values.appName }}.${{ values.team }}.<platform-domain>` |
+| dev | `https://${{ values.appName }}.${{ values.team }}.dev.capstone.uamishub.com` |
+| staging | `https://${{ values.appName }}.${{ values.team }}.staging.capstone.uamishub.com` |
+| prod | `https://${{ values.appName }}.${{ values.team }}.capstone.uamishub.com` |
 
 ## The `.devops/` contract
 
