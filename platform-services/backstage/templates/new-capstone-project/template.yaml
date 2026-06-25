@@ -59,7 +59,8 @@ spec:
       required:
         - appName
         - team
-        - semester
+        - season
+        - year
       properties:
         appName:
           title: App name
@@ -86,12 +87,38 @@ spec:
             project, and OIDC group on this single value, D-026).
           pattern: '^[a-z]([-a-z0-9]*[a-z0-9])?$'
           maxLength: 30
-        semester:
-          title: Semester
+        # Cohort = Season + Year, matching the org's "Capstone {Season} {Year}" naming
+        # (the parent-team convention used for 6+ years). These two inputs compose two
+        # derived forms downstream (Backstage has no "computed parameter", so each step
+        # builds what it needs inline):
+        #   - DISPLAY  "Capstone {Season} {Year}"  (e.g. "Capstone Fall 2026") — the
+        #     onboarding PR title/body, the README cohort line, and the catalog
+        #     `capstone.uamishub.com/cohort` annotation: human-facing text only.
+        #   - SLUG     "{year}-{season|lower}"      (e.g. "2026-fall") — the
+        #     platform.capstone/semester LABEL value, the catalog tag, the
+        #     app-metadata.yaml `semester` field, and the value passed to
+        #     capstone:render-tenant. k8s label values + catalog tags forbid
+        #     spaces/uppercase, so the machine form MUST be a slug; the display stays
+        #     readable. NOTE: slug is year-first (`2026-fall`) ON PURPOSE — it matches
+        #     render-tenant's existing SEMESTER regex so the Backstage image needs NO
+        #     rebuild for this change. (Post-v1: flip the slug to `fall-2026` together
+        #     with the renderTenant.ts regex on the next planned image rebuild.)
+        season:
+          title: Season
           type: string
-          description: Cohort selector label, e.g. 2026-fall.
-          pattern: '^[0-9]{4}-(spring|summer|fall)$'
-          default: '2026-fall'
+          description: The cohort season (part of "Capstone {Season} {Year}").
+          enum:
+            - Spring
+            - Summer
+            - Fall
+          default: Fall
+        year:
+          title: Year
+          type: integer
+          description: The cohort year, e.g. 2026 (part of "Capstone {Season} {Year}").
+          minimum: 2020
+          maximum: 2099
+          default: 2026
         port:
           title: Container port
           type: integer
@@ -126,7 +153,11 @@ spec:
         values:
           appName: ${{ parameters.appName }}
           team: ${{ parameters.team }}
-          semester: ${{ parameters.semester }}
+          # Cohort in two forms (see the season/year params above): `semester` = the
+          # machine SLUG (year-first, e.g. 2026-fall) for the catalog tag + label; and
+          # `semesterDisplay` = the readable org name (e.g. "Capstone Fall 2026").
+          semester: ${{ parameters.year }}-${{ parameters.season | lower }}
+          semesterDisplay: Capstone ${{ parameters.season }} ${{ parameters.year }}
           port: ${{ parameters.port }}
           description: ${{ parameters.description }}
           destination: ${{ ("github.com?owner=UA-MIS&repo=" + parameters.appName) | parseRepoUrl }}
@@ -217,7 +248,11 @@ spec:
         # bump deliberately like the .devops contract pin above).
         templateUrl: https://github.com/UA-MIS/platform-infra/tree/main/tenants/_template
         team: ${{ parameters.team }}
-        semester: ${{ parameters.semester }}
+        # SLUG form (year-first, e.g. 2026-fall) — this becomes the
+        # platform.capstone/semester LABEL value substituted into every tenant
+        # object, and MUST match capstone:render-tenant's SEMESTER regex (year-first).
+        # Keeping it year-first is why this change needs no Backstage image rebuild.
+        semester: ${{ parameters.year }}-${{ parameters.season | lower }}
         # Write the rendered tree under this workspace subdir; the PR step picks
         # it up as the PR's sourcePath. The action lays it out at the final repo
         # path tenants/team-<team>/ so the PR diff is review-ready.
@@ -236,7 +271,7 @@ spec:
         repoUrl: github.com?owner=UA-MIS&repo=platform-infra
         branchName: onboard-team-${{ parameters.team }}
         targetBranchName: main
-        title: "onboard tenant: team-${{ parameters.team }} (${{ parameters.semester }})"
+        title: "onboard tenant: team-${{ parameters.team }} (Capstone ${{ parameters.season }} ${{ parameters.year }})"
         sourcePath: ./tenant-pr
         # B2 — the operator onboarding CHECKLIST is the PR body. Every Harbor
         # command shows TARGET=real-talos explicitly (lesson #1: omitting TARGET
@@ -245,7 +280,7 @@ spec:
         # non-empty-seal guard (lesson #6) is baked into each seal command so a
         # duplicate-robot 409 can never commit an empty SealedSecret.
         description: |
-          ## Tenant onboarding request — `team-${{ parameters.team }}` (`${{ parameters.semester }}`)
+          ## Tenant onboarding request — `team-${{ parameters.team }}` (Capstone ${{ parameters.season }} ${{ parameters.year }})
 
           Scaffolded by **The Process** ("New Capstone Project") for app
           **${{ parameters.appName }}** (repo: ${{ steps['publish'].output.remoteUrl }}).

@@ -11,8 +11,13 @@ metadata:
     backstage.io/techdocs-ref: dir:.
     # Link the catalog entity back to its source for the "View Source" action.
     github.com/project-slug: UA-MIS/${{ values.appName }}
+    # Readable cohort name (org convention "Capstone {Season} {Year}"). The machine
+    # slug is the tag below; this annotation is the human-facing display.
+    capstone.uamishub.com/cohort: ${{ values.semesterDisplay }}
   tags:
     - capstone
+    # Cohort SLUG (lowercase, e.g. 2026-fall) — catalog tags forbid spaces/uppercase,
+    # so this is the slug; the readable name is the cohort annotation above.
     - ${{ values.semester }}
   links:
     # Dev ingress host — MUST match the .devops dev overlay's ingress host
