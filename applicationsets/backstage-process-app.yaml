@@ -62,7 +62,7 @@ spec:
             # until the first build lands; the CI build tags by commit SHA.
             registry: harbor.capstone.uamishub.com
             repository: backstage/backstage-process
-            tag: bdc917b                          # P5 Secrets-UX on ESO+Vault (#106 self-contained scaffolder + #108 Vault-write secrets-UX). Built+pushed by backstage-process-build-push run 28138139272 (headSha bdc917b). Gated on the backstage-writer CLI semantics test PASS (non-destructive merge-patch/null-delete proven as the backstage-writer identity) + #109 deploy wiring (SA backstage-vault-writer + projected audience=vault token + vault-ca CA mount) being LIVE first → no 403 window. prev: 251ce97987db (#98 scaffolder route); ca6ce4e9784d (M3+M4 PR #94); 89955061bd37 (M2 Node 24.16 fix).
+            tag: bdc917baeeec                     # P5 Secrets-UX on ESO+Vault (#106 self-contained scaffolder + #108 Vault-write secrets-UX). FULL 12-char short-sha (CI tags with `git rev-parse | cut -c1-12`) — #110 mistakenly used the 7-char `bdc917b` → ImagePullBackOff NotFound. Built+pushed by backstage-process-build-push run 28138139272 (IMAGE log: ...backstage-process:bdc917baeeec). Gated on backstage-writer CLI semantics test PASS + #109 deploy wiring (SA backstage-vault-writer + projected audience=vault token + vault-ca CA mount) LIVE. prev: 251ce97987db (#98 scaffolder route); ca6ce4e9784d (M3+M4 PR #94).
             pullPolicy: IfNotPresent
             # Pull from the private Harbor `backstage` project via a robot
             # imagePullSecret (`harbor-pull`, minted at go-live by `make harbor-robot
