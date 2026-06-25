@@ -14,6 +14,7 @@ export {
   createHarborOnboardAction,
   ensureHarborProject,
   readHarborConfig,
+  authorizeTeamOwnership,
 } from './actions/harborOnboard';
 export type {
   HarborOnboardActionDeps,

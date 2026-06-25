@@ -34,7 +34,21 @@
  */
 import { createTemplateAction } from '@backstage/plugin-scaffolder-node';
 import type { Config } from '@backstage/config';
-import type { LoggerService } from '@backstage/backend-plugin-api';
+import type {
+  AuthService,
+  BackstageCredentials,
+  LoggerService,
+} from '@backstage/backend-plugin-api';
+import type { CatalogService } from '@backstage/plugin-catalog-node';
+import { parseEntityRef, stringifyEntityRef } from '@backstage/catalog-model';
+import { NotAllowedError } from '@backstage/errors';
+
+/**
+ * The platform-staff admin group; a member of it may onboard ANY team (the same
+ * `labmx` override sealCore uses for the secrets owner re-check). Keep this in sync
+ * with sealCore.ADMIN_GROUP_REF.
+ */
+export const ADMIN_GROUP_REF = 'group:default/labmx';
 
 /**
  * A Harbor project name (= the canonical team slug, D-026) must be a DNS-ish label:
@@ -198,9 +212,92 @@ export async function ensureHarborProject(args: {
   return { projectCreated, groupMapped };
 }
 
+/** Extract the actor's user entity ref from credentials; throws if not an authenticated user. */
+function requireUserRef(credentials: BackstageCredentials): string {
+  const userRef = (credentials.principal as { userEntityRef?: string } | undefined)
+    ?.userEntityRef;
+  if (!userRef) {
+    throw new NotAllowedError(
+      'capstone:harbor-onboard requires an authenticated user identity ' +
+        '(no service-to-service onboarding).',
+    );
+  }
+  return userRef;
+}
+
+/**
+ * Derive the actor's ownership refs (their User ref + each team Group ref). Uses the
+ * catalog to resolve the user's group memberships — mirrors how M2's policy obtains
+ * ownershipEntityRefs and how sealCore.resolveActorOwnership does the secrets owner
+ * re-check, so this access-control check matches the platform's authz model.
+ */
+async function resolveActorOwnership(
+  catalog: CatalogService,
+  serviceCreds: Awaited<ReturnType<AuthService['getOwnServiceCredentials']>>,
+  userEntityRef: string,
+): Promise<string[]> {
+  const refs = new Set<string>([userEntityRef]);
+  const { items } = await catalog.getEntities(
+    {
+      filter: [
+        { kind: 'Group', 'relations.hasMember': userEntityRef },
+        { kind: 'Group', 'spec.members': parseEntityRef(userEntityRef).name },
+      ],
+      fields: ['kind', 'metadata.name', 'metadata.namespace'],
+    },
+    { credentials: serviceCreds },
+  );
+  for (const g of items) {
+    refs.add(stringifyEntityRef(g));
+  }
+  return Array.from(refs);
+}
+
+/**
+ * Access control (SEC-020): the initiator must OWN the team they are onboarding — i.e. be
+ * a member of `group:default/<team>` — or be a platform-staff admin (`labmx`). Without
+ * this, any signed-in user could pass `team: team-rival` and create another team's Harbor
+ * project + grant `UA-MIS:team-rival` Developer. Fails CLOSED (throws) on any miss, and is
+ * called BEFORE any Harbor API call so a denial makes ZERO Harbor requests.
+ *
+ * Mirrors sealCore's belt-and-suspenders owner re-check (labmx short-circuit). The check is
+ * membership of the team Group directly (this action's input is a team slug, not a Component
+ * entityRef), which is the same group the platform keys per-team RBAC/registry on (D-026).
+ */
+export async function authorizeTeamOwnership(args: {
+  catalog: CatalogService;
+  auth: AuthService;
+  credentials: BackstageCredentials;
+  team: string;
+}): Promise<void> {
+  const { catalog, auth, credentials, team } = args;
+  const actorUserRef = requireUserRef(credentials);
+  const serviceCreds = await auth.getOwnServiceCredentials();
+  const actorOwnership = await resolveActorOwnership(
+    catalog,
+    serviceCreds,
+    actorUserRef,
+  );
+  const teamGroupRef = stringifyEntityRef({
+    kind: 'Group',
+    namespace: 'default',
+    name: team,
+  });
+  const isAdmin = actorOwnership.includes(ADMIN_GROUP_REF);
+  const ownsTeam = actorOwnership.includes(teamGroupRef);
+  if (!isAdmin && !ownsTeam) {
+    throw new NotAllowedError(
+      `You are not a member of team '${team}'; Harbor onboarding is restricted to the ` +
+        `owning team (or platform staff).`,
+    );
+  }
+}
+
 /** Services the action handler needs, injected from the module's registerInit. */
 export interface HarborOnboardActionDeps {
   config: Config;
+  catalog: CatalogService;
+  auth: AuthService;
   /**
    * Injectable fetch — defaults to the global fetch (Node 18+/24 in the backstage image).
    * Tests pass a mock to assert request shape + idempotency without a live Harbor.
@@ -214,7 +311,7 @@ export interface HarborOnboardActionDeps {
  * unit-testable with a mock fetch + mock config.
  */
 export function createHarborOnboardAction(deps: HarborOnboardActionDeps) {
-  const { config } = deps;
+  const { config, catalog, auth } = deps;
   const fetchImpl: FetchLike =
     deps.fetchImpl ?? ((url, init) => fetch(url, init) as unknown as ReturnType<FetchLike>);
 
@@ -251,6 +348,13 @@ export function createHarborOnboardAction(deps: HarborOnboardActionDeps) {
 
     async handler(ctx) {
       const { team } = ctx.input;
+
+      // ACCESS CONTROL (SEC-020) — FIRST, before reading config or touching Harbor: the
+      // initiator must own `team` (member of group:default/<team>) or be labmx admin.
+      // Fails closed; a denial makes ZERO Harbor calls.
+      const credentials = await ctx.getInitiatorCredentials();
+      await authorizeTeamOwnership({ catalog, auth, credentials, team });
+
       const cfg = readHarborConfig(config);
 
       const { projectCreated, groupMapped } = await ensureHarborProject({

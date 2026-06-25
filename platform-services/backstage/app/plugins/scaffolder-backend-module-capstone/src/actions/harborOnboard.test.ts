@@ -14,6 +14,7 @@
  */
 import { createMockActionContext } from '@backstage/plugin-scaffolder-node-test-utils';
 import {
+  authorizeTeamOwnership,
   createHarborOnboardAction,
   ensureHarborProject,
   readHarborConfig,
@@ -56,6 +57,31 @@ function captureLogger() {
   logger.child = () => logger;
   return { logger, lines };
 }
+
+/**
+ * Catalog mock whose getEntities reports the given Group refs as the actor's memberships
+ * (mirrors sealSecret.test.ts), driving the SEC-020 initiator-owns-team check.
+ */
+function mockCatalog(actorGroups: string[]): any {
+  return {
+    getEntities: jest.fn(async () => ({
+      items: actorGroups.map(ref => {
+        const [ns, name] = ref.split(':')[1].split('/');
+        return { kind: 'Group', metadata: { name, namespace: ns } };
+      }),
+    })),
+  };
+}
+
+const mockAuth: any = {
+  getOwnServiceCredentials: jest.fn(async () => ({ token: 'svc' })),
+};
+
+/** Credentials for an authenticated user (alice). */
+const ALICE_CREDS: any = {
+  $$type: '@backstage/BackstageCredentials',
+  principal: { type: 'user', userEntityRef: 'user:default/alice' },
+};
 
 describe('readHarborConfig', () => {
   it('reads baseUrl/username/secret/prefix and strips a trailing slash', () => {
@@ -207,6 +233,52 @@ describe('ensureHarborProject', () => {
   });
 });
 
+describe('authorizeTeamOwnership (SEC-020 access control)', () => {
+  it('ALLOWS a member of the team (group:default/<team>)', async () => {
+    await expect(
+      authorizeTeamOwnership({
+        catalog: mockCatalog(['group:default/team-acme']),
+        auth: mockAuth,
+        credentials: ALICE_CREDS,
+        team: 'team-acme',
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('ALLOWS a platform-staff admin (labmx) onboarding ANY team', async () => {
+    await expect(
+      authorizeTeamOwnership({
+        catalog: mockCatalog(['group:default/labmx']),
+        auth: mockAuth,
+        credentials: ALICE_CREDS,
+        team: 'team-rival',
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('DENIES a non-member passing another team (fails closed)', async () => {
+    await expect(
+      authorizeTeamOwnership({
+        catalog: mockCatalog(['group:default/team-mine']),
+        auth: mockAuth,
+        credentials: ALICE_CREDS,
+        team: 'team-rival',
+      }),
+    ).rejects.toThrow(/not a member of team 'team-rival'/i);
+  });
+
+  it('DENIES a service principal (no authenticated user)', async () => {
+    await expect(
+      authorizeTeamOwnership({
+        catalog: mockCatalog([]),
+        auth: mockAuth,
+        credentials: { principal: { type: 'service' } } as any,
+        team: 'team-acme',
+      }),
+    ).rejects.toThrow(/authenticated user identity/i);
+  });
+});
+
 describe('capstone:harbor-onboard action', () => {
   function mockConfig(): any {
     return {
@@ -227,11 +299,24 @@ describe('capstone:harbor-onboard action', () => {
     };
   }
 
-  it('runs the handler and emits project/projectCreated/groupMapped outputs', async () => {
-    const { fetchImpl } = mockFetch([201, 409]);
-    const action = createHarborOnboardAction({ config: mockConfig(), fetchImpl });
+  /** ctx with an authenticated-user initiator (alice). */
+  function ctxFor(team: string): any {
+    return createMockActionContext({
+      input: { team },
+      getInitiatorCredentials: (async () => ALICE_CREDS) as any,
+    } as any);
+  }
 
-    const ctx = createMockActionContext({ input: { team: 'team-acme' } });
+  it('runs the handler (owner) and emits project/projectCreated/groupMapped outputs', async () => {
+    const { fetchImpl } = mockFetch([201, 409]);
+    const action = createHarborOnboardAction({
+      config: mockConfig(),
+      catalog: mockCatalog(['group:default/team-acme']),
+      auth: mockAuth,
+      fetchImpl,
+    });
+
+    const ctx = ctxFor('team-acme');
     await action.handler(ctx);
 
     expect(ctx.output).toHaveBeenCalledWith('project', 'team-acme');
@@ -239,13 +324,43 @@ describe('capstone:harbor-onboard action', () => {
     expect(ctx.output).toHaveBeenCalledWith('groupMapped', false);
   });
 
-  it('propagates a config error (fail closed) before any HTTP call', async () => {
+  it('SEC-020: DENIES a non-member onboarding another team, with ZERO Harbor calls', async () => {
+    const { fetchImpl, calls } = mockFetch([201, 201]);
+    const action = createHarborOnboardAction({
+      config: mockConfig(),
+      catalog: mockCatalog(['group:default/team-mine']),
+      auth: mockAuth,
+      fetchImpl,
+    });
+    const ctx = ctxFor('team-rival');
+    await expect(action.handler(ctx)).rejects.toThrow(/not a member of team 'team-rival'/i);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('runs the ownership check BEFORE reading config (deny short-circuits, no config error)', async () => {
+    // A non-member must be denied for ownership reasons even if config is also broken —
+    // proving the authz gate precedes config read (and any Harbor call).
     const { fetchImpl, calls } = mockFetch([201, 201]);
     const action = createHarborOnboardAction({
       config: { getOptionalConfig: () => undefined } as any,
+      catalog: mockCatalog(['group:default/team-mine']),
+      auth: mockAuth,
       fetchImpl,
     });
-    const ctx = createMockActionContext({ input: { team: 'team-acme' } });
+    const ctx = ctxFor('team-rival');
+    await expect(action.handler(ctx)).rejects.toThrow(/not a member of team/i);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('propagates a config error (fail closed) for an authorized owner before any HTTP call', async () => {
+    const { fetchImpl, calls } = mockFetch([201, 201]);
+    const action = createHarborOnboardAction({
+      config: { getOptionalConfig: () => undefined } as any,
+      catalog: mockCatalog(['group:default/team-acme']),
+      auth: mockAuth,
+      fetchImpl,
+    });
+    const ctx = ctxFor('team-acme');
     await expect(action.handler(ctx)).rejects.toThrow(/missing config section/i);
     expect(calls).toHaveLength(0);
   });

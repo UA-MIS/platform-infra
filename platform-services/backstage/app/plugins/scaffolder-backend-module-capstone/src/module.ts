@@ -57,7 +57,8 @@ export const capstoneScaffolderModule = createBackendModule({
           // Harbor onboarding — create the team's Harbor project + OIDC Developer
           // mapping at scaffold time (config-driven; least-privilege provisioner robot)
           // so the team's first CI build can push. Idempotent (already-exists = OK).
-          createHarborOnboardAction({ config }),
+          // catalog+auth: the SEC-020 initiator-owns-team access-control check.
+          createHarborOnboardAction({ config, catalog, auth }),
         );
       },
     });
