@@ -161,28 +161,44 @@ spec:
           port: ${{ parameters.port }}
           description: ${{ parameters.description }}
           destination: ${{ ("github.com?owner=UA-MIS&repo=" + parameters.appName) | parseRepoUrl }}
-      # SELF-CONTAINED CONTRACT: the golden-path `.devops/` tree (chart base + 4
-      # overlays, promotion.yaml, ci/ scripts) AND the `.github/` CI workflow are
-      # EMBEDDED in ./skeleton — NO `fetch:plain` from an external repo. The scaffolder
-      # itself is the blueprint: deleting/renaming UA-MIS/sample-app has zero effect, no
-      # contract tag to maintain, no GitHub-App access to sample-app needed. The
-      # appName/team values above are substituted INTO the contract (registry, namespace,
-      # ingress host, image name, labels) so a fresh scaffold is correct for ITS OWN
-      # team/app on the first build — fixing the old fetch:plain bug where every tenant
-      # inherited sample's hardcoded `sample-dev`/`harbor.../sample/sample` values.
-      # Protect the GitHub-Actions workflow (`${{ github.* }}`/`${{ secrets.* }}` — the
-      # SAME `${{ }}` nunjucks uses) AND the .devops/ci/ shell scripts from nunjucks.
-      # The workflow is the only file that strictly NEEDS it (it's the only `${{` file,
-      # and it self-derives registry+app from promotion.yaml at runtime — no per-team
-      # templating); the scripts use `${VAR}` (single brace, nunjucks-safe) but are
-      # belt-and-suspenders protected so the whole CI surface is shipped VERBATIM and a
-      # future `${{`-using edit can't silently break. Broad globs cover both subtrees.
-      # NOTE (Backstage 1.52): the current key is `copyWithoutTemplating`;
-      # `copyWithoutRender` (the older name) was deprecated in 1.40 — if the deployed
-      # action rejects this key, rename to `copyWithoutRender` (same semantics).
-      copyWithoutTemplating:
-        - '**/.github/**'
-        - '**/.devops/ci/**'
+        # SELF-CONTAINED CONTRACT: the golden-path `.devops/` tree (chart base + 4
+        # overlays, promotion.yaml, ci/ scripts) AND the `.github/` CI workflow are
+        # EMBEDDED in ./skeleton — NO `fetch:plain` from an external repo. The scaffolder
+        # itself is the blueprint: deleting/renaming UA-MIS/sample-app has zero effect, no
+        # contract tag to maintain, no GitHub-App access to sample-app needed. The
+        # appName/team values above are substituted INTO the contract (registry, namespace,
+        # ingress host, image name, labels) so a fresh scaffold is correct for ITS OWN
+        # team/app on the first build — fixing the old fetch:plain bug where every tenant
+        # inherited sample's hardcoded `sample-dev`/`harbor.../sample/sample` values.
+        # Protect the GitHub-Actions workflow (`${{ github.* }}`/`${{ secrets.* }}` — the
+        # SAME `${{ }}` nunjucks uses) AND the .devops/ci/ shell scripts from nunjucks.
+        # The workflow is the only file that strictly NEEDS it (it's the only `${{` file,
+        # and it self-derives registry+app from promotion.yaml at runtime — no per-team
+        # templating); the scripts use `${VAR}` (single brace, nunjucks-safe) but are
+        # belt-and-suspenders protected so the whole CI surface is shipped VERBATIM and a
+        # future `${{`-using edit can't silently break.
+        #
+        # ⚠ INDENTATION IS LOAD-BEARING: this key MUST be nested under `input:` (8-space
+        # indent, a sibling of `url:`/`values:`). A prior revision placed it at 6 spaces —
+        # a sibling of `input:` — so fetch:template never received it, nunjucks templated
+        # EVERY file, and the workflow's `${{ github.* }}` crashed the render with
+        # "expected variable end" (a live scaffold failed at step "Render project skeleton",
+        # taking publish/register/render-tenant/tenant-pr down with it). Keep it under input.
+        #
+        # KEY NAME: `copyWithoutTemplating` is the current name; `copyWithoutRender` is the
+        # older alias — BOTH are accepted by fetch:template (v1.20+; deployed
+        # @backstage/plugin-scaffolder-backend is 4.0.1). No rename needed.
+        #
+        # GLOBS: matched by globby (cwd = skeleton root, dot:true) against repo-relative
+        # paths like `.github/workflows/build-and-push.yaml`. Both the root-relative form
+        # (`.github/**`) and the `**/`-prefixed form match a root-level subtree under those
+        # options (globby's `**` matches zero leading segments); both are listed so the
+        # exclusion holds regardless of where the subtree sits and is obvious to a reader.
+        copyWithoutTemplating:
+          - '.github/**'
+          - '**/.github/**'
+          - '.devops/ci/**'
+          - '**/.devops/ci/**'
 
     # 3) Create UA-MIS/<repo>, push, protect main (PRs only — matches platform policy).
     - id: publish
