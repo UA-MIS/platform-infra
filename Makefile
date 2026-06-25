@@ -645,6 +645,39 @@ harbor-push-robot: _check-harbor-target ## (P2.3) Create a CI PUSH robot for pro
 	      --controller-name sealed-secrets-controller \
 	      --namespace "$(RUNNER_NS)" --format yaml
 
+# ---- Vault per-tenant onboarding (ADR-030 B1, ESO+Vault) -------------------
+# The READ-path glue the scaffolder (#106) doesn't do: per onboarded <team>-<env>,
+# (1) create the per-tenant Vault role/policy (tenant-role.sh — scopes a tenant SA to
+#     secret/data/tenants/<team>/* ONLY, least privilege), and
+# (2) materialize the in-ns `vault-ca` ConfigMap (key ca.crt) the rendered SecretStore's
+#     caProvider reads — a namespaced SecretStore can't cross-ns reference the
+#     vault-server-tls Secret in ns `vault`, so each tenant ns needs its own copy of
+#     the (public) CA. Idempotent; re-runnable. Override KUBE_CONTEXT for non-k3d.
+# ⚠ The chart sets VAULT_ADDR but NOT VAULT_CACERT, so the in-pod exec is env-prefixed
+#   with the mounted CA path (else x509 "unknown authority").
+VAULT_NS         ?= vault
+VAULT_CA_PATH    ?= /vault/userconfig/vault-server-tls/ca.crt
+TENANT_ROLE_SH   := platform-services/external-secrets/vault-policies/tenant-role.sh
+
+.PHONY: vault-onboard
+vault-onboard: ## (ESO+Vault) Onboard a tenant for secrets: per-team Vault role + in-ns vault-ca ConfigMap. NAME=<team> ENV=<env>. Override KUBE_CONTEXT for non-k3d.
+	@test -n "$(NAME)" || { echo "usage: make vault-onboard NAME=<team-slug> ENV=<env>"; exit 1; }
+	@test -n "$(ENV)"  || { echo "usage: make vault-onboard NAME=<team-slug> ENV=<env> (dev/staging/prod/preview)"; exit 1; }
+	@command -v kubectl >/dev/null || { echo "ERROR: kubectl not found."; exit 1; }
+	@kubectl config get-contexts "$(KUBE_CONTEXT)" >/dev/null 2>&1 \
+	  || { echo "ERROR: kube-context '$(KUBE_CONTEXT)' not found. For Talos set KUBECONFIG=clusters/real-talos/talos-kubeconfig and KUBE_CONTEXT=admin@capstone."; exit 1; }
+	@ctx="$(KUBE_CONTEXT)"; tns="$(NAME)-$(ENV)"; \
+	  echo "==> [1/2] creating per-tenant Vault role/policy (tenant-$(NAME)) via vault-0 on '$$ctx'..."; \
+	  kubectl --context "$$ctx" -n "$(VAULT_NS)" exec -i vault-0 -- \
+	    env VAULT_CACERT="$(VAULT_CA_PATH)" sh -s -- "$(NAME)" "$(ENV)" < "$(TENANT_ROLE_SH)"; \
+	  echo "==> [2/2] materializing the vault-ca ConfigMap in ns '$$tns' (caProvider source for the SecretStore)..."; \
+	  kubectl --context "$$ctx" create namespace "$$tns" --dry-run=client -o yaml | kubectl --context "$$ctx" apply -f - >/dev/null; \
+	  ca=$$(kubectl --context "$$ctx" -n "$(VAULT_NS)" get secret vault-server-tls -o jsonpath='{.data.ca\.crt}' | base64 -d); \
+	  if [ -z "$$ca" ]; then echo "ERROR: vault-server-tls ca.crt empty/not found in ns $(VAULT_NS)"; exit 1; fi; \
+	  printf '%s' "$$ca" | kubectl --context "$$ctx" -n "$$tns" create configmap vault-ca --from-file=ca.crt=/dev/stdin \
+	    --dry-run=client -o yaml | kubectl --context "$$ctx" apply -f -; \
+	  echo "vault-onboard: DONE for '$$tns'. NEXT: apply the rendered SecretStore+ExternalSecret (scaffolder #106 / secretstore-template.yaml), then put values via the Backstage secrets-UX or 'vault kv put secret/tenants/$(NAME)/$(ENV)/app KEY=val'."
+
 # ---- validation gate (T12 hardening) ---------------------------------------
 # Catches the failure classes security flagged so they can't ship again:
 #   (1) malformed/divergent tenant RBAC names (the SEC-001 blanket-sed bug),

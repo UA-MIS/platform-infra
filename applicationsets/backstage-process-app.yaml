@@ -86,6 +86,44 @@ spec:
           extraEnvVarsSecrets:
             - backstage-process-secrets
 
+          # ── Vault WRITE path for the secrets-UX (#108, ADR-030 B1) ──────────────
+          # The backend writes tenant secret VALUES to Vault over KV-v2 (role
+          # `backstage-writer`, see external-secrets/vault-policies/backstage-role.sh).
+          # Two mounts the client needs (paths match app-config.production.yaml's
+          # capstone.secrets.vault saTokenPath/caPath):
+          #   1. a PROJECTED SA token with audience=vault — the DEFAULT SA token's
+          #      audience is the apiserver, which the Vault role REJECTS; this projected
+          #      token carries audience=vault so the k8s-auth login succeeds.
+          #   2. the Vault server CA (vault-server-tls ca.crt) so the client trusts the
+          #      in-cluster TLS listener (same cert ESO trusts).
+          extraVolumes:
+            - name: vault-token
+              projected:
+                sources:
+                  - serviceAccountToken:
+                      path: vault-token
+                      audience: vault
+                      expirationSeconds: 3600
+            - name: vault-ca
+              # In-NAMESPACE ConfigMap (a pod can only mount volumes from its OWN ns;
+              # vault-server-tls lives in ns `vault`, unreachable from here). The human
+              # materializes `vault-ca` (key ca.crt = the public Vault CA PEM) in the
+              # backstage ns at go-live — same pattern as the per-tenant vault-ca drop:
+              #   kubectl -n vault get secret vault-server-tls -o jsonpath='{.data.ca\.crt}' \
+              #     | base64 -d | kubectl -n backstage create configmap vault-ca --from-file=ca.crt=/dev/stdin
+              configMap:
+                name: vault-ca
+                items:
+                  - key: ca.crt
+                    path: ca.crt
+          extraVolumeMounts:
+            - name: vault-token
+              mountPath: /var/run/secrets/vault
+              readOnly: true
+            - name: vault-ca
+              mountPath: /etc/backstage/vault-ca
+              readOnly: true
+
           # app-config.production.yaml baked into the custom image is the SOURCE OF TRUTH
           # for auth + integrations; this block is MERGED on top (chart -> ConfigMap ->
           # $APP_CONFIG_*). Kept to the host/deploy seams only (app/backend/catalog) — the
@@ -224,6 +262,17 @@ spec:
                       clientSecret: ${GITHUB_APP_CLIENT_SECRET}
                       privateKey: ${GITHUB_APP_PRIVATE_KEY}
                       allowedInstallationOwners: ['UA-MIS']
+
+        # ── ServiceAccount for the Vault WRITE path (#108) ───────────────────────
+        # Dedicated SA the secrets-UX backend authenticates to Vault as (k8s-auth role
+        # `backstage-writer` binds THIS SA — NOT `default`, which would grant write-any-
+        # tenant to every pod in the ns). The chart sets the Deployment's
+        # serviceAccountName to this. The projected vault-token volume above mints an
+        # audience=vault token for this SA via TokenRequest.
+        serviceAccount:
+          create: true
+          name: backstage-vault-writer
+          automountServiceAccountToken: true
 
         # ── Ingress: process.<domain> via Traefik (matches every other service) ──
         # Plain Ingress, TLS host listed but NO secretName — Traefik's default TLSStore
