@@ -36,6 +36,9 @@ spec:
         platform.capstone/team: __TEAM__
     spec:
       restartPolicy: Never
+      volumes:
+        - name: tmp
+          emptyDir: {}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -60,6 +63,12 @@ spec:
               value: "http://harbor-core.harbor.svc:80"
             - name: TEAM
               value: "__TEAM__"
+          # The root fs is read-only (hardening, kept); curl writes its response
+          # bodies to /tmp/p.out and /tmp/m.out (-o), so /tmp must be a writable
+          # mount — without it curl fails: "(23) client returned ERROR on write".
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
           command: ["/bin/sh", "-eu", "-c"]
           args:
             - |
