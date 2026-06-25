@@ -18,6 +18,7 @@ import { scaffolderActionsExtensionPoint } from '@backstage/plugin-scaffolder-no
 import { catalogServiceRef } from '@backstage/plugin-catalog-node';
 import { createSealSecretAction } from './actions/sealSecret';
 import { createRenderTenantAction } from './actions/renderTenant';
+import { createHarborOnboardAction } from './actions/harborOnboard';
 
 export const capstoneScaffolderModule = createBackendModule({
   pluginId: 'scaffolder',
@@ -53,6 +54,10 @@ export const capstoneScaffolderModule = createBackendModule({
           }),
           // M4 — capstone:render-tenant (m4-dev owns renderTenant.ts).
           createRenderTenantAction({ reader: urlReader }),
+          // Harbor onboarding — create the team's Harbor project + OIDC Developer
+          // mapping at scaffold time (config-driven; least-privilege provisioner robot)
+          // so the team's first CI build can push. Idempotent (already-exists = OK).
+          createHarborOnboardAction({ config }),
         );
       },
     });
