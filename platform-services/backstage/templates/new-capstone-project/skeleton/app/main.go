@@ -1,8 +1,9 @@
 // ${{ values.appName }} — UA-MIS capstone starter service.
 //
 // A minimal std-lib-only Go HTTP service that proves the golden path end to end:
-// PR -> preview, merge -> dev, tag -> staging, manual gate -> prod, reading a Sealed
-// Secret along the way. Edit this freely — it is YOUR app code. (Do not edit .devops/.)
+// PR -> preview, merge -> dev, tag -> staging, manual gate -> prod, reading a secret
+// (materialized by ESO from Vault) along the way. Edit this freely — it is YOUR app
+// code. (Do not edit .devops/.)
 //
 //	GET /healthz : 200 "ok" — liveness/readiness; always up while the process is.
 //	GET /        : 200 — proves it read APP_SECRET WITHOUT echoing the value.

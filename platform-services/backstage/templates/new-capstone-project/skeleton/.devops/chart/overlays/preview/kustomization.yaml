@@ -1,0 +1,71 @@
+# preview overlay — ephemeral PR preview (§2.4). Smallest footprint (1 replica,
+# half-quota namespace). The preview ApplicationSet sets the image tag to
+# pull-<sha> at sync time. The Git-branch stand-in (D-009) provides the Phase-1
+# trigger, instantiated against namespace sample-pr-1.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Phase-1 preview stand-in namespace (D-009). The base Deployment's APP_SECRET is
+# optional and the app-secret ExternalSecret uses deletionPolicy Delete, so a preview
+# with no Vault value still starts (the old SEC-004 "pods won't start" no longer
+# applies). ESO ALSO simplifies the Phase-2 dynamic-namespace wrinkle: each per-PR
+# namespace gets its own SecretStore + ExternalSecret that resolve from Vault by path
+# — no strict-scope seal cryptographically bound to one namespace. For the live PR
+# generator the ApplicationSet templates sample-pr-<number> and the per-PR namespace's
+# eso-tenant SA must be bound to the tenant Vault role — see .devops/README.md.
+namespace: ${{ values.team }}-pr-1
+
+resources:
+  - ../../base
+  # Per-tenant ESO store + SA (vault-tenant / eso-tenant, scoped to this team's
+  # Vault path) — the tenant half of the ADR-030 B1 secrets contract.
+  - secretstore.yaml
+  # ${{ values.appName }}-secret ExternalSecret (demonstrates the secret path; APP_SECRET in
+  # base is optional + deletionPolicy Delete so a fresh repo with no Vault value still
+  # deploys — M4 zero-config).
+  - app-secret.externalsecret.yaml
+  # harbor-pull image-pull cred (SA imagePullSecrets:[harbor-pull], #C3) — v1 SealedSecret.
+  # The pull robot is Harbor-minted at onboarding (`make harbor-robot`) and committed as a
+  # per-namespace SealedSecret; the stub here ships a placeholder ciphertext the operator
+  # replaces at onboarding (see .devops/README.md). NOT on ESO in v1: a real ESO harbor-pull
+  # needs onboarding to write the robot to Vault first (the make-harbor-robot migration is
+  # on HOLD) — an ExternalSecret at an unpopulated path would be broken. RESERVED for a
+  # post-v1 flip: Vault path `secret/data/tenants/<team>/<env>/harbor-pull` (key
+  # .dockerconfigjson); ADR-030 follow-on, coordinated with eso-vault.
+  - harbor-pull.sealedsecret.yaml
+  # capstone:secrets — The Process "Secrets" tab (M3 ESO rework, ADR-030 §5) adds user
+  # secret keys by APPENDING a `data[]` entry to app-secret.externalsecret.yaml above
+  # (one ExternalSecret / one k8s Secret `${{ values.appName }}-secret` per env; all keys
+  # share the Vault object `tenants/${{ values.team }}/<env>/app`) — it does NOT add files
+  # here. Manifests must stay INSIDE this overlay dir: a kustomize resource that escapes
+  # the chart/ root (e.g. ../../../secrets/...) fails ArgoCD's default load restrictor.
+
+labels:
+  - pairs:
+      platform.capstone/env: preview
+      platform.capstone/semester: 2026-fall
+    includeSelectors: false
+
+# Image seam: preview tracks the PR head build (promotion.yaml: preview=pull-<sha>).
+images:
+  - name: ${{ values.appName }}
+    newName: harbor.capstone.uamishub.com/${{ values.team }}/${{ values.appName }}
+    newTag: preview
+
+replicas:
+  - name: ${{ values.appName }}
+    count: 1
+
+patches:
+  - target:
+      kind: Ingress
+      name: ${{ values.appName }}
+    # Preview host carries the PR number; the ApplicationSet substitutes <n>.
+    # Stand-in host for the sample-pr-1 D-009 proof / standalone render validation.
+    patch: |
+      - op: replace
+        path: /spec/rules/0/host
+        value: ${{ values.appName }}.pr-1.capstone.uamishub.com
+      - op: replace
+        path: /spec/tls/0/hosts/0
+        value: ${{ values.appName }}.pr-1.capstone.uamishub.com

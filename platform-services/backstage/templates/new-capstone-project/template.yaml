@@ -7,16 +7,14 @@
 # the four fields in `.devops/app-metadata.yaml` — everything else is platform-managed.
 #
 # WHAT IT DOES (steps below):
-#   1. fetch:template — render the ./skeleton (app/ starter + .devops/app-metadata.yaml
-#      + catalog-info.yaml + mkdocs/TechDocs) with the four collected values.
-#   2. fetch:plain    — overlay the CANONICAL, immutable .devops/ tree (chart/
-#      base+overlays, promotion.yaml, ci/ scripts) copied verbatim from the reference
-#      golden-path repo so every team gets the SAME platform contract. Pinned by ref so
-#      the template is reproducible.
-#   2b. fetch:plain   — overlay the .github/ tree (the build-and-push.yaml CI workflow +
-#      actionlint). The workflow MUST live at .github/workflows/ (GitHub requirement), so
-#      it is NOT under .devops/ and needs its own overlay — without this a scaffolded repo
-#      would have NO CI. Same canonical source repo + same pin.
+#   1. fetch:template — render the ENTIRE ./skeleton (app/ starter + .devops/ golden-path
+#      contract [chart base+overlays, promotion.yaml, ci/ scripts] + .github/ CI workflow +
+#      catalog-info.yaml + mkdocs/TechDocs) with the collected values. SELF-CONTAINED: the
+#      contract is EMBEDDED in the skeleton — there is NO fetch:plain from an external repo,
+#      NO sample-app dependency, NO contract tag. appName/team are substituted INTO the
+#      contract so a fresh scaffold is correct for its own team/app on the first build. The
+#      one GitHub-Actions file (.github/workflows/build-and-push.yaml) is listed under
+#      copyWithoutTemplating so nunjucks never mangles its ${{ github.* }} expressions.
 #   3. publish:github — create UA-MIS/<repo>, push, set the default branch + the
 #      branch protection the platform expects (PRs only into main; no direct pushes).
 #   4. catalog:register — register the new component's catalog-info.yaml so it shows
@@ -37,7 +35,7 @@
 #     (the platform-infra onboarding PR — so ANY member can open it; merge is the gate).
 #   - The capstone:render-tenant custom scaffolder action registered in the backend
 #     (plugins/scaffolder-backend-module-capstone, shared with capstone:seal-secret).
-#   - The reference .devops/ source repo URL (pinned at /tree/v1.0.0/.devops below).
+#   - (No external .devops/ source repo — the contract is embedded in ./skeleton.)
 #   - The OIDC sign-in so the acting user (a UA-MIS member) is the repo author.
 apiVersion: scaffolder.backstage.io/v1beta3
 kind: Template
@@ -69,7 +67,7 @@ spec:
           description: >-
             Short slug for your app + repo (lowercase letters, digits, hyphens — no
             spaces, uppercase, or dots). Becomes the repo name, the Kubernetes
-            workload names, and the ingress host <app-name>.<team>.<platform-domain>,
+            workload names, and the ingress host <app-name>.<platform-domain>,
             so it MUST be a DNS-1123 label.
           # DNS-1123 label: lowercase alphanumerics + hyphens, must start AND end with
           # an alphanumeric (so a hyphen can't be first/last). Same charset as a repo
@@ -132,47 +130,28 @@ spec:
           port: ${{ parameters.port }}
           description: ${{ parameters.description }}
           destination: ${{ ("github.com?owner=UA-MIS&repo=" + parameters.appName) | parseRepoUrl }}
-
-    # 2) Overlay the CANONICAL platform .devops/ contract verbatim (immutable; every
-    #    team gets the SAME CI workflow, chart base/overlays, promotion.yaml, scripts).
-    #    PINNED to the `v1` contract tag (A3) so the scaffold is REPRODUCIBLE and a
-    #    push to the source repo's `main` can never silently change every future
-    #    tenant's golden-path contract. This is pinned to an IMMUTABLE SEMVER CONTRACT
-    #    RELEASE (v1.0.0, v1.0.1, …) — NOT a rolling pointer. When the contract changes,
-    #    cut a new contract release on UA-MIS/sample-app (e.g. v1.0.1) and bump BOTH
-    #    pins below in one PR so new scaffolds pick it up. Do NOT move an existing tag.
-    - id: fetch-devops
-      name: Overlay platform .devops/ contract
-      action: fetch:plain
-      input:
-        targetPath: ./.devops
-        # PINNED golden-path .devops tree (sample-app contract release @ tag v1.0.0).
-        # NOTE: the GitHub repo is UA-MIS/sample-app (the local checkout dir is named
-        # team-sample-app; the earlier `team-sample-app` URL here was a non-existent
-        # repo — corrected). Pinned to an IMMUTABLE semver contract release, NOT a
-        # rolling pointer; bump per contract release (cut v1.0.1 + bump this pin in a
-        # PR — see the .github pin below; bump both in lockstep). Do NOT point this
-        # back at /tree/main (re-introduces the silent-drift risk).
-        url: https://github.com/UA-MIS/sample-app/tree/v1.0.0/.devops
-
-    # 2b) Overlay the CI workflow (+ actionlint config). The build-and-push.yaml CI
-    #     workflow lives at `.github/workflows/` (GitHub requires workflows there), NOT
-    #     under `.devops/` — so the `.devops` fetch above does NOT deliver it. Without
-    #     this step a scaffolded repo would have the chart/promotion/scripts but NO CI
-    #     workflow → no build/push/deploy at all. This 2nd fetch:plain overlays the
-    #     pinned `.github/` tree from the same canonical source repo (single source,
-    #     same `v1.0.0` pin) so every tenant inherits the SAME, immutable CI workflow —
-    #     including the push-to-main auto-bump job that makes merge→deploy hands-free
-    #     (D-030). Bump this ref in lockstep with the .devops pin above (one PR).
-    - id: fetch-github
-      name: Overlay platform CI workflow (.github/)
-      action: fetch:plain
-      input:
-        targetPath: ./.github
-        # PINNED `.github/` tree (sample-app contract release @ tag v1.0.0):
-        # build-and-push.yaml + actionlint. Immutable semver release; bump in lockstep
-        # with the .devops pin above (one PR per contract release).
-        url: https://github.com/UA-MIS/sample-app/tree/v1.0.0/.github
+      # SELF-CONTAINED CONTRACT: the golden-path `.devops/` tree (chart base + 4
+      # overlays, promotion.yaml, ci/ scripts) AND the `.github/` CI workflow are
+      # EMBEDDED in ./skeleton — NO `fetch:plain` from an external repo. The scaffolder
+      # itself is the blueprint: deleting/renaming UA-MIS/sample-app has zero effect, no
+      # contract tag to maintain, no GitHub-App access to sample-app needed. The
+      # appName/team values above are substituted INTO the contract (registry, namespace,
+      # ingress host, image name, labels) so a fresh scaffold is correct for ITS OWN
+      # team/app on the first build — fixing the old fetch:plain bug where every tenant
+      # inherited sample's hardcoded `sample-dev`/`harbor.../sample/sample` values.
+      # Protect the GitHub-Actions workflow (`${{ github.* }}`/`${{ secrets.* }}` — the
+      # SAME `${{ }}` nunjucks uses) AND the .devops/ci/ shell scripts from nunjucks.
+      # The workflow is the only file that strictly NEEDS it (it's the only `${{` file,
+      # and it self-derives registry+app from promotion.yaml at runtime — no per-team
+      # templating); the scripts use `${VAR}` (single brace, nunjucks-safe) but are
+      # belt-and-suspenders protected so the whole CI surface is shipped VERBATIM and a
+      # future `${{`-using edit can't silently break. Broad globs cover both subtrees.
+      # NOTE (Backstage 1.52): the current key is `copyWithoutTemplating`;
+      # `copyWithoutRender` (the older name) was deprecated in 1.40 — if the deployed
+      # action rejects this key, rename to `copyWithoutRender` (same semantics).
+      copyWithoutTemplating:
+        - '**/.github/**'
+        - '**/.devops/ci/**'
 
     # 3) Create UA-MIS/<repo>, push, protect main (PRs only — matches platform policy).
     - id: publish
@@ -347,7 +326,8 @@ spec:
           2. Open a PR -> a **preview** environment is built automatically.
           3. Merge to `main` -> **dev** auto-deploys.
           4. Tag `vX.Y.Z` -> **staging** auto-deploys; **prod** waits on the manual gate.
-          Your app will be at `https://${{ parameters.appName }}.${{ parameters.team }}.<platform-domain>`.
+          Your app will be at `https://${{ parameters.appName }}.capstone.uamishub.com`
+          (dev/staging add a `.dev`/`.staging` segment before the domain).
 
           **One thing is gated:** a **platform onboarding PR** was opened against
           `UA-MIS/platform-infra` to stand up your team's namespaces/RBAC/Harbor

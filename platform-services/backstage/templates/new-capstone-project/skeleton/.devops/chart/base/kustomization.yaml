@@ -1,0 +1,21 @@
+# Environment-agnostic base for the sample app. Overlays patch the image tag,
+# replicas, ingress host, and the mandatory platform.capstone/* labels per env,
+# and each adds its own per-namespace ESO SecretStore + ExternalSecrets (ADR-030 B1).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Common labels carried by every object. The platform.capstone/* selector labels
+# (team/semester/env) are set by overlays via commonLabels so non-prod and prod
+# differ only in values, not structure (§3.1).
+labels:
+  - pairs:
+      app.kubernetes.io/name: ${{ values.appName }}
+      app.kubernetes.io/managed-by: argocd
+      platform.capstone/team: ${{ values.team }}
+    includeSelectors: false
+
+resources:
+  - serviceaccount.yaml
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml

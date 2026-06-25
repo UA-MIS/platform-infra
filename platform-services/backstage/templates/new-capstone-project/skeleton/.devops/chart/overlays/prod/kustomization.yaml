@@ -1,0 +1,58 @@
+# prod overlay — the production gate (§2.3, §4). Sync is MANUAL: the env
+# ApplicationSet gives prod NO `automated:` block, so promotion = a human syncing
+# the gated tag. Values are explicit here for clarity even though the gate lives
+# in the ApplicationSet/promotion.yaml. Image seam: prod=gated semver tag.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: ${{ values.team }}-prod
+resources:
+  - ../../base
+  # Per-tenant ESO store + SA (vault-tenant / eso-tenant, scoped to this team's
+  # Vault path) — the tenant half of the ADR-030 B1 secrets contract.
+  - secretstore.yaml
+  # ${{ values.appName }}-secret ExternalSecret (demonstrates the secret path; APP_SECRET in
+  # base is optional + deletionPolicy Delete so a fresh repo with no Vault value still
+  # deploys — M4 zero-config).
+  - app-secret.externalsecret.yaml
+  # harbor-pull image-pull cred (SA imagePullSecrets:[harbor-pull], #C3) — v1 SealedSecret.
+  # The pull robot is Harbor-minted at onboarding (`make harbor-robot`) and committed as a
+  # per-namespace SealedSecret; the stub here ships a placeholder ciphertext the operator
+  # replaces at onboarding (see .devops/README.md). NOT on ESO in v1: a real ESO harbor-pull
+  # needs onboarding to write the robot to Vault first (the make-harbor-robot migration is
+  # on HOLD) — an ExternalSecret at an unpopulated path would be broken. RESERVED for a
+  # post-v1 flip: Vault path `secret/data/tenants/<team>/<env>/harbor-pull` (key
+  # .dockerconfigjson); ADR-030 follow-on, coordinated with eso-vault.
+  - harbor-pull.sealedsecret.yaml
+  # capstone:secrets — The Process "Secrets" tab (M3 ESO rework, ADR-030 §5) adds user
+  # secret keys by APPENDING a `data[]` entry to app-secret.externalsecret.yaml above
+  # (one ExternalSecret / one k8s Secret `${{ values.appName }}-secret` per env; all keys
+  # share the Vault object `tenants/${{ values.team }}/<env>/app`) — it does NOT add files
+  # here. Manifests must stay INSIDE this overlay dir: a kustomize resource that escapes
+  # the chart/ root (e.g. ../../../secrets/...) fails ArgoCD's default load restrictor.
+labels:
+  - pairs:
+      platform.capstone/env: prod
+      platform.capstone/semester: 2026-fall
+    includeSelectors: false
+images:
+  - name: ${{ values.appName }}
+    newName: harbor.capstone.uamishub.com/${{ values.team }}/${{ values.appName }}
+    # Bare semver (NO 'v' prefix) — matches what CI pushes: resolve-image.sh strips
+    # the git tag's 'v' (refs/tags/v0.1.0 -> image tag 0.1.0). A v-prefixed newTag
+    # here would reference an image CI never pushed -> ImagePullBackOff.
+    newTag: 0.1.0
+# Prod runs more replicas; quota ceiling is higher (§3.2).
+replicas:
+  - name: ${{ values.appName }}
+    count: 3
+patches:
+  - target:
+      kind: Ingress
+      name: ${{ values.appName }}
+    patch: |
+      - op: replace
+        path: /spec/rules/0/host
+        value: ${{ values.appName }}.capstone.uamishub.com
+      - op: replace
+        path: /spec/tls/0/hosts/0
+        value: ${{ values.appName }}.capstone.uamishub.com

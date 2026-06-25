@@ -15,8 +15,13 @@ metadata:
     - capstone
     - ${{ values.semester }}
   links:
+    # Dev ingress host — MUST match the .devops dev overlay's ingress host
+    # (<app>.dev.capstone.uamishub.com; no team segment — appName is globally
+    # unique). The domain is the live platform domain (capstone.uamishub.com); it is
+    # rendered here so the catalog link is a valid URL (a literal <platform-domain>
+    # placeholder fails catalog:register's URL policy check).
     - title: App (dev)
-      url: https://${{ values.appName }}.${{ values.team }}.dev.<platform-domain>
+      url: https://${{ values.appName }}.dev.capstone.uamishub.com
 spec:
   type: service
   lifecycle: experimental
