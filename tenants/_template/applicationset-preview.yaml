@@ -1,6 +1,6 @@
 # ============================================================================
 # Ephemeral PREVIEW ApplicationSet (§2.4, D-009) — Phase-1 GIT-BRANCH STAND-IN.
-# Tokens: __TEAM__, __SEMESTER__.
+# Tokens: __TEAM__, __APPNAME__ (the app repo, UA-MIS/<appName>), __SEMESTER__, __PRNUM__.
 #
 # D-009: Phase 1 proves ephemeral preview namespaces WITHOUT a live GitHub org.
 # The PRODUCTION trigger is the ArgoCD pullRequest generator (commented seam at
@@ -48,7 +48,7 @@ spec:
     spec:
       project: __TEAM__
       source:
-        repoURL: https://github.com/UA-MIS/__TEAM__-app
+        repoURL: https://github.com/UA-MIS/__APPNAME__
         targetRevision: '{{.branch}}'
         path: .devops/chart/overlays/preview
       destination:
@@ -75,7 +75,7 @@ spec:
 #    - pullRequest:
 #        github:
 #          owner: UA-MIS
-#          repo: __TEAM__-app
+#          repo: __APPNAME__
 #          # tokenRef: { secretName: github-token, key: token }   # via SealedSecret
 #        requeueAfterSeconds: 30
 #  # template.spec.source.targetRevision: '{{.head_sha}}'

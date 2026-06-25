@@ -34,16 +34,31 @@ import path from 'path';
  * never reach a file path or a rendered manifest.
  */
 const SLUG = /^[a-z]([-a-z0-9]*[a-z0-9])?$/;
+/**
+ * appName is a DNS-1123 LABEL (may start with a digit, unlike the team slug), matching the
+ * Scaffolder template's `appName` parameter `pattern`. It is the app REPO name —
+ * `UA-MIS/<appName>` (the scaffolder creates the repo AS the appName, #101) — which the
+ * tenant ApplicationSets/AppProject point their `repoURL`/`sourceRepos` at. We re-validate
+ * here because it flows into rendered manifest repo refs.
+ */
+const APPNAME = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
 /** Semester is `YYYY-(spring|summer|fall)`, matching the template's `semester` pattern. */
 const SEMESTER = /^[0-9]{4}-(spring|summer|fall)$/;
 
-/** Apply the literal-token substitution to a string (path or file contents). */
+/**
+ * Apply the literal-token substitution to a string (path or file contents).
+ * `__APPNAME__` is the app repo (UA-MIS/<appName>) — keyed on appName, NOT `<team>-app`:
+ * those differ whenever the app isn't literally named `<team>-app`, and the old
+ * `__TEAM__-app` form pointed ArgoCD at a non-existent repo ("repository not found").
+ */
 export function substituteTokens(
   input: string,
   team: string,
+  appName: string,
   semester: string,
 ): string {
   return input
+    .replace(/__APPNAME__/g, appName)
     .replace(/__TEAM__/g, team)
     .replace(/__SEMESTER__/g, semester);
 }
@@ -65,8 +80,8 @@ export function createRenderTenantAction(deps: RenderTenantActionDeps) {
     id: 'capstone:render-tenant',
     description:
       'Render the canonical tenants/_template/ blueprint into the workspace as ' +
-      'tenants/team-<team>/, substituting the literal __TEAM__/__SEMESTER__ tokens ' +
-      '(D-M4-2: render the single source, do not fork it).',
+      'tenants/team-<team>/, substituting the literal __TEAM__/__APPNAME__/__SEMESTER__ ' +
+      'tokens (D-M4-2: render the single source, do not fork it).',
     schema: {
       input: {
         templateUrl: z =>
@@ -81,6 +96,13 @@ export function createRenderTenantAction(deps: RenderTenantActionDeps) {
             description:
               'Team slug (DNS label). Substituted for __TEAM__; also the rendered ' +
               'directory name tenants/team-<team>/.',
+          }),
+        appName: z =>
+          z.string({
+            description:
+              'App repo name (DNS-1123 label) — the repo created at UA-MIS/<appName> ' +
+              '(#101). Substituted for __APPNAME__; the tenant ApplicationSets/AppProject ' +
+              'point their repoURL/sourceRepos at it.',
           }),
         semester: z =>
           z.string({
@@ -108,15 +130,21 @@ export function createRenderTenantAction(deps: RenderTenantActionDeps) {
     },
 
     async handler(ctx) {
-      const { templateUrl, team, semester } = ctx.input;
+      const { templateUrl, team, appName, semester } = ctx.input;
       const targetPath = ctx.input.targetPath ?? '.';
 
-      // Fail closed on a malformed slug/semester — these flow into file paths and
-      // into every rendered manifest's metadata; a bad value must never get written.
+      // Fail closed on a malformed slug/appName/semester — these flow into file paths,
+      // rendered manifest metadata, AND repo refs; a bad value must never get written.
       if (!SLUG.test(team)) {
         throw new Error(
           `capstone:render-tenant: invalid team slug '${team}' — must be a DNS ` +
             `label matching ${SLUG}.`,
+        );
+      }
+      if (!APPNAME.test(appName)) {
+        throw new Error(
+          `capstone:render-tenant: invalid appName '${appName}' — must be a DNS-1123 ` +
+            `label matching ${APPNAME} (it becomes the UA-MIS/<appName> repo ref).`,
         );
       }
       if (!SEMESTER.test(semester)) {
@@ -137,7 +165,7 @@ export function createRenderTenantAction(deps: RenderTenantActionDeps) {
 
       ctx.logger.info(
         `Rendering tenant blueprint from ${templateUrl} -> ${repoPath} ` +
-          `(team=${team}, semester=${semester})`,
+          `(team=${team}, appName=${appName}, semester=${semester})`,
       );
 
       // Read the _template/ tree. files() yields every regular file with a path
@@ -157,11 +185,11 @@ export function createRenderTenantAction(deps: RenderTenantActionDeps) {
         // Substitute tokens in the relative path too (keeps the action correct if a
         // future blueprint tokenises a filename). resolveSafeChildPath re-anchors it
         // under outDir and rejects traversal.
-        const relPath = substituteTokens(file.path, team, semester);
+        const relPath = substituteTokens(file.path, team, appName, semester);
         const dest = resolveSafeChildPath(outDir, relPath);
 
         const raw = (await file.content()).toString('utf8');
-        const rendered = substituteTokens(raw, team, semester);
+        const rendered = substituteTokens(raw, team, appName, semester);
 
         await fs.outputFile(dest, rendered);
         fileCount += 1;

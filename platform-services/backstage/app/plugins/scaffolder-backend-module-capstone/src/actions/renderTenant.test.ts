@@ -40,19 +40,41 @@ const TEMPLATE_URL =
   'https://github.com/UA-MIS/platform-infra/tree/main/tenants/_template';
 
 describe('substituteTokens', () => {
-  it('replaces every __TEAM__ and __SEMESTER__ occurrence', () => {
+  it('replaces every __TEAM__, __APPNAME__, and __SEMESTER__ occurrence', () => {
     const out = substituteTokens(
-      'name: __TEAM__\nsemester: __SEMESTER__\nns: __TEAM__-dev',
+      'name: __TEAM__\nsemester: __SEMESTER__\nns: __TEAM__-dev\nrepo: __APPNAME__',
       'acme',
+      'acme-app',
       '2026-fall',
     );
-    expect(out).toBe('name: acme\nsemester: 2026-fall\nns: acme-dev');
+    expect(out).toBe(
+      'name: acme\nsemester: 2026-fall\nns: acme-dev\nrepo: acme-app',
+    );
   });
 
   it('leaves text without tokens unchanged', () => {
-    expect(substituteTokens('kind: AppProject', 'acme', '2026-fall')).toBe(
+    expect(substituteTokens('kind: AppProject', 'acme', 'acme-app', '2026-fall')).toBe(
       'kind: AppProject',
     );
+  });
+
+  it('renders the app repo ref to UA-MIS/<appName>, NOT <team>-app (the bug)', () => {
+    // team slug (v1check) != appName (v1check) here happens to match, but the point is
+    // the ref keys on appName: a team 'acme' with app 'cool-thing' -> UA-MIS/cool-thing.
+    const out = substituteTokens(
+      'repoURL: https://github.com/UA-MIS/__APPNAME__',
+      'acme',
+      'cool-thing',
+      '2026-fall',
+    );
+    expect(out).toBe('repoURL: https://github.com/UA-MIS/cool-thing');
+    expect(out).not.toContain('acme-app');
+  });
+
+  it('substitutes __APPNAME__ before __TEAM__ so a __TEAM__-prefixed appName is not corrupted', () => {
+    // appName literally contains the team slug: must not be half-replaced.
+    const out = substituteTokens('r: __APPNAME__', 'acme', 'acme-app', '2026-fall');
+    expect(out).toBe('r: acme-app');
   });
 });
 
@@ -75,6 +97,12 @@ describe('capstone:render-tenant', () => {
         path: 'namespaces/dev.yaml',
         content: 'metadata:\n  name: __TEAM__-dev\n',
       },
+      {
+        // The repo-ref file (appset-envs/appproject shape) — the regression: it must
+        // render to UA-MIS/<appName>, NOT <team>-app.
+        path: 'applicationset-envs.yaml',
+        content: 'spec:\n  source:\n    repoURL: https://github.com/UA-MIS/__APPNAME__\n',
+      },
       { path: 'README.md', content: 'team __TEAM__ (__SEMESTER__)\n' },
     ]);
     const action = createRenderTenantAction({ reader });
@@ -85,6 +113,7 @@ describe('capstone:render-tenant', () => {
       input: {
         templateUrl: TEMPLATE_URL,
         team: 'acme',
+        appName: 'cool-thing',
         semester: '2026-fall',
         targetPath: './tenant-pr',
       },
@@ -102,14 +131,22 @@ describe('capstone:render-tenant', () => {
       path.join(base, 'namespaces', 'dev.yaml'),
       'utf8',
     );
+    const envsAs = await fs.readFile(
+      path.join(base, 'applicationset-envs.yaml'),
+      'utf8',
+    );
 
     expect(appproject).toContain('name: acme');
     expect(appproject).toContain('semester: 2026-fall');
     expect(appproject).not.toContain('__TEAM__');
     expect(devNs).toContain('name: acme-dev');
+    // Repo ref keys on appName (UA-MIS/cool-thing), NOT the team or <team>-app.
+    expect(envsAs).toContain('repoURL: https://github.com/UA-MIS/cool-thing');
+    expect(envsAs).not.toContain('acme-app');
+    expect(envsAs).not.toContain('__APPNAME__');
 
     expect(ctx.output).toHaveBeenCalledWith('repoPath', 'tenants/team-acme');
-    expect(ctx.output).toHaveBeenCalledWith('fileCount', 3);
+    expect(ctx.output).toHaveBeenCalledWith('fileCount', 4);
   });
 
   it('substitutes tokens in file PATHS, not just contents', async () => {
@@ -125,6 +162,7 @@ describe('capstone:render-tenant', () => {
         input: {
           templateUrl: TEMPLATE_URL,
           team: 'acme',
+          appName: 'acme',
           semester: '2026-fall',
         },
         workspacePath,
@@ -152,6 +190,7 @@ describe('capstone:render-tenant', () => {
         input: {
           templateUrl: TEMPLATE_URL,
           team: 'acme',
+          appName: 'acme',
           semester: '2026-fall',
         },
         workspacePath,
@@ -173,12 +212,30 @@ describe('capstone:render-tenant', () => {
           input: {
             templateUrl: TEMPLATE_URL,
             team: 'Acme_Bad', // uppercase + underscore — not a DNS label
+            appName: 'acme',
             semester: '2026-fall',
           },
           workspacePath: mockDir.resolve('wsbad1'),
         }),
       ),
     ).rejects.toThrow(/invalid team slug/);
+  });
+
+  it('fails closed on an invalid appName', async () => {
+    const action = createRenderTenantAction({ reader: mockReader([]) });
+    await expect(
+      action.handler(
+        createMockActionContext({
+          input: {
+            templateUrl: TEMPLATE_URL,
+            team: 'acme',
+            appName: 'Bad_App', // uppercase + underscore — not a DNS-1123 label
+            semester: '2026-fall',
+          },
+          workspacePath: mockDir.resolve('wsbadapp'),
+        }),
+      ),
+    ).rejects.toThrow(/invalid appName/);
   });
 
   it('fails closed on an invalid semester', async () => {
@@ -189,6 +246,7 @@ describe('capstone:render-tenant', () => {
           input: {
             templateUrl: TEMPLATE_URL,
             team: 'acme',
+            appName: 'acme',
             semester: 'fall-2026', // wrong order
           },
           workspacePath: mockDir.resolve('wsbad2'),
@@ -205,6 +263,7 @@ describe('capstone:render-tenant', () => {
           input: {
             templateUrl: TEMPLATE_URL,
             team: 'acme',
+            appName: 'acme',
             semester: '2026-fall',
           },
           workspacePath: mockDir.resolve('wsempty'),
@@ -227,6 +286,7 @@ describe('capstone:render-tenant', () => {
           input: {
             templateUrl: TEMPLATE_URL,
             team: 'acme',
+            appName: 'acme',
             semester: '2026-fall',
           },
           workspacePath,
