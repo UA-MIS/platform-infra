@@ -54,6 +54,20 @@ describe('substituteTokens', () => {
       'kind: AppProject',
     );
   });
+
+  it('substitutes __PRNUM__ to the Phase-1 stand-in (1) — preview namespace bundle', () => {
+    const out = substituteTokens('name: __TEAM__-pr-__PRNUM__', 'acme', '2026-fall');
+    expect(out).toBe('name: acme-pr-1');
+  });
+
+  it('leaves NO raw __*__ token behind for the three known tokens', () => {
+    const out = substituteTokens(
+      'name: __TEAM__-pr-__PRNUM__\nsemester: __SEMESTER__',
+      'acme',
+      '2026-fall',
+    );
+    expect(out).not.toMatch(/__[A-Z0-9_]+__/);
+  });
 });
 
 describe('capstone:render-tenant', () => {
@@ -74,6 +88,12 @@ describe('capstone:render-tenant', () => {
       {
         path: 'namespaces/dev.yaml',
         content: 'metadata:\n  name: __TEAM__-dev\n',
+      },
+      {
+        // The ephemeral preview bundle carries __PRNUM__ (the regression that broke
+        // tenant sync when it was left raw -> invalid Namespace/<team>-pr-__PRNUM__).
+        path: 'namespaces/preview.yaml',
+        content: 'metadata:\n  name: __TEAM__-pr-__PRNUM__\n',
       },
       { path: 'README.md', content: 'team __TEAM__ (__SEMESTER__)\n' },
     ]);
@@ -102,14 +122,21 @@ describe('capstone:render-tenant', () => {
       path.join(base, 'namespaces', 'dev.yaml'),
       'utf8',
     );
+    const previewNs = await fs.readFile(
+      path.join(base, 'namespaces', 'preview.yaml'),
+      'utf8',
+    );
 
     expect(appproject).toContain('name: acme');
     expect(appproject).toContain('semester: 2026-fall');
     expect(appproject).not.toContain('__TEAM__');
     expect(devNs).toContain('name: acme-dev');
+    // __PRNUM__ -> 1 (Phase-1 stand-in); no raw token survives anywhere.
+    expect(previewNs).toContain('name: acme-pr-1');
+    expect(previewNs).not.toMatch(/__[A-Z0-9_]+__/);
 
     expect(ctx.output).toHaveBeenCalledWith('repoPath', 'tenants/team-acme');
-    expect(ctx.output).toHaveBeenCalledWith('fileCount', 3);
+    expect(ctx.output).toHaveBeenCalledWith('fileCount', 4);
   });
 
   it('substitutes tokens in file PATHS, not just contents', async () => {
