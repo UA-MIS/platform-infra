@@ -91,6 +91,8 @@ echo "$j" | grep -q '"B":' && { echo "FAIL: B survived null-delete — got: $j";
 echo "$j" | grep -q '"A":"a1"' && echo "$j" | grep -q '"C":"c1"' \
   || { echo "FAIL: A/C lost during B delete (DESTRUCTIVE) — got: $j"; exit 1; }
 echo "    OK: A,C survive; B gone (non-destructive confirmed)"
+echo "==> AUDIT (final RO read via external-secrets-ro, .data only):"
+printf '%s\n' "$j" | sed -n 's/.*\("data":{[^}]*}\).*/    \1/p'
 echo "NOTE: throwaway path left behind (writer has no metadata delete). Root cleanup:"
 echo "      vault kv metadata delete secret/tenants/smoketest/dev/app"
 echo "SEMANTICS-TEST: PASS"
