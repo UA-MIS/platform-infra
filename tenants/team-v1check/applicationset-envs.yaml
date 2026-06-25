@@ -5,7 +5,7 @@
 # MATRIX generator = (env list) x (git-files read of the app repo's CANONICAL
 # promotion.yaml). Per ADR-008 (D-011) there is NO promotion.yaml in
 # platform-infra; the single source of truth is
-# team-v1check-app/.devops/promotion.yaml. This ApplicationSet READS it via the
+# v1check/.devops/promotion.yaml. This ApplicationSet READS it via the
 # git `files:` generator so the per-env `gate` (auto vs manual) and `overlay`
 # drive the rendered Application without a second copy and without a cross-repo
 # fetch (the app repo is already this ApplicationSet's source, §2.3).
@@ -46,7 +46,7 @@ spec:
           #    top-level keys (registry/app/environments) become root template
           #    params. One file -> one element, matrixed across the three envs.
           - git:
-              repoURL: https://github.com/UA-MIS/v1check-app
+              repoURL: https://github.com/UA-MIS/v1check
               revision: HEAD
               files:
                 - path: .devops/promotion.yaml
@@ -60,7 +60,7 @@ spec:
     spec:
       project: v1check
       source:
-        repoURL: https://github.com/UA-MIS/v1check-app
+        repoURL: https://github.com/UA-MIS/v1check
         targetRevision: HEAD
         # overlay is the FULL repo-relative path per the §4.1 schema, e.g.
         # ".devops/chart/overlays/dev" — used verbatim (not basename-joined).
