@@ -1,54 +1,32 @@
 /*
- * Unit tests for the capstone:seal-secret action (M3-T4 behavior + M3-T5 authz).
+ * Unit tests for the capstone:seal-secret action (M3 behavior + authz), reworked for the
+ * ESO+Vault v1 model (ADR-030 B1).
  *
  * SECURITY-CRITICAL ASSERTIONS (plan §7 / R2 / R1):
- *  - kubeseal is invoked with --cert <path> --scope strict --namespace <team>-<env> --name,
- *    and the plaintext value is piped to STDIN — never an argv, never a tempfile.
- *  - the plaintext value NEVER appears in any ctx.logger call, in kubeseal argv, or in a
- *    thrown error.
- *  - one PR per selected env, file at <secretsDir>/<key>.sealedsecret.yaml; overwrite path
- *    updates an existing file (passes its sha).
- *  - authz: owner -> ALLOW + seal; non-owner -> DENY (no kubeseal, no Octokit); admin
+ *  - the plaintext value is WRITTEN TO VAULT (VaultClient.setKey) at the per-env path
+ *    tenants/<team>/<env>/app under the KEY — and the value NEVER appears in any committed
+ *    file, in any ctx.logger call, or in a thrown error,
+ *  - the PR commits an ExternalSecret declaration (key NAMES + remoteRef pointers, NO values)
+ *    at .devops/secrets/externalsecret-<env>.yaml + references it from the env overlay,
+ *  - one PR per selected env; a second key for the same env MERGES into the ExternalSecret,
+ *  - authz: owner -> ALLOW + write; non-owner -> DENY (no Vault write, no Octokit); admin
  *    (labmx) -> override ALLOW; policy DENY -> fail closed.
  */
 import { AuthorizeResult } from '@backstage/plugin-permission-common';
 import { NotAllowedError } from '@backstage/errors';
 
-// ── Mock child_process.execFile: capture argv + stdin, return canned sealed YAML ──────────
-type ExecFileCall = { bin: string; args: string[]; stdin: string };
-const execFileCalls: ExecFileCall[] = [];
-let execFileShouldFail = false;
-
-jest.mock('child_process', () => ({
-  execFile: jest.fn(
-    (
-      bin: string,
-      args: string[],
-      _opts: unknown,
-      cb: (err: Error | null, stdout: string, stderr: string) => void,
-    ) => {
-      const child = {
-        stdin: {
-          end: (data: string) => {
-            // Record only AFTER stdin is written so the test can assert on it.
-            execFileCalls.push({ bin, args, stdin: data });
-            if (execFileShouldFail) {
-              cb(new Error('boom'), '', 'kubeseal: some diagnostic');
-            } else {
-              cb(
-                null,
-                `apiVersion: bitnami.com/v1alpha1\nkind: SealedSecret\nmetadata:\n  name: ${
-                  args[args.indexOf('--name') + 1]
-                }\n  namespace: ${args[args.indexOf('--namespace') + 1]}\n`,
-                '',
-              );
-            }
-          },
-        },
-      };
-      return child;
-    },
-  ),
+// ── Mock the VaultClient: record setKey calls, never a real network/TLS call ──────────────
+type VaultSetCall = { path: string; key: string; value: string };
+const vaultSetCalls: VaultSetCall[] = [];
+let vaultShouldFail = false;
+jest.mock('../vaultClient', () => ({
+  VaultClient: jest.fn().mockImplementation(() => ({
+    setKey: jest.fn(async (path: string, key: string, value: string) => {
+      vaultSetCalls.push({ path, key, value });
+      if (vaultShouldFail) throw new Error('vault boom (HTTP 500)');
+    }),
+    deleteKey: jest.fn(async () => {}),
+  })),
 }));
 
 // ── Mock @backstage/integration credentials provider (App token, no PAT) ─────────────────
@@ -62,8 +40,6 @@ jest.mock('@backstage/integration', () => ({
 }));
 
 // ── Mock @octokit/rest: record the PR/file calls ─────────────────────────────────────────
-// Loosely typed (Promise<any>, any[]) so .mockImplementation can take varied option shapes
-// and .mock.calls index freely — this is a mock surface, not the real Octokit contract.
 const octokitCalls = {
   reposGet: jest.fn<Promise<any>, any[]>(async () => ({
     data: { default_branch: 'main' },
@@ -112,18 +88,82 @@ function mockConfig(): any {
             getOptionalString: (k: string) =>
               (
                 {
-                  sealingCertPath:
-                    '/etc/backstage/sealing-cert/sealing-cert.pem',
-                  kubesealBin: 'kubeseal',
                   defaultBranchPrefix: 'secrets/',
-                  secretsDir: '.devops/secrets',
-                  overlayRelPath: '../../secrets',
                   overlaysDir: '.devops/chart/overlays',
+                  overlayEsFile: 'app-secret.externalsecret.yaml',
                 } as Record<string, string>
               )[k],
+            getOptionalConfig: (_vk: string) => undefined, // vault.* -> defaults
           }
         : undefined,
   };
+}
+
+/** The per-env overlay ExternalSecret path the scaffolder ships (what the Secrets tab edits). */
+function overlayEs(env: string): string {
+  return `.devops/chart/overlays/${env}/app-secret.externalsecret.yaml`;
+}
+
+/**
+ * A realistic RENDERED (placeholders already substituted) overlay ExternalSecret like the M4
+ * scaffolder ships (#106) — shipped with the demo `app-secret` <- APP_SECRET entry. Tests mount
+ * this via getContent so the upsert/remove operate on the real shape.
+ */
+function shippedEs(env: string, extraKeys: string[] = []): string {
+  const lines = [
+    '# App secret — ESO ExternalSecret (ADR-030 B1).',
+    'apiVersion: external-secrets.io/v1',
+    'kind: ExternalSecret',
+    'metadata:',
+    '  name: my-app-secret',
+    `  namespace: team-alpha-${env}`,
+    'spec:',
+    '  refreshInterval: "1h"',
+    '  secretStoreRef:',
+    '    name: vault-tenant',
+    '    kind: SecretStore',
+    '  target:',
+    '    name: my-app-secret',
+    '    creationPolicy: Owner',
+    '    deletionPolicy: Delete',
+    '  data:',
+    '    - secretKey: app-secret',
+    '      remoteRef:',
+    `        key: tenants/team-alpha/${env}/app`,
+    '        property: APP_SECRET',
+  ];
+  for (const k of extraKeys) {
+    lines.push(
+      `    - secretKey: ${k}`,
+      '      remoteRef:',
+      `        key: tenants/team-alpha/${env}/app`,
+      `        property: ${k}`,
+    );
+  }
+  lines.push('');
+  return lines.join('\n');
+}
+
+/** A getContent mock that serves the shipped overlay ES for the given envs, 404 elsewhere. */
+function serveShippedEs(envs: string[], extraKeys: Record<string, string[]> = {}) {
+  octokitCalls.getContent.mockImplementation(async (opts: any) => {
+    for (const env of envs) {
+      if (opts.path === overlayEs(env)) {
+        return {
+          data: {
+            sha: `sha-${env}`,
+            content: Buffer.from(
+              shippedEs(env, extraKeys[env] ?? []),
+              'utf8',
+            ).toString('base64'),
+          },
+        } as any;
+      }
+    }
+    const e = new Error('Not Found') as Error & { status: number };
+    e.status = 404;
+    throw e;
+  });
 }
 
 // The target Component: owned by team-alpha, source repo UA-MIS/my-app.
@@ -194,9 +234,6 @@ function ctxFor(input: {
   value: string;
   envs: string[];
 }): any {
-  // Returned as `any`: the action's handler is typed to its specific input schema, while the
-  // generic mock context is ActionContext<JsonObject>. The cast keeps the test ergonomic; the
-  // real input shape is exercised by the action-shape tests above + the runtime assertions.
   return createMockActionContext({
     input,
     getInitiatorCredentials: (async () => ({
@@ -206,9 +243,18 @@ function ctxFor(input: {
   } as any);
 }
 
+/** All file contents written (path -> decoded utf8) across createOrUpdateFileContents calls. */
+function writtenFiles(): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const c of octokitCalls.createOrUpdateFileContents.mock.calls as any[]) {
+    out[c[0].path] = Buffer.from(c[0].content, 'base64').toString('utf8');
+  }
+  return out;
+}
+
 beforeEach(() => {
-  execFileCalls.length = 0;
-  execFileShouldFail = false;
+  vaultSetCalls.length = 0;
+  vaultShouldFail = false;
   Object.values(octokitCalls).forEach(m => (m as jest.Mock).mockClear());
   octokitCalls.reposGet.mockImplementation(async () => ({
     data: { default_branch: 'main' },
@@ -247,9 +293,10 @@ describe('capstone:seal-secret action shape', () => {
   });
 });
 
-describe('capstone:seal-secret sealing + publish (owner)', () => {
-  it('seals each env offline and opens one PR per env', async () => {
+describe('capstone:seal-secret write + publish (owner)', () => {
+  it('writes the value to Vault per env and opens one PR per env', async () => {
     const { deps } = makeDeps({ actorGroups: [OWNER_GROUP] });
+    serveShippedEs(['dev', 'prod']);
     const action = createSealSecretAction(deps);
     const ctx = ctxFor({
       entityRef: TARGET_REF,
@@ -260,39 +307,40 @@ describe('capstone:seal-secret sealing + publish (owner)', () => {
 
     await action.handler(ctx);
 
-    // One kubeseal call per env, strict scope, namespace <team>-<env>, name from key.
-    expect(execFileCalls).toHaveLength(2);
-    const namespaces = execFileCalls.map(
-      c => c.args[c.args.indexOf('--namespace') + 1],
-    );
-    expect(namespaces).toEqual(['team-alpha-dev', 'team-alpha-prod']);
-    for (const c of execFileCalls) {
-      expect(c.bin).toBe('kubeseal');
-      expect(c.args).toContain('--cert');
-      expect(c.args).toContain('/etc/backstage/sealing-cert/sealing-cert.pem');
-      expect(c.args[c.args.indexOf('--scope') + 1]).toBe('strict');
-      expect(c.args[c.args.indexOf('--name') + 1]).toBe('database-url');
+    // One Vault write per env, at the per-env path (reused from the shipped ES remoteRef.key),
+    // under the KEY, with the value.
+    expect(vaultSetCalls).toEqual([
+      {
+        path: 'tenants/team-alpha/dev/app',
+        key: 'DATABASE_URL',
+        value: SECRET_VALUE,
+      },
+      {
+        path: 'tenants/team-alpha/prod/app',
+        key: 'DATABASE_URL',
+        value: SECRET_VALUE,
+      },
+    ]);
+
+    // One PR per env, each upserting the overlay ES (NOT a new file, NOT a kustomization edit).
+    expect(octokitCalls.pullsCreate).toHaveBeenCalledTimes(2);
+    const files = writtenFiles();
+    expect(files[overlayEs('dev')]).toBeDefined();
+    expect(files[overlayEs('prod')]).toBeDefined();
+    // No file outside the overlay (no .devops/secrets/, no kustomization.yaml edit).
+    for (const p of Object.keys(files)) {
+      expect(p).toMatch(/overlays\/(dev|prod)\/app-secret\.externalsecret\.yaml$/);
     }
 
-    // One PR per env.
-    expect(octokitCalls.pullsCreate).toHaveBeenCalledTimes(2);
-    // The SealedSecret committed at the per-key path.
-    const filePaths = octokitCalls.createOrUpdateFileContents.mock.calls.map(
-      (c: any) => c[0].path,
-    );
-    expect(filePaths).toContain(
-      '.devops/secrets/database-url.sealedsecret.yaml',
-    );
-
-    // Output: two PR URLs.
     expect(ctx.output).toHaveBeenCalledWith(
       'pullRequestUrls',
       expect.arrayContaining([expect.stringContaining('/pull/')]),
     );
   });
 
-  it('pipes the plaintext to kubeseal STDIN — never an argv, never a tempfile', async () => {
+  it('upserts a data[] entry (names only) + PRESERVES the shipped app-secret entry', async () => {
     const { deps } = makeDeps({ actorGroups: [OWNER_GROUP] });
+    serveShippedEs(['dev']);
     const action = createSealSecretAction(deps);
     await action.handler(
       ctxFor({
@@ -303,15 +351,43 @@ describe('capstone:seal-secret sealing + publish (owner)', () => {
       }),
     );
 
-    const call = execFileCalls[0];
-    // The value IS in stdin (sealed)...
-    expect(call.stdin).toContain(SECRET_VALUE);
-    // ...and NEVER in the argv (no shell/process-listing leak).
-    expect(call.args.join(' ')).not.toContain(SECRET_VALUE);
+    const es = writtenFiles()[overlayEs('dev')];
+    // The new entry — names + Vault pointer only.
+    expect(es).toContain('- secretKey: "API_KEY"');
+    expect(es).toContain('key: "tenants/team-alpha/dev/app"');
+    expect(es).toContain('property: "API_KEY"');
+    // The shipped demo entry is preserved (not clobbered).
+    expect(es).toContain('secretKey: app-secret');
+    expect(es).toContain('property: APP_SECRET');
+    // Document scaffolding preserved + the VALUE never in git.
+    expect(es).toContain('kind: ExternalSecret');
+    expect(es).toContain('deletionPolicy: Delete');
+    expect(es).not.toContain(SECRET_VALUE);
+  });
+
+  it('is idempotent — re-setting an existing key rewrites no git (only Vault)', async () => {
+    const { deps } = makeDeps({ actorGroups: [OWNER_GROUP] });
+    // The dev overlay already declares API_KEY.
+    serveShippedEs(['dev'], { dev: ['API_KEY'] });
+    const action = createSealSecretAction(deps);
+    await action.handler(
+      ctxFor({
+        entityRef: TARGET_REF,
+        key: 'API_KEY',
+        value: 'new-rotated-value',
+        envs: ['dev'],
+      }),
+    );
+    // Vault is still written (rotation), but no file is committed (the declaration is unchanged).
+    expect(vaultSetCalls).toHaveLength(1);
+    expect(octokitCalls.createOrUpdateFileContents).not.toHaveBeenCalled();
+    // A PR is still opened (no-op-safe; the value did change in Vault).
+    expect(octokitCalls.pullsCreate).toHaveBeenCalledTimes(1);
   });
 
   it('NEVER logs the plaintext value', async () => {
     const { deps, loggerCalls } = makeDeps({ actorGroups: [OWNER_GROUP] });
+    serveShippedEs(['dev', 'prod']);
     const action = createSealSecretAction(deps);
     await action.handler(
       ctxFor({
@@ -328,52 +404,25 @@ describe('capstone:seal-secret sealing + publish (owner)', () => {
     expect(loggerCalls.join('\n')).toMatch(/TOKEN/);
   });
 
-  it('appends the SealedSecret to each env overlay kustomization (Option A)', async () => {
+  it('fails CLOSED (no Vault write, no PR) if the overlay ExternalSecret is missing', async () => {
     const { deps } = makeDeps({ actorGroups: [OWNER_GROUP] });
+    // getContent 404s for everything (default) -> not an M4 tenant repo.
     const action = createSealSecretAction(deps);
-    await action.handler(
-      ctxFor({
-        entityRef: TARGET_REF,
-        key: 'DB',
-        value: SECRET_VALUE,
-        envs: ['dev'],
-      }),
-    );
-    const writtenPaths = octokitCalls.createOrUpdateFileContents.mock.calls.map(
-      (c: any) => c[0].path,
-    );
-    expect(writtenPaths).toContain(
-      '.devops/chart/overlays/dev/kustomization.yaml',
-    );
+    await expect(
+      action.handler(
+        ctxFor({
+          entityRef: TARGET_REF,
+          key: 'K',
+          value: SECRET_VALUE,
+          envs: ['dev'],
+        }),
+      ),
+    ).rejects.toThrow(/ExternalSecret/);
+    expect(vaultSetCalls).toHaveLength(0);
+    expect(octokitCalls.pullsCreate).not.toHaveBeenCalled();
   });
 
-  it('overwrites (rotates) an existing SealedSecret by passing its sha', async () => {
-    const { deps } = makeDeps({ actorGroups: [OWNER_GROUP] });
-    // getContent returns an existing file for the secret path.
-    octokitCalls.getContent.mockImplementation(async (opts: any) => {
-      if (opts.path.endsWith('.sealedsecret.yaml')) {
-        return { data: { sha: 'existingsha', content: '' } } as any;
-      }
-      const e = new Error('Not Found') as Error & { status: number };
-      e.status = 404;
-      throw e;
-    });
-    const action = createSealSecretAction(deps);
-    await action.handler(
-      ctxFor({
-        entityRef: TARGET_REF,
-        key: 'ROTATE_ME',
-        value: SECRET_VALUE,
-        envs: ['dev'],
-      }),
-    );
-    const secretWrite = octokitCalls.createOrUpdateFileContents.mock.calls.find(
-      (c: any) => c[0].path.endsWith('rotate-me.sealedsecret.yaml'),
-    );
-    expect(secretWrite?.[0].sha).toBe('existingsha');
-  });
-
-  it('fails CLOSED (no Octokit) if a Component has no source-location', async () => {
+  it('fails CLOSED (no Vault write, no Octokit) if a Component has no source-location', async () => {
     const { deps } = makeDeps({
       actorGroups: [OWNER_GROUP],
       entity: {
@@ -397,8 +446,9 @@ describe('capstone:seal-secret sealing + publish (owner)', () => {
 });
 
 describe('capstone:seal-secret authorization (fails closed)', () => {
-  it('admin (labmx) override: seals even without owning the Component', async () => {
+  it('admin (labmx) override: writes even without owning the Component', async () => {
     const { deps } = makeDeps({ actorGroups: [ADMIN_GROUP_REF] });
+    serveShippedEs(['dev']);
     const action = createSealSecretAction(deps);
     await action.handler(
       ctxFor({
@@ -408,11 +458,11 @@ describe('capstone:seal-secret authorization (fails closed)', () => {
         envs: ['dev'],
       }),
     );
-    expect(execFileCalls).toHaveLength(1);
+    expect(vaultSetCalls).toHaveLength(1);
     expect(octokitCalls.pullsCreate).toHaveBeenCalledTimes(1);
   });
 
-  it('non-owner: DENIED by the owner re-check — no kubeseal, no Octokit', async () => {
+  it('non-owner: DENIED by the owner re-check — no Vault write, no Octokit', async () => {
     const { deps } = makeDeps({
       actorGroups: ['group:default/some-other-team'],
     });
@@ -427,7 +477,7 @@ describe('capstone:seal-secret authorization (fails closed)', () => {
         }),
       ),
     ).rejects.toThrow(NotAllowedError);
-    expect(execFileCalls).toHaveLength(0);
+    expect(vaultSetCalls).toHaveLength(0);
     expect(octokitCalls.pullsCreate).not.toHaveBeenCalled();
   });
 
@@ -447,6 +497,6 @@ describe('capstone:seal-secret authorization (fails closed)', () => {
         }),
       ),
     ).rejects.toThrow(NotAllowedError);
-    expect(execFileCalls).toHaveLength(0);
+    expect(vaultSetCalls).toHaveLength(0);
   });
 });

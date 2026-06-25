@@ -1,13 +1,16 @@
 /*
- * `capstone:seal-secret` — the M3 secrets sealing scaffolder action (plan §2, §3).
+ * `capstone:seal-secret` — the M3 secrets scaffolder action (plan §2, §3; reworked for the
+ * ESO+Vault v1 model, ADR-030 B1).
  *
  * This is a THIN caller of sealCore.sealAndPublish (src/sealCore.ts) — the ONE shared
  * implementation also used by the capstone-secrets backend route the frontend posts to. So the
  * action and the route enforce the SAME `capstone.secret.seal` authz + owner re-check +
- * fail-closed + offline-seal-via-stdin invariants; neither is a softer back-door (ADR-029 §6).
+ * fail-closed + write-to-Vault-then-commit-ExternalSecret invariants; neither is a softer
+ * back-door (ADR-029 §6). The value lands ONLY in Vault — nothing secret is committed to git.
  *
- * The action exists so the seal capability is ALSO usable from a scaffolder Template step (e.g.
- * M4 onboarding could seal a bootstrap secret); the frontend Secrets page uses the route.
+ * The action exists so the secrets capability is ALSO usable from a scaffolder Template step
+ * (e.g. M4 onboarding could set a bootstrap secret); the frontend Secrets page uses the route.
+ * The id stays `capstone:seal-secret` for backward compatibility with existing templates.
  */
 import { createTemplateAction } from '@backstage/plugin-scaffolder-node';
 import {
@@ -29,8 +32,9 @@ export function createSealSecretAction(deps: SealSecretActionDeps) {
   return createTemplateAction({
     id: 'capstone:seal-secret',
     description:
-      'Seal a team secret (kubeseal, offline cert) and open a PR committing the ' +
-      'SealedSecret to the team app repo. Write-only: values cannot be read back.',
+      'Set a team secret: write the value to Vault (ESO model) and open a PR committing an ' +
+      'ExternalSecret declaration (key names only) to the team app repo. Write-only: ' +
+      'values cannot be read back.',
     schema: {
       input: {
         entityRef: z =>
@@ -45,16 +49,16 @@ export function createSealSecretAction(deps: SealSecretActionDeps) {
         value: z =>
           z.string({
             description:
-              'The secret value (plaintext). Sealed immediately; never stored or logged.',
+              'The secret value (plaintext). Written to Vault immediately; never committed ' +
+              'to git or logged.',
           }),
         envs: z =>
           z
             .array(z.enum(['dev', 'staging', 'prod']))
             .min(1)
             .describe(
-              'Target environments to seal for (dev, staging, and/or prod). ' +
-                'Preview (ephemeral pr-<n>) namespaces are out of scope — strict scope ' +
-                'cannot pre-seal for an unknown namespace.',
+              'Target environments to set for (dev, staging, and/or prod). ' +
+                'Preview (ephemeral pr-<n>) namespaces are out of scope.',
             ),
       },
       output: {

@@ -37,11 +37,24 @@ export function SecretsForm(props: {
   }) => Promise<SealSecretResult>;
   disabled?: boolean;
   disabledReason?: string;
+  /**
+   * EDIT mode: when set, the form pre-fills + locks the key (you're re-setting an existing
+   * secret) and targets the given env(s). "Edit" is a transparent re-set — enter a new value
+   * → the same POST /seal overwrites the value in Vault (write-only, so the old value is never
+   * shown; you just set a new one).
+   */
+  initialKey?: string;
+  initialEnvs?: string[];
 }) {
   const classes = useStyles();
-  const [key, setKey] = useState('');
+  const editMode = Boolean(props.initialKey);
+  const [key, setKey] = useState(props.initialKey ?? '');
   const [value, setValue] = useState('');
-  const [envs, setEnvs] = useState<string[]>(['dev']);
+  const [envs, setEnvs] = useState<string[]>(
+    props.initialEnvs && props.initialEnvs.length > 0
+      ? props.initialEnvs
+      : ['dev'],
+  );
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | undefined>();
   const [result, setResult] = useState<SealSecretResult | undefined>();
@@ -75,11 +88,12 @@ export function SecretsForm(props: {
   };
 
   return (
-    <InfoCard title="Seal a secret">
+    <InfoCard title={editMode ? `Edit secret: ${props.initialKey}` : 'Set a secret'}>
       <Typography variant="body2" color="textSecondary" gutterBottom>
-        Secrets are <strong>write-only</strong> here — sealed values cannot be
-        read back. To change a secret, set it again. On submit, a pull request is
-        opened on your app repo; merge it to apply.
+        Secrets are <strong>write-only</strong> here — values cannot be read
+        back. To change a secret, set it again. On submit, the value is written
+        to Vault and a pull request is opened on your app repo (declaration
+        only, no secret material); merge it to apply.
       </Typography>
 
       {props.disabled && (
@@ -95,10 +109,15 @@ export function SecretsForm(props: {
         placeholder="DATABASE_URL"
         fullWidth
         value={key}
-        disabled={props.disabled || submitting}
+        // In edit mode the key is fixed (you're re-sealing THIS secret) — lock it.
+        disabled={props.disabled || submitting || editMode}
         onChange={e => setKey(e.target.value)}
         inputProps={{ 'aria-label': 'secret key' }}
-        helperText="The secret key (becomes the SealedSecret name + data key)."
+        helperText={
+          editMode
+            ? 'Setting a new value for this key — enter it below.'
+            : 'The secret key (becomes a key in your app Secret).'
+        }
       />
 
       <TextField
@@ -110,7 +129,7 @@ export function SecretsForm(props: {
         disabled={props.disabled || submitting}
         onChange={e => setValue(e.target.value)}
         inputProps={{ 'aria-label': 'secret value', autoComplete: 'new-password' }}
-        helperText="Sealed immediately and discarded. Never stored or shown."
+        helperText="Written to Vault immediately. Never committed to git or shown."
       />
 
       <FormControl
@@ -134,8 +153,8 @@ export function SecretsForm(props: {
           ))}
         </FormGroup>
         <FormHelperText>
-          One SealedSecret per env (namespace &lt;team&gt;-&lt;env&gt;). Preview
-          (pr-&lt;n&gt;) is not a seal target.
+          One Secret per env (namespace &lt;team&gt;-&lt;env&gt;). Preview
+          (pr-&lt;n&gt;) is not a target.
         </FormHelperText>
       </FormControl>
 

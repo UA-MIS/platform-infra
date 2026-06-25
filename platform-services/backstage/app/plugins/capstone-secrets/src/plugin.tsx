@@ -37,6 +37,11 @@ const secretsPage = PageBlueprint.make({
   params: {
     routeRef: rootRouteRef,
     path: '/secrets',
+    // title + icon make the new frontend system auto-register a "Secrets" SIDEBAR item
+    // (NavItemBlueprint was removed in frontend-plugin-api 0.17.0 — nav items now come from
+    // a PageBlueprint's title/icon). Sidebar.tsx renders it via nav.rest().
+    title: 'Secrets',
+    icon: <SecurityIcon />,
     loader: () =>
       import('./components/SecretsPage').then(m => <m.SecretsPage />),
   },

@@ -19,6 +19,8 @@ export {
 export {
   sealAndPublish,
   listSecrets,
+  listMyProjects,
+  deleteSecret,
   ADMIN_GROUP_REF,
 } from './sealCore';
 export type {
@@ -26,4 +28,7 @@ export type {
   SealRequest,
   ListRequest,
   SecretSummary,
+  ListProjectsRequest,
+  ProjectSummary,
+  DeleteRequest,
 } from './sealCore';

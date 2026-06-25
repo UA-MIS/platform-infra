@@ -1,8 +1,9 @@
 /*
  * The write-only listing: existing secret key NAMES + last-updated, per env. NEVER values
- * (plan §2.4). There is no reveal affordance by design — the values are sealed and cannot be
- * read back.
+ * (plan §2.4). There is no reveal affordance by design — the values live in Vault and cannot
+ * be read back here.
  */
+import { Button } from '@material-ui/core';
 import {
   Table,
   TableColumn,
@@ -16,8 +17,12 @@ export function SecretsList(props: {
   secrets: SecretSummary[];
   loading: boolean;
   error?: Error;
+  /** When provided, each row gets an "Edit" (re-seal) action. */
+  onEdit?: (secret: SecretSummary) => void;
+  /** When provided, each row gets a "Delete" (opens a PR) action. */
+  onDelete?: (secret: SecretSummary) => void;
 }) {
-  const { secrets, loading, error } = props;
+  const { secrets, loading, error, onEdit, onDelete } = props;
 
   if (loading) {
     return <Progress />;
@@ -47,6 +52,37 @@ export function SecretsList(props: {
         row.lastUpdated ? new Date(row.lastUpdated).toLocaleString() : '—',
     },
   ];
+
+  if (onEdit || onDelete) {
+    columns.push({
+      title: 'Actions',
+      sorting: false,
+      render: row => (
+        <>
+          {onEdit && (
+            <Button
+              size="small"
+              color="primary"
+              onClick={() => onEdit(row)}
+              aria-label={`edit ${row.key}`}
+            >
+              Edit
+            </Button>
+          )}
+          {onDelete && (
+            <Button
+              size="small"
+              color="secondary"
+              onClick={() => onDelete(row)}
+              aria-label={`delete ${row.key}`}
+            >
+              Delete
+            </Button>
+          )}
+        </>
+      ),
+    });
+  }
 
   return (
     <Table<SecretSummary>

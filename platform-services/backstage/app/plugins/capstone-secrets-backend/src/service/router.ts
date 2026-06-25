@@ -1,8 +1,10 @@
 /*
  * The capstone-secrets backend route — what the frontend Secrets page posts to.
  *
- *   POST /seal   { entityRef, key, value, envs[] }  -> { pullRequestUrls[] }
- *   GET  /list?entityRef=...                          -> { secrets: [{key, env, lastUpdated}] }
+ *   POST /seal    { entityRef, key, value, envs[] } -> { pullRequestUrls[] }
+ *   GET  /list?entityRef=...                         -> { secrets: [{key, env, lastUpdated}] }
+ *   GET  /my-projects                                -> { projects: [{entityRef, title, owner}] }
+ *   POST /delete  { entityRef, key }                 -> { pullRequestUrl }  (un-seal via PR)
  *
  * SECURITY: every request resolves the AUTHENTICATED USER's credentials (httpAuth, allow:
  * ['user'] only — no service principal can drive this) and passes them into sealCore, which
@@ -17,7 +19,9 @@ import express from 'express';
 import Router from 'express-promise-router';
 import {
   listSecrets,
+  listMyProjects,
   sealAndPublish,
+  deleteSecret,
   type CapstoneSecretsDeps,
 } from '@internal/backstage-plugin-scaffolder-backend-module-capstone';
 
@@ -73,6 +77,28 @@ export async function createRouter(
     }
     const secrets = await listSecrets(core, { credentials, entityRef });
     res.json({ secrets });
+  });
+
+  // GET /my-projects — the access-scoped project picker (Components the user owns; labmx=all).
+  router.get('/my-projects', async (req, res) => {
+    const credentials = await httpAuth.credentials(req, { allow: ['user'] });
+    const projects = await listMyProjects(core, { credentials });
+    res.json({ projects });
+  });
+
+  // POST /delete — un-seal a key (PR removing the file + overlay refs). Same authz as seal.
+  // POST (not DELETE) so the {entityRef,key} body parses reliably across clients/proxies.
+  router.post('/delete', async (req, res) => {
+    const credentials = await httpAuth.credentials(req, { allow: ['user'] });
+    const { entityRef, key } = req.body ?? {};
+    if (typeof entityRef !== 'string' || !entityRef) {
+      throw new InputError('entityRef is required');
+    }
+    if (typeof key !== 'string' || !key.trim()) {
+      throw new InputError('key is required');
+    }
+    const result = await deleteSecret(core, { credentials, entityRef, key });
+    res.json(result);
   });
 
   return router;

@@ -144,18 +144,26 @@ mcpActions:
   name: 'My Company Backstage' # defaults to "backstage"
   description: 'Tools for managing your software catalog, creating new services from templates, and exploring your developer portal' # optional
 
-# ── M3 (local dev): the secrets capability (capstone:seal-secret) ───────────────────────
+# ── M3 (local dev): the secrets capability (capstone:seal-secret), ESO+Vault model ──────
 # Local-dev variant of capstone.secrets.* (prod values live in app-config.production.yaml).
-# To exercise the seal action locally you need (a) a dev-exported PUBLIC sealing cert at
-# sealingCertPath and (b) kubeseal on PATH (`kubesealBin: kubeseal`). The action requires a
-# real signed-in user whose catalog Groups own the target Component (no guest bypass — the
-# owner re-check fails closed by design), so local end-to-end needs a dev catalog with a User
-# + owning Group, or run the unit tests (which mock kubeseal + Octokit) instead.
+# End-to-end locally needs a reachable Vault (capstone.secrets.vault.*) with the
+# `backstage-writer` k8s-auth role + write policy, plus a real signed-in user whose catalog
+# Groups own the target Component (no guest bypass — the owner re-check fails closed by
+# design). Most local work runs the unit tests instead (they mock the VaultClient + Octokit).
+# The vault.* block falls back to the in-cluster defaults below if omitted.
 capstone:
   secrets:
-    sealingCertPath: ./sealing-cert.dev.pem
-    kubesealBin: kubeseal
     defaultBranchPrefix: secrets/
-    secretsDir: .devops/secrets
-    overlayRelPath: ../../secrets
     overlaysDir: .devops/chart/overlays
+    # The overlay ExternalSecret the M4 scaffolder ships per env — the Secrets tab UPSERTS
+    # data[] entries into it (it's already a kustomization resource). Must match #106.
+    overlayEsFile: app-secret.externalsecret.yaml
+    # Vault connection (the value-write path). In-cluster defaults; override for local dev.
+    vault:
+      addr: https://vault.vault.svc.cluster.local:8200
+      mount: secret
+      authMount: kubernetes
+      role: backstage-writer
+      # Projected SA token with audience=vault (deploy mounts it; NOT the default token).
+      saTokenPath: /var/run/secrets/vault/vault-token
+      caPath: /etc/backstage/vault-ca/ca.crt

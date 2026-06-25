@@ -118,28 +118,39 @@ integrations:
           # App to that org so credential discovery never strays to another installation.
           allowedInstallationOwners: ['UA-MIS']
 
-# ── M3: the secrets capability (capstone:seal-secret, ADR-029 §4) ───────────────────────
-# Tells the capstone:seal-secret backend action where to find the OFFLINE sealing cert + the
-# bundled kubeseal binary, and the repo-write conventions. The cert is the controller's
-# PUBLIC key (D-047 A2): the action seals OFFLINE (`kubeseal --cert <path>`), so there is NO
-# backstage->controller egress. The cert is mounted by the Helm extraVolume/extraVolumeMount
-# in applicationsets/backstage-process-app.yaml (devops, m2-deploy) at sealingCertPath; the
-# kubeseal binary is baked into the image (packages/backend/Dockerfile, pinned v0.37.0). These
-# values must be mirrored into the Helm appConfig IF the pod loads only that (same pattern as
-# permission.enabled) — confirm with devops.
+# ── M3: the secrets capability (capstone:seal-secret), ESO+Vault model (ADR-030 B1) ─────
+# Tells the secrets backend where to WRITE the value (Vault) + the repo-write conventions for
+# the ExternalSecret declaration it commits. The value is written to Vault over the k8s-auth
+# method; NOTHING secret is committed to git. DEPLOY DEPENDENCIES — ALL owned by eso-vault on
+# the deploy side (confirmed): (1) a Vault `backstage-writer` k8s-auth role (audience `vault`)
+# bound to a DEDICATED SA `backstage-vault-writer` in ns `backstage` (NOT the default SA) with
+# policy `backstage-writer`: create/update/patch (NO read) on secret/data/tenants/* + read/list
+# on secret/metadata/tenants/*; (2) the Vault CA bundle (the vault-server-tls issuing CA, same
+# ESO uses) mounted at vault.caPath; (3) the Deployment serviceAccountName set to
+# backstage-vault-writer + a PROJECTED serviceAccountToken volume (audience: vault) mounted at
+# vault.saTokenPath — the default API-server-audience token 403s ("invalid audience"); + netpol
+# egress to vault.vault.svc:8200 (paired with the vault-netpol ingress allow). SECURITY: this
+# token can write ANY tenant path (coarse by design) — per-tenant authz is enforced in the
+# Backstage layer (the capstone.secret.seal owner re-check, BEFORE the Vault write). These may
+# need mirroring into the Helm appConfig — devops.
 capstone:
   secrets:
-    # The mounted public sealing cert (read-only ConfigMap, m2-deploy). Action seals offline.
-    sealingCertPath: /etc/backstage/sealing-cert/sealing-cert.pem
-    # The bundled kubeseal binary (Dockerfile COPY); 'kubeseal' on PATH also works.
-    kubesealBin: /usr/local/bin/kubeseal
-    # PR branch name prefix for each seal (branch = <prefix><key>-<env>-<timestamp>).
+    # PR branch name prefix for each set (branch = <prefix><key>-<env>-<timestamp>).
     defaultBranchPrefix: secrets/
-    # Where the SealedSecret lands in the team app repo (per-key file).
-    secretsDir: .devops/secrets
-    # Relative path FROM an env overlay's kustomization.yaml TO the secrets dir (Option A,
-    # coordinated with M4): .devops/chart/overlays/<env>/ -> .devops/secrets/.
-    overlayRelPath: ../../secrets
-    # Parent dir holding the per-env overlay kustomizations the action appends the SealedSecret
-    # reference to (dev/staging/prod; preview/pr-<n> are ephemeral and out of scope).
+    # Parent dir holding the per-env overlay dirs (dev/staging/prod; preview/pr-<n> are
+    # ephemeral and out of scope for the Secrets tab).
     overlaysDir: .devops/chart/overlays
+    # The ExternalSecret the M4 scaffolder ships INSIDE each overlay dir — the Secrets tab
+    # UPSERTS a data[] entry into it per env (it's already a kustomization resource, so no
+    # overlay edit + no kustomize load-restrictor escape). MUST match the scaffolder (#106).
+    overlayEsFile: app-secret.externalsecret.yaml
+    # Vault connection — the value-write path (k8s-auth -> KV-v2 PATCH).
+    vault:
+      addr: https://vault.vault.svc.cluster.local:8200
+      mount: secret
+      authMount: kubernetes
+      role: backstage-writer
+      # Projected SA token with audience=vault (deploy mounts a serviceAccountToken projected
+      # volume here; the default API-server-audience token will NOT satisfy the Vault role).
+      saTokenPath: /var/run/secrets/vault/vault-token
+      caPath: /etc/backstage/vault-ca/ca.crt
