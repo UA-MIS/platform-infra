@@ -18,13 +18,16 @@
 # The tag IS the promotion mechanism (D-030 prod-gate): a `vX.Y.Z` git tag yields
 # the IMMUTABLE `:X.Y.Z` image that the prod (and staging) overlays pin; a push to
 # main yields a mutable `:<short-sha>` image for dev; a pull_request yields a
-# build-only `pull-<short-sha>` (no push). Exactly ONE tag per build — the git tag
-# names both the image and, via bump-image.sh, the manifest revision.
+# preview-scoped `pull-<short-sha>` image (pushed, so the per-PR preview env can
+# deploy it). Exactly ONE tag per build — the git tag names both the image and, via
+# bump-image.sh, the manifest revision.
 #
 # Trigger -> env (matches promotion.yaml `environments.*.trigger`):
 #   tag:v*        (refs/tags/vX.Y.Z) -> prod    (semver, immutable, gated)  PUSH
 #   branch:main   (refs/heads/main)  -> dev     (git-describe, mutable)     PUSH
-#   pull_request                     -> preview (pull-<sha>, build-only)    NO PUSH
+#   pull_request                     -> preview (pull-<sha>, UNTRUSTED)     PUSH*
+# * preview pushes UNTRUSTED PR code, bounded to the team's own Harbor project +
+#   the disjoint pull-<sha> tag + the fenced <team>-pr-<n> ns (see the case below).
 #
 # NOTE on staging vs prod: both are driven by `tag:v*`. One `vX.Y.Z` tag builds ONE
 # immutable `:X.Y.Z` image that BOTH staging and prod overlays pin — staging
@@ -96,7 +99,18 @@ yread() {
 PUSH="true"; SEMVER=""
 case "${EVENT}" in
   pull_request)
-    ENV="preview"; PUSH="false"          # PR builds VALIDATE only — never push
+    ENV="preview"; PUSH="true"           # PR builds PUSH a preview-scoped pull-<sha>
+    # image so the per-PR preview env has something to deploy. SECURITY: this is
+    # UNTRUSTED PR code being built+pushed, but the blast radius is bounded by
+    # (a) the harbor-push robot — push is scoped to THIS team's OWN Harbor project
+    # only (no other project, no delete); (b) the `pull-<sha>` tag namespace is
+    # DISJOINT from dev's git-describe + prod's semver tags, so a PR can never
+    # overwrite the dev/staging/prod image; (c) the image only ever lands in the
+    # ephemeral, fully-fenced <team>-pr-<n> preview namespace (quota/limitrange/
+    # default-deny netpol/restricted-PSA/narrow-RBAC). Building untrusted PR code
+    # already happened here pre-preview (the build job ran on pull_request, just
+    # --no-push); the only new exposure is the push of that build to the team's own
+    # project. See the build-and-push.yaml header + the preview ApplicationSet.
     ;;
   push)
     case "${REF}" in

@@ -44,7 +44,10 @@ on:
   push:
     branches: [main]          # -> dev image (mutable sha tag), pushed
     tags: ["v*.*.*"]          # -> prod/staging image (immutable semver), pushed
-  pull_request:               # -> build-only validation (untrusted code, no push)
+  pull_request:               # -> preview image (pull-<head-sha>, pushed). UNTRUSTED
+                              #    PR code, bounded to the team's own Harbor project +
+                              #    the disjoint pull-<sha> tag + the fenced
+                              #    <team>-pr-<n> preview ns (see the Kaniko step).
 
 # Least privilege for the workflow token. `contents: read` is all actions/checkout
 # needs. The registry push is authenticated by the Harbor `harbor-push` robot —
@@ -98,6 +101,15 @@ jobs:
 
       - name: Resolve image identity from promotion.yaml
         id: resolve
+        env:
+          # SHA the resolver hashes into the tag. For a pull_request, GITHUB_SHA is the
+          # ephemeral MERGE-ref sha (refs/pull/n/merge) — but the preview ApplicationSet's
+          # pullRequest generator keys the image override on the PR HEAD sha
+          # (pull-{{.head_short_sha_7}}). Feed the HEAD sha here so the PUSHED preview tag
+          # (pull-<head-sha[0:7]>) MATCHES what the preview App pulls — else ImagePullBackOff.
+          # For push/tag builds the expression is empty, so the resolver falls back to
+          # GITHUB_SHA (current behaviour for dev/prod is unchanged).
+          SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           sh .devops/ci/resolve-image.sh | tee -a "$GITHUB_OUTPUT"
 
@@ -117,6 +129,14 @@ jobs:
       # checked-out repo mounted. We override the entrypoint with a tiny sh wrapper
       # so we can (a) fail closed if a push build is missing its cred, and (b) build
       # vs. --no-push from the resolver's PUSH decision.
+      #
+      # SECURITY — preview (pull_request) now PUSHES untrusted PR code. The push is
+      # authenticated by the SAME least-privilege harbor-push robot (pull+push on THIS
+      # team's OWN Harbor project only, no other project, no delete). The tag is
+      # pull-<head-sha>, a namespace DISJOINT from dev's git-describe + prod's semver,
+      # so a PR can never overwrite the dev/staging/prod image. The pushed image only
+      # ever deploys into the ephemeral, fully-fenced <team>-pr-<n> preview namespace.
+      # (NEEDS SECURITY REVIEW before merge — see the preview ApplicationSet header.)
       - name: Build (and push) with Kaniko
         # Digest-pinned (SEC, D-030): the Kaniko image holds the Harbor push cred, so
         # pin it to an immutable digest — a re-tag of v1.23.2-debug can't inject a
