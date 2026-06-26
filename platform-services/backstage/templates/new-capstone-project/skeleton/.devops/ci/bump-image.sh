@@ -67,6 +67,16 @@ yq '.images' "${KUSTOMIZATION}"
 # (Harmless for the local/manual path — it's just a commit-message tag.)
 if [ "${COMMIT:-0}" = "1" ]; then
   echo "==> committing bump (GitOps signal)"
+  # CI ownership guard: GitHub Actions checks out the repo as a different owner (uid)
+  # than the user this job's git runs as, so git refuses to touch it ("fatal: detected
+  # dubious ownership", exit 128) and the bump silently never commits. Mark the repo dir
+  # safe. safe.directory MUST live in global/system config — git deliberately ignores it
+  # from a repo-local config — so we set it --global (the CI container is ephemeral).
+  # Scoped to GitHub Actions so a local COMMIT=1 run never appends to the developer's
+  # own ~/.gitconfig (locally the owner already matches, so the guard isn't needed).
+  if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+    git config --global --add safe.directory "${REPO_DIR}"
+  fi
   git -C "${REPO_DIR}" add "${KUSTOMIZATION}"
   git -C "${REPO_DIR}" commit -m "ci: bump ${ENV} image to ${NEW_TAG} [skip ci]" \
     && echo "committed. ArgoCD will sync ${ENV} on next reconcile." \
