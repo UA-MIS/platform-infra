@@ -82,6 +82,22 @@ assert_kv "pr->preview" PUSH false
 run "feature-branch" push "refs/heads/feature-x" "abc1234"
 assert_rc "feature-branch" 1
 
+# 4b) workflow_dispatch on main -> dev, PUSH (manual re-run = same path as push)
+run "dispatch->dev" workflow_dispatch "refs/heads/main" "9b08056abcdef1234567890"
+assert_rc "dispatch->dev" 0
+assert_kv "dispatch->dev" ENV dev
+assert_kv "dispatch->dev" PUSH true
+
+# 4c) workflow_dispatch on a v* tag -> prod, immutable semver (ref decides env)
+run "dispatch->prod" workflow_dispatch "refs/tags/v1.4.0" "deadbeefcafef00d"
+assert_rc "dispatch->prod" 0
+assert_kv "dispatch->prod" ENV prod
+assert_kv "dispatch->prod" TAG 1.4.0
+
+# 4d) workflow_dispatch on a non-main branch -> rejected (only main + v* tags build)
+run "dispatch-branch" workflow_dispatch "refs/heads/feature-x" "abc1234"
+assert_rc "dispatch-branch" 1
+
 # 5) a non-semver tag -> rejected (never build an unlabelled prod image)
 run "bad-tag" push "refs/tags/vlatest" "abc1234"
 assert_rc "bad-tag" 1

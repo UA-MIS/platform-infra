@@ -26,6 +26,10 @@
 #   branch:main   (refs/heads/main)  -> dev     (git-describe, mutable)     PUSH
 #   pull_request                     -> preview (pull-<sha>, build-only)    NO PUSH
 #
+# workflow_dispatch (manual re-run) is treated EXACTLY like a push: the ref decides
+# the env (dispatch on main -> dev; dispatch on a vX.Y.Z tag -> prod). This lets an
+# operator re-drive the build+deploy by hand without inventing a new code path.
+#
 # NOTE on staging vs prod: both are driven by `tag:v*`. One `vX.Y.Z` tag builds ONE
 # immutable `:X.Y.Z` image that BOTH staging and prod overlays pin — staging
 # auto-syncs, prod is the manual gate (§4). The tag build is env-agnostic; we
@@ -36,7 +40,7 @@
 #   ENV / REGISTRY / APP / TAG / IMAGE(=REGISTRY/APP:TAG) / PUSH(true|false)
 #
 # Inputs (env; GitHub Actions sets the first three automatically):
-#   GITHUB_EVENT_NAME  push|pull_request   GITHUB_REF  refs/...   GITHUB_SHA  sha
+#   GITHUB_EVENT_NAME  push|pull_request|workflow_dispatch   GITHUB_REF  refs/...   GITHUB_SHA  sha
 #   PROMOTION  path to promotion.yaml (default: alongside this script's ../)
 set -eu
 
@@ -98,11 +102,11 @@ case "${EVENT}" in
   pull_request)
     ENV="preview"; PUSH="false"          # PR builds VALIDATE only — never push
     ;;
-  push)
+  push|workflow_dispatch)   # workflow_dispatch = manual re-run; ref decides the env
     case "${REF}" in
       refs/tags/v*)  ENV="prod"; SEMVER="${REF#refs/tags/v}" ;;   # immutable semver
       refs/heads/main) ENV="dev" ;;                               # mutable sha
-      *) echo "no promotion mapping for push ref '${REF}' (only main + v* tags build)" >&2; exit 1 ;;
+      *) echo "no promotion mapping for ref '${REF}' (only main + v* tags build)" >&2; exit 1 ;;
     esac
     ;;
   "") echo "GITHUB_EVENT_NAME is empty — set GITHUB_EVENT_NAME and GITHUB_REF" >&2; exit 2 ;;

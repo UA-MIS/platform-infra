@@ -46,11 +46,13 @@ EXPECTED_NEWNAME="${REGISTRY}/${APP}"
 
 echo "==> bumping ${ENV} overlay (${OVERLAY_PATH}) image tag -> ${NEW_TAG}"
 
-# Rewrite images[] entry named 'sample': keep newName aligned to the registry and
-# set newTag. yq selects the matching entry by .name so we never touch the wrong one.
-NEW_TAG="${NEW_TAG}" EXPECTED_NEWNAME="${EXPECTED_NEWNAME}" yq -i '
-  (.images[] | select(.name == "sample") | .newTag) = strenv(NEW_TAG)
-  | (.images[] | select(.name == "sample") | .newName) = strenv(EXPECTED_NEWNAME)
+# Rewrite the images[] entry whose .name is the app (from promotion.yaml `app`): keep
+# newName aligned to the registry and set newTag. The selector MUST key on ${APP} — the
+# overlay's image .name is the scaffolded app name (e.g. v1check), NOT a literal "sample"
+# — or a non-sample app silently matches nothing and the tag is never rewritten.
+NEW_TAG="${NEW_TAG}" EXPECTED_NEWNAME="${EXPECTED_NEWNAME}" APP="${APP}" yq -i '
+  (.images[] | select(.name == strenv(APP)) | .newTag) = strenv(NEW_TAG)
+  | (.images[] | select(.name == strenv(APP)) | .newName) = strenv(EXPECTED_NEWNAME)
 ' "${KUSTOMIZATION}"
 
 echo "==> overlay now pins:"

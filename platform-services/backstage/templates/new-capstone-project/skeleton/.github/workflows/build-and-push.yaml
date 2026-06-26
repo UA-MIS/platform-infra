@@ -45,6 +45,11 @@ on:
     branches: [main]          # -> dev image (mutable sha tag), pushed
     tags: ["v*.*.*"]          # -> prod/staging image (immutable semver), pushed
   pull_request:               # -> build-only validation (untrusted code, no push)
+  workflow_dispatch:          # -> manual re-run; resolve-image.sh treats it like a
+                              #    push (the ref decides the env: main -> dev,
+                              #    vX.Y.Z tag -> prod). Lets an operator re-drive a
+                              #    build+deploy by hand (e.g. after a transient CI
+                              #    failure) without pushing an empty commit.
 
 # Least privilege for the workflow token. `contents: read` is all actions/checkout
 # needs. The registry push is authenticated by the Harbor `harbor-push` robot —
@@ -164,8 +169,12 @@ jobs:
   # exactly the BUILT tag — zero drift.
   #
   # SECURITY (least privilege — SEPARATE job, NOT the build job):
-  #   - `if:` restricts to a real push to main. NEVER runs on pull_request, so
-  #     UNTRUSTED student PR code can't reach the write token.
+  #   - `if:` restricts to a real push to main OR a manual workflow_dispatch on main.
+  #     NEVER runs on pull_request, so UNTRUSTED student PR code can't reach the
+  #     write token. workflow_dispatch is safe here: GitHub requires write access to
+  #     dispatch a workflow, and the `refs/heads/main` guard means the code that runs
+  #     is the trusted post-merge main (a dispatch on a feature branch fails the
+  #     build job's resolver and never reaches this job).
   #   - job-scoped `permissions: contents: write` applies ONLY here; build-and-push
   #     keeps the workflow-default `contents: read`.
   #   - no pull_request_target; the only writer is post-merge trusted code.
@@ -194,13 +203,37 @@ jobs:
   # ============================================================================
   bump-dev:
     needs: build-and-push
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.build-and-push.outputs.PUSH == 'true' }}
+    if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && needs.build-and-push.outputs.PUSH == 'true' }}
     runs-on: ua-mis-kaniko
+    # FULL node image (NOT -slim): bump-image.sh git-commits the overlay and this job
+    # `git push`es it to main, and actions/checkout needs git to produce a real .git
+    # (with persist-credentials) rather than a REST tarball. node:24-trixie-slim ships
+    # NEITHER git NOR curl; node:24-trixie (buildpack-deps based) ships git + curl +
+    # ca-certificates, so the existing git commit/push flow works unchanged. (The
+    # build-and-push job stays on -slim — it deliberately needs no git: resolve-image.sh
+    # degrades to a bare sha without it.) node is still present, satisfying the ARC
+    # containerMode:kubernetes job-container requirement + actions/checkout's runtime.
     container:
-      image: node:24-trixie-slim
+      image: node:24-trixie
     permissions:
       contents: write
     steps:
+      - name: Install yq (pinned + checksum-verified; bump-image.sh needs it)
+        # bump-image.sh reads promotion.yaml + rewrites the overlay images[].newTag
+        # with yq, which is NOT in the base image. Pull the static linux/amd64 binary
+        # from GitHub releases over HTTPS (the runner's egress is :443-only, so https
+        # works). Pin the version AND verify the sha256 so a re-published/poisoned
+        # asset can't slip in (mirrors the digest-pinning of the other tool images).
+        env:
+          YQ_VERSION: v4.44.3
+          YQ_SHA256: a2c097180dd884a8d50c956ee16a9cec070f30a7947cf4ebf87d5f36213e9ed7
+        run: |
+          set -eu
+          curl -fsSL -o /usr/local/bin/yq \
+            "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+          echo "${YQ_SHA256}  /usr/local/bin/yq" | sha256sum -c -
+          chmod +x /usr/local/bin/yq
+          yq --version
       - name: Checkout main (writable; full history for a clean commit base)
         # Digest-pinned (SEC, ELEVATED for the WRITE job): this checkout runs in the
         # bypass-holding job (github-actions[bot] can push to protected main), so a
