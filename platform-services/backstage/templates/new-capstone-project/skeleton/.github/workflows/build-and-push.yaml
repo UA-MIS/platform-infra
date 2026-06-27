@@ -49,3 +49,11 @@ jobs:
     # injects it as a Kubernetes secret — so no secret is listed explicitly.
     secrets: inherit
     uses: UA-MIS/platform-infra/.github/workflows/tenant-build.yaml@v1
+    # PER-TEAM RUNNER (finish-eso A2 — per-team scale set + harbor-push robot, PR #128):
+    # by default the build runs on the shared `ua-mis-kaniko` scale set. To cut THIS
+    # team onto its own scale set, uncomment + set the team's scale-set name:
+    #   with:
+    #     runner: <team>-kaniko
+    # NOTE: this file is copied verbatim (copyWithoutTemplating protects the GHA ${{ }}),
+    # so the scaffolder can't render `<team>` here — it must inject the literal value
+    # post-copy (scaffolder/finish-eso seam). Until A2, the default is correct.

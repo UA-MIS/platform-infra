@@ -69,12 +69,17 @@ name: tenant-build (reusable)
 on:
   workflow_call:
     inputs:
-      # The self-hosted ARC runner label. Defaulted to the platform Kaniko scale
-      # set so callers pass NOTHING; exposed only so the platform can retarget
-      # every tenant's runner centrally (rename the scale set -> bump this default
-      # + the @v1 tag) without editing any tenant repo.
+      # The self-hosted ARC runner label / scale-set name (every job's runs-on).
+      # Default = the shared platform Kaniko scale set, so single-scale-set tenants
+      # (A1, today) pass NOTHING. Two reasons it's an input:
+      #   - central retarget: rename the shared scale set -> bump this default + @v1,
+      #     no per-tenant edit.
+      #   - PER-TEAM scale sets (finish-eso A2 target, PR #128): when a team moves to
+      #     its own scale set (<team>-kaniko, for a per-team harbor-push robot), the
+      #     caller passes `with: { runner: <team>-kaniko }` — a one-value cutover, no
+      #     workflow change. (Caller seam: see the skeleton build-and-push.yaml.)
       runner:
-        description: "Self-hosted ARC runner label (job runs-on)."
+        description: "Self-hosted ARC runner label / scale-set (job runs-on). Per-team: <team>-kaniko."
         type: string
         required: false
         default: ua-mis-kaniko
