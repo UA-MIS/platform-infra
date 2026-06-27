@@ -152,6 +152,28 @@ spec:
                    (curl-Job rootfs / legacy API): no Job — the provider speaks the
                    unified API. Robot tokens land in connection secrets (writeConnection
                    SecretToRef) → bridged to Vault by the PushSecrets below.
+
+                   ROBOT-SECRET RECONCILE-STABILITY — VARIANT 2 LOCKED (reliability-first).
+                   We let Harbor GENERATE the token (do NOT supply `secret`) and capture it
+                   from the connection secret. This is STABLE ACROSS RECONCILES: the Harbor
+                   API does not return the robot secret on read, so Upjet/Terraform keep the
+                   value in state — it is Computed-ONCE and persists; there is NO regen on
+                   steady-state reconcile (confirmed via the TF provider's read behavior).
+                   Regeneration happens ONLY on REPLACEMENT-forcing changes, which are not
+                   reconciles: editing `permissions` (goharbor TF #140), a prefix plus-sign
+                   (#479), or import (#447). So: DO NOT churn the `permissions`/`name` below
+                   post-onboarding (a Composition edit to them would replace every tenant's
+                   robot → one-time re-pull); greenfield only (no import). `duration: -1`
+                   (non-expiring) avoids expiry-driven change.
+                   Variant 1 (SUPPLY the secret) was REJECTED: in a stateless go-template
+                   Composition a supplied value must be generated each render (sprig
+                   randAlphaNum) → churns every reconcile; and supplying the plain `secret`
+                   field risks a perpetual update-diff (the reason the TF provider added the
+                   write-only `secret_wo`+`secret_wo_version`, unconfirmed in v0.1.1). So
+                   variant 1 trades a rare, controllable replacement event for a potential
+                   PER-RECONCILE churn — worse on the reliability criterion. ⚠ Phase-0:
+                   confirm no reconcile-diff on the captured secret; if variant-2 permission-
+                   change churn ever bites AND `secret_wo` is available, revisit.
                    ===================================================================== */}}
             ---
             # ⚠ Verify group/kind vs provider-harbor v0.1.1 (project.harbor.crossplane.io / Project).

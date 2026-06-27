@@ -104,6 +104,29 @@ design** — the XRD does **not** model components:
   (that would assume one image); per-PR image tags for N components are set by the
   overlay+CI (multicomp/track-1 contract). Single-component stays correct.
 
+## Robot-secret reconcile-stability — variant 2 LOCKED
+
+The spike found two ways to get the Harbor robot token to Vault. We locked
+**variant 2 (let Harbor generate it, capture from the connection secret)** on the
+reliability-first criterion (no reconcile churn):
+
+- **Variant 2 is stable across reconciles.** The Harbor API does not return the
+  robot secret on read, so Upjet/Terraform keep the value in state — Computed-once,
+  persists, **no regen on steady-state reconcile**. Regen happens only on
+  REPLACEMENT-forcing changes (editing `permissions` (goharbor TF #140), a prefix
+  plus-sign (#479), or import (#447)) — none of which are reconciles. Mitigation:
+  treat the robot `permissions`/`name` as immutable post-onboarding; greenfield only
+  (no import).
+- **Variant 1 (supply the secret) was rejected.** In a stateless go-template
+  Composition a supplied value would be regenerated every render (sprig
+  `randAlphaNum`) → churns every reconcile; and supplying the plain `secret` risks a
+  perpetual update-diff (why the TF provider added write-only `secret_wo` +
+  `secret_wo_version`, unconfirmed in v0.1.1). It trades a rare, controllable
+  replacement event for a potential per-reconcile churn — worse on the criterion.
+- **Lesson:** "deterministic" ≠ "stable" under stateless rendering. ⚠ Phase-0:
+  confirm the captured secret shows no reconcile-diff; revisit only if variant-2
+  permission-change churn ever bites AND `secret_wo` is available.
+
 ## Coordination with sibling tracks
 
 - **track-1** (`feat/reusable-tenant-ci-workflow`): the `github-ci-caller`
