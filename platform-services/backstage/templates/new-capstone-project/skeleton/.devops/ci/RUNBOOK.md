@@ -104,6 +104,13 @@ ease + reliability over speed — a failed gate stops everything downstream):
 The IMAGE vulnerability scan stays **Harbor-on-push** (D-028); the `scan` stage is
 the complementary *source* gate (secrets), not a dup.
 
+The CI shell scripts (`resolve-image.sh` / `resolve-components.sh` / `bump-image.sh`)
+are installed at run time from the **central composite action**
+`UA-MIS/platform-infra/.github/actions/tenant-ci-scripts@v1` (it overrides any per-repo
+copy), so a script fix ships once at `@v1` — like the workflow. No cross-repo token is
+needed (a composite action in a private org repo is fetched via the same org-access
+setting as the reusable workflow).
+
 **Multi-component (FE+BE in one repo):** stages 2–3 run as a **matrix over the
 components** declared in `.devops/components.yaml` (the multicomp component model;
 matrix emitted by `.devops/ci/resolve-components.sh`). Single-component repos have

@@ -105,10 +105,11 @@ jobs:
     container:
       image: node:24-trixie
     outputs:
-      ENV: ${{ steps.resolve.outputs.ENV }}
+      # PUSH+TAG drive bump-dev; MATRIX is the per-component build list (full image refs
+      # from resolve-components.sh). REGISTRY/ENV are no longer needed downstream — the
+      # matrix carries the full image ref, so the build job never recomputes it.
       PUSH: ${{ steps.resolve.outputs.PUSH }}
       TAG: ${{ steps.resolve.outputs.TAG }}
-      REGISTRY: ${{ steps.resolve.outputs.REGISTRY }}
       MATRIX: ${{ steps.components.outputs.matrix }}
     steps:
       - name: Install yq (pinned + checksum-verified)
@@ -130,6 +131,12 @@ jobs:
           # `git describe --tags` (Deploy Model A readable dev tag).
           fetch-depth: 0
 
+      - name: Install canonical CI scripts (central @v1 — overrides per-repo copies)
+        # Pulls resolve-image.sh / resolve-components.sh / bump-image.sh from platform-infra
+        # @v1 into .devops/ci, so CI runs the ONE central, component-aware script set — a
+        # script fix ships once (no per-repo drift). No cross-repo token (composite action).
+        uses: UA-MIS/platform-infra/.github/actions/tenant-ci-scripts@v1
+
       - name: Resolve image identity from promotion.yaml (tag/env/push/registry)
         id: resolve
         env:
@@ -140,33 +147,30 @@ jobs:
         run: |
           sh .devops/ci/resolve-image.sh | tee -a "$GITHUB_OUTPUT"
 
-      - name: Discover component matrix (multi-component model, else single)
+      - name: Discover component matrix (resolve-components.sh; single fallback)
         id: components
+        env:
+          # resolve-components.sh CONSUMES these (multicomp's contract): it resolved the
+          # TAG/PUSH once via resolve-image.sh, then fans out the per-component build list.
+          TAG: ${{ steps.resolve.outputs.TAG }}
+          PUSH: ${{ steps.resolve.outputs.PUSH }}
         run: |
           set -eu
-          # MULTI-COMPONENT: the multicomp track owns + defines the component model
-          # (.devops/components.yaml, platform.capstone/v1) and emits the build matrix
-          # via .devops/ci/resolve-components.sh (task #7) — a COMPACT JSON ARRAY of
-          # objects. We CONSUME these keys (their schema; we do not define it):
-          #   name       component id (the chart overlay images[].name is <appName>-<name>)
-          #   context    build dir, relative to repo root (Kaniko --context)
-          #   dockerfile Dockerfile path, relative to context
-          #   image      Harbor repo (their convention <appName>-<name>) -> <registry>/<image>:<tag>
-          # (their components.yaml also carries kind/port/path — for the CHART, not the
-          # build matrix, so the matrix ignores them.)
-          if [ -f .devops/ci/resolve-components.sh ]; then
-            ARR="$(sh .devops/ci/resolve-components.sh)"
-            echo "multi-component repo: $ARR"
-          else
-            # SINGLE-COMPONENT FALLBACK (no components.yaml) — the multicomp contract's
-            # IMPLICIT single component: { name: app, context: app, image: <appName> }.
-            # Synthesized from promotion.yaml so v1check/sample build EXACTLY as before.
-            APP="$(yq -r '.app' .devops/promotion.yaml)"
-            ARR="[{\"name\":\"app\",\"context\":\"app\",\"dockerfile\":\"Dockerfile\",\"image\":\"${APP}\"}]"
-            echo "single-component repo: $ARR"
-          fi
+          # The matrix generator resolve-components.sh is the multi-component track's
+          # canonical script (installed centrally by the composite step above, so it is
+          # ALWAYS present — no per-repo fallback needed). We CONSUME its output verbatim —
+          # a COMPACT JSON ARRAY whose objects carry:
+          #   name       component id           context    build dir (Kaniko --context)
+          #   dockerfile path relative to context
+          #   image      FULL image ref incl registry+tag (<registry>/<appName>-<name>:<tag>)
+          #   push       true|false
+          # It emits the IMPLICIT single component when there is NO components.yaml, so it
+          # is the single source for both single- and multi-component repos (single stays
+          # byte-for-byte: image = <registry>/<app>:<tag>).
+          ARR="$(sh .devops/ci/resolve-components.sh)"   # reads TAG+PUSH from env
+          echo "resolve-components.sh -> $ARR"
           # strategy.matrix consumes {"include":[...]} — each array entry's keys become
-          # matrix.name / matrix.context / matrix.dockerfile / matrix.image.
+          # matrix.name / matrix.context / matrix.dockerfile / matrix.image / matrix.push.
           echo "matrix={\"include\":${ARR}}" >> "$GITHUB_OUTPUT"
 
   # ---------------------------------------------------------------------------
@@ -299,9 +303,9 @@ jobs:
           fetch-depth: 0
 
       - name: Guard — push builds must have the Harbor cred mounted
-        if: ${{ needs.prepare.outputs.PUSH == 'true' }}
+        if: ${{ matrix.push == 'true' }}
         run: |
-          echo "push build for ${{ needs.prepare.outputs.REGISTRY }}/${{ matrix.image }}:${{ needs.prepare.outputs.TAG }}" \
+          echo "push build for ${{ matrix.image }}" \
                "— Harbor cred expected at ${DOCKER_CONFIG_DIR}/config.json in the Kaniko step pod"
 
       # --- Kaniko build as a container-action STEP (its own pod; shared _work) ---
@@ -340,8 +344,10 @@ jobs:
             fi
             '
         env:
-          IMAGE: ${{ needs.prepare.outputs.REGISTRY }}/${{ matrix.image }}:${{ needs.prepare.outputs.TAG }}
-          PUSH: ${{ needs.prepare.outputs.PUSH }}
+          # matrix.image is the FULL ref (registry/<appName>-<name>:tag) emitted by
+          # resolve-components.sh — consumed verbatim, no recomputation.
+          IMAGE: ${{ matrix.image }}
+          PUSH: ${{ matrix.push }}
           CONTEXT: ${{ matrix.context }}
           DOCKERFILE: ${{ matrix.dockerfile }}
           DOCKER_CONFIG_DIR: ${{ env.DOCKER_CONFIG_DIR }}
@@ -401,6 +407,11 @@ jobs:
           ref: main
           fetch-depth: 0
           persist-credentials: true
+
+      - name: Install canonical CI scripts (central @v1 — overrides per-repo copies)
+        # Same central bump-image.sh every tenant runs (the component-aware version that
+        # bumps EVERY overlay images[] entry; single-component = the one entry).
+        uses: UA-MIS/platform-infra/.github/actions/tenant-ci-scripts@v1
 
       - name: Bump dev overlay newTag -> built tag + commit + push
         env:
