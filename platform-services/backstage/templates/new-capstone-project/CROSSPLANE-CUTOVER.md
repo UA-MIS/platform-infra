@@ -56,6 +56,22 @@ ledger, and makes de-provisioning `git rm tenants/_claims/<team>-<app>.yaml`
 (consistent with the existing `platform.capstone/semester` cohort-GC model). See
 ADR-031 §7 (Option A chosen over Option B).
 
+## ⚠ App overlay / skeleton MUST drop the ESO plumbing at cutover
+
+The Crossplane Composition OWNS the per-tenant ESO plumbing — it renders the
+`vault-tenant` **SecretStore**, the `vault-ca` **ConfigMap**, and the `eso-tenant`
+**ServiceAccount** in each tenant namespace. So at cutover the app overlay / scaffolder
+skeleton (`.devops/chart/overlays/*/`) **must DROP its own copies** of:
+
+- `secretstore.yaml` (the `vault-tenant` SecretStore), and
+- the `vault-ca` ConfigMap (if shipped there).
+
+If both the overlay and the Composition ship them, they become **dual-owner** objects
+→ ArgoCD `SharedResourceWarning` blocks sync (the exact harbor-pull #123 class of bug
+this whole effort eliminates). The app overlay keeps ONLY the **consumer**
+ExternalSecrets it owns (`app-secrets`, `harbor-pull`) — those read from the
+Composition-owned SecretStore. One owner per object.
+
 ## Output text update
 
 The current template's "one thing is gated: a platform onboarding PR ... a reviewer

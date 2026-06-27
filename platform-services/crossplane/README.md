@@ -130,7 +130,8 @@ reliability-first criterion (no reconcile churn):
 ## Coordination with sibling tracks
 
 - **track-1** (`feat/reusable-tenant-ci-workflow`): the `github-ci-caller`
-  RepositoryFile calls `UA-MIS/platform-infra/.github/workflows/build-and-push.yaml@v1`.
+  RepositoryFile calls the reusable workflow `UA-MIS/platform-infra/.github/workflows/tenant-build.yaml@v1`
+  (`tenant-build.yaml` is the `on: workflow_call` reusable workflow; `build-and-push.yaml` is the per-repo caller filename).
 - **track-4** (`feat/eso-perteam-push`): track-4 OWNS the consumer ExternalSecrets
   (app overlay) and the Vault paths; track-5 (this) is the PRODUCER it delegated to —
   it mints the robots and PushSecrets their creds into Vault at track-4's committed
