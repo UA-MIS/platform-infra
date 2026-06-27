@@ -24,15 +24,24 @@
 #   ha.replicas: 3, re-init is NOT needed (add raft peers via `vault operator raft
 #   join`), and unseal all three. Flagged for the human in vault/README.md §B.
 #
-# (A) ⚠ THE KEY OPERATIONAL DECISION — UNSEAL STRATEGY. Vault boots SEALED; it
-#   cannot serve secrets until unsealed, and it re-seals on every pod restart
-#   (reboot, image bump, node drain, OOM). There is NO cloud KMS on Talos, so
-#   cloud auto-unseal (awskms/gcpckms/azurekeyvault) is off the table.
-#   RECOMMENDATION = **Transit auto-unseal from a tiny second "unsealer" Vault**
-#   (see vault/README.md §A for the full options table + the recommended setup).
-#   This file ships MANUAL unseal (the zero-extra-infra default) so the platform
-#   is operable on day one; the runbook documents promoting to Transit auto-unseal
-#   so the user is not hand-unsealing after every reboot. DECIDE in §A.
+# (A) UNSEAL STRATEGY — TRANSIT AUTO-UNSEAL (now WIRED, Track-2 DR). Vault boots
+#   SEALED and re-seals on every pod restart (reboot, image bump, node drain, OOM).
+#   There is NO cloud KMS on Talos. The chosen strategy (vault/README.md §A option 2)
+#   is Transit auto-unseal against the tiny second `platform-vault-unsealer` Vault
+#   (applicationsets/vault-unsealer-app.yaml) — so this main Vault SELF-unseals on
+#   restart instead of needing a human to type 3 Shamir shares. The `seal "transit"`
+#   stanza is ACTIVE in the raft config below; the unseal token is injected via
+#   server.extraSecretEnvironmentVars -> VAULT_TOKEN (NOT inline — no secret in git).
+#
+#   ⚠⚠⚠ ORDERING — DO NOT merge+sync this change until ALL of the following exist,
+#   or the main Vault pod will restart into a config it cannot satisfy and go DOWN:
+#     1. platform-vault-unsealer is live + manually inited/unsealed, transit engine
+#        enabled, `autounseal` key created, auto-unseal token minted;
+#     2. Secret  vault-transit-unseal-token  (key: token)  in the vault ns;
+#     3. Secret  vault-unsealer-ca           (key: ca.crt) in the vault ns;
+#     4. you are ready to run the one-time `vault operator unseal -migrate` (Shamir
+#        -> Transit) ceremony immediately after the sync.
+#   FULL keyboard runbook: artifacts/design/vault-dr-runbook.md.
 # =============================================================================
 apiVersion: argoproj.io/v1alpha1
 kind: Application
@@ -96,10 +105,24 @@ spec:
             whenScaled: Retain
 
           # --- Mount the server-cert Secret into the pod (referenced by the raft
-          #     config tls_cert_file/tls_key_file paths below).
+          #     config tls_cert_file/tls_key_file paths below), plus the unsealer's
+          #     CA (so the seal "transit" TLS connection to the unsealer verifies —
+          #     tls_skip_verify=false). vault-unsealer-ca holds ca.crt; created by the
+          #     runbook (artifacts/design/vault-dr-runbook.md §C), NOT in git.
           extraVolumes:
             - type: secret
               name: vault-server-tls
+            - type: secret
+              name: vault-unsealer-ca
+
+          # --- AUTO-UNSEAL token: injected as VAULT_TOKEN from the Secret
+          #     vault-transit-unseal-token (key: token), created by the runbook (§C).
+          #     The seal "transit" stanza reads VAULT_TOKEN when `token` is omitted
+          #     from the stanza — so no token ever lands in git.
+          extraSecretEnvironmentVars:
+            - envName: VAULT_TOKEN
+              secretName: vault-transit-unseal-token
+              secretKey: token
 
           # --- HA Raft, SINGLE node (decision B above). Raft storage engine, one
           #     replica. setNodeId gives a stable raft node id. The Pod still gets a
@@ -129,19 +152,21 @@ spec:
 
                 service_registration "kubernetes" {}
 
-                # --- AUTO-UNSEAL (decision A): MANUAL by default — leave the seal
-                #     stanza commented. To promote to Transit auto-unseal from the
-                #     unsealer Vault (RECOMMENDED, vault/README.md §A), UNCOMMENT and
-                #     fill, then re-sync + `vault operator unseal -migrate` once:
-                #
-                #     seal "transit" {
-                #       address    = "https://vault-unsealer.vault-unsealer.svc:8200"
-                #       token      = "<auto-unseal-token>"   # via extraSecretEnvironmentVars, NOT inline
-                #       disable_renewal = "false"
-                #       key_name   = "autounseal"
-                #       mount_path = "transit/"
-                #       tls_skip_verify = "false"
-                #     }
+                # --- AUTO-UNSEAL (decision A): Transit auto-unseal against the
+                #     platform-vault-unsealer Vault. `token` is intentionally OMITTED
+                #     here — Vault reads it from the VAULT_TOKEN env injected via
+                #     server.extraSecretEnvironmentVars (Secret vault-transit-unseal-
+                #     token), so no secret material is committed. tls_ca_cert verifies
+                #     the unsealer's server cert (tls_skip_verify=false). See the
+                #     ORDERING warning in the header + artifacts/design/vault-dr-runbook.md.
+                seal "transit" {
+                  address         = "https://vault-unsealer.vault-unsealer.svc:8200"
+                  disable_renewal = "false"
+                  key_name        = "autounseal"
+                  mount_path      = "transit/"
+                  tls_ca_cert     = "/vault/userconfig/vault-unsealer-ca/ca.crt"
+                  tls_skip_verify = "false"
+                }
 
         # --- UI enabled, ClusterIP only (D-043 — NO LoadBalancer on Talos). The
         #     human reaches the UI via `kubectl -n vault port-forward svc/vault 8200`.

@@ -1,0 +1,132 @@
+# Vault UNSEALER Application (ADR-030 B1, Track-2 DR) — the tiny second Vault that
+# powers Transit AUTO-UNSEAL of the main `platform-vault` (vault/README.md §A
+# option 2, the CHOSEN strategy). Its ONLY job: hold one Transit key (`autounseal`)
+# that the main Vault encrypts/decrypts its root key against on every restart — so
+# the main Vault self-unseals after a reboot/upgrade/OOM instead of needing a human
+# to type 3 Shamir shares. See artifacts/design/vault-dr-runbook.md for the full
+# rationale, the one-time `vault operator unseal -migrate` ceremony, and key custody.
+#
+# Chart: hashicorp/vault 0.33.0 (appVersion 1.21.2) — SAME pinned chart + repo
+# allowlist entry (helm.releases.hashicorp.com) as platform-vault; no new supply-
+# chain source. Root-app recurses applicationsets/, so this Application registers.
+#
+# =============================================================================
+# ⚠ TRADE-OFF (decided): a SECOND Vault is extra infra, but it is the only option
+#   that is BOTH low-maintenance AND keeps the seal key OFF the main Vault's disk
+#   (vs. option 3 "stored keys in a k8s Secret", which defeats the seal). This
+#   unsealer is deliberately MINIMAL: standalone mode, file storage on a small Ceph
+#   PVC, single replica. It restarts RARELY (no image churn, no app load), so even
+#   though IT stays on MANUAL unseal (Shamir — bootstrapping the unsealer with a
+#   third Vault is infinite regress), hand-unsealing it is a once-in-a-blue-moon
+#   keyboard task — versus hand-unsealing the busy main Vault on every restart.
+#   3-node HA for either Vault is OUT of scope (anti-gold-plate, single-node homelab).
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-vault-unsealer
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    # Wave -1: the unsealer must exist BEFORE the main Vault (wave 0) so the main
+    # Vault's seal "transit" stanza has a target. (Ordering intent only — the
+    # unsealer still needs its one-time manual init+unseal+transit-setup from the
+    # runbook before the main Vault can actually auto-unseal against it.)
+    argocd.argoproj.io/sync-wave: "-1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://helm.releases.hashicorp.com   # PINNED chart repo (already on the platform AppProject allowlist)
+    chart: vault
+    targetRevision: 0.33.0                          # pinned chart version (appVersion 1.21.2); no ^/~/latest
+    helm:
+      releaseName: vault-unsealer                   # -> svc vault-unsealer.vault-unsealer.svc (the seal "transit" address)
+      values: |
+        # --- TLS ON. The seal "transit" connection from the main Vault carries the
+        #     auto-unseal token, so it MUST be encrypted (tls_skip_verify=false on the
+        #     main side). The unsealer's server cert lives in the
+        #     `vault-unsealer-server-tls` Secret, built by the human runbook (NOT in
+        #     git, B1). SANs in artifacts/design/vault-dr-runbook.md §B.
+        global:
+          tlsDisable: false
+
+        # --- Agent Injector OFF (no sidecar-injection model here; the unsealer has
+        #     exactly one consumer — the main Vault's seal — reached directly).
+        injector:
+          enabled: false
+
+        server:
+          image:
+            repository: hashicorp/vault
+            tag: "1.21.2"                            # pin to the chart's tested appVersion
+
+          # Tiny: this Vault holds ONE transit key, nothing else.
+          resources:
+            requests: { memory: 128Mi, cpu: 100m }
+            limits:   { memory: 256Mi, cpu: 250m }
+
+          # --- STANDALONE mode (single pod, file storage). The unsealer does NOT
+          #     need Raft/HA — it stores one Transit key. File storage on a small
+          #     replica-3 Ceph RBD PVC survives a node loss (reschedules + reattaches).
+          ha:
+            enabled: false
+          standalone:
+            enabled: true
+            config: |
+              ui = true
+
+              listener "tcp" {
+                address         = "[::]:8200"
+                cluster_address = "[::]:8201"
+                tls_cert_file   = "/vault/userconfig/vault-unsealer-server-tls/tls.crt"
+                tls_key_file    = "/vault/userconfig/vault-unsealer-server-tls/tls.key"
+              }
+
+              storage "file" {
+                path = "/vault/data"
+              }
+
+              service_registration "kubernetes" {}
+              # NOTE: the transit secrets engine (`transit/`) + the `autounseal` key +
+              # the auto-unseal policy/token are created by the human runbook
+              # (artifacts/design/vault-dr-runbook.md §C) — NOT here (no secret
+              # material / no privileged API calls from git).
+
+          # Data on a Ceph RBD PVC (cluster default replica-3). 1Gi is ample for one
+          # transit key + its keyring. Retain on delete/scale (losing it = the main
+          # Vault can never auto-unseal until the unsealer is re-keyed + re-migrated).
+          dataStorage:
+            enabled: true
+            size: 1Gi
+            storageClass: ceph-block
+            accessMode: ReadWriteOnce
+          persistentVolumeClaimRetentionPolicy:
+            whenDeleted: Retain
+            whenScaled: Retain
+
+          # Mount the unsealer's server-cert Secret (referenced by the listener above).
+          extraVolumes:
+            - type: secret
+              name: vault-unsealer-server-tls
+
+        # UI on, ClusterIP only (D-043 — no LoadBalancer on Talos). Reach via
+        # `kubectl -n vault-unsealer port-forward svc/vault-unsealer 8200`.
+        ui:
+          enabled: true
+          serviceType: ClusterIP
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: vault-unsealer
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false   # vault-unsealer ns ships via platform-services/vault-unsealer
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }
