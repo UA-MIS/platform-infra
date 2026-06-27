@@ -241,12 +241,38 @@ spec:
         repoContentsUrl: ${{ steps['publish'].output.repoContentsUrl }}
         catalogInfoPath: '/catalog-info.yaml'
 
+    # 4b) Create the team's Harbor PROJECT (+ OIDC Developer mapping) NOW, so the
+    #     team's very first CI build can push. Without this the first build fails with
+    #     `UNAUTHORIZED: project <team> not found` — the Kaniko push cred (harbor-push,
+    #     platform-injected) authenticates fine, but the target project doesn't exist.
+    #     Previously this was a MANUAL post-merge operator step (`make harbor-onboard`
+    #     in the onboarding-PR checklist below); doing it at scaffold time is what makes
+    #     a fresh scaffold first-try-green.
+    #
+    #     Idempotent (already-exists is success), so re-scaffolding/re-running is safe.
+    #     Authenticates with a DEDICATED least-privilege Harbor PROVISIONER ROBOT
+    #     (project-create + member-add only — NOT harbor-admin), read from backend config
+    #     `capstone.harbor.*` (provisioned into the backstage ns at deploy; see README).
+    #     SCOPE (v1): project + OIDC mapping only. The CI PUSH robot + per-env PULL robots
+    #     stay in the operator's post-merge `make harbor-*-robot` steps (the robot token
+    #     is Harbor-generated, one-time, and must be sealed into the cluster — out of scope
+    #     for a web-facing scaffolder backend). The shared-`harbor-push` last-write-wins
+    #     multi-tenant collision is a tracked POST-V1 follow-up (single-team for v1).
+    - id: harbor-onboard
+      name: Create Harbor project (team registry)
+      action: capstone:harbor-onboard
+      input:
+        # The canonical D-026 slug: names the Harbor project AND the OIDC group suffix
+        # (group = UA-MIS:<team> -> Developer). Same slug the image registry uses
+        # (promotion.yaml registry: harbor.../<team>).
+        team: ${{ parameters.team }}
+
     # =====================================================================
     # PLATFORM SIDE — the D-049 review-gated grant path (B1 + B2).
-    # The steps above created the STUDENT's own repo (automatic — they own it).
-    # The steps below open a *request* (a PR to platform-infra) that a reviewer
-    # *grants* (merge) — a student must NEVER silently mint cluster RBAC, quotas,
-    # namespaces, or Harbor robots. The merge is the gate.
+    # The steps above created the STUDENT's own repo (automatic — they own it) and
+    # the team's Harbor project. The steps below open a *request* (a PR to
+    # platform-infra) that a reviewer *grants* (merge) — a student must NEVER silently
+    # mint cluster RBAC, quotas, or namespaces. The merge is the gate.
     # =====================================================================
 
     # 5a) Render the tenant manifests from the SINGLE canonical blueprint
@@ -314,9 +340,13 @@ spec:
           - [ ] AppProject is team-scoped (empty `clusterResourceWhitelist`; destinations limited to `team-${{ parameters.team }}-*`).
           - [ ] `__TEAM__`/`__SEMESTER__` fully substituted (no leftover tokens).
 
-          ### Operator steps (run AFTER merge — imperative Harbor provisioning)
-          Harbor robot tokens are Harbor-generated, one-time, and **cannot** be
-          expressed declaratively, so these are run by an operator post-merge.
+          ### Operator steps (run AFTER merge — imperative Harbor robot provisioning)
+          The Harbor **project** + OIDC Developer mapping were already created at
+          scaffold time by The Process (`capstone:harbor-onboard`), so the team's
+          repo can build immediately. These remaining steps mint the **robot tokens**,
+          which are Harbor-generated, one-time, and **cannot** be expressed
+          declaratively, so an operator runs them post-merge. (Step 1 below is kept as
+          an idempotent belt-and-suspenders — it's a no-op 409 if the project exists.)
           **Run them with `TARGET=real-talos` exactly as shown** (omitting `TARGET`
           seals the wrong registry host → push/pull 403). All seals use the
           non-empty guard so a duplicate-robot 409 never commits an empty secret.
@@ -325,7 +355,8 @@ spec:
           # 0) cluster context (Talos)
           export KUBECONFIG=clusters/real-talos/talos-kubeconfig
 
-          # 1) Harbor project + OIDC group -> Developer mapping
+          # 1) (idempotent) Harbor project + OIDC mapping — already done at scaffold time
+          #    by capstone:harbor-onboard; safe re-run (409 = already exists).
           make harbor-onboard NAME=${{ parameters.team }} \
             TARGET=real-talos KUBE_CONTEXT=admin@capstone
 

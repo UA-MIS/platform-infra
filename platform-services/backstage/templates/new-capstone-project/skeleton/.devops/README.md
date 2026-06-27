@@ -61,10 +61,15 @@ Process "Secrets" tab; ESO syncs them into real `Secret`s.
 
 In v1 the `harbor-pull` `kubernetes.io/dockerconfigjson` Secret is a **SealedSecret**:
 the platform mints a Harbor pull robot at onboarding (`make harbor-robot`) and the
-per-namespace SealedSecret is committed at `overlays/<env>/harbor-pull.sealedsecret.yaml`.
-The ciphertext shipped in the skeleton is a non-functional **placeholder** so the chart
-renders; the operator regenerates it with the real robot cred (`kubeseal`, per-namespace
-strict scope) at onboarding. It is NOT on ESO in v1 because a real ESO `harbor-pull` needs
+per-namespace SealedSecret is committed to the operator's tenant directory at
+`platform-infra/tenants/<team>/harbor-pull-<env>-sealed.yaml`, synced by the
+`tenant-<team>` Application. That tenant-dir copy is the **single owner** of the Secret.
+The app overlays here deliberately do **NOT** ship a `harbor-pull.sealedsecret.yaml`: a
+second owner of the same Secret triggers ArgoCD's `SharedResourceWarning` and blocks the
+app's sync (the twin of the harbor-push collision fixed in #117). The base
+`ServiceAccount` still references `imagePullSecrets: [harbor-pull]`, so the pod pulls from
+the private Harbor project once the operator's SealedSecret has materialized the Secret in
+the namespace. It is NOT on ESO in v1 because a real ESO `harbor-pull` needs
 onboarding to write the robot creds to Vault first (the `make-harbor-robot` migration is
 on HOLD) — an ExternalSecret pointed at an unpopulated Vault path would be broken. A
 post-v1 ESO flip is **RESERVED** at Vault path
