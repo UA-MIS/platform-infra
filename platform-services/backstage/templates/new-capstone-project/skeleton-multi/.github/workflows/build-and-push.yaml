@@ -62,6 +62,7 @@ jobs:
       image: node:24-trixie-slim
     outputs:
       ENV: ${{ steps.img.outputs.ENV }}
+      REGISTRY: ${{ steps.img.outputs.REGISTRY }}
       TAG: ${{ steps.img.outputs.TAG }}
       PUSH: ${{ steps.img.outputs.PUSH }}
       matrix: ${{ steps.matrix.outputs.matrix }}
@@ -83,11 +84,9 @@ jobs:
           sh .devops/ci/resolve-image.sh | tee -a "$GITHUB_OUTPUT"
       - name: Resolve the per-component build matrix from components.yaml
         id: matrix
-        env:
-          TAG: ${{ steps.img.outputs.TAG }}
-          PUSH: ${{ steps.img.outputs.PUSH }}
         run: |
-          # Compact JSON array of {name,context,dockerfile,image(full ref),push}.
+          # Compact JSON array of {name,context,dockerfile,image(LEAF, e.g. <app>-frontend)}.
+          # The build job composes the full ref <registry>/<image>:<tag> below.
           # Single-component repos (no components.yaml) get a one-element matrix.
           echo "matrix=$(sh .devops/ci/resolve-components.sh)" | tee -a "$GITHUB_OUTPUT"
 
@@ -117,8 +116,8 @@ jobs:
         run: |
           # The cred lives in the Kaniko STEP pod (not this runner pod); the real check
           # runs inside the Kaniko step (entrypoint wrapper) and fails closed.
-          echo "push build for ${{ matrix.image }} — Harbor cred expected at" \
-               "${DOCKER_CONFIG_DIR}/config.json in the Kaniko step pod"
+          echo "push build for ${{ needs.resolve.outputs.REGISTRY }}/${{ matrix.image }}:${{ needs.resolve.outputs.TAG }}" \
+               "— Harbor cred expected at ${DOCKER_CONFIG_DIR}/config.json in the Kaniko step pod"
       # --- Kaniko build as a container-action STEP (its own pod; shared _work) ---
       # SECURITY — preview (pull_request) PUSHES untrusted PR code. Authenticated by the
       # SAME least-privilege harbor-push robot (pull+push on THIS team's OWN project only).
@@ -154,11 +153,13 @@ jobs:
             fi
             '
         env:
-          # Per-component, straight from the resolve matrix.
-          IMAGE: ${{ matrix.image }}
+          # Full ref composed here: <registry>/<leaf image>:<tag>. resolve-components.sh
+          # emits the LEAF (matrix.image); registry + the one per-commit tag + push come
+          # from the resolve job (resolve-image.sh). One tag for every component.
+          IMAGE: ${{ needs.resolve.outputs.REGISTRY }}/${{ matrix.image }}:${{ needs.resolve.outputs.TAG }}
           CONTEXT: ${{ matrix.context }}
           DOCKERFILE: ${{ matrix.dockerfile }}
-          PUSH: ${{ matrix.push }}
+          PUSH: ${{ needs.resolve.outputs.PUSH }}
           DOCKER_CONFIG_DIR: ${{ env.DOCKER_CONFIG_DIR }}
 
   # ---- 3) bump-dev: ONE commit bumping ALL components -------------------------

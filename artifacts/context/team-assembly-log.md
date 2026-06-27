@@ -88,25 +88,28 @@ trigger→env→tag source of truth). Per-component full image = `<registry>/<co
 
 ### Track 1 (reusable-ci) — CONSUME this, build the matrix
 
-`.devops/ci/resolve-components.sh` (Track 6 ships it) emits a **JSON matrix array** on stdout
-(for GitHub Actions `fromJSON`), reading components.yaml (or the single fallback) + the
-resolved TAG from resolve-image.sh:
+`.devops/ci/resolve-components.sh` (Track 6 ships it) emits a **compact JSON ARRAY** on
+stdout (bare, not wrapped — the workflow wraps it as `{"include":[...]}` for
+`strategy.matrix`), reading components.yaml (or the single fallback). The script takes **no
+tag/registry/push inputs** — `image` is the Harbor repo **LEAF** (already appName-prefixed);
+the workflow composes the full ref itself:
 
 ```json
 [
-  {"name":"frontend","context":"frontend","dockerfile":"Dockerfile","image":"harbor.../<team>/myapp-frontend:<TAG>","push":"true"},
-  {"name":"backend","context":"backend","dockerfile":"Dockerfile","image":"harbor.../<team>/myapp-backend:<TAG>","push":"true"}
+  {"name":"frontend","context":"frontend","dockerfile":"Dockerfile","image":"myapp-frontend"},
+  {"name":"backend","context":"backend","dockerfile":"Dockerfile","image":"myapp-backend"}
 ]
 ```
 
 The reusable workflow should:
-1. resolve once (env + TAG + push decision) via `resolve-image.sh`;
+1. resolve once (env + REGISTRY + TAG + push decision) via `resolve-image.sh`;
 2. emit the matrix via `resolve-components.sh` and `strategy.matrix.include = fromJSON(...)`;
-3. Kaniko-build each component with `--context=dir://$WORKSPACE/<context>`
-   `--dockerfile=<dockerfile>` `--destination=<image>` (push per `push`);
+3. compose `IMAGE=<REGISTRY>/<matrix.image>:<TAG>` (one tag for ALL components) and
+   Kaniko-build each with `--context=dir://$WORKSPACE/<context>` `--dockerfile=<dockerfile>`
+   `--destination=<IMAGE>` (push per the resolve decision);
 4. bump: on push-to-main, run `COMMIT=1 bump-image.sh dev <TAG>` ONCE — Track 6's
-   `bump-image.sh` now sets `newTag` on **every** component's `images[]` entry (reads
-   components.yaml; single-component falls back to the `<appName>` entry).
+   `bump-image.sh` sets `newTag` on **every** component's `images[]` entry (single-component
+   overlay = the one entry; CLI unchanged from the single script).
 
 **Heads-up / related finding:** the current single-component `bump-image.sh` hardcodes
 `yq '... select(.name == "sample") ...'`, but rendered overlays use `name: <appName>`. In a
