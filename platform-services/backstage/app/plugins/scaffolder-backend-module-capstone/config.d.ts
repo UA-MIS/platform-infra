@@ -6,6 +6,38 @@
  */
 export interface Config {
   capstone?: {
+    /**
+     * Harbor provisioning for the capstone:harbor-onboard scaffolder action (creates the
+     * team's Harbor project + OIDC Developer mapping at scaffold time). Authenticates with
+     * a DEDICATED least-privilege provisioner robot (project-create + member-add only) —
+     * NOT the full harbor-admin account. The deploy materializes username/secret into the
+     * backstage namespace (e.g. via ESO/SealedSecret); they are NOT committed.
+     */
+    harbor?: {
+      /**
+       * Harbor core base URL (no trailing slash needed).
+       * Default: http://harbor-core.harbor.svc:80 (in-cluster service).
+       * @visibility backend
+       */
+      baseUrl?: string;
+      /**
+       * Provisioner robot username (e.g. `robot$capstone-provisioner`). REQUIRED — the
+       * action fails closed rather than calling Harbor unauthenticated.
+       * @visibility secret
+       */
+      username?: string;
+      /**
+       * Provisioner robot secret. REQUIRED.
+       * @visibility secret
+       */
+      secret?: string;
+      /**
+       * OIDC group-name prefix; the mapped Harbor group is `<oidcGroupPrefix>:<team>`
+       * (group_type 3). Default: 'UA-MIS'.
+       * @visibility backend
+       */
+      oidcGroupPrefix?: string;
+    };
     secrets?: {
       /**
        * Branch-name prefix for each set/delete PR (branch = <prefix><key>-<env>-<ts>).
