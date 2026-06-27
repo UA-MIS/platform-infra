@@ -1,0 +1,299 @@
+# ============================================================================
+# tenant-build.yaml — the CENTRAL, reusable tenant CI build+push+bump workflow
+# (P2.3, D-032; ADR-031 §8 "CI: reusable workflow"). `on: workflow_call`.
+#
+# WHY THIS FILE EXISTS (the retro's #1 fix — stop copying).
+#   Before: this whole ~250-line pipeline was COPIED verbatim into every tenant
+#   repo, the scaffolder skeleton, and the Makefile. A CI fix (yq install, the
+#   node image choice, the ${APP}-keyed bump selector, git safe.directory, the
+#   fetch-depth/tag contract) had to be re-landed in N places — the root cause
+#   behind the ~14-bug onboarding saga. Now the orchestration lives HERE, once.
+#   Every tenant ships a ~10-line CALLER that does
+#     uses: UA-MIS/platform-infra/.github/workflows/tenant-build.yaml@v1
+#   so a fix ships ONCE and every tenant picks it up at the pinned @v1 ref.
+#
+#   (ADR-031 §8 sketched this central file as build-and-push.yaml; we name it
+#   tenant-build.yaml to keep it distinct from the tenant-side CALLER, which is
+#   itself .github/workflows/build-and-push.yaml in each tenant repo.)
+#
+# WHAT STAYS PER-REPO (by design — single source of truth, NOT a copy):
+#   - .devops/promotion.yaml          the team's registry/app + trigger→env→tag map
+#   - .devops/ci/resolve-image.sh     the trigger→image resolver
+#   - .devops/ci/bump-image.sh        the GitOps overlay-tag bump
+#   - .devops/chart/overlays/*        the student's deployment surface
+#   resolve-image.sh + bump-image.sh are deliberately scripts (NOT inlined here):
+#   they are the SAME tested resolver/bumper the LOCAL dev loop uses (unit-tested
+#   by resolve-image.test.sh). Inlining a copy into this YAML would re-introduce
+#   the very drift this change removes (two resolvers). This workflow CALLS them
+#   from the caller's checkout — see note on `actions/checkout` below.
+#
+# HOW THE CALLER'S REPO IS USED.
+#   A reusable workflow's `github` context is the CALLER's (event_name, ref,
+#   sha, pull_request.head.sha all reflect the tenant's triggering event), and
+#   `actions/checkout` with no `repository:` checks out the CALLER (tenant) repo.
+#   So this workflow builds the tenant's app/, reads the tenant's promotion.yaml,
+#   and runs the tenant's .devops/ci/*.sh — @v1 only versions THIS yaml.
+#
+# WHAT IT DOES (unchanged from the proven per-repo pipeline):
+#   - Builds the app image with KANIKO (rootless, no docker daemon/socket) on the
+#     self-hosted ARC runners (containerMode:kubernetes, non-root).
+#   - Pushes to the team's OWN Harbor project: harbor.<domain>/<name>/<app>, using
+#     the least-privilege PUSH robot secret `harbor-push` injected by the platform
+#     runner's container-hook template at /kaniko/.docker/config.json (a Kubernetes
+#     secret on the runner — NOT a GitHub Actions secret; this workflow needs none).
+#   - Harbor scans the image on push (D-028) — no Trivy here (no dup).
+#
+# THE TAG IS THE PROMOTION MECHANISM (D-030 prod-gate):
+#   - push to main          -> :<git-describe>  (mutable; dev auto-syncs)
+#   - push tag vX.Y.Z       -> :X.Y.Z           (IMMUTABLE; prod image; one tag
+#                                               names both image + manifest rev —
+#                                               staging auto-syncs it, prod is the
+#                                               manual gate). No second tag.
+#   - pull_request          -> :pull-<head-sha> (PUSHED preview image; UNTRUSTED PR
+#                                               code, bounded to the team's own
+#                                               Harbor project + the disjoint
+#                                               pull-<sha> tag + the fenced
+#                                               <team>-pr-<n> preview ns).
+#
+# The trigger->env->tag mapping is computed by .devops/ci/resolve-image.sh, which
+# reads promotion.yaml (the single source of truth) and is unit-tested by
+# .devops/ci/resolve-image.test.sh — the SAME resolver the local loop uses.
+#
+# CONTAINER-MODE SHAPE (why each job is a normal runner pod with a Kaniko *step*,
+# not a Kaniko *job container*): the ARC runners are containerMode:kubernetes. The
+# job runs on the normal runner pod (which has node+git, so actions/checkout works);
+# the Kaniko build runs as a `uses: docker://` CONTAINER-ACTION STEP, which the
+# runner-container-hooks execute in a SEPARATE pod from the Kaniko image, with the
+# shared _work volume mounted — so the checked-out repo is Kaniko's local context.
+# (Making Kaniko the job container would break the runner: its minimal image has no
+# node/bash for the Actions runner internals.)
+# ============================================================================
+name: tenant-build (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      # The self-hosted ARC runner label. Defaulted to the platform Kaniko scale
+      # set so callers pass NOTHING; exposed as an input only so the platform can
+      # retarget every tenant's runner centrally (e.g. a renamed scale set) by
+      # bumping this default + the @v1 tag — without editing any tenant repo.
+      runner:
+        description: "Self-hosted ARC runner label (job runs-on)."
+        type: string
+        required: false
+        default: ua-mis-kaniko
+
+# Least privilege DEFAULT for the workflow token. `contents: read` is all
+# actions/checkout needs for the build job. The bump-dev job RE-DECLARES
+# `contents: write` for itself (job-level overrides this default). NOTE: a
+# reusable workflow can only DOWNGRADE the caller's granted permissions — so the
+# caller's calling job MUST grant `permissions: contents: write` for bump-dev to
+# keep its write scope (the thin caller does; see the skeleton build-and-push.yaml).
+permissions:
+  contents: read
+
+# Don't pile up redundant builds for the same ref; cancel superseded runs. Scoped
+# per-caller-repo (github.ref is the caller's), so tenants never collide here.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-push:
+    runs-on: ${{ inputs.runner }}
+    # Expose the resolver's identity to the bump-dev job (consumed via
+    # needs.build-and-push.outputs.*) so the DEPLOYED tag == the BUILT tag with no
+    # recomputation/drift. TAG = the readable git-describe value (Deploy Model A).
+    outputs:
+      TAG: ${{ steps.resolve.outputs.TAG }}
+      ENV: ${{ steps.resolve.outputs.ENV }}
+      PUSH: ${{ steps.resolve.outputs.PUSH }}
+    # REQUIRED by containerMode:kubernetes — every workflow job MUST declare a job
+    # `container:` or the runner hard-fails at "Set up job" with "Jobs without a job
+    # container are forbidden on this runner." This small node image gives
+    # actions/checkout its node runtime + a shell for the resolve step. It is NOT
+    # the Kaniko image — the Kaniko build runs in its OWN job-step pod via the
+    # `uses: docker://` step below (shared _work volume + the platform's harbor-push
+    # hook injection), so this container needs neither Kaniko nor git.
+    container:
+      image: node:24-trixie-slim
+    env:
+      # Where the Harbor push cred lands inside the Kaniko step pod (Kaniko's
+      # default DOCKER_CONFIG dir). The platform runner's container-hook template
+      # injects secret `harbor-push` (dockerconfigjson) -> config.json here.
+      DOCKER_CONFIG_DIR: /kaniko/.docker
+    steps:
+      - name: Checkout (build context + promotion.yaml + resolver)
+        # Checks out the CALLER (tenant) repo — a reusable workflow's default
+        # checkout target is github.repository, which is the caller. Digest-pinned
+        # (SEC, D-030): immutable SHA, not a mutable tag. sha = actions/checkout v4.3.1.
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          # fetch-depth: 0 = full history + ALL TAGS. REQUIRED for resolve-image.sh's
+          # `git describe --tags` (Deploy Model A readable dev tag, e.g.
+          # v1.0.0-5-gabc123). The default depth=1 fetches NO tags → git describe
+          # degrades to a bare sha (--always), defeating Model A.
+          fetch-depth: 0
+
+      - name: Resolve image identity from promotion.yaml
+        id: resolve
+        env:
+          # SHA the resolver hashes into the tag. For a pull_request, GITHUB_SHA is the
+          # ephemeral MERGE-ref sha (refs/pull/n/merge) — but the preview ApplicationSet's
+          # pullRequest generator keys the image override on the PR HEAD sha
+          # (pull-{{.head_short_sha_7}}). Feed the HEAD sha here so the PUSHED preview tag
+          # (pull-<head-sha[0:7]>) MATCHES what the preview App pulls — else ImagePullBackOff.
+          # For push/tag builds the expression is empty, so the resolver falls back to
+          # GITHUB_SHA (current behaviour for dev/prod is unchanged).
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          sh .devops/ci/resolve-image.sh | tee -a "$GITHUB_OUTPUT"
+
+      - name: Guard — push builds must have the Harbor cred mounted
+        if: ${{ steps.resolve.outputs.PUSH == 'true' }}
+        run: |
+          # The cred lives in the Kaniko STEP pod, not this runner pod, so we
+          # can't stat it here. This guard instead asserts the contract that the
+          # platform MUST have wired the hook template; the real presence check
+          # runs inside the Kaniko step (entrypoint wrapper below) and fails the
+          # build rather than pushing unauthenticated. Kept as a visible marker.
+          echo "push build for ${{ steps.resolve.outputs.IMAGE }} — Harbor cred" \
+               "expected at ${DOCKER_CONFIG_DIR}/config.json in the Kaniko step pod"
+
+      # --- Kaniko build as a container-action STEP (its own pod; shared _work) ---
+      # `uses: docker://` runs the Kaniko image in a separate job-step pod with the
+      # checked-out repo mounted. We override the entrypoint with a tiny sh wrapper
+      # so we can (a) fail closed if a push build is missing its cred, and (b) build
+      # vs. --no-push from the resolver's PUSH decision.
+      #
+      # SECURITY — preview (pull_request) PUSHES untrusted PR code. The push is
+      # authenticated by the SAME least-privilege harbor-push robot (pull+push on THIS
+      # team's OWN Harbor project only, no other project, no delete). The tag is
+      # pull-<head-sha>, a namespace DISJOINT from dev's git-describe + prod's semver,
+      # so a PR can never overwrite the dev/staging/prod image. The pushed image only
+      # ever deploys into the ephemeral, fully-fenced <team>-pr-<n> preview namespace.
+      - name: Build (and push) with Kaniko
+        # Digest-pinned (SEC, D-030): the Kaniko image holds the Harbor push cred, so
+        # pin it to an immutable digest — a re-tag of v1.23.2-debug can't inject a
+        # poisoned builder. digest = gcr.io/kaniko-project/executor:v1.23.2-debug.
+        uses: docker://gcr.io/kaniko-project/executor@sha256:c3109d5926a997b100c4343944e06c6b30a6804b2f9abe0994d3de6ef92b028e # v1.23.2-debug
+        with:
+          entrypoint: /busybox/sh
+          args: >-
+            -c '
+            set -eu;
+            CFG="${DOCKER_CONFIG_DIR}/config.json";
+            if [ "${PUSH}" = "true" ] && [ ! -s "$CFG" ]; then
+              echo "ERROR: Harbor push credential not found at $CFG — the platform" \
+                   "runner must inject secret harbor-push (container-hook template)." \
+                   "Refusing an unauthenticated push." >&2;
+              exit 1;
+            fi;
+            COMMON="--context=dir://${GITHUB_WORKSPACE}/app
+                    --dockerfile=Dockerfile
+                    --destination=${IMAGE}
+                    --reproducible
+                    --verbosity=info";
+            if [ "${PUSH}" = "true" ]; then
+              echo "==> building + pushing ${IMAGE}";
+              /kaniko/executor $COMMON;
+            else
+              echo "==> PR build-only validation for ${IMAGE} (no push)";
+              /kaniko/executor $COMMON --no-push --tar-path=/tmp/image.tar;
+            fi
+            '
+        env:
+          IMAGE: ${{ steps.resolve.outputs.IMAGE }}
+          PUSH: ${{ steps.resolve.outputs.PUSH }}
+          DOCKER_CONFIG_DIR: ${{ env.DOCKER_CONFIG_DIR }}
+
+  # ============================================================================
+  # bump-dev — the GitOps image-bump (D-030 automated promotion: push -> builds ->
+  # DEPLOYS, hands-free). After build-and-push pushes the dev image, rewrite the
+  # dev overlay's images[].newTag to the just-built tag and commit it to main;
+  # ArgoCD sees the changed overlay and syncs the new image into <team>-dev.
+  #
+  # Deploy Model A: the tag is the BUILD job's resolver output (TAG) — a readable
+  # `git describe --tags` value (e.g. v1.0.0-5-gabc123), NOT a bare SHA. We CONSUME
+  # needs.build-and-push.outputs.TAG (no recomputation) so the DEPLOYED tag is
+  # exactly the BUILT tag — zero drift.
+  #
+  # SECURITY (least privilege — SEPARATE job, NOT the build job):
+  #   - `if:` restricts to a real push to main OR a manual workflow_dispatch on main.
+  #     NEVER runs on pull_request, so UNTRUSTED student PR code can't reach the
+  #     write token. workflow_dispatch is safe here: GitHub requires write access to
+  #     dispatch a workflow, and the `refs/heads/main` guard means the code that runs
+  #     is the trusted post-merge main.
+  #   - job-scoped `permissions: contents: write` applies ONLY here; build-and-push
+  #     keeps the workflow-default `contents: read`. (Reusable-workflow caveat: the
+  #     caller's calling job MUST grant contents: write or this downgrades to read.)
+  #   - no pull_request_target; the only writer is post-merge trusted code.
+  #   - loop guard: bump-image.sh's commit message carries `[skip ci]` → the bump
+  #     commit does NOT re-trigger the caller's build-and-push (no infinite loop).
+  #
+  # BRANCH PROTECTION (Option A, D-030 — human risk-accepted github-actions[bot]):
+  #   main requires PRs, so a plain GITHUB_TOKEN push is rejected by default. The
+  #   platform allowlists the workflow's own actor `github-actions[bot]` in main's
+  #   "bypass pull request allowances", so this job's GITHUB_TOKEN (job-scoped
+  #   contents:write) can push the overlay-tag commit to protected main directly.
+  #   If the bypass isn't configured, the push fails LOUD (set -e) — never a silent
+  #   no-deploy.
+  # ============================================================================
+  bump-dev:
+    needs: build-and-push
+    if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && needs.build-and-push.outputs.PUSH == 'true' }}
+    runs-on: ${{ inputs.runner }}
+    # FULL node image (NOT -slim): bump-image.sh git-commits the overlay and this job
+    # `git push`es it to main, and actions/checkout needs git to produce a real .git
+    # (with persist-credentials) rather than a REST tarball. node:24-trixie-slim ships
+    # NEITHER git NOR curl; node:24-trixie (buildpack-deps based) ships git + curl +
+    # ca-certificates, so the existing git commit/push flow works unchanged.
+    container:
+      image: node:24-trixie
+    permissions:
+      contents: write
+    steps:
+      - name: Install yq (pinned + checksum-verified; bump-image.sh needs it)
+        # bump-image.sh reads promotion.yaml + rewrites the overlay images[].newTag
+        # with yq, which is NOT in the base image. Pull the static linux/amd64 binary
+        # from GitHub releases over HTTPS (the runner's egress is :443-only, so https
+        # works). Pin the version AND verify the sha256 so a re-published/poisoned
+        # asset can't slip in (mirrors the digest-pinning of the other tool images).
+        env:
+          YQ_VERSION: v4.44.3
+          YQ_SHA256: a2c097180dd884a8d50c956ee16a9cec070f30a7947cf4ebf87d5f36213e9ed7
+        run: |
+          set -eu
+          curl -fsSL -o /usr/local/bin/yq \
+            "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+          echo "${YQ_SHA256}  /usr/local/bin/yq" | sha256sum -c -
+          chmod +x /usr/local/bin/yq
+          yq --version
+      - name: Checkout main (writable; full history for a clean commit base)
+        # Checks out the CALLER (tenant) repo's main. Digest-pinned (SEC, ELEVATED for
+        # the WRITE job): this checkout runs in the bypass-holding job
+        # (github-actions[bot] can push to protected main), so a poisoned re-tag of v4
+        # would inherit push-to-main. Pin to immutable SHA. sha = actions/checkout v4.3.1.
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: main
+          fetch-depth: 0
+          # default GITHUB_TOKEN; job-scoped contents:write + the Option-A bypass
+          # allowlist (github-actions[bot]) authorize the push to protected main.
+          persist-credentials: true
+
+      - name: Bump dev overlay newTag -> built git-describe tag + commit + push
+        env:
+          TAG: ${{ needs.build-and-push.outputs.TAG }}
+          GIT_AUTHOR_NAME: ua-mis-ci
+          GIT_AUTHOR_EMAIL: ci@capstone.uamishub.com
+          GIT_COMMITTER_NAME: ua-mis-ci
+          GIT_COMMITTER_EMAIL: ci@capstone.uamishub.com
+        run: |
+          set -eu
+          # CONSUME the build job's resolver TAG (readable git-describe; no recompute).
+          # bump-image.sh (COMMIT=1) rewrites the dev overlay newTag + git-commits with
+          # a "[skip ci]" message (so this push does NOT re-trigger build-and-push), and
+          # marks the workspace a safe.directory (CI checks out as a different uid).
+          COMMIT=1 sh .devops/ci/bump-image.sh dev "${TAG}"
+          git push origin HEAD:main

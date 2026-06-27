@@ -83,7 +83,12 @@ of truth; only `registry` and the trigger change, exactly as designed).
 
 ### The workflow — `.github/workflows/build-and-push.yaml`
 
-Platform-managed (part of the immutable `.devops` contract). Triggers and outputs:
+Platform-managed (part of the immutable `.devops` contract). This file is now a
+**thin caller**: it declares the triggers and `uses:` the **central reusable
+workflow** `UA-MIS/platform-infra/.github/workflows/tenant-build.yaml@v1`, which
+holds the full build+push+bump logic once for every tenant (ADR-031 §8). A CI fix
+lands on `platform-infra` and re-points `@v1`; every tenant picks it up — no
+per-repo re-copy. The triggers and outputs are unchanged:
 
 | Trigger | Resolved env | Image tag | Pushed? |
 | --- | --- | --- | --- |
