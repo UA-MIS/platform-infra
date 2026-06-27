@@ -242,7 +242,7 @@ with `on: workflow_call` (inputs it can't self-derive; it already reads registry
 on: [push, pull_request]
 jobs:
   build:
-    uses: UA-MIS/platform-infra/.github/workflows/build-and-push.yaml@v1
+    uses: UA-MIS/platform-infra/.github/workflows/tenant-build.yaml@v1
     secrets: inherit
 ```
 
