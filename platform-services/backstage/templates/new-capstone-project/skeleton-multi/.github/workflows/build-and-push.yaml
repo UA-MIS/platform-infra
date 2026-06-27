@@ -1,0 +1,202 @@
+# ============================================================================
+# build-and-push.yaml — MULTI-COMPONENT platform CI build+push workflow (P2.3, D-032).
+#
+# PLATFORM-MANAGED (.devops golden path). This is the multi-component variant of the
+# single-component workflow: it builds + pushes ONE image PER COMPONENT declared in
+# .devops/components.yaml, via a build MATRIX. Students do NOT edit it. The ONLY
+# per-team/per-component values come from .devops/promotion.yaml (registry/app) +
+# .devops/components.yaml (the components) + the git event.
+#
+# HOW IT WORKS (three jobs):
+#   1. resolve     — run ONCE. resolve-image.sh maps the git event -> env + the ONE tag
+#                    all components share (D-030); resolve-components.sh reads
+#                    components.yaml and emits the per-component build MATRIX (one image
+#                    each, full ref = <registry>/<component.image>:<tag>).
+#   2. build-and-push — a MATRIX over the components. Each leg Kaniko-builds its
+#                    component (rootless, no docker daemon) from that component's
+#                    `context`/`dockerfile` and pushes to the team's OWN Harbor project
+#                    using the least-privilege PUSH robot (`harbor-push`, project-scoped
+#                    so it covers every component repo — no per-component robot).
+#   3. bump-dev    — run ONCE after all matrix legs. On push-to-main, rewrite the dev
+#                    overlay so EVERY component's images[].newTag = the built tag, commit
+#                    [skip ci], push -> ArgoCD syncs all components into <team>-dev.
+#
+# THE TAG IS THE PROMOTION MECHANISM (D-030 prod-gate), SAME as single-component:
+#   - push to main      -> :<git-describe>  (mutable; dev auto-syncs)        PUSH
+#   - push tag vX.Y.Z   -> :X.Y.Z           (IMMUTABLE; prod image, gated)   PUSH
+#   - pull_request      -> :pull-<head-sha> (preview, UNTRUSTED PR code)     PUSH*
+# * preview pushes UNTRUSTED PR code, bounded to the team's own Harbor project + the
+#   disjoint pull-<sha> tag + the fenced <team>-pr-<n> preview ns (see the build step).
+#
+# CONTAINER-MODE SHAPE: the ARC runners are containerMode:kubernetes, so EVERY job
+# declares a `container:` (node image for the Actions runner internals + actions/checkout)
+# and the Kaniko build runs as a `uses: docker://` CONTAINER-ACTION STEP in its own
+# job-step pod (shared _work volume = the checked-out repo is Kaniko's context; the
+# platform runner's container-hook injects harbor-push into that pod). Making Kaniko the
+# job container would break the runner (its minimal image has no node/bash). (PR #60.)
+# ============================================================================
+name: build-and-push
+
+on:
+  push:
+    branches: [main]          # -> dev images (mutable git-describe tag), pushed
+    tags: ["v*.*.*"]          # -> prod/staging images (immutable semver), pushed
+  pull_request:               # -> preview images (pull-<head-sha>, pushed). UNTRUSTED
+                              #    PR code, bounded to the team's own Harbor project +
+                              #    the disjoint pull-<sha> tag + the fenced <team>-pr-<n> ns.
+
+# Least privilege: contents:read is all actions/checkout needs. Registry push is
+# authenticated by the Harbor harbor-push robot, NOT GITHUB_TOKEN.
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---- 1) resolve: ONE tag + the per-component build matrix --------------------
+  resolve:
+    runs-on: ua-mis-kaniko
+    container:
+      image: node:24-trixie-slim
+    outputs:
+      ENV: ${{ steps.img.outputs.ENV }}
+      TAG: ${{ steps.img.outputs.TAG }}
+      PUSH: ${{ steps.img.outputs.PUSH }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Checkout (.devops contract + resolver scripts)
+        # Digest-pinned (SEC, D-030): immutable SHA. sha = actions/checkout v4.3.1.
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          # fetch-depth: 0 = full history + ALL TAGS — REQUIRED for resolve-image.sh's
+          # `git describe --tags` (Deploy Model A readable dev tag).
+          fetch-depth: 0
+      - name: Resolve image identity (env + tag + push) from promotion.yaml
+        id: img
+        env:
+          # For a pull_request, feed the PR HEAD sha (the preview ApplicationSet keys the
+          # image override on pull-{{.head_short_sha_7}}); empty for push/tag builds.
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          sh .devops/ci/resolve-image.sh | tee -a "$GITHUB_OUTPUT"
+      - name: Resolve the per-component build matrix from components.yaml
+        id: matrix
+        env:
+          TAG: ${{ steps.img.outputs.TAG }}
+          PUSH: ${{ steps.img.outputs.PUSH }}
+        run: |
+          # Compact JSON array of {name,context,dockerfile,image(full ref),push}.
+          # Single-component repos (no components.yaml) get a one-element matrix.
+          echo "matrix=$(sh .devops/ci/resolve-components.sh)" | tee -a "$GITHUB_OUTPUT"
+
+  # ---- 2) build-and-push: one Kaniko build per component (matrix) --------------
+  build-and-push:
+    needs: resolve
+    runs-on: ua-mis-kaniko
+    strategy:
+      # Don't cancel sibling components if one fails — surface every component's result.
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+    container:
+      image: node:24-trixie-slim
+    env:
+      # Where the Harbor push cred lands inside the Kaniko step pod (Kaniko's default
+      # DOCKER_CONFIG dir). The platform runner's container-hook injects secret
+      # harbor-push (dockerconfigjson) -> config.json here.
+      DOCKER_CONFIG_DIR: /kaniko/.docker
+    steps:
+      - name: Checkout (build context for ${{ matrix.name }})
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+      - name: Guard — push builds must have the Harbor cred mounted
+        if: ${{ needs.resolve.outputs.PUSH == 'true' }}
+        run: |
+          # The cred lives in the Kaniko STEP pod (not this runner pod); the real check
+          # runs inside the Kaniko step (entrypoint wrapper) and fails closed.
+          echo "push build for ${{ matrix.image }} — Harbor cred expected at" \
+               "${DOCKER_CONFIG_DIR}/config.json in the Kaniko step pod"
+      # --- Kaniko build as a container-action STEP (its own pod; shared _work) ---
+      # SECURITY — preview (pull_request) PUSHES untrusted PR code. Authenticated by the
+      # SAME least-privilege harbor-push robot (pull+push on THIS team's OWN project only).
+      # The tag is pull-<head-sha>, DISJOINT from dev's git-describe + prod's semver, so a
+      # PR can never overwrite the dev/staging/prod image; it only deploys into the
+      # ephemeral, fully-fenced <team>-pr-<n> preview namespace.
+      - name: Build (and push) ${{ matrix.name }} with Kaniko
+        # Digest-pinned (SEC, D-030). digest = gcr.io/kaniko-project/executor:v1.23.2-debug.
+        uses: docker://gcr.io/kaniko-project/executor@sha256:c3109d5926a997b100c4343944e06c6b30a6804b2f9abe0994d3de6ef92b028e # v1.23.2-debug
+        with:
+          entrypoint: /busybox/sh
+          args: >-
+            -c '
+            set -eu;
+            CFG="${DOCKER_CONFIG_DIR}/config.json";
+            if [ "${PUSH}" = "true" ] && [ ! -s "$CFG" ]; then
+              echo "ERROR: Harbor push credential not found at $CFG — the platform" \
+                   "runner must inject secret harbor-push (container-hook template)." \
+                   "Refusing an unauthenticated push." >&2;
+              exit 1;
+            fi;
+            COMMON="--context=dir://${GITHUB_WORKSPACE}/${CONTEXT}
+                    --dockerfile=${DOCKERFILE}
+                    --destination=${IMAGE}
+                    --reproducible
+                    --verbosity=info";
+            if [ "${PUSH}" = "true" ]; then
+              echo "==> building + pushing ${IMAGE}";
+              /kaniko/executor $COMMON;
+            else
+              echo "==> PR build-only validation for ${IMAGE} (no push)";
+              /kaniko/executor $COMMON --no-push --tar-path=/tmp/image.tar;
+            fi
+            '
+        env:
+          # Per-component, straight from the resolve matrix.
+          IMAGE: ${{ matrix.image }}
+          CONTEXT: ${{ matrix.context }}
+          DOCKERFILE: ${{ matrix.dockerfile }}
+          PUSH: ${{ matrix.push }}
+          DOCKER_CONFIG_DIR: ${{ env.DOCKER_CONFIG_DIR }}
+
+  # ---- 3) bump-dev: ONE commit bumping ALL components -------------------------
+  # GitOps image-bump (D-030): after all component images are pushed, rewrite the dev
+  # overlay so EVERY component's images[].newTag = the built tag, commit [skip ci], push.
+  # ArgoCD syncs all components into <team>-dev. Runs ONCE (not per matrix leg).
+  #
+  # SECURITY (least privilege — SEPARATE job): `if:` restricts to a real push to main
+  # (never pull_request, so untrusted PR code can't reach the write token); job-scoped
+  # contents:write applies ONLY here. bump-image.sh's commit carries [skip ci] so the
+  # push does NOT re-trigger this workflow (no infinite loop). Branch-protection Option A
+  # (D-030): main allowlists github-actions[bot] in its PR-bypass so this GITHUB_TOKEN
+  # push lands on protected main. If the bypass isn't configured the push fails LOUD.
+  bump-dev:
+    needs: [resolve, build-and-push]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.resolve.outputs.PUSH == 'true' }}
+    runs-on: ua-mis-kaniko
+    container:
+      image: node:24-trixie-slim
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout main (writable; full history for a clean commit base)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Bump dev overlay (ALL components) -> built tag + commit + push
+        env:
+          TAG: ${{ needs.resolve.outputs.TAG }}
+          GIT_AUTHOR_NAME: ua-mis-ci
+          GIT_AUTHOR_EMAIL: ci@capstone.uamishub.com
+          GIT_COMMITTER_NAME: ua-mis-ci
+          GIT_COMMITTER_EMAIL: ci@capstone.uamishub.com
+        run: |
+          set -eu
+          # CONSUME the resolve job's TAG (no recompute). bump-image.sh (COMMIT=1) sets
+          # newTag on EVERY component's images[] entry + commits with "[skip ci]".
+          COMMIT=1 sh .devops/ci/bump-image.sh dev "${TAG}"
+          git push origin HEAD:main

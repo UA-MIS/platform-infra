@@ -1,0 +1,24 @@
+# ClusterIP Services — ONE per component (nunjucks loop, expanded at create time).
+# Traefik routes Ingress traffic to these; each Service selects ONLY its own
+# component's pods via app.kubernetes.io/component. Every Service exposes port 80 ->
+# the component's container `http` port, so the Ingress backend wiring is uniform.
+{%- for c in values.components %}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${{ values.appName }}-${{ c.name }}
+  labels:
+    app.kubernetes.io/name: ${{ values.appName }}
+    app.kubernetes.io/component: ${{ c.name }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ${{ values.appName }}
+    app.kubernetes.io/component: ${{ c.name }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+{%- endfor %}
