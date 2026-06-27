@@ -49,11 +49,12 @@ jobs:
     # injects it as a Kubernetes secret — so no secret is listed explicitly.
     secrets: inherit
     uses: UA-MIS/platform-infra/.github/workflows/tenant-build.yaml@v1
-    # PER-TEAM RUNNER (finish-eso A2 — per-team scale set + harbor-push robot, PR #128):
-    # by default the build runs on the shared `ua-mis-kaniko` scale set. To cut THIS
-    # team onto its own scale set, uncomment + set the team's scale-set name:
-    #   with:
-    #     runner: <team>-kaniko
-    # NOTE: this file is copied verbatim (copyWithoutTemplating protects the GHA ${{ }}),
-    # so the scaffolder can't render `<team>` here — it must inject the literal value
-    # post-copy (scaffolder/finish-eso seam). Until A2, the default is correct.
+    with:
+      # PER-TEAM RUNNER (finish-eso A2 — per-team scale set + harbor-push robot, PR #128).
+      # The repo Actions variable RUNNER_SCALE_SET picks THIS team's scale set; unset →
+      # the shared `ua-mis-kaniko` (A1). `vars.*` is a GHA expression, so it survives the
+      # scaffolder's copyWithoutTemplating (no post-copy sed, nothing to template) and a
+      # reusable-workflow `with:` can read it (it can't read a file). A2 cutover = the
+      # scaffolder sets ONE repo variable at create time (same class as the branch-protection
+      # API calls it already makes) — no workflow edit. Default stays correct throughout.
+      runner: ${{ vars.RUNNER_SCALE_SET || 'ua-mis-kaniko' }}
