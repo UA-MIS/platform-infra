@@ -1,0 +1,196 @@
+# kube-prometheus-stack Application (Observability, retro #3 — "we run a multi-tenant
+# platform blind: only metrics-server, no alert even on 'Vault sealed'"). Installs the
+# full Prometheus Operator stack: Prometheus + Alertmanager + Grafana + node-exporter +
+# kube-state-metrics + the operator and its CRDs (ServiceMonitor / PodMonitor /
+# PrometheusRule / Prometheus / Alertmanager).
+#
+# Deploy method A (D-022/D-028), same as Harbor/Vault/metrics-server: a Helm-source
+# Application with the chart repo pinned + allowlisted in the `platform` AppProject
+# sourceRepos (bootstrap/platform-appproject.yaml — INSTALL-OWNED, re-apply via
+# `make bootstrap-reapply` after merge). Root-app recurses applicationsets/, so this
+# Application is registered.
+#
+# Chart: kube-prometheus-stack 87.3.0 (appVersion / prometheus-operator v0.92.0),
+# pinned. Bump deliberately.
+#
+# SCOPE (anti-gold-plate, per the retro): NO Thanos/Mimir, NO remote-write, NO
+# long-term object storage — single Prometheus with 15d local retention on a Ceph
+# RBD PVC. That is the right altitude for a homelab/student-capstone platform.
+#
+# ── The two values that make this a PLATFORM monitor (not just self-monitoring) ──
+# serviceMonitor/podMonitor/probe/ruleSelectorNilUsesHelmValues: false → Prometheus
+# discovers EVERY ServiceMonitor / PodMonitor / PrometheusRule in the cluster
+# regardless of Helm release label (the default `true` would only match objects
+# carrying this release's label). This is what lets the platform-svc-monitoring app
+# (platform-services/monitoring/) ship the alert rules + the cross-component scrape
+# configs (ArgoCD, cert-manager, ESO) and have Prometheus pick them up, and lets
+# tenants add their own ServiceMonitors later.
+#
+# ── Grafana exposure ── Traefik ingress at grafana.${PLATFORM_DOMAIN} (same pattern
+# as harbor/process/argocd: className traefik, TLS host listed but NO secretName so
+# Traefik's default TLSStore serves the cert-manager wildcard cert for
+# *.capstone.uamishub.com). Prometheus + Alertmanager stay ClusterIP (port-forward
+# only) — internal ops surfaces, no need to expose.
+#
+# ⚠ Grafana admin password: the chart default (admin / prom-operator) is shipped here
+# so the stack is operable on day one, but Grafana IS internet-reachable via the
+# Cloudflare tunnel. ROTATE IT — set grafana.adminPassword via a SealedSecret /
+# grafana.admin.existingSecret before/just after go-live. Flagged in
+# platform-services/monitoring/README.md, not blocking the deploy.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-kube-prometheus-stack
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://prometheus-community.github.io/helm-charts   # PINNED chart repo (sourceRepos allowlist)
+    chart: kube-prometheus-stack
+    targetRevision: 87.3.0                                        # pinned chart version (appVersion v0.92.0); no ^/~/latest
+    helm:
+      releaseName: kube-prometheus-stack
+      # Skip Helm hook-based CRD install timing issues: the chart templates its CRDs
+      # (crds.enabled below); ServerSideApply on the syncPolicy handles their size.
+      values: |
+        fullnameOverride: kube-prometheus-stack
+
+        # The prometheus-operator CRDs ship WITH the chart (templated). ArgoCD applies
+        # them server-side (syncOptions ServerSideApply=true) — the Prometheus CRD is
+        # far larger than the 262 KB client-side annotation limit.
+        crds:
+          enabled: true
+
+        # The upstream mixin alerts (node/kubelet/apiserver/etcd/memory-pressure, and
+        # KubePodCrashLooping / KubeNodeNotReady / KubePodNotReady etc.). Kept ON —
+        # this is exactly the broad k8s coverage the "running blind" retro wants, and
+        # it is free. Our 6 platform-specific alerts (Vault/ESO/ArgoCD/cert-manager,
+        # plus explicit CrashLoop/ImagePull + NodeNotReady for traceability to the
+        # retro) live in platform-services/monitoring/alerts.yaml.
+        defaultRules:
+          create: true
+
+        prometheusOperator:
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 256Mi }
+
+        prometheus:
+          prometheusSpec:
+            retention: 15d
+            # ── Discover ALL monitors/rules cluster-wide (see header) ──
+            serviceMonitorSelectorNilUsesHelmValues: false
+            podMonitorSelectorNilUsesHelmValues: false
+            probeSelectorNilUsesHelmValues: false
+            ruleSelectorNilUsesHelmValues: false
+            resources:
+              requests: { cpu: 200m, memory: 512Mi }
+              limits: { memory: 2Gi }
+            # TSDB on a Ceph RBD PVC (replica-3, survives node loss; same SC as
+            # Harbor/Vault). 20Gi holds ~15d of platform-scale metrics comfortably.
+            storageSpec:
+              volumeClaimTemplate:
+                spec:
+                  storageClassName: ceph-block
+                  accessModes: ["ReadWriteOnce"]
+                  resources:
+                    requests:
+                      storage: 20Gi
+
+        alertmanager:
+          alertmanagerSpec:
+            resources:
+              requests: { cpu: 25m, memory: 64Mi }
+              limits: { memory: 128Mi }
+            storage:
+              volumeClaimTemplate:
+                spec:
+                  storageClassName: ceph-block
+                  accessModes: ["ReadWriteOnce"]
+                  resources:
+                    requests:
+                      storage: 2Gi
+          # ── Alertmanager routing — RECEIVER STUB ──────────────────────────────
+          # `null` swallows the always-firing Watchdog heartbeat; everything at
+          # severity critical|warning routes to `platform-oncall`, which is an EMPTY
+          # receiver TODAY (alerts group + dedupe + show in the Alertmanager UI but
+          # are not pushed anywhere). To wire a real channel, add a slack_configs /
+          # webhook_configs / email block under the `platform-oncall` receiver — the
+          # webhook URL / Slack token belongs in a SealedSecret referenced via
+          # alertmanager.alertmanagerSpec, NOT inline here. See
+          # platform-services/monitoring/README.md "Wiring a notification channel".
+          config:
+            global:
+              resolve_timeout: 5m
+            route:
+              group_by: ['namespace', 'alertname']
+              group_wait: 30s
+              group_interval: 5m
+              repeat_interval: 12h
+              receiver: 'null'
+              routes:
+                - receiver: 'null'
+                  matchers:
+                    - alertname = "Watchdog"
+                - receiver: 'platform-oncall'
+                  matchers:
+                    - severity =~ "critical|warning"
+            receivers:
+              - name: 'null'
+              - name: 'platform-oncall'   # ← plug a real channel here (README)
+
+        grafana:
+          # ⚠ ROTATE — chart default; Grafana is reachable via the CF tunnel (header).
+          adminPassword: prom-operator
+          persistence:
+            enabled: true
+            storageClassName: ceph-block
+            accessModes: ["ReadWriteOnce"]
+            size: 5Gi
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { memory: 256Mi }
+          # Traefik ingress, wildcard TLS via the default TLSStore (no secretName) —
+          # identical pattern to harbor/process/argocd/dex.
+          ingress:
+            enabled: true
+            ingressClassName: traefik
+            hosts:
+              - grafana.capstone.uamishub.com
+            tls:
+              - hosts:
+                  - grafana.capstone.uamishub.com
+          # Wire Loki (platform-loki) as a log datasource so logs + metrics live in
+          # one Grafana. Prometheus is auto-added by the chart.
+          additionalDataSources:
+            - name: Loki
+              type: loki
+              access: proxy
+              url: http://loki.monitoring.svc.cluster.local:3100
+
+        kube-state-metrics:
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { memory: 128Mi }
+
+        prometheus-node-exporter:
+          resources:
+            requests: { cpu: 25m, memory: 32Mi }
+            limits: { memory: 64Mi }
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false      # monitoring ns ships via platform-services/monitoring
+      - ServerSideApply=true       # large prometheus-operator CRDs
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

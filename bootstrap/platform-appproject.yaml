@@ -77,6 +77,18 @@ spec:
     # platform-vault will InvalidSpecError "repo not permitted".
     - https://charts.external-secrets.io                  # ESO (platform-external-secrets Application)
     - https://helm.releases.hashicorp.com                 # Vault (platform-vault Application)
+    # Observability (retro #3 "we run the platform blind"): the kube-prometheus-stack
+    # chart repo (Prometheus + Alertmanager + Grafana + node-exporter + kube-state-
+    # metrics) and the Grafana chart repo (Loki single-binary + Alloy log shipper).
+    # TWO named sources, chart versions pinned in the Applications (kube-prometheus-
+    # stack @ 87.3.0, loki @ 6.55.0, alloy @ 1.10.0). ⚠ INSTALL-OWNED (same as the
+    # Harbor/ARC/Rook/metrics-server/Traefik/Backstage/ESO/Vault adds): reaches the
+    # live `platform` AppProject only via `make bootstrap`/`make bootstrap-reapply` +
+    # VERIFY (the AppProject is bootstrap-managed, not GitOps-reconciled) or
+    # platform-kube-prometheus-stack / platform-loki / platform-alloy will
+    # InvalidSpecError "repo not permitted".
+    - https://prometheus-community.github.io/helm-charts   # kube-prometheus-stack (platform-kube-prometheus-stack Application)
+    - https://grafana.github.io/helm-charts                # Loki + Alloy (platform-loki / platform-alloy Applications)
 
   # Platform services are cluster-wide; allow any namespace on the in-cluster API.
   destinations:
