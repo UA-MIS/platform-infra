@@ -1,0 +1,21 @@
+# provider-vault (upbound, Upjet — wraps hashicorp/terraform-provider-vault).
+# ADR-031: mints the per-tenant Vault `Policy` (scoped to secret/data/tenants/<team>/*)
+# and the k8s-auth `AuthBackendRole` (bound to the tenant's eso-tenant SAs). This
+# replaces the manual `make vault-onboard` step (the #107 "never run" gap) with a
+# reconciling managed resource.
+#
+# Auth: a Vault token whose policy (`tenant-provisioner`) may write policy +
+# auth/kubernetes/role under tenants/* ONLY — config/providerconfig-vault.yaml.
+#
+# ⚠ Provider maturity (ADR-031 Consequences + open-question 4): provider-vault is
+# v0.1.0 — EARLY. Pinned here; the SRE confirms the exact MR API groups
+# (policy.vault.upbound.io / kubernetes.vault.upbound.io) against the installed CRDs
+# at Phase-0 apply (the Composition annotates these for verification).
+apiVersion: pkg.crossplane.io/v1
+kind: Provider
+metadata:
+  name: provider-vault
+  labels:
+    platform.capstone/component: platform
+spec:
+  package: xpkg.upbound.io/upbound/provider-vault:v0.1.0

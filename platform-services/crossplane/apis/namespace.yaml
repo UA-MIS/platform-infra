@@ -1,0 +1,12 @@
+# The namespace CapstoneTenant XRs live in (ADR-031). Crossplane v2 XRs are
+# Namespaced (no Claim); the Backstage scaffolder commits each XR to
+# tenants/_claims/<team>-<app>.yaml with metadata.namespace: capstone-tenants, and
+# platform-crossplane-claims syncs them here. The XR is a low-trust ~10-field object;
+# the privileged work happens in the provider controllers (crossplane-system), not here.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: capstone-tenants
+  labels:
+    app.kubernetes.io/managed-by: argocd
+    platform.capstone/component: platform

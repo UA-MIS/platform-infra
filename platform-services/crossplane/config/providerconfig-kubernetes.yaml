@@ -1,0 +1,17 @@
+# ProviderConfig for provider-kubernetes. ADR-031 §6 — the provider runs IN-CLUSTER
+# and authenticates as its OWN ServiceAccount (InjectedIdentity), which is the
+# fixed-named `provider-kubernetes` SA (providers/provider-kubernetes.yaml
+# DeploymentRuntimeConfig) bound to the hand-curated ClusterRole in
+# rbac/provider-kubernetes-rbac.yaml. So the provider can create/manage ONLY the
+# kinds that ClusterRole allows — the tenancy fence and nothing else. NEVER
+# cluster-admin (the upstream README's cluster-admin binding is exactly what we do
+# NOT do here — see rbac/).
+apiVersion: kubernetes.crossplane.io/v1alpha1
+kind: ProviderConfig
+metadata:
+  name: default
+  labels:
+    platform.capstone/component: platform
+spec:
+  credentials:
+    source: InjectedIdentity

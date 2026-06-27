@@ -1,0 +1,19 @@
+# ⚠ SECURITY — PLACEHOLDER ciphertext. Reseal with the REAL ua-mis-backstage App
+# creds before go-live (see creds/README.md). This stub will NOT decrypt; the
+# github-provider-creds Secret stays absent and provider-github sits unauthenticated
+# (safe failure mode) until the operator reseals against the live controller.
+apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: github-provider-creds
+  namespace: crossplane-system
+  labels:
+    platform.capstone/component: platform
+spec:
+  encryptedData:
+    credentials: PLACEHOLDER_RESEAL_AT_GO_LIVE_github_app_auth_json_DO_NOT_USE
+  template:
+    metadata:
+      name: github-provider-creds
+      namespace: crossplane-system
+    type: Opaque

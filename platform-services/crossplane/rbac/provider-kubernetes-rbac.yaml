@@ -1,0 +1,98 @@
+# ============================================================================
+# THE RECONCILE BOUND — the curated provider-kubernetes ClusterRole (ADR-031 §6).
+# ============================================================================
+# This is THE most security-sensitive file in the Crossplane onboarding stack and
+# the focal point of the one-time SRE review (ADR-031 constraint #4). It defines the
+# EXACT set of kinds/verbs the provider-kubernetes controller may create/manage when
+# the CapstoneTenant Composition fans out. It is a hand-curated ALLOW-LIST — NEVER
+# `cluster-admin`, NEVER `*`/`*`.
+#
+# Bound (ClusterRoleBinding below) to the fixed-named SA
+# `system:serviceaccount:crossplane-system:provider-kubernetes`
+# (providers/provider-kubernetes.yaml DeploymentRuntimeConfig). Together with the
+# Composition, this ClusterRole IS the blast radius: a flawed XR cannot escalate
+# beyond these kinds, and a flawed Composition cannot mint anything outside them.
+#
+# WHY each entry is here (every kind maps to a managed resource the Composition's
+# provider-kubernetes `Object`s render — see apis/composition.yaml):
+#   - argoproj.io AppProject + ApplicationSet → the tenancy fence + env/preview app gen
+#   - core Namespace/ResourceQuota/LimitRange/ConfigMap/ServiceAccount → the ns bundle
+#       + the in-ns vault-ca ConfigMap + the eso-tenant SA
+#   - networking.k8s.io NetworkPolicy → the default-deny + allowances
+#   - rbac.authorization.k8s.io Role/RoleBinding → the team-developer namespaced RBAC
+#   - external-secrets.io SecretStore/ExternalSecret/PushSecret → the ESO wiring +
+#       the Harbor-robot→Vault bridge
+#
+# ⚠ K8s privilege-escalation prevention: to CREATE a Role/RoleBinding, the creator
+# must already hold the permissions it grants (or the `escalate`/`bind` verbs). To
+# avoid granting the blunt `escalate` verb, this ClusterRole ALSO enumerates the
+# exact permissions the tenant `team-developer` Role contains (the apps/core/
+# networking/bitnami read+limited-write rules from tenants/_template/namespaces/*.yaml)
+# so the provider can create those Roles without escalation. If the tenant Role's
+# rules change, update the "tenant-role mirror" block below IN LOCKSTEP — the SRE
+# review checks this pairing.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: crossplane-provider-kubernetes-tenancy
+  labels:
+    platform.capstone/component: platform
+rules:
+  # --- ArgoCD tenancy objects (created in the argocd namespace) --------------
+  - apiGroups: ["argoproj.io"]
+    resources: ["appprojects", "applicationsets"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  # --- Namespace + per-namespace governance (the ns bundle) ------------------
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["resourcequotas", "limitranges", "configmaps", "serviceaccounts"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  # --- Namespaced RBAC: the team-developer Role + RoleBinding ----------------
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  # --- ESO wiring: per-tenant store + secrets + the Harbor-robot→Vault bridge -
+  - apiGroups: ["external-secrets.io"]
+    resources: ["secretstores", "externalsecrets", "pushsecrets"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  # --- tenant-role MIRROR (escalation-prevention; keep in lockstep with -------
+  #     tenants/_template/namespaces/*.yaml team-developer Role). These rules are
+  #     NOT used by the provider directly — they are present ONLY so the provider
+  #     may CREATE a team-developer Role containing them without tripping the
+  #     API server's privilege-escalation check. Mirror EXACTLY; no broader.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["services", "configmaps", "serviceaccounts", "pods", "pods/log", "events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["bitnami.com"]
+    resources: ["sealedsecrets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: crossplane-provider-kubernetes-tenancy
+  labels:
+    platform.capstone/component: platform
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: crossplane-provider-kubernetes-tenancy
+subjects:
+  - kind: ServiceAccount
+    name: provider-kubernetes        # the fixed SA from the DeploymentRuntimeConfig
+    namespace: crossplane-system

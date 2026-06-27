@@ -1,0 +1,909 @@
+# ============================================================================
+# CapstoneTenant Composition — THE REVIEWED-ONCE EXPANSION (ADR-031 §4).
+# ============================================================================
+# `mode: Pipeline` with function-go-templating: reads the ONE CapstoneTenant XR and
+# renders EVERY downstream managed resource, doing the substitution that imperative
+# `sed`+`make` used to do — but type-checked, reconciling, and drift-correcting.
+# function-auto-ready then marks the XR Ready when its composed resources are Ready.
+#
+# This file IS the blast radius the one-time SRE review scrutinizes (with
+# rbac/provider-kubernetes-rbac.yaml). Read the bug→declarative mapping in the
+# crossplane README alongside it — each section below is annotated with the
+# v1check-era onboarding bug(s) it structurally eliminates.
+#
+# ⚠ Provider MR apiVersions: the github/harbor/vault MR groups below are pinned to
+# the providers in providers/. provider-vault (v0.1.0) + provider-harbor (v0.1.1)
+# are early — the SRE confirms the exact group/kind against the installed CRDs at
+# Phase-0 apply (notes inline). The k8s tenancy objects (rendered via
+# provider-kubernetes Object) are stable and mirror tenants/_template/ verbatim.
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: capstonetenant
+  labels:
+    platform.capstone/component: platform
+spec:
+  compositeTypeRef:
+    apiVersion: platform.capstone.uamishub.com/v1alpha1
+    kind: CapstoneTenant
+  mode: Pipeline
+  pipeline:
+    # ------------------------------------------------------------------------
+    - step: render-tenant
+      functionRef:
+        name: function-go-templating
+      input:
+        apiVersion: gotemplating.fn.crossplane.io/v1beta1
+        kind: GoTemplate
+        source: Inline
+        inline:
+          options:
+            - missingkey=error
+          template: |
+            {{- $spec := .observed.composite.resource.spec }}
+            {{- $team := $spec.team }}
+            {{- $app := $spec.appName }}
+            {{- $sem := $spec.semester }}
+            {{- $ghTeam := $spec.githubTeam | default $team }}
+            {{- $port := $spec.port | default 8080 }}
+            {{- $domain := $spec.domain | default "capstone.uamishub.com" }}
+            {{- $preview := $spec.previewEnabled | default false }}
+            {{- $registry := printf "harbor.%s" $domain }}
+            {{- $repoUrl := printf "https://github.com/UA-MIS/%s" $app }}
+            {{- $infraUrl := "https://github.com/UA-MIS/platform-infra" }}
+            {{- /* env quota tiers — dev/staging modest, prod higher (mirrors tenants/_template/namespaces/*) */}}
+            {{- $envs := list
+                  (dict "name" "dev"     "cpuReq" "2" "memReq" "2Gi" "cpuLim" "4" "memLim" "4Gi"  "pods" "10")
+                  (dict "name" "staging" "cpuReq" "2" "memReq" "2Gi" "cpuLim" "4" "memLim" "4Gi"  "pods" "10")
+                  (dict "name" "prod"    "cpuReq" "4" "memReq" "4Gi" "cpuLim" "8" "memLim" "8Gi"  "pods" "20") }}
+
+            {{- /* =====================================================================
+                   GITHUB — repo + branch protection + team access + CI caller.
+                   Bug #5 (appName/repo-name mismatch): repo name derives from the one
+                   $app field. Bug #8: org-wide repo cred is platform infra; provider
+                   reuses the same ua-mis-backstage App. Bug #9: the CI caller is a
+                   tiny RepositoryFile pointing at the reusable workflow @v1.
+                   ===================================================================== */}}
+            ---
+            apiVersion: repo.github.upbound.io/v1alpha1
+            kind: Repository
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation "github-repo" }}
+            spec:
+              forProvider:
+                name: {{ $app | quote }}
+                description: {{ printf "UA-MIS capstone app %s (team %s, %s)" $app $team $sem | quote }}
+                visibility: private
+                # Bootstrap the repo content from the platform's app template repo.
+                # (Hybrid, ADR-031 §9a: Backstage fetch:template still renders the
+                # per-team starter content; this template gives a non-empty default.)
+                template:
+                  - owner: UA-MIS
+                    repository: capstone-app-template
+                  - {}
+              providerConfigRef:
+                name: default
+            ---
+            apiVersion: repo.github.upbound.io/v1alpha1
+            kind: BranchProtection
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation "github-branch-protection" }}
+            spec:
+              forProvider:
+                repository: {{ $app | quote }}
+                pattern: main
+                requireConversationResolution: true
+                requiredPullRequestReviews:
+                  - requiredApprovingReviewCount: 1
+                    requireCodeOwnerReviews: true
+                    dismissStaleReviews: true
+              providerConfigRef:
+                name: default
+            ---
+            # Team push access. ⚠ Verify kind/group against provider-upjet-github CRDs
+            # at Phase-0 (team_repository → TeamRepository, group team.github.upbound.io).
+            apiVersion: team.github.upbound.io/v1alpha1
+            kind: TeamRepository
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation "github-team-repo" }}
+            spec:
+              forProvider:
+                username: {{ $ghTeam | quote }}     # team slug
+                repository: {{ $app | quote }}
+                permission: push
+              providerConfigRef:
+                name: default
+            ---
+            # The CI caller (bug #9): a ~10-line static workflow that calls the central
+            # reusable workflow @v1 (track-1). Static content (no Argo-expression
+            # collision) → provider-github RepositoryFile writes it verbatim. A CI fix ships once
+            # (the reusable workflow), every tenant picks it up at the pinned tag.
+            apiVersion: repo.github.upbound.io/v1alpha1
+            kind: RepositoryFile
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation "github-ci-caller" }}
+            spec:
+              forProvider:
+                repository: {{ $app | quote }}
+                branch: main
+                file: .github/workflows/ci.yaml
+                commitMessage: "platform: CI reusable-workflow caller (managed by Crossplane)"
+                content: |
+                  # Managed by the platform (Crossplane CapstoneTenant). Do not edit.
+                  # Calls the central reusable build/push workflow (track-1) — a fix
+                  # there ships once to every tenant at the pinned @v1 tag (bug #9).
+                  name: ci
+                  on: [push, pull_request]
+                  jobs:
+                    build:
+                      uses: UA-MIS/platform-infra/.github/workflows/build-and-push.yaml@v1
+                      secrets: inherit
+              providerConfigRef:
+                name: default
+
+            {{- /* =====================================================================
+                   HARBOR — project + push/pull robots (provider-harbor, the spike path).
+                   Bug #1 (project missing): Project MR, reconciled. Bug #2 (shared
+                   harbor-push collision): per-team push RobotAccount. Bug #10/#11
+                   (curl-Job rootfs / legacy API): no Job — the provider speaks the
+                   unified API. Robot tokens land in connection secrets (writeConnection
+                   SecretToRef) → bridged to Vault by the PushSecrets below.
+                   ===================================================================== */}}
+            ---
+            # ⚠ Verify group/kind vs provider-harbor v0.1.1 (project.harbor.crossplane.io / Project).
+            apiVersion: project.harbor.crossplane.io/v1alpha1
+            kind: Project
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation "harbor-project" }}
+            spec:
+              forProvider:
+                name: {{ $team | quote }}
+                public: false
+                vulnerabilityScanning: true       # auto_scan (verify field name vs CRD)
+              providerConfigRef:
+                name: default
+            ---
+            # Per-team PUSH robot (CI). pull+push on the team project. Token → connection
+            # secret <team>-harbor-push in crossplane-system → PushSecret → Vault.
+            apiVersion: robotaccount.harbor.crossplane.io/v1alpha1
+            kind: RobotAccount
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation "harbor-robot-push" }}
+            spec:
+              forProvider:
+                name: {{ printf "%s-push" $team | quote }}
+                description: "CI push robot (managed by Crossplane)"
+                level: project
+                duration: -1                       # non-expiring (verify; -1 = unlimited)
+                permissions:
+                  - kind: project
+                    namespace: {{ $team | quote }}
+                    access:
+                      - action: push
+                        resource: repository
+                      - action: pull
+                        resource: repository
+              writeConnectionSecretToRef:
+                namespace: crossplane-system
+                name: {{ printf "%s-harbor-push" $team | quote }}
+              providerConfigRef:
+                name: default
+            ---
+            # Per-team PULL robot (workloads). pull-only on the team project. Token →
+            # connection secret <team>-harbor-pull → PushSecret → Vault → per-env ESO.
+            apiVersion: robotaccount.harbor.crossplane.io/v1alpha1
+            kind: RobotAccount
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation "harbor-robot-pull" }}
+            spec:
+              forProvider:
+                name: {{ printf "%s-pull" $team | quote }}
+                description: "Workload pull robot (managed by Crossplane)"
+                level: project
+                duration: -1
+                permissions:
+                  - kind: project
+                    namespace: {{ $team | quote }}
+                    access:
+                      - action: pull
+                        resource: repository
+              writeConnectionSecretToRef:
+                namespace: crossplane-system
+                name: {{ printf "%s-harbor-pull" $team | quote }}
+              providerConfigRef:
+                name: default
+
+            {{- /* =====================================================================
+                   VAULT — per-tenant scoped policy + k8s-auth role (provider-vault).
+                   Bug #7 (vault-onboard never run): Policy + AuthBackendRole MRs created
+                   WITH the tenant, reconciled forever. Replaces `make vault-onboard`.
+                   ⚠ Verify groups vs provider-vault v0.1.0 (policy.vault.upbound.io /
+                   kubernetes.vault.upbound.io) at Phase-0.
+                   ===================================================================== */}}
+            ---
+            apiVersion: policy.vault.upbound.io/v1alpha1
+            kind: Policy
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation "vault-policy" }}
+            spec:
+              forProvider:
+                name: {{ printf "tenant-%s-ro" $team | quote }}
+                policy: |
+                  path "secret/data/tenants/{{ $team }}/*" {
+                    capabilities = ["read"]
+                  }
+                  path "secret/metadata/tenants/{{ $team }}/*" {
+                    capabilities = ["read", "list"]
+                  }
+              providerConfigRef:
+                name: default
+            ---
+            apiVersion: kubernetes.vault.upbound.io/v1alpha1
+            kind: AuthBackendRole
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation "vault-k8s-role" }}
+            spec:
+              forProvider:
+                backend: kubernetes
+                roleName: {{ printf "tenant-%s" $team | quote }}
+                boundServiceAccountNames: ["eso-tenant"]
+                boundServiceAccountNamespaces:
+                  {{- range $envs }}
+                  - {{ printf "%s-%s" $team .name | quote }}
+                  {{- end }}
+                  - {{ printf "%s-preview" $team | quote }}
+                audience: vault
+                tokenPolicies: [{{ printf "tenant-%s-ro" $team | quote }}]
+                tokenTtl: 3600
+              providerConfigRef:
+                name: default
+
+            {{- /* =====================================================================
+                   KUBERNETES TENANCY FENCE — via provider-kubernetes Object.
+                   Mirrors tenants/_template/ EXACTLY (the reviewed fence), but rendered
+                   from the one XR (no sed → bug #13 SEC-001 malformed names impossible).
+                   AppProject includes the ESO whitelist (bug #6) so the SecretStore/
+                   ExternalSecret kinds the same template renders are permitted.
+                   ===================================================================== */}}
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation "k8s-appproject" }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: argoproj.io/v1alpha1
+                  kind: AppProject
+                  metadata:
+                    name: {{ $team | quote }}
+                    namespace: argocd
+                    labels:
+                      platform.capstone/team: {{ $team | quote }}
+                      platform.capstone/semester: {{ $sem | quote }}
+                      platform.capstone/component: tenant
+                    finalizers:
+                      - resources-finalizer.argocd.argoproj.io
+                  spec:
+                    description: {{ printf "Tenant project for team %s (%s)." $team $sem | quote }}
+                    sourceRepos:
+                      - {{ $repoUrl | quote }}
+                      - {{ printf "%s.git" $repoUrl | quote }}
+                      - {{ $infraUrl | quote }}
+                      - {{ printf "%s.git" $infraUrl | quote }}
+                    destinations:
+                      {{- range $envs }}
+                      - server: https://kubernetes.default.svc
+                        namespace: {{ printf "%s-%s" $team .name | quote }}
+                      {{- end }}
+                      - server: https://kubernetes.default.svc
+                        namespace: {{ printf "%s-pr-*" $team | quote }}
+                    clusterResourceWhitelist: []
+                    namespaceResourceWhitelist:
+                      - { group: '', kind: ConfigMap }
+                      - { group: '', kind: Service }
+                      - { group: '', kind: ServiceAccount }
+                      - { group: apps, kind: Deployment }
+                      - { group: apps, kind: ReplicaSet }
+                      - { group: autoscaling, kind: HorizontalPodAutoscaler }
+                      - { group: networking.k8s.io, kind: Ingress }
+                      - { group: bitnami.com, kind: SealedSecret }
+                      # Bug #6 — ESO kinds whitelisted WITH the ESO objects this template
+                      # also renders, so the whitelist + the CRs can never drift apart.
+                      - { group: external-secrets.io, kind: ExternalSecret }
+                      - { group: external-secrets.io, kind: SecretStore }
+                    roles:
+                      - name: developer
+                        description: {{ printf "Team %s developers — sync/get own apps only." $team | quote }}
+                        policies:
+                          - {{ printf "p, proj:%s:developer, applications, get, %s/*, allow" $team $team | quote }}
+                          - {{ printf "p, proj:%s:developer, applications, sync, %s/*, allow" $team $team | quote }}
+                        groups:
+                          - {{ printf "%s-developers" $team | quote }}
+
+            {{- /* Per-env namespace bundle: Namespace+Quota+LimitRange+3 NetworkPolicies+
+                   Role+RoleBinding + eso-tenant SA + vault-ca ConfigMap + SecretStore +
+                   app-secrets ExternalSecret + harbor-pull ExternalSecret. One
+                   provider-kubernetes Object per manifest, ranged over envs (DRY; no sed). */}}
+            {{- range $e := $envs }}
+            {{- $ns := printf "%s-%s" $team $e.name }}
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation (printf "k8s-ns-%s" $e.name) }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: v1
+                  kind: Namespace
+                  metadata:
+                    name: {{ $ns | quote }}
+                    labels:
+                      app.kubernetes.io/managed-by: argocd
+                      platform.capstone/team: {{ $team | quote }}
+                      platform.capstone/semester: {{ $sem | quote }}
+                      platform.capstone/env: {{ $e.name | quote }}
+                      pod-security.kubernetes.io/enforce: restricted
+                      pod-security.kubernetes.io/enforce-version: v1.31
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation (printf "k8s-quota-%s" $e.name) }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: v1
+                  kind: ResourceQuota
+                  metadata:
+                    name: compute-quota
+                    namespace: {{ $ns | quote }}
+                    labels:
+                      platform.capstone/team: {{ $team | quote }}
+                      platform.capstone/semester: {{ $sem | quote }}
+                      platform.capstone/env: {{ $e.name | quote }}
+                  spec:
+                    hard:
+                      requests.cpu: {{ $e.cpuReq | quote }}
+                      requests.memory: {{ $e.memReq | quote }}
+                      limits.cpu: {{ $e.cpuLim | quote }}
+                      limits.memory: {{ $e.memLim | quote }}
+                      pods: {{ $e.pods | quote }}
+                      services: "5"
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation (printf "k8s-limits-%s" $e.name) }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: v1
+                  kind: LimitRange
+                  metadata:
+                    name: container-limits
+                    namespace: {{ $ns | quote }}
+                    labels:
+                      platform.capstone/team: {{ $team | quote }}
+                      platform.capstone/semester: {{ $sem | quote }}
+                      platform.capstone/env: {{ $e.name | quote }}
+                  spec:
+                    limits:
+                      - type: Container
+                        default: { cpu: 500m, memory: 256Mi }
+                        defaultRequest: { cpu: 50m, memory: 64Mi }
+                        max: { cpu: "1", memory: 1Gi }
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation (printf "k8s-netpol-deny-%s" $e.name) }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: networking.k8s.io/v1
+                  kind: NetworkPolicy
+                  metadata:
+                    name: default-deny-all
+                    namespace: {{ $ns | quote }}
+                    labels:
+                      platform.capstone/team: {{ $team | quote }}
+                      platform.capstone/semester: {{ $sem | quote }}
+                      platform.capstone/env: {{ $e.name | quote }}
+                  spec:
+                    podSelector: {}
+                    policyTypes: [Ingress, Egress]
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation (printf "k8s-netpol-ingress-%s" $e.name) }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: networking.k8s.io/v1
+                  kind: NetworkPolicy
+                  metadata:
+                    name: allow-ingress-traefik-and-intra-ns
+                    namespace: {{ $ns | quote }}
+                    labels:
+                      platform.capstone/team: {{ $team | quote }}
+                      platform.capstone/semester: {{ $sem | quote }}
+                      platform.capstone/env: {{ $e.name | quote }}
+                  spec:
+                    podSelector: {}
+                    policyTypes: [Ingress]
+                    ingress:
+                      - from:
+                          - namespaceSelector:
+                              matchLabels:
+                                kubernetes.io/metadata.name: kube-system
+                      - from:
+                          - podSelector: {}
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation (printf "k8s-netpol-egress-%s" $e.name) }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: networking.k8s.io/v1
+                  kind: NetworkPolicy
+                  metadata:
+                    name: allow-egress-dns-and-intra-ns
+                    namespace: {{ $ns | quote }}
+                    labels:
+                      platform.capstone/team: {{ $team | quote }}
+                      platform.capstone/semester: {{ $sem | quote }}
+                      platform.capstone/env: {{ $e.name | quote }}
+                  spec:
+                    podSelector: {}
+                    policyTypes: [Egress]
+                    egress:
+                      - to:
+                          - namespaceSelector:
+                              matchLabels:
+                                kubernetes.io/metadata.name: kube-system
+                        ports:
+                          - { protocol: UDP, port: 53 }
+                          - { protocol: TCP, port: 53 }
+                      - to:
+                          - podSelector: {}
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation (printf "k8s-role-%s" $e.name) }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: rbac.authorization.k8s.io/v1
+                  kind: Role
+                  metadata:
+                    name: team-developer
+                    namespace: {{ $ns | quote }}
+                    labels:
+                      platform.capstone/team: {{ $team | quote }}
+                      platform.capstone/semester: {{ $sem | quote }}
+                      platform.capstone/env: {{ $e.name | quote }}
+                  rules:
+                    - apiGroups: ["apps"]
+                      resources: ["deployments", "replicasets"]
+                      verbs: ["get", "list", "watch", "update", "patch"]
+                    - apiGroups: [""]
+                      resources: ["services", "configmaps", "serviceaccounts"]
+                      verbs: ["get", "list", "watch"]
+                    - apiGroups: ["networking.k8s.io"]
+                      resources: ["ingresses"]
+                      verbs: ["get", "list", "watch"]
+                    - apiGroups: ["bitnami.com"]
+                      resources: ["sealedsecrets"]
+                      verbs: ["get", "list", "watch"]
+                    - apiGroups: [""]
+                      resources: ["pods", "pods/log"]
+                      verbs: ["get", "list", "watch"]
+                    - apiGroups: [""]
+                      resources: ["pods/exec"]
+                      verbs: ["create"]
+                    - apiGroups: [""]
+                      resources: ["events"]
+                      verbs: ["get", "list", "watch"]
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation (printf "k8s-rolebinding-%s" $e.name) }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: rbac.authorization.k8s.io/v1
+                  kind: RoleBinding
+                  metadata:
+                    name: team-developer
+                    namespace: {{ $ns | quote }}
+                    labels:
+                      platform.capstone/team: {{ $team | quote }}
+                      platform.capstone/semester: {{ $sem | quote }}
+                      platform.capstone/env: {{ $e.name | quote }}
+                  roleRef:
+                    apiGroup: rbac.authorization.k8s.io
+                    kind: Role
+                    name: team-developer
+                  subjects:
+                    - apiGroup: rbac.authorization.k8s.io
+                      kind: Group
+                      name: {{ printf "%s-developers" $team | quote }}
+            ---
+            # eso-tenant SA (the per-tenant ExternalSecrets authenticate as this →
+            # Vault role tenant-<team>). Bug #7 companion.
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation (printf "k8s-eso-sa-%s" $e.name) }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: v1
+                  kind: ServiceAccount
+                  metadata:
+                    name: eso-tenant
+                    namespace: {{ $ns | quote }}
+                    labels:
+                      platform.capstone/component: tenant
+            ---
+            # vault-ca ConfigMap (bug #7): the in-ns CA the namespaced SecretStore's
+            # caProvider reads — replaces `make vault-onboard` materializing it.
+            # ⚠ The ca.crt VALUE is the PUBLIC Vault CA (git-safe); injected at apply
+            # from vault-server-tls. Left as a placeholder marker here — the operator/
+            # ESO contract (track-4) supplies the real CA. NOT secret material.
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation (printf "k8s-vault-ca-%s" $e.name) }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: v1
+                  kind: ConfigMap
+                  metadata:
+                    name: vault-ca
+                    namespace: {{ $ns | quote }}
+                    labels:
+                      platform.capstone/component: tenant
+                  data:
+                    ca.crt: "__VAULT_CA_PEM__"   # public CA, injected at apply (track-4/ESO contract)
+            ---
+            # Per-tenant namespaced SecretStore (ADR-030 isolation): tenant SA →
+            # Vault role tenant-<team> scoped to secret/data/tenants/<team>/*.
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation (printf "k8s-secretstore-%s" $e.name) }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: external-secrets.io/v1
+                  kind: SecretStore
+                  metadata:
+                    name: vault-tenant
+                    namespace: {{ $ns | quote }}
+                    labels:
+                      platform.capstone/component: tenant
+                  spec:
+                    provider:
+                      vault:
+                        server: "https://vault.vault.svc.cluster.local:8200"
+                        path: "secret"
+                        version: "v2"
+                        caProvider:
+                          type: ConfigMap
+                          name: vault-ca
+                          key: ca.crt
+                        auth:
+                          kubernetes:
+                            mountPath: "kubernetes"
+                            role: {{ printf "tenant-%s" $team | quote }}
+                            serviceAccountRef:
+                              name: eso-tenant
+                              audiences: ["vault"]
+            {{- /* CONSUMER ExternalSecrets (app-secrets, harbor-pull) are intentionally
+                   NOT rendered here. They are owned by the APP OVERLAY (Backstage
+                   fetch:template / M3 Secrets-UX for app-secrets; track-4
+                   feat/eso-perteam-push for harbor-pull), so each object has exactly
+                   ONE owner — this is what AVOIDS re-introducing the bug #3 dual-owner
+                   race (the very bug ADR-031 eliminates). track-5 (this Composition)
+                   owns the PRODUCER side only: it mints the robots and PushSecrets their
+                   creds into Vault at track-4's committed paths (below), and owns the
+                   platform ESO PLUMBING above (the vault-tenant SecretStore, the
+                   vault-ca ConfigMap, the eso-tenant SA — all platform-owned per
+                   external-secrets/README §6). The app-overlay ExternalSecrets then read
+                   Vault and materialize app-secrets + the harbor-pull dockerconfigjson. */}}
+            {{- end }}
+
+            {{- /* =====================================================================
+                   ENV + PREVIEW ApplicationSets (via provider-kubernetes Object).
+                   Bug #4 (__PRNUM__) + bug #5: typed fields, no literal tokens. The env
+                   ApplicationSet reads the app repo's promotion.yaml (ADR-008) — single
+                   source of truth, unchanged.
+                   ===================================================================== */}}
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation "k8s-appset-envs" }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: argoproj.io/v1alpha1
+                  kind: ApplicationSet
+                  metadata:
+                    name: {{ printf "%s-envs" $team | quote }}
+                    namespace: argocd
+                    labels:
+                      platform.capstone/team: {{ $team | quote }}
+                      platform.capstone/semester: {{ $sem | quote }}
+                      platform.capstone/component: tenant
+                  spec:
+                    goTemplate: true
+                    goTemplateOptions: ["missingkey=error"]
+                    generators:
+                      - matrix:
+                          generators:
+                            - list:
+                                elements:
+                                  - { env: dev }
+                                  - { env: staging }
+                                  - { env: prod }
+                            - git:
+                                repoURL: {{ $repoUrl | quote }}
+                                revision: HEAD
+                                files:
+                                  - path: .devops/promotion.yaml
+                    template:
+                      metadata:
+                        name: '{{ $team }}-{{ `{{.env}}` }}'
+                        labels:
+                          platform.capstone/team: {{ $team | quote }}
+                          platform.capstone/semester: {{ $sem | quote }}
+                          platform.capstone/env: '{{ `{{.env}}` }}'
+                      spec:
+                        project: {{ $team | quote }}
+                        source:
+                          repoURL: {{ $repoUrl | quote }}
+                          targetRevision: HEAD
+                          path: '{{ `{{ (index .environments .env).overlay }}` }}'
+                        destination:
+                          server: https://kubernetes.default.svc
+                          namespace: '{{ $team }}-{{ `{{.env}}` }}'
+                    templatePatch: |
+                      {{ `{{- $gate := (index .environments .env).gate }}` }}
+                      {{ `{{- if eq $gate "auto" }}` }}
+                      spec:
+                        syncPolicy:
+                          automated: { prune: true, selfHeal: true }
+                          syncOptions: ["CreateNamespace=false"]
+                      {{ `{{- else }}` }}
+                      spec:
+                        syncPolicy:
+                          syncOptions: ["CreateNamespace=false"]
+                      {{ `{{- end }}` }}
+            {{- if $preview }}
+            ---
+            # Preview ApplicationSet (security-gated — see tenants/_template/
+            # applicationset-preview.yaml header). Only rendered when previewEnabled=true.
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation "k8s-appset-preview" }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: argoproj.io/v1alpha1
+                  kind: ApplicationSet
+                  metadata:
+                    name: {{ printf "%s-preview" $team | quote }}
+                    namespace: argocd
+                    labels:
+                      platform.capstone/team: {{ $team | quote }}
+                      platform.capstone/semester: {{ $sem | quote }}
+                      platform.capstone/component: tenant
+                  spec:
+                    goTemplate: true
+                    goTemplateOptions: ["missingkey=error"]
+                    generators:
+                      - pullRequest:
+                          github:
+                            owner: UA-MIS
+                            repo: {{ $app | quote }}
+                            appSecretName: argocd-repo-creds-uamis
+                          requeueAfterSeconds: 120
+                    template:
+                      metadata:
+                        name: '{{ $team }}-pr-{{ `{{.number}}` }}'
+                        labels:
+                          platform.capstone/team: {{ $team | quote }}
+                          platform.capstone/semester: {{ $sem | quote }}
+                          platform.capstone/env: preview
+                      spec:
+                        project: {{ $team | quote }}
+                        source:
+                          repoURL: {{ $repoUrl | quote }}
+                          targetRevision: '{{ `{{.head_sha}}` }}'
+                          path: .devops/chart/overlays/preview
+                          kustomize:
+                            namespace: '{{ $team }}-pr-{{ `{{.number}}` }}'
+                            images:
+                              - '{{ $app }}={{ $registry }}/{{ $team }}/{{ $app }}:pull-{{ `{{.head_short_sha_7}}` }}'
+                        destination:
+                          server: https://kubernetes.default.svc
+                          namespace: '{{ $team }}-pr-{{ `{{.number}}` }}'
+                        syncPolicy:
+                          automated: { prune: true, selfHeal: true }
+                          syncOptions: ["CreateNamespace=true"]
+            {{- end }}
+
+            {{- /* =====================================================================
+                   HARBOR ROBOT → VAULT bridge (ESO PushSecret) — the PRODUCER side that
+                   track-4 (feat/eso-perteam-push) explicitly delegated to track-5. The
+                   robot creds captured in the RobotAccount connection secrets (in
+                   crossplane-system, via writeConnectionSecretToRef) are pushed into
+                   Vault at TRACK-4's COMMITTED PATHS, with KV fields `name` + `secret`
+                   (external-secrets/README §7). track-4's app-overlay ExternalSecrets
+                   then template these into the harbor-push / harbor-pull dockerconfigjson
+                   — so SealedSecrets/kubeseal/TARGET-host are retired for robots (bug
+                   #2/#3), with zero human seal/paste (the zero-touch end-state).
+                   Rendered via provider-kubernetes Object so they land in crossplane-system
+                   (next to the connection secrets a PushSecret must read from) and use the
+                   `vault-push` writer SecretStore (config/vault-push-secretstore.yaml).
+                   ⚠ Verify the connection-secret SOURCE keys against provider-harbor
+                   v0.1.1 at Phase-0: Upjet exposes the robot token + full name as
+                   connection details — likely keys `attribute.secret` and
+                   `attribute.full_name` (the Harbor `<project>+<robot>` username). If
+                   full_name isn't surfaced, the username is deterministic
+                   (`<team>+<team>-{push,pull}`) and track-4's template can hardcode it.
+                   ===================================================================== */}}
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation "push-harbor-push" }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: external-secrets.io/v1alpha1
+                  kind: PushSecret
+                  metadata:
+                    name: {{ printf "%s-harbor-push" $team | quote }}
+                    namespace: crossplane-system
+                    labels:
+                      platform.capstone/component: platform
+                  spec:
+                    refreshInterval: "1h"
+                    secretStoreRefs:
+                      - name: vault-push
+                        kind: SecretStore
+                    selector:
+                      secret:
+                        name: {{ printf "%s-harbor-push" $team | quote }}   # the RobotAccount connection secret
+                    data:
+                      - match:
+                          secretKey: "attribute.full_name"
+                          remoteRef:
+                            remoteKey: {{ printf "tenants/%s/ci/harbor-push" $team | quote }}
+                            property: name
+                      - match:
+                          secretKey: "attribute.secret"
+                          remoteRef:
+                            remoteKey: {{ printf "tenants/%s/ci/harbor-push" $team | quote }}
+                            property: secret
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation "push-harbor-pull" }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: external-secrets.io/v1alpha1
+                  kind: PushSecret
+                  metadata:
+                    name: {{ printf "%s-harbor-pull" $team | quote }}
+                    namespace: crossplane-system
+                    labels:
+                      platform.capstone/component: platform
+                  spec:
+                    refreshInterval: "1h"
+                    secretStoreRefs:
+                      - name: vault-push
+                        kind: SecretStore
+                    selector:
+                      secret:
+                        name: {{ printf "%s-harbor-pull" $team | quote }}
+                    # The project-level pull robot is identical across envs; write it to
+                    # each env path track-4 reads (tenants/<team>/<env>/harbor-pull).
+                    data:
+                      {{- range $e := $envs }}
+                      - match:
+                          secretKey: "attribute.full_name"
+                          remoteRef:
+                            remoteKey: {{ printf "tenants/%s/%s/harbor-pull" $team $e.name | quote }}
+                            property: name
+                      - match:
+                          secretKey: "attribute.secret"
+                          remoteRef:
+                            remoteKey: {{ printf "tenants/%s/%s/harbor-pull" $team $e.name | quote }}
+                            property: secret
+                      {{- end }}
+
+            {{- /* =====================================================================
+                   STATUS — surface the derived repo + Harbor project on the XR.
+                   ===================================================================== */}}
+            ---
+            apiVersion: platform.capstone.uamishub.com/v1alpha1
+            kind: CapstoneTenant
+            status:
+              repoUrl: {{ $repoUrl | quote }}
+              harborProject: {{ $team | quote }}
+    # ------------------------------------------------------------------------
+    - step: ready
+      functionRef:
+        name: function-auto-ready
