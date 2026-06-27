@@ -86,9 +86,29 @@ of truth; only `registry` and the trigger change, exactly as designed).
 Platform-managed (part of the immutable `.devops` contract). This file is now a
 **thin caller**: it declares the triggers and `uses:` the **central reusable
 workflow** `UA-MIS/platform-infra/.github/workflows/tenant-build.yaml@v1`, which
-holds the full build+push+bump logic once for every tenant (ADR-031 §8). A CI fix
-lands on `platform-infra` and re-points `@v1`; every tenant picks it up — no
-per-repo re-copy. The triggers and outputs are unchanged:
+holds the full pipeline once for every tenant (ADR-031 §8). A CI fix lands on
+`platform-infra` and re-points `@v1`; every tenant picks it up — no per-repo
+re-copy.
+
+The reusable workflow is a **staged pipeline** (separate jobs wired with `needs:`;
+ease + reliability over speed — a failed gate stops everything downstream):
+
+| Stage | Job | What | Blocking? |
+| --- | --- | --- | --- |
+| 1 | `prepare` | resolve image identity (tag/env/push/registry) + discover the component matrix | — |
+| 2 | `scan` | source secret scan (gitleaks) | yes |
+| 2 | `checks` | per-component lint + unit test (language auto-detected: go/node/python) | yes |
+| 3 | `build-and-push` | per-component Kaniko build+push (`needs: [scan, checks]`) | — |
+| 4 | `bump-dev` | GitOps dev-overlay image bump (push-to-main only) | — |
+
+The IMAGE vulnerability scan stays **Harbor-on-push** (D-028); the `scan` stage is
+the complementary *source* gate (secrets), not a dup.
+
+**Multi-component (FE+BE in one repo):** stages 2–3 run as a **matrix over the
+components** declared in `.devops/components.yaml` (the multicomp component model;
+matrix emitted by `.devops/ci/resolve-components.sh`). Single-component repos have
+no `components.yaml` and build as one implicit component — unchanged. The triggers
+and the tag mechanism are the same for every component:
 
 | Trigger | Resolved env | Image tag | Pushed? |
 | --- | --- | --- | --- |
