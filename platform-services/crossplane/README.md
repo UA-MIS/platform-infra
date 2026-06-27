@@ -63,7 +63,7 @@ Composition. The "Where" column points at the resource in `apis/composition.yaml
 | # | v1check-era bug | Now declarative as | Where |
 | --- | --- | --- | --- |
 | 1 | Harbor project missing → `project not found` | provider-harbor `Project` MR | `harbor-project` |
-| 2 | Shared `harbor-push` last-write-wins collision | per-team push `RobotAccount` → PushSecret → per-team Vault path | `harbor-robot-push`, `push-harbor-push` |
+| 2 | Shared `harbor-push` last-write-wins collision | per-team push `RobotAccount` → PushSecret → per-team Vault path → per-team `gha-runner-scale-set` + hook ConfigMap + `harbor-push-<team>` ExternalSecret | `harbor-robot-push`, `push-harbor-push`, `arc-scaleset`, `arc-hook-cm`, `arc-pushsecret-es` |
 | 3 | `harbor-pull` dual-owner race | single owner: track-4 app-overlay ExternalSecret reads Vault; Composition only PRODUCES the data | `push-harbor-pull` (consumer NOT rendered here — by design) |
 | 4 | `__PRNUM__` never substituted | typed `previewEnabled` + rendered preview ApplicationSet | `k8s-appset-preview` |
 | 5 | `appName`/repo-name mismatch (`v1check-app` vs `v1check`) | repo/registry/host/ns all derive from one `appName` field | `github-repo` + everywhere `$app` |
@@ -135,8 +135,19 @@ reliability-first criterion (no reconcile churn):
   (app overlay) and the Vault paths; track-5 (this) is the PRODUCER it delegated to —
   it mints the robots and PushSecrets their creds into Vault at track-4's committed
   paths (`tenants/<team>/ci/harbor-push`, `tenants/<team>/<env>/harbor-pull`, KV
-  fields `name`+`secret`). The Composition does NOT render the consumer
+  fields `name`+`secret`). The Composition does NOT render the app-overlay consumer
   ExternalSecrets → single owner per object (no new dual-owner race).
+  - **ARC per-team CI push (PR #128 A1).** The Composition also emits the per-team
+    ARC stack — rendered from `platform-services/arc/per-team/*.template.yaml`: a
+    `gha-runner-scale-set` Application (`releaseName: <team>-kaniko` = the `runs-on`
+    label), its container-hook ConfigMap (`arc-hook-template-<team>`), and the
+    `harbor-push-<team>` **ExternalSecret** that materializes the dockerconfigjson
+    from Vault `tenants/<team>/ci/harbor-push` (the zero-touch replacement for
+    `make harbor-push-robot` + seal). This retires the shared-`harbor-push`
+    last-write-wins hole declaratively. Shared bits (`arc-github-app` via ESO from
+    `platform/arc/github-app`, `platform-ca`, the runner netpol) stay
+    finish-eso/operator-owned in `arc-runners`. The provider-kubernetes ClusterRole
+    gained `applications` (the scale-set is an ArgoCD Application).
 
 ## Operator go-live steps (one-time, the human keyboard)
 

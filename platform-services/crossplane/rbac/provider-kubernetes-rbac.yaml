@@ -40,8 +40,10 @@ metadata:
     platform.capstone/component: platform
 rules:
   # --- ArgoCD tenancy objects (created in the argocd namespace) --------------
+  # applications: the per-team ARC runner scale-set is an ArgoCD Application
+  # (finish-eso A1 per-team CI push); appprojects/applicationsets: the tenancy fence.
   - apiGroups: ["argoproj.io"]
-    resources: ["appprojects", "applicationsets"]
+    resources: ["appprojects", "applicationsets", "applications"]
     verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
   # --- Namespace + per-namespace governance (the ns bundle) ------------------
   - apiGroups: [""]

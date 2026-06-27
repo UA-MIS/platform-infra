@@ -992,6 +992,231 @@ spec:
                       {{- end }}
 
             {{- /* =====================================================================
+                   ARC PER-TEAM CI PUSH (finish-eso / track-4 PR #128, A1 model).
+                   One gha-runner-scale-set per team (the container hook can't pick a
+                   secret per-job → per-team scale-set, each mounting its OWN
+                   harbor-push-<team>). Retires the shared harbor-push last-write-wins
+                   hole. Rendered from platform-services/arc/per-team/*.template.yaml,
+                   but ZERO-TOUCH: the push cred is materialized by ESO from Vault
+                   (tenants/<team>/ci/harbor-push, populated by the PushSecret above) —
+                   no `make harbor-push-robot` + seal. Shared (A1, provided by
+                   finish-eso/operator in arc-runners): arc-github-app (ESO from
+                   platform/arc/github-app), platform-ca, runner netpol.
+                   ===================================================================== */}}
+            ---
+            # 1) The per-team container-hook ConfigMap. The scale-set points
+            #    ACTIONS_RUNNER_CONTAINER_HOOK_TEMPLATE here so build pods mount ONLY
+            #    harbor-push-<team> (registry resolved in-cluster to Traefik to dodge the
+            #    Cloudflare 100MB edge cap on image-layer push).
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              name: {{ printf "xp-%s-arc-hook-cm" $team | quote }}
+              annotations:
+                {{ setResourceNameAnnotation "arc-hook-cm" }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: v1
+                  kind: ConfigMap
+                  metadata:
+                    name: {{ printf "arc-hook-template-%s" $team | quote }}
+                    namespace: arc-runners
+                    labels:
+                      platform.capstone/component: platform
+                      platform.capstone/team: {{ $team | quote }}
+                  data:
+                    content: |
+                      spec:
+                        # ⚠ HARDCODED Traefik ClusterIP — keep in sync with the shared
+                        # platform-services/arc/hook-template.yaml (single source).
+                        hostAliases:
+                          - ip: "10.97.22.53"
+                            hostnames:
+                              - {{ $registry }}
+                        containers:
+                          - name: "$job"
+                            volumeMounts:
+                              - name: harbor-push
+                                mountPath: /kaniko/.docker
+                                readOnly: true
+                              - name: platform-ca
+                                mountPath: /kaniko/ssl/certs/platform-ca.crt
+                                subPath: ca.crt
+                                readOnly: true
+                        volumes:
+                          - name: harbor-push
+                            secret:
+                              secretName: {{ printf "harbor-push-%s" $team | quote }}
+                              optional: true
+                              items:
+                                - key: .dockerconfigjson
+                                  path: config.json
+                          - name: platform-ca
+                            configMap:
+                              name: platform-ca
+                              optional: true
+                              items:
+                                - key: ca.crt
+                                  path: ca.crt
+            ---
+            # 2) harbor-push-<team> imagePullSecret materialized by ESO from Vault — the
+            #    zero-touch replacement for the sealed `make harbor-push-robot` output.
+            #    Reads via the platform ClusterSecretStore (vault-backend) and templates
+            #    dockerconfigjson from the name+secret the PushSecret wrote to Vault.
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              name: {{ printf "xp-%s-arc-pushsecret-es" $team | quote }}
+              annotations:
+                {{ setResourceNameAnnotation "arc-pushsecret-es" }}
+            spec:
+              providerConfigRef:
+                name: default
+              references:
+                - dependsOn:
+                    apiVersion: kubernetes.crossplane.io/v1alpha1
+                    kind: Object
+                    name: {{ printf "xp-%s-harborpush" $team | quote }}   # Vault populated first
+              forProvider:
+                manifest:
+                  apiVersion: external-secrets.io/v1
+                  kind: ExternalSecret
+                  metadata:
+                    name: {{ printf "harbor-push-%s" $team | quote }}
+                    namespace: arc-runners
+                    labels:
+                      platform.capstone/component: platform
+                      platform.capstone/team: {{ $team | quote }}
+                  spec:
+                    refreshInterval: "1h"
+                    secretStoreRef:
+                      name: vault-backend
+                      kind: ClusterSecretStore
+                    target:
+                      name: {{ printf "harbor-push-%s" $team | quote }}
+                      creationPolicy: Owner
+                      template:
+                        type: kubernetes.io/dockerconfigjson
+                        data:
+                          .dockerconfigjson: |
+                            {{ `{"auths":{"` }}{{ $registry }}{{ `":{"username":"{{ .name }}","password":"{{ .secret }}","auth":"{{ printf "%s:%s" .name .secret | b64enc }}"}}}` }}
+                    data:
+                      - secretKey: name
+                        remoteRef:
+                          key: {{ printf "tenants/%s/ci/harbor-push" $team | quote }}
+                          property: name
+                      - secretKey: secret
+                        remoteRef:
+                          key: {{ printf "tenants/%s/ci/harbor-push" $team | quote }}
+                          property: secret
+            ---
+            # 3) The per-team runner scale-set (Helm gha-runner-scale-set @0.14.2).
+            #    releaseName == the runs-on label (<team>-kaniko). Gated behind the hook
+            #    ConfigMap + the push ExternalSecret so the runner only starts once its
+            #    cred exists (provision-before-deploy for CI too).
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              name: {{ printf "xp-%s-arc-scaleset" $team | quote }}
+              annotations:
+                {{ setResourceNameAnnotation "arc-scaleset" }}
+            spec:
+              providerConfigRef:
+                name: default
+              references:
+                - dependsOn:
+                    apiVersion: kubernetes.crossplane.io/v1alpha1
+                    kind: Object
+                    name: {{ printf "xp-%s-arc-hook-cm" $team | quote }}
+                - dependsOn:
+                    apiVersion: kubernetes.crossplane.io/v1alpha1
+                    kind: Object
+                    name: {{ printf "xp-%s-arc-pushsecret-es" $team | quote }}
+              forProvider:
+                manifest:
+                  apiVersion: argoproj.io/v1alpha1
+                  kind: Application
+                  metadata:
+                    name: {{ printf "platform-arc-runner-%s" $team | quote }}
+                    namespace: argocd
+                    labels:
+                      platform.capstone/component: platform
+                      platform.capstone/team: {{ $team | quote }}
+                    annotations:
+                      argocd.argoproj.io/sync-wave: "1"
+                    finalizers:
+                      - resources-finalizer.argocd.argoproj.io
+                  spec:
+                    project: platform
+                    source:
+                      repoURL: ghcr.io/actions/actions-runner-controller-charts
+                      chart: gha-runner-scale-set
+                      targetRevision: 0.14.2
+                      helm:
+                        releaseName: {{ printf "%s-kaniko" $team | quote }}
+                        values: |
+                          githubConfigUrl: "https://github.com/UA-MIS"
+                          githubConfigSecret: arc-github-app
+                          controllerServiceAccount:
+                            name: arc-gha-rs-controller
+                            namespace: arc-system
+                          minRunners: 0
+                          maxRunners: 3
+                          containerMode:
+                            type: "kubernetes"
+                            kubernetesModeWorkVolumeClaim:
+                              accessModes: ["ReadWriteOnce"]
+                              storageClassName: "ceph-block"
+                              resources:
+                                requests:
+                                  storage: "5Gi"
+                          template:
+                            spec:
+                              securityContext:
+                                runAsNonRoot: true
+                                runAsUser: 1001
+                                fsGroup: 1001
+                                seccompProfile:
+                                  type: RuntimeDefault
+                              containers:
+                                - name: runner
+                                  image: ghcr.io/actions/actions-runner:2.335.1
+                                  command: ["/home/runner/run.sh"]
+                                  securityContext:
+                                    allowPrivilegeEscalation: false
+                                    capabilities:
+                                      drop: ["ALL"]
+                                  env:
+                                    - name: ACTIONS_RUNNER_CONTAINER_HOOK_TEMPLATE
+                                      value: /home/runner/pod-templates/hook-template.yaml
+                                  volumeMounts:
+                                    - name: hook-template
+                                      mountPath: /home/runner/pod-templates
+                                      readOnly: true
+                                  resources:
+                                    requests: { cpu: "250m", memory: "512Mi" }
+                                    limits:   { cpu: "2",    memory: "2Gi" }
+                              volumes:
+                                - name: hook-template
+                                  configMap:
+                                    name: {{ printf "arc-hook-template-%s" $team | quote }}
+                                    items:
+                                      - key: content
+                                        path: hook-template.yaml
+                    destination:
+                      server: https://kubernetes.default.svc
+                      namespace: arc-runners
+                    syncPolicy:
+                      automated: { prune: true, selfHeal: true }
+                      syncOptions: ["CreateNamespace=false", "ServerSideApply=true"]
+                      retry:
+                        limit: 5
+                        backoff: { duration: 10s, factor: 2, maxDuration: 5m }
+
+            {{- /* =====================================================================
                    STATUS — surface the derived repo + Harbor project on the XR.
                    ===================================================================== */}}
             ---
