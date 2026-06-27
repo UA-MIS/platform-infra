@@ -46,6 +46,20 @@ const APPNAME = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
 const SEMESTER = /^[0-9]{4}-(spring|summer|fall)$/;
 
 /**
+ * Phase-1 (D-009) stand-in for the preview/PR number. `__PRNUM__` appears in the tenant
+ * blueprint's namespaces/preview.yaml (the ephemeral <team>-pr-<n> namespace bundle's
+ * guardrails) and must be substituted to a CONCRETE value or ArgoCD rejects
+ * `Namespace/<team>-pr-__PRNUM__` (invalid name) and the WHOLE tenant sync fails. The
+ * established render is `1`, matching team-sample (namespaces/preview.yaml -> sample-pr-1)
+ * and the blueprint README's token table. The live preview ApplicationSet uses ArgoCD's
+ * own `{{.number}}` generator placeholder (NOT this token) for real per-PR namespaces, so
+ * `__PRNUM__` only ever appears in the static guardrail bundle + docs/comments — a fixed
+ * `1` is correct there. (When org PR-previews are wired, the per-PR namespaces come from
+ * the ApplicationSet generator, not from re-rendering this token.)
+ */
+const PRNUM_STANDIN = '1';
+
+/**
  * Apply the literal-token substitution to a string (path or file contents).
  * `__APPNAME__` is the app repo (UA-MIS/<appName>) — keyed on appName, NOT `<team>-app`:
  * those differ whenever the app isn't literally named `<team>-app`, and the old
@@ -60,7 +74,8 @@ export function substituteTokens(
   return input
     .replace(/__APPNAME__/g, appName)
     .replace(/__TEAM__/g, team)
-    .replace(/__SEMESTER__/g, semester);
+    .replace(/__SEMESTER__/g, semester)
+    .replace(/__PRNUM__/g, PRNUM_STANDIN);
 }
 
 /** Services the action handler needs, injected from the module's registerInit. */

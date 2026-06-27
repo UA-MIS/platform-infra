@@ -1,18 +1,47 @@
 # ============================================================================
-# Ephemeral PREVIEW ApplicationSet (§2.4, D-009) — Phase-1 GIT-BRANCH STAND-IN.
-# Tokens: __TEAM__, __APPNAME__ (the app repo, UA-MIS/<appName>), __SEMESTER__, __PRNUM__.
+# Ephemeral PREVIEW ApplicationSet (§2.4, D-009) — LIVE PR generator.
+# Tokens: __TEAM__, __APPNAME__ (the app repo, UA-MIS/<appName>), __SEMESTER__.
 #
-# D-009: Phase 1 proves ephemeral preview namespaces WITHOUT a live GitHub org.
-# The PRODUCTION trigger is the ArgoCD pullRequest generator (commented seam at
-# the bottom); until GITHUB_ORG previews are wired we use a LIST generator seeded
-# with the known feature branch + preview number. This exercises the SAME
-# primitive (one App per "PR" -> ephemeral <team>-pr-<n> ns -> auto-pruned when
-# the element is removed) so the swap to the live PR generator is one config edit
-# in promotion.yaml — nothing else changes.
+# WHAT THIS DOES: one ephemeral preview environment PER OPEN PULL REQUEST on the
+# team's app repo. The ArgoCD `pullRequest` generator lists the repo's open PRs via
+# the GitHub API and renders one Application per PR -> ephemeral <team>-pr-<n> ns ->
+# the App is auto-deleted when the PR closes/merges (the generator drops the
+# element), and `prune: true` then tears the namespace down. No custom teardown
+# controller (§2.4). A ≤12h TTL backstop for stale/orphaned previews lives in the
+# cohort-gc preview-ttl CronJob (PR #104).
 #
-# Each preview App ALSO needs its namespace guardrails (quota/limitrange/netpol/
-# RBAC from namespaces/preview.yaml). The orchestrating tenant applies those with
-# __PRNUM__ substituted; see namespaces/preview.yaml header.
+# ⚠⚠⚠ DRAFT — DO NOT MERGE WITHOUT SECURITY REVIEW. Enabling this generator makes
+# UNTRUSTED PR code build+push a preview image (see the app repo's
+# .devops/.github/workflows/build-and-push.yaml — pull_request now PUSHes a
+# pull-<sha> image) AND deploy into the cluster. The risk is BOUNDED by the
+# preview-namespace fence (quota/limitrange/default-deny-netpol/restricted-PSA/
+# narrow-RBAC) + the team-scoped harbor-push robot + the disjoint pull-<sha> tag.
+# BLOCKERS the security review MUST resolve before go-live (see the tenant README +
+# the PR description):
+#   (B1) PER-PR GUARDRAILS. CreateNamespace=true makes a BARE namespace; the fence
+#        (ResourceQuota/LimitRange/NetworkPolicy/Role/RoleBinding) is NOT in this
+#        App. A team-project App CANNOT create them anyway — the team AppProject's
+#        namespaceResourceWhitelist excludes Quota/LimitRange/NetworkPolicy/RBAC and
+#        clusterResourceWhitelist is empty (appproject.yaml). So the guardrails MUST
+#        be applied by a PLATFORM-project App. Proposed: a sibling
+#        `applicationset-preview-guardrails.yaml` (project: platform) using the SAME
+#        pullRequest generator, deploying a guardrails kustomize base with
+#        `kustomize.namespace: <team>-pr-<n>`. NOT shipped here to avoid
+#        destabilising the recursing tenants-appset (it would apply a guardrails dir
+#        directly) + the static-pr-1 collision (B4) mid-golden-path. UNTIL B1 lands,
+#        previews are UNFENCED — do not enable.
+#   (B2) PER-PR ESO. The preview overlay's SecretStore/ExternalSecret + the
+#        per-namespace eso-tenant SA->Vault-role binding are written for the static
+#        pr-1 stand-in; each dynamic <team>-pr-<n> needs its own SA bound to the
+#        tenant Vault role (see the overlay header + ADR-030).
+#   (B3) CREDS. The github provider needs API creds to LIST PRs — it reuses PR
+#        #120's `argocd-repo-creds-uamis` GitHub-App secret (appSecretName below).
+#        #120 currently ships PLACEHOLDER ciphertext; the operator must seal the
+#        real ua-mis-backstage App values first or the generator errors.
+#   (B4) STATIC pr-1 COLLISION. namespaces/preview.yaml still renders a static
+#        <team>-pr-1 fence (applied by the tenant bootstrap). With a real PR #1 the
+#        dynamic + static would fight. Coordinate with the m4/v1-preview-pr1-removal
+#        work to drop the static stand-in when the live generator is enabled.
 # ============================================================================
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
@@ -27,17 +56,30 @@ spec:
   goTemplate: true
   goTemplateOptions: ["missingkey=error"]
   generators:
-    # ---- list generator: EMPTY by default (no previews until opted in) ---------
-    # v1: ships with NO elements, so a fresh tenant creates ZERO preview Apps (an
-    # empty list generator is valid and produces nothing). This is deliberate — the
-    # PRODUCTION trigger is the ArgoCD pullRequest generator (commented seam at the
-    # bottom); the list is only a stand-in. A demo element here (number:1 +
-    # branch:preview-demo) would make a real tenant try to deploy a preview from a
-    # branch that doesn't exist → a crash-loop, so it is NOT shipped. To demo a
-    # preview manually, add an element (number + an existing branch); to wire live
-    # PR previews, swap to the pullRequest generator below (post-v1).
-    - list:
-        elements: []
+    # ---- pullRequest generator (github provider) -------------------------------
+    # Lists OPEN PRs on UA-MIS/__APPNAME__ and yields one element per PR. Auto-prunes
+    # the Application when a PR closes/merges (native lifecycle, §2.4).
+    - pullRequest:
+        github:
+          owner: UA-MIS
+          repo: __APPNAME__
+          # GitHub App creds to call the API (reuses PR #120's org-wide repo-creds
+          # GitHub-App secret — same ua-mis-backstage App already sealed for ARC).
+          # appSecretName references a Secret carrying githubAppID /
+          # githubAppInstallationID / githubAppPrivateKey (context7-verified). The
+          # App installation needs Pull requests: Read + Contents: Read on UA-MIS.
+          appSecretName: argocd-repo-creds-uamis
+          # OPT-IN GATE (optional, RECOMMENDED by the security review): uncomment to
+          # only create a preview for PRs carrying the `preview` label, so untrusted
+          # code isn't built+deployed on EVERY PR. Left OFF by default to match the
+          # "auto preview on every PR" v1 scope; the reviewer may require it on.
+          # labels:
+          #   - preview
+        # Re-list interval. 120s balances preview latency against the GitHub API
+        # rate limit of the SHARED org App (every tenant's generator polls it; 30s
+        # would exhaust the budget at cohort scale). The low-latency upgrade is an
+        # ArgoCD applicationset webhook (post-v1); polling is the v1 default.
+        requeueAfterSeconds: 120
   template:
     metadata:
       name: '__TEAM__-pr-{{.number}}'
@@ -49,8 +91,35 @@ spec:
       project: __TEAM__
       source:
         repoURL: https://github.com/UA-MIS/__APPNAME__
-        targetRevision: '{{.branch}}'
+        # Read the overlay from the PR HEAD commit (what the author proposes).
+        targetRevision: '{{.head_sha}}'
         path: .devops/chart/overlays/preview
+        kustomize:
+          # The preview overlay hardcodes the static pr-1 stand-in namespace; stamp
+          # the DYNAMIC per-PR namespace over it so each PR lands in its own ns.
+          namespace: '__TEAM__-pr-{{.number}}'
+          # Pin the image to the preview build CI pushed for THIS PR head. CI tags
+          # pull-<head-sha[0:7]> (resolve-image.sh, fed the PR head sha by the
+          # workflow); head_short_sha_7 is the matching 7-char head sha — so the App
+          # pulls exactly what CI built (else ImagePullBackOff). The `name=` key is
+          # the base image name (__APPNAME__), so kustomize overrides the overlay's
+          # newName+newTag in place.
+          images:
+            - '__APPNAME__=harbor.capstone.uamishub.com/__TEAM__/__APPNAME__:pull-{{.head_short_sha_7}}'
+          # The overlay's Ingress host hardcodes pr-1; rewrite it to the per-PR host
+          # so previews don't collide on one hostname. (Needs the *.pr-*.<domain>
+          # wildcard TLS — see the Cloudflare wildcard note; coordinate at go-live.)
+          patches:
+            - target:
+                kind: Ingress
+                name: __APPNAME__
+              patch: |
+                - op: replace
+                  path: /spec/rules/0/host
+                  value: __APPNAME__.pr-{{.number}}.capstone.uamishub.com
+                - op: replace
+                  path: /spec/tls/0/hosts/0
+                  value: __APPNAME__.pr-{{.number}}.capstone.uamishub.com
       destination:
         server: https://kubernetes.default.svc
         namespace: '__TEAM__-pr-{{.number}}'
@@ -59,29 +128,7 @@ spec:
           prune: true
           selfHeal: true
         syncOptions:
-          - CreateNamespace=true        # preview ns is created on demand
+          - CreateNamespace=true        # preview ns is created on demand (BARE — see B1)
         retry:
           limit: 5
           backoff: { duration: 5s, factor: 2, maxDuration: 3m }
-
-# ============================================================================
-# PRODUCTION SEAM (swap in when GITHUB_ORG previews are wired — D-007/D-009).
-# Replace the `list` generator above with the pullRequest generator below. The
-# template is otherwise unchanged: {{.number}} and {{.head_sha}} come from the
-# generator instead of the hand-maintained list. This is the SINGLE configured
-# place for the PR->preview trigger (promotion.yaml references it).
-#
-#  generators:
-#    - pullRequest:
-#        github:
-#          owner: UA-MIS
-#          repo: __APPNAME__
-#          # tokenRef: { secretName: github-token, key: token }   # via SealedSecret
-#        requeueAfterSeconds: 30
-#  # template.spec.source.targetRevision: '{{.head_sha}}'
-#  # template.spec.source.path: .devops/chart/overlays/preview
-#
-# The pullRequest generator's native lifecycle deletes the Application when the
-# PR closes/merges; `prune: true` then tears down the namespace. No custom
-# teardown controller needed (§2.4).
-# ============================================================================

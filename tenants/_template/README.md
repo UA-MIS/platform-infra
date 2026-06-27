@@ -15,7 +15,17 @@ ApplicationSets. **No imperative `kubectl`, no cluster-admin action.**
 | `namespaces/prod.yaml` | same, `<team>-prod`, higher quota ceiling | §3.2 |
 | `namespaces/preview.yaml` | `<team>-pr-<n>` guardrails (half quota), applied per preview | §3.2, §2.4 |
 | `applicationset-envs.yaml` | matrix (env list × git-files read of the app repo's `promotion.yaml`) → dev/staging/prod Apps; per-env `gate` drives sync policy (prod manual-gated) | §2.3, §4, ADR-008 |
-| `applicationset-preview.yaml` | git-branch stand-in → ephemeral preview Apps (PR-generator seam) | §2.4, D-009 |
+| `applicationset-preview.yaml` | LIVE ArgoCD `pullRequest` generator → one ephemeral `<team>-pr-<n>` preview App per open PR (auto-pruned on close) | §2.4, D-009 |
+
+> **⚠ Preview previews are DRAFT — security review + cred provisioning gated.** The
+> `pullRequest` generator (a) reuses PR #120's `argocd-repo-creds-uamis` GitHub-App
+> secret to list PRs (seal the real values first), and (b) makes UNTRUSTED PR code
+> build+push a `pull-<sha>` image (app repo CI) and deploy it. Before enabling for any
+> live tenant the security review MUST resolve: per-PR guardrails via a platform-project
+> guardrails App (the team AppProject can't create Quota/NetworkPolicy/RBAC); per-PR ESO
+> SA→Vault binding; the `*.pr-*.<domain>` wildcard TLS; and the static `pr-1` collision
+> (coordinate with the pr-1 removal). The ≤12h stale-preview TTL is the cohort-gc
+> `preview-ttl` CronJob (PR #104). See the header of `applicationset-preview.yaml`.
 
 > **No `promotion.yaml` here (ADR-008 / D-011).** The single trigger→target
 > mapping lives canonically in the APP repo at `<appName>/.devops/promotion.yaml`

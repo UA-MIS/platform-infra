@@ -48,7 +48,7 @@ spec:
     spec:
       project: v1check
       source:
-        repoURL: https://github.com/UA-MIS/v1check-app
+        repoURL: https://github.com/UA-MIS/v1check
         targetRevision: '{{.branch}}'
         path: .devops/chart/overlays/preview
       destination:
@@ -75,7 +75,7 @@ spec:
 #    - pullRequest:
 #        github:
 #          owner: UA-MIS
-#          repo: v1check-app
+#          repo: v1check
 #          # tokenRef: { secretName: github-token, key: token }   # via SealedSecret
 #        requeueAfterSeconds: 30
 #  # template.spec.source.targetRevision: '{{.head_sha}}'

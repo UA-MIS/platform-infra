@@ -58,6 +58,21 @@ describe('substituteTokens', () => {
     );
   });
 
+  it('substitutes __PRNUM__ to the Phase-1 stand-in (1) — preview namespace bundle', () => {
+    const out = substituteTokens('name: __TEAM__-pr-__PRNUM__', 'acme', 'acme', '2026-fall');
+    expect(out).toBe('name: acme-pr-1');
+  });
+
+  it('leaves NO raw __*__ token behind for the known tokens', () => {
+    const out = substituteTokens(
+      'name: __TEAM__-pr-__PRNUM__\nrepo: __APPNAME__\nsemester: __SEMESTER__',
+      'acme',
+      'acme-app',
+      '2026-fall',
+    );
+    expect(out).not.toMatch(/__[A-Z0-9_]+__/);
+  });
+
   it('renders the app repo ref to UA-MIS/<appName>, NOT <team>-app (the bug)', () => {
     // team slug (v1check) != appName (v1check) here happens to match, but the point is
     // the ref keys on appName: a team 'acme' with app 'cool-thing' -> UA-MIS/cool-thing.
@@ -98,6 +113,12 @@ describe('capstone:render-tenant', () => {
         content: 'metadata:\n  name: __TEAM__-dev\n',
       },
       {
+        // The ephemeral preview bundle carries __PRNUM__ (the regression that broke
+        // tenant sync when it was left raw -> invalid Namespace/<team>-pr-__PRNUM__).
+        path: 'namespaces/preview.yaml',
+        content: 'metadata:\n  name: __TEAM__-pr-__PRNUM__\n',
+      },
+      {
         // The repo-ref file (appset-envs/appproject shape) — the regression: it must
         // render to UA-MIS/<appName>, NOT <team>-app.
         path: 'applicationset-envs.yaml',
@@ -131,6 +152,10 @@ describe('capstone:render-tenant', () => {
       path.join(base, 'namespaces', 'dev.yaml'),
       'utf8',
     );
+    const previewNs = await fs.readFile(
+      path.join(base, 'namespaces', 'preview.yaml'),
+      'utf8',
+    );
     const envsAs = await fs.readFile(
       path.join(base, 'applicationset-envs.yaml'),
       'utf8',
@@ -140,13 +165,17 @@ describe('capstone:render-tenant', () => {
     expect(appproject).toContain('semester: 2026-fall');
     expect(appproject).not.toContain('__TEAM__');
     expect(devNs).toContain('name: acme-dev');
+    // __PRNUM__ -> 1 (Phase-1 stand-in); no raw token survives anywhere.
+    expect(previewNs).toContain('name: acme-pr-1');
+    expect(previewNs).not.toMatch(/__[A-Z0-9_]+__/);
     // Repo ref keys on appName (UA-MIS/cool-thing), NOT the team or <team>-app.
     expect(envsAs).toContain('repoURL: https://github.com/UA-MIS/cool-thing');
     expect(envsAs).not.toContain('acme-app');
     expect(envsAs).not.toContain('__APPNAME__');
 
     expect(ctx.output).toHaveBeenCalledWith('repoPath', 'tenants/team-acme');
-    expect(ctx.output).toHaveBeenCalledWith('fileCount', 4);
+    // 5 fixtures: appproject + dev + preview + applicationset-envs + README.
+    expect(ctx.output).toHaveBeenCalledWith('fileCount', 5);
   });
 
   it('substitutes tokens in file PATHS, not just contents', async () => {
