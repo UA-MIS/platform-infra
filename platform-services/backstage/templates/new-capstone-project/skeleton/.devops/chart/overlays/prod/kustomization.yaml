@@ -14,15 +14,16 @@ resources:
   # base is optional + deletionPolicy Delete so a fresh repo with no Vault value still
   # deploys — M4 zero-config).
   - app-secret.externalsecret.yaml
-  # harbor-pull image-pull cred (SA imagePullSecrets:[harbor-pull], #C3) — v1 SealedSecret.
-  # The pull robot is Harbor-minted at onboarding (`make harbor-robot`) and committed as a
-  # per-namespace SealedSecret; the stub here ships a placeholder ciphertext the operator
-  # replaces at onboarding (see .devops/README.md). NOT on ESO in v1: a real ESO harbor-pull
-  # needs onboarding to write the robot to Vault first (the make-harbor-robot migration is
-  # on HOLD) — an ExternalSecret at an unpopulated path would be broken. RESERVED for a
-  # post-v1 flip: Vault path `secret/data/tenants/<team>/<env>/harbor-pull` (key
+  # harbor-pull image-pull cred (SA imagePullSecrets:[harbor-pull], #C3) is NOT shipped by
+  # this overlay. It is owned SOLELY by the platform operator's tenant directory
+  # (platform-infra/tenants/<team>/harbor-pull-<env>-sealed.yaml, synced by the tenant-<team>
+  # Application and minted by `make harbor-robot`). The base ServiceAccount keeps
+  # imagePullSecrets:[harbor-pull] so the pod still pulls from the private Harbor project;
+  # the secret is provided out-of-band by that single owner. Shipping a placeholder
+  # SealedSecret here too made harbor-pull a dual-owner resource, triggering ArgoCD's
+  # SharedResourceWarning and blocking sync (twin of the harbor-push fix, #117). RESERVED
+  # for a post-v1 ESO flip: Vault path `secret/data/tenants/<team>/<env>/harbor-pull` (key
   # .dockerconfigjson); ADR-030 follow-on, coordinated with eso-vault.
-  - harbor-pull.sealedsecret.yaml
   # capstone:secrets — The Process "Secrets" tab (M3 ESO rework, ADR-030 §5) adds user
   # secret keys by APPENDING a `data[]` entry to app-secret.externalsecret.yaml above
   # (one ExternalSecret / one k8s Secret `${{ values.appName }}-secret` per env; all keys
