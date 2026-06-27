@@ -77,6 +77,12 @@ the listener can't auth (the app shows Progressing) — expected pre-credential.
     never onto the general runner pod (untrusted non-build steps can't read it).
     Wired via `ACTIONS_RUNNER_CONTAINER_HOOK_TEMPLATE` in
     `applicationsets/arc-runner-scaleset-app.yaml`.
+  - **⚠ SHARED secret = last-write-wins (retro #4).** Today this is the ONE
+    `harbor-push` secret for the ONE org-wide `ua-mis-kaniko` set, so only one team's
+    push cred is live at a time. The **per-team** model (one scale set per team, each
+    hook-template → its own `harbor-push-<team>`, `runs-on: <team>-kaniko`) is designed
+    in **`per-team/README.md`** — the container hook can't select a secret per job, so
+    isolation requires per-team scale sets.
 
 ## Resource posture (local k3d)
 `minRunners: 0` + `maxRunners: 3` + per-runner requests/limits (250m/512Mi →

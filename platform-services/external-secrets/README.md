@@ -118,6 +118,97 @@ kubectl -n sample-dev get secret app-secrets -o jsonpath='{.data.DATABASE_URL}' 
 
 ---
 
+## §6 — Per-tenant onboarding runbook (worked example: v1check)
+
+Greens a tenant's **Degraded `vault-tenant` SecretStore** (the app-repo overlay's
+`secretstore.yaml`). Two things must exist before that store can authenticate:
+the **`tenant-<team>` Vault role** (operator keyboard — a Vault-admin write) and the
+in-ns **`vault-ca` ConfigMap** (the public CA the namespaced store's `caProvider`
+reads). `vault-onboard` does both in one shot; or split the CA off to GitOps (below).
+
+### Fastest — one command (creates role + vault-ca):
+
+```bash
+make vault-onboard NAME=v1check ENV=dev \
+  KUBECONFIG=clusters/real-talos/talos-kubeconfig KUBE_CONTEXT=admin@capstone
+```
+
+### The role-create on its own (the Vault-admin keyboard step, for transparency):
+
+```bash
+# Runs vault-policies/tenant-role.sh inside vault-0 (env-prefixed with the mounted CA
+# so the in-pod vault CLI trusts the server). Creates policy `tenant-v1check-ro`
+# (read on secret/data/tenants/v1check/* ONLY) + k8s-auth role `tenant-v1check`
+# bound to SA eso-tenant in v1check-{dev,staging,prod,preview}, audience=vault.
+kubectl --context admin@capstone -n vault exec -i vault-0 -- \
+  env VAULT_CACERT=/vault/userconfig/vault-server-tls/ca.crt sh -s -- v1check dev \
+  < platform-services/external-secrets/vault-policies/tenant-role.sh
+```
+
+### vault-ca as GitOps (move it off the imperative path):
+
+`vault-onboard` applies `vault-ca` imperatively. To make it declarative instead, emit
+it once (reads the **public** CA — git-safe) and commit it into the tenant dir, where
+`tenants-appset` reconciles it into `v1check-dev`:
+
+```bash
+make vault-ca-manifest NAME=v1check ENV=dev KUBE_CONTEXT=admin@capstone \
+  > tenants/team-v1check/vault-ca-dev.yaml
+git add tenants/team-v1check/vault-ca-dev.yaml && git commit  # then PR
+```
+
+> ⚠ Commit the **real** CA, never a placeholder. The tenant App `selfHeal`s, so a
+> placeholder/empty `data.ca.crt` in git would let ArgoCD overwrite a good
+> imperatively-created ConfigMap (empty CA → store stays Degraded). With the real CA,
+> selfHeal is a feature — it keeps the stable public cert correct. (Agents are
+> classifier-gated from prod secret reads, so the operator runs `vault-ca-manifest`.)
+
+### Verify it cleared:
+
+```bash
+kubectl --context admin@capstone -n v1check-dev get secretstore vault-tenant \
+  -o jsonpath='{.status.conditions}'   # expect Ready/Valid
+kubectl --context admin@capstone -n v1check-dev get externalsecret   # SecretSynced
+```
+
+---
+
+## §7 — Robot-cred → ESO (retiring SealedSecret-robots-in-git)
+
+Two Harbor robot creds still ship as **SealedSecrets in git**, which the v1 secrets
+model (§0, "no secret material in git") aims to retire:
+
+| Secret | Where | Today | Retire to |
+|---|---|---|---|
+| `harbor-pull` | `tenants/team-<team>/` (`<team>-<env>`) | SealedSecret (`make harbor-robot`) | ExternalSecret → `tenants/<team>/<env>/harbor-pull` |
+| `harbor-push-<team>` | `arc-runners` (per-team CI) | SealedSecret (`make harbor-push-robot`) | ExternalSecret → `tenants/<team>/ci/harbor-push` |
+| `arc-github-app` | `arc-runners` | SealedSecret (human) | ExternalSecret → `platform/arc/github-app` (unblocks per-team-ns A2, see `../arc/per-team/README.md`) |
+
+**Mechanism.** ESO can materialize a `kubernetes.io/dockerconfigjson` imagePullSecret
+from Vault via `target.template` — the robot `{name,secret}` live in Vault as KV-v2
+fields and ESO templates them into `.dockerconfigjson`. So the robot mint output goes
+to Vault (`vault kv put` / a `PushSecret`) instead of `kubeseal`, and the in-ns
+SealedSecret file is replaced by an ExternalSecret (names + remoteRef only).
+
+**Safe now (post Vault-live):** the **`harbor-pull`** migration is the low-risk first
+move — the per-tenant `vault-tenant` SecretStore (§6) already exists, so an
+ExternalSecret in the app overlay can pull the robot cred from `tenants/<team>/<env>/
+harbor-pull` and produce the dockerconfigjson. Do it per team behind a verify (pull a
+real image) and keep the SealedSecret until the ESO-materialized pull secret is proven,
+then delete it (single-owner — precedent #123). **`arc-github-app` → ESO** is also safe
+now and is the thing that makes per-team-ns runner isolation (A2) declarative.
+
+**Needs track-5 (Crossplane) for zero-touch:** robot **minting** is still the
+imperative `make harbor-*-robot` + a manual `vault kv put`. Track-5's mint-Job /
+Composition should mint the robot and **write it straight to Vault**, so ESO consumes
+it with no human seal/paste — that's the fully declarative end-state. Until then the
+operator runs the mint once per team and pipes to `vault kv put` instead of `kubeseal`.
+
+**Do not break working:** `harbor-pull` SealedSecrets stay the live path until ESO+Vault
+are permanently live AND the per-tenant store is proven per team. No flag-day.
+
+---
+
 ## Follow-on PRs (OUT OF SCOPE here — noted per orchestrator scope discipline)
 
 This PR is **platform infra only (ESO + Vault up)**. Separate PRs:
