@@ -278,11 +278,19 @@ spec:
             apiVersion: kubernetes.crossplane.io/v1alpha1
             kind: Object
             metadata:
+              # Deterministic Object name so the env/preview ApplicationSet Objects can
+              # dependsOn it (provision-before-deploy ordering — see those Objects).
+              name: {{ printf "xp-%s-appproject" $team | quote }}
               annotations:
                 {{ setResourceNameAnnotation "k8s-appproject" }}
             spec:
               providerConfigRef:
                 name: default
+              # Object is Ready only when the AppProject actually exists (so the XR's
+              # function-auto-ready Ready reflects real provisioning — the signal the
+              # tenant deploy waits on).
+              readiness:
+                policy: DeriveFromObject
               forProvider:
                 manifest:
                   apiVersion: argoproj.io/v1alpha1
@@ -343,11 +351,14 @@ spec:
             apiVersion: kubernetes.crossplane.io/v1alpha1
             kind: Object
             metadata:
+              name: {{ printf "xp-%s-%s-ns" $team $e.name | quote }}
               annotations:
                 {{ setResourceNameAnnotation (printf "k8s-ns-%s" $e.name) }}
             spec:
               providerConfigRef:
                 name: default
+              readiness:
+                policy: DeriveFromObject
               forProvider:
                 manifest:
                   apiVersion: v1
@@ -622,6 +633,7 @@ spec:
             apiVersion: kubernetes.crossplane.io/v1alpha1
             kind: Object
             metadata:
+              name: {{ printf "xp-%s-%s-secretstore" $team $e.name | quote }}
               annotations:
                 {{ setResourceNameAnnotation (printf "k8s-secretstore-%s" $e.name) }}
             spec:
@@ -677,11 +689,46 @@ spec:
             apiVersion: kubernetes.crossplane.io/v1alpha1
             kind: Object
             metadata:
+              name: {{ printf "xp-%s-appset-envs" $team | quote }}
               annotations:
                 {{ setResourceNameAnnotation "k8s-appset-envs" }}
             spec:
               providerConfigRef:
                 name: default
+              # PROVISION-BEFORE-DEPLOY (reliability-first, user's checks→plan→apply→deploy
+              # model). The env ApplicationSet is the thing that generates the workload
+              # Applications — so it is NOT created until the tenant fence + secret plumbing
+              # exist: the AppProject (else the App refs a missing project), the namespaces
+              # (the deploy targets), the per-env SecretStores (so the app-overlay's
+              # ExternalSecrets can resolve), and the Harbor robot→Vault PushSecrets (so the
+              # pull cred is in Vault before the pod pulls → no ImagePullBackOff flap).
+              # provider-kubernetes `dependsOn` blocks this Object's apply until each
+              # referenced Object exists; ArgoCD's own retry/self-heal covers residual
+              # readiness. (The XR's overall Ready, via function-auto-ready + the
+              # DeriveFromObject readiness on these Objects, is the signal to gate on.)
+              references:
+                - dependsOn:
+                    apiVersion: kubernetes.crossplane.io/v1alpha1
+                    kind: Object
+                    name: {{ printf "xp-%s-appproject" $team | quote }}
+                {{- range $e := $envs }}
+                - dependsOn:
+                    apiVersion: kubernetes.crossplane.io/v1alpha1
+                    kind: Object
+                    name: {{ printf "xp-%s-%s-ns" $team $e.name | quote }}
+                - dependsOn:
+                    apiVersion: kubernetes.crossplane.io/v1alpha1
+                    kind: Object
+                    name: {{ printf "xp-%s-%s-secretstore" $team $e.name | quote }}
+                {{- end }}
+                - dependsOn:
+                    apiVersion: kubernetes.crossplane.io/v1alpha1
+                    kind: Object
+                    name: {{ printf "xp-%s-harborpush" $team | quote }}
+                - dependsOn:
+                    apiVersion: kubernetes.crossplane.io/v1alpha1
+                    kind: Object
+                    name: {{ printf "xp-%s-harborpull" $team | quote }}
               forProvider:
                 manifest:
                   apiVersion: argoproj.io/v1alpha1
@@ -744,11 +791,28 @@ spec:
             apiVersion: kubernetes.crossplane.io/v1alpha1
             kind: Object
             metadata:
+              name: {{ printf "xp-%s-appset-preview" $team | quote }}
               annotations:
                 {{ setResourceNameAnnotation "k8s-appset-preview" }}
             spec:
               providerConfigRef:
                 name: default
+              # Same provision-before-deploy gate as the env ApplicationSet.
+              references:
+                - dependsOn:
+                    apiVersion: kubernetes.crossplane.io/v1alpha1
+                    kind: Object
+                    name: {{ printf "xp-%s-appproject" $team | quote }}
+                {{- range $e := $envs }}
+                - dependsOn:
+                    apiVersion: kubernetes.crossplane.io/v1alpha1
+                    kind: Object
+                    name: {{ printf "xp-%s-%s-secretstore" $team $e.name | quote }}
+                {{- end }}
+                - dependsOn:
+                    apiVersion: kubernetes.crossplane.io/v1alpha1
+                    kind: Object
+                    name: {{ printf "xp-%s-harborpull" $team | quote }}
               forProvider:
                 manifest:
                   apiVersion: argoproj.io/v1alpha1
@@ -785,8 +849,17 @@ spec:
                           path: .devops/chart/overlays/preview
                           kustomize:
                             namespace: '{{ $team }}-pr-{{ `{{.number}}` }}'
-                            images:
-                              - '{{ $app }}={{ $registry }}/{{ $team }}/{{ $app }}:pull-{{ `{{.head_short_sha_7}}` }}'
+                            # MULTI-COMPONENT (track-6 / multicomp): per-PR image pinning is
+                            # NOT done here. A repo may have N components (images named
+                            # <appName>-<comp>, all under Harbor project <team> — the
+                            # project-level robots already cover them); this Composition does
+                            # NOT model components (XRD stays component-agnostic by design).
+                            # The preview overlay loops `components` and the overlay+CI set
+                            # each component's pull-<sha> tag at the PR head_sha this App reads
+                            # (multicomp contract). A single-image kustomize `images:` override
+                            # here would assume ONE image and break multi-component previews —
+                            # so it is intentionally omitted. Single-component stays correct
+                            # (its one overlay image is tagged the same way).
                         destination:
                           server: https://kubernetes.default.svc
                           namespace: '{{ $team }}-pr-{{ `{{.number}}` }}'
@@ -819,6 +892,7 @@ spec:
             apiVersion: kubernetes.crossplane.io/v1alpha1
             kind: Object
             metadata:
+              name: {{ printf "xp-%s-harborpush" $team | quote }}
               annotations:
                 {{ setResourceNameAnnotation "push-harbor-push" }}
             spec:
@@ -856,6 +930,7 @@ spec:
             apiVersion: kubernetes.crossplane.io/v1alpha1
             kind: Object
             metadata:
+              name: {{ printf "xp-%s-harborpull" $team | quote }}
               annotations:
                 {{ setResourceNameAnnotation "push-harbor-pull" }}
             spec:

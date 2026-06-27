@@ -77,6 +77,33 @@ Composition. The "Where" column points at the resource in `apis/composition.yaml
 | 13 | SEC-001 malformed RBAC names (blanket `sed`) | XRD `pattern` validation + function rendering (no `sed`) | `apis/xrd.yaml` |
 | 14 | SEC-002 stray files / SEC-006 dangling refs | function emits only known kinds; AppProject+RBAC rendered together | whole Composition |
 
+## Provision-before-deploy (reliability-first)
+
+Mirrors the user's checks→plan→apply→**deploy** model: nothing deploys into
+half-provisioned infra. The env + preview ApplicationSet Objects (which generate the
+workload Applications) carry provider-kubernetes `references[].dependsOn` on the tenant
+fence + secret plumbing — the AppProject, the per-env namespaces, the per-env
+SecretStores, and the Harbor-robot→Vault PushSecrets. provider-kubernetes blocks
+applying the ApplicationSet until those Objects exist, so no workload App is generated
+until the project/namespaces/secret-store/pull-cred are in place (no `ImagePullBackOff`
+flap, no "project not found" race). Key Objects also set `readiness.policy:
+DeriveFromObject`, so the XR's overall Ready (via function-auto-ready) reflects real
+provisioning — the signal a consumer can gate on. ArgoCD's own retry/self-heal covers
+residual readiness after creation.
+
+## Multi-component (N images per repo) — provisioning is component-agnostic
+
+A repo may ship N deployable components (e.g. frontend+backend; track-6 `multicomp`
+owns the repo-content chart). This per-tenant provisioning is **component-agnostic by
+design** — the XRD does **not** model components:
+- Harbor **project + project-level push/pull robots** cover all `<appName>-<comp>`
+  repos under `<team>/` (project scope already spans N images).
+- The tenancy fence (namespaces, quota, netpol, RBAC, ESO) is per-namespace, not
+  per-image.
+- The preview ApplicationSet does **not** hardcode a single-image kustomize override
+  (that would assume one image); per-PR image tags for N components are set by the
+  overlay+CI (multicomp/track-1 contract). Single-component stays correct.
+
 ## Coordination with sibling tracks
 
 - **track-1** (`feat/reusable-tenant-ci-workflow`): the `github-ci-caller`
