@@ -1,0 +1,32 @@
+// Prisma schema — MySQL.
+//
+// The connection string comes from the DATABASE_URL env var. NEVER hardcode it: on
+// the platform it is materialized into the pod by ESO from Vault (set the key
+// DATABASE_URL in The Process "Secrets" tab). Locally, put it in a .env file (which
+// .gitignore excludes), e.g.:
+//   DATABASE_URL="mysql://user:password@127.0.0.1:3306/appdb"
+//
+// After changing models, create + apply a migration:
+//   npx prisma migrate dev --name <change>     # local: creates the migration
+//   npx prisma migrate deploy                  # CI / prod: applies pending migrations
+
+generator client {
+  provider = "prisma-client-js"
+  // native = your machine; debian-openssl-3.0.x = the Debian-slim runtime image
+  // (see app/Dockerfile). Keep both so the generated engine works in dev AND in CI.
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// A tiny sample model so the starter is runnable end-to-end. Replace it with your own.
+model Note {
+  id        Int      @id @default(autoincrement())
+  title     String   @db.VarChar(200)
+  body      String?  @db.Text
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
