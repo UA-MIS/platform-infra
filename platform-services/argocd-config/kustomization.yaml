@@ -30,6 +30,7 @@ kind: Kustomization
 
 resources:
   - sealedsecret.yaml
+  - sealedsecret-repo-creds.yaml   # org-wide private-repo creds (GitHub App) — DRAFT, placeholder ciphertext
   - argocd-cm.yaml
   - argocd-rbac-cm.yaml
   - ingress.yaml
