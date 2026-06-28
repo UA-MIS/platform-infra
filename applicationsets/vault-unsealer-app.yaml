@@ -89,7 +89,6 @@ spec:
                 path = "/vault/data"
               }
 
-              service_registration "kubernetes" {}
               # NOTE: the transit secrets engine (`transit/`) + the `autounseal` key +
               # the auto-unseal policy/token are created by the human runbook
               # (artifacts/design/vault-dr-runbook.md §C) — NOT here (no secret
