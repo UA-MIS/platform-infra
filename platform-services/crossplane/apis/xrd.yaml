@@ -1,0 +1,120 @@
+# ============================================================================
+# CapstoneTenant XRD — THE TENANT ONBOARDING API (ADR-031 §3).
+# ============================================================================
+# A Crossplane v2 CompositeResourceDefinition. This is the ENTIRE per-onboarding
+# surface: a Backstage scaffold emits ONE CapstoneTenant XR carrying ~10
+# schema-validated fields, and the reviewed-once Composition (composition.yaml)
+# expands it into the full tenant (repo + Harbor + Vault + the k8s tenancy fence).
+#
+# Crossplane v2 (apiextensions.crossplane.io/v2): XRs are NAMESPACED by default and
+# there is NO separate Claim — the scaffolder creates the XR directly (verified
+# against current Crossplane v2 docs: scope: Namespaced, Composition.mode: Pipeline).
+#
+# WHY this is a real security gate (not a rubber stamp): the XR is LOW-TRUST — every
+# field below is a string/int/bool bounded by pattern/min/max. A fully automated
+# Backstage emit CANNOT escalate, because the *shape of what is possible* is fixed by
+# this reviewed XRD + the reviewed Composition + the four scoped ProviderConfigs. The
+# pattern/maxLength guards are the SAME DNS-1123 bounds the scaffolder form enforces
+# today (template.yaml) — but here they bound the whole blast radius declaratively,
+# so the SEC-001 blanket-`sed` malformed-name bug class is impossible by construction.
+apiVersion: apiextensions.crossplane.io/v2
+kind: CompositeResourceDefinition
+metadata:
+  name: capstonetenants.platform.capstone.uamishub.com
+  labels:
+    platform.capstone/component: platform
+spec:
+  scope: Namespaced                       # v2 default; XRs live in ns capstone-tenants
+  group: platform.capstone.uamishub.com
+  names:
+    kind: CapstoneTenant
+    plural: capstonetenants
+  versions:
+    - name: v1alpha1
+      served: true
+      referenceable: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: [team, appName, semester]
+              # ⚠ RESERVED-NAME GUARD (CXP-1, privilege-escalation / tenant-isolation).
+              # The XR auto-commits to main via the GitHub App with NO human merge
+              # (branch-protection bypass — ADR-031 §7), so `team`/`appName` are
+              # LOW-TRUST inputs used directly with org-admin + cluster-wide creds.
+              # DNS-1123 format alone is NOT enough: `team: platform` would clobber the
+              # privileged platform AppProject, and `appName: platform-infra` would hand
+              # the tenant push to the infra repo. These CEL rules (Crossplane v2 XRDs
+              # support x-kubernetes-validations) reject reserved names at ADMISSION —
+              # the same denylist is mirrored in the scaffolder (emitTenantClaim.ts) for
+              # defense in depth. Keep the two lists in lockstep.
+              x-kubernetes-validations:
+                - rule: >-
+                    !(self.team in ['platform','argocd','default','kube-system',
+                    'crossplane-system','vault','vault-unsealer','harbor','arc-runners',
+                    'arc-system','sealed-secrets','external-secrets','monitoring',
+                    'cert-manager'])
+                  message: >-
+                    spec.team is a reserved platform/namespace name and cannot be used as
+                    a tenant team slug (would collide with privileged platform RBAC).
+                - rule: >-
+                    !(self.appName in ['platform-infra','capstone-app-template','.github'])
+                  message: >-
+                    spec.appName is a reserved org-infrastructure repo name and cannot be
+                    used as a tenant app name (would collide with an infra repo).
+              properties:
+                team:
+                  type: string
+                  description: >-
+                    Team slug — the ONE canonical key (D-026): AppProject name,
+                    namespace prefix, Harbor project, Vault path, OIDC group suffix.
+                    DNS-1123 label.
+                  pattern: '^[a-z]([-a-z0-9]*[a-z0-9])?$'
+                  maxLength: 30
+                appName:
+                  type: string
+                  description: >-
+                    App/repo slug — the repo name, the workload names, the image name,
+                    and the ingress host segment all derive from this one field (kills
+                    the v1check appName/repo-name mismatch bug class). DNS-1123 label.
+                  pattern: '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'
+                  maxLength: 30
+                semester:
+                  type: string
+                  description: >-
+                    Cohort slug (year-first, e.g. 2026-fall) — the universal
+                    platform.capstone/semester GC/report selector. Matches the
+                    scaffolder's SLUG form.
+                  pattern: '^[0-9]{4}-(spring|summer|fall)$'
+                githubTeam:
+                  type: string
+                  description: GitHub team slug for repo push access. Defaults to `team`.
+                  pattern: '^[a-z]([-a-z0-9]*[a-z0-9])?$'
+                  maxLength: 39
+                port:
+                  type: integer
+                  description: Container port (PORT env + Service/Ingress target).
+                  default: 8080
+                  minimum: 1
+                  maximum: 65535
+                previewEnabled:
+                  type: boolean
+                  description: >-
+                    Enable the per-PR preview ApplicationSet (security-gated — see
+                    tenants/_template/applicationset-preview.yaml). Default off.
+                  default: false
+                domain:
+                  type: string
+                  description: Public base domain for ingress hosts.
+                  default: capstone.uamishub.com
+            status:
+              type: object
+              properties:
+                repoUrl:
+                  type: string
+                  description: The created team app repo URL (set by the Composition).
+                harborProject:
+                  type: string
+                  description: The created Harbor project name (set by the Composition).

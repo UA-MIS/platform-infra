@@ -19,6 +19,7 @@ import { catalogServiceRef } from '@backstage/plugin-catalog-node';
 import { createSealSecretAction } from './actions/sealSecret';
 import { createRenderTenantAction } from './actions/renderTenant';
 import { createHarborOnboardAction } from './actions/harborOnboard';
+import { createEmitTenantClaimAction } from './actions/emitTenantClaim';
 
 export const capstoneScaffolderModule = createBackendModule({
   pluginId: 'scaffolder',
@@ -59,6 +60,14 @@ export const capstoneScaffolderModule = createBackendModule({
           // so the team's first CI build can push. Idempotent (already-exists = OK).
           // catalog+auth: the SEC-020 initiator-owns-team access-control check.
           createHarborOnboardAction({ config, catalog, auth }),
+          // ADR-031 (track-5, Crossplane zero-touch onboarding): emit the ONE
+          // CapstoneTenant XR. The Phase-2 template cutover swaps the imperative
+          // harbor-onboard + render-tenant + onboarding-PR steps for this single
+          // emit + a commit to tenants/_claims/ on main. NOT wired into the live
+          // template until Crossplane is installed + a hand-applied XR is proven
+          // (ADR-031 §11 Phase 2) — see CROSSPLANE-CUTOVER.md. Registering it now is
+          // inert (no template references it yet) and ships the capability.
+          createEmitTenantClaimAction(),
         );
       },
     });

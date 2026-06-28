@@ -1,0 +1,48 @@
+# Crossplane APIs Application (ADR-031). Installs the tenant API surface:
+#   - the `capstone-tenants` namespace the CapstoneTenant XRs live in (v2 XRs are
+#     Namespaced),
+#   - the CapstoneTenant CompositeResourceDefinition (XRD),
+#   - the reviewed-once Composition (the go-templating pipeline that fans one XR out
+#     to repo + Harbor + Vault + the k8s tenancy fence).
+#
+# Separate from crossplane-runtime-app (wave 0) because the Composition's pipeline
+# references the function packages (function-go-templating, function-auto-ready) and
+# the XRD/Composition admission needs the Crossplane apiextensions engine — both of
+# which come up in earlier waves. The XRD also can't validate the rendered managed
+# resources until the provider CRDs are registered (wave 0).
+#
+# ⚠ DO NOT APPLY without the one-time SRE review (ADR-031 constraint #4): the
+# Composition in apis/composition.yaml IS the reviewed-once expansion — it is the
+# blast radius. Read it alongside rbac/provider-kubernetes-rbac.yaml.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-crossplane-apis
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"   # after runtime (0), before claims (2)
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/UA-MIS/platform-infra
+    targetRevision: HEAD
+    path: platform-services/crossplane/apis
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: crossplane-system    # XRD/Composition are cluster-scoped; ns is incidental
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
+      - ServerSideApply=true        # XRDs generate large CRDs — SSA avoids the anno limit
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

@@ -1,0 +1,25 @@
+# ProviderConfig for provider-harbor (globallogicuki). ADR-031 §6 — authenticates
+# as a least-privilege Harbor PROVISIONER ROBOT (project + robot + member admin,
+# NOT harbor-admin). References the placeholder-sealed credentials Secret
+# (creds/harbor-provisioner-creds-sealed.yaml), materialized to `harbor-provider-creds`.
+# The `credentials` key is the JSON the Upjet harbor provider expects:
+#   {"url":"https://harbor.capstone.uamishub.com","username":"robot$provisioner","password":"<token>"}
+# (Use the in-cluster URL or the public host per where the provider Pod resolves
+# Harbor; in-cluster `https://harbor-core.harbor.svc` avoids the Cloudflare 100MB
+# edge cap, though the provider only makes small API calls — verify at apply.)
+#
+# ⚠ Verify the ProviderConfig apiVersion (harbor.crossplane.io/v1beta1) + the
+# credentials JSON keys against the installed provider-harbor v0.1.1 CRDs at Phase-0.
+apiVersion: harbor.crossplane.io/v1beta1
+kind: ProviderConfig
+metadata:
+  name: default
+  labels:
+    platform.capstone/component: platform
+spec:
+  credentials:
+    source: Secret
+    secretRef:
+      namespace: crossplane-system
+      name: harbor-provider-creds
+      key: credentials

@@ -1,0 +1,19 @@
+# ⚠ SECURITY — PLACEHOLDER ciphertext. Reseal with a REAL least-privilege Harbor
+# PROVISIONER ROBOT (project+robot+member admin, NOT harbor-admin) before go-live
+# (see creds/README.md). This stub will NOT decrypt; provider-harbor sits
+# unauthenticated (safe failure mode) until the operator reseals.
+apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: harbor-provider-creds
+  namespace: crossplane-system
+  labels:
+    platform.capstone/component: platform
+spec:
+  encryptedData:
+    credentials: PLACEHOLDER_RESEAL_AT_GO_LIVE_harbor_provisioner_json_DO_NOT_USE
+  template:
+    metadata:
+      name: harbor-provider-creds
+      namespace: crossplane-system
+    type: Opaque

@@ -11,6 +11,10 @@ export type { SealSecretActionDeps } from './actions/sealSecret';
 export { createRenderTenantAction } from './actions/renderTenant';
 export type { RenderTenantActionDeps } from './actions/renderTenant';
 export {
+  createEmitTenantClaimAction,
+  renderCapstoneTenant,
+} from './actions/emitTenantClaim';
+export {
   createHarborOnboardAction,
   ensureHarborProject,
   readHarborConfig,

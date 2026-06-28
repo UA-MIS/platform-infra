@@ -77,6 +77,17 @@ spec:
     # platform-vault will InvalidSpecError "repo not permitted".
     - https://charts.external-secrets.io                  # ESO (platform-external-secrets Application)
     - https://helm.releases.hashicorp.com                 # Vault (platform-vault Application)
+    # Crossplane core (ADR-031, zero-touch tenant onboarding): the Crossplane Helm
+    # chart repo. ONE named source, chart version pinned in the Application
+    # (crossplane @ 2.3.2). ⚠ INSTALL-OWNED (same as the Harbor/ARC/Rook/metrics-
+    # server/Traefik/Backstage/ESO/Vault adds): reaches the live `platform`
+    # AppProject only via `make bootstrap`/`make bootstrap-reapply` + VERIFY (the
+    # AppProject is bootstrap-managed, not GitOps-reconciled) or
+    # platform-crossplane-core will InvalidSpecError "repo not permitted". The
+    # Crossplane PROVIDER/FUNCTION packages are pulled from xpkg.upbound.io by the
+    # Crossplane package manager (NOT an ArgoCD source), so no further sourceRepos
+    # entry is needed for them — only this one Helm chart repo.
+    - https://charts.crossplane.io/stable                 # Crossplane core (platform-crossplane-core Application)
     # Observability (retro #3 "we run the platform blind"): the kube-prometheus-stack
     # chart repo (Prometheus + Alertmanager + Grafana + node-exporter + kube-state-
     # metrics) and the Grafana chart repo (Loki single-binary + Alloy log shipper).

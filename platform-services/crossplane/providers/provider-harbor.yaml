@@ -1,0 +1,25 @@
+# provider-harbor (globallogicuki, Upjet — wraps goharbor/terraform-provider-harbor).
+# ADR-031 §10 + the Step-A spike: this is the provider the spike SELECTED. It
+# exposes `Project` (project.harbor.crossplane.io) and `RobotAccount`
+# (robotaccount.harbor.crossplane.io). The RobotAccount's `secret` field is the
+# upstream TF `secret` (Optional + Computed + Sensitive), so Upjet writes the
+# Harbor-generated robot token to the MR's connection secret
+# (writeConnectionSecretToRef) — which an ESO PushSecret then routes into Vault.
+# THIS is what resolves the ADR's load-bearing open question (robot one-time-token
+# capture): the PRIMARY path is viable, the mint-Job fallback is NOT needed.
+#
+# Auth: a least-privilege Harbor PROVISIONER ROBOT (project + robot + member admin,
+# NOT harbor-admin), via config/providerconfig-harbor.yaml. Derive it once from
+# harbor-admin and seal it (creds/harbor-provisioner-creds-sealed.yaml).
+#
+# ⚠ Provider maturity (ADR-031 Consequences): community provider, v0.1.1. Pin and
+# watch. The unified Harbor v2.15 robot API (memory harbor-robots-unified-api) is
+# the provider's concern now — version-pinned once here, not re-implemented per tenant.
+apiVersion: pkg.crossplane.io/v1
+kind: Provider
+metadata:
+  name: provider-harbor
+  labels:
+    platform.capstone/component: platform
+spec:
+  package: xpkg.upbound.io/globallogicuki/provider-harbor:v0.1.1
