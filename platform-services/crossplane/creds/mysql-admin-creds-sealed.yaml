@@ -1,0 +1,33 @@
+# ⚠ SECURITY — PLACEHOLDER ciphertext (ADR-033). Reseal with a REAL scoped DB-tier
+# MariaDB provisioner credential before go-live (see creds/README.md). This stub will
+# NOT decrypt; provider-sql sits unauthenticated (safe failure mode — no Database/User
+# is created) until the operator reseals against the live cluster's sealed-secrets
+# controller. Agents cannot reach the cluster to seal; this is the operator's keyboard.
+#
+# The credential is a MariaDB login (NOT root) granted ONLY: CREATE/DROP DATABASE,
+# CREATE/DROP USER, and GRANT OPTION on `<team>_<env>` schemas — the least privilege
+# provider-sql needs to mint per-tenant Database+User+Grant (creds/README.md §grants).
+#
+# provider-sql's MySQLConnectionSecret source reads FOUR keys (not a single JSON blob,
+# unlike the github/harbor/vault creds): endpoint, port, username, password. The real
+# seal must carry exactly those four keys.
+apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: db-tier-mysql-admin
+  namespace: crossplane-system
+  labels:
+    platform.capstone/component: platform
+spec:
+  encryptedData:
+    endpoint: PLACEHOLDER_RESEAL_AT_GO_LIVE_db_endpoint_DO_NOT_USE
+    port: PLACEHOLDER_RESEAL_AT_GO_LIVE_db_port_DO_NOT_USE
+    username: PLACEHOLDER_RESEAL_AT_GO_LIVE_db_username_DO_NOT_USE
+    password: PLACEHOLDER_RESEAL_AT_GO_LIVE_db_password_DO_NOT_USE
+  template:
+    metadata:
+      name: db-tier-mysql-admin
+      namespace: crossplane-system
+      labels:
+        platform.capstone/component: platform
+    type: Opaque

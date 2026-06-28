@@ -1,0 +1,38 @@
+# ProviderConfig for provider-sql (ADR-033). Connects to the off-cluster DB tier
+# (ua-mis-db-1, MariaDB 11.8) using a SCOPED admin credential — NOT the MariaDB
+# `root` account. The provisioner only needs CREATE/DROP DATABASE, CREATE/DROP USER,
+# and GRANT on the tenant `<team>_<env>` namespace (see creds/README.md for the exact
+# SQL grants to mint that login). This mirrors the harbor/vault provisioner-robot
+# pattern: the powerful credential lives ONLY in crossplane-system, never in Backstage,
+# never with humans, and is the focal point of the one-time SRE review (ADR-031 §6).
+#
+# The referenced Secret `db-tier-mysql-admin` is materialized from the PLACEHOLDER
+# SealedSecret in creds/mysql-admin-creds-sealed.yaml. provider-sql's
+# `MySQLConnectionSecret` source reads four keys from it — the default secretKeyMapping
+# is endpoint/port/username/password (made explicit below so the SRE can audit it
+# against the sealed keys).
+#
+# ⚠ Phase-0: confirm the ProviderConfig apiVersion (mysql.sql.crossplane.io/v1alpha1)
+# and the secretKeyMapping field names against the installed provider-sql v0.15.0 CRDs.
+# TLS: MariaDB on ua-mis-db-1 is reachable over the trusted Tailscale overlay; if TLS
+# is later enabled on the DB, add the CA via the provider's runtime config (the tailnet
+# is the current transport-security boundary — DB-tier runbook §4).
+apiVersion: mysql.sql.crossplane.io/v1alpha1
+kind: ProviderConfig
+metadata:
+  name: db-tier-mariadb
+  labels:
+    platform.capstone/component: platform
+spec:
+  credentials:
+    source: MySQLConnectionSecret
+    connectionSecretRef:
+      namespace: crossplane-system
+      name: db-tier-mysql-admin
+    # Explicit mapping (these ARE the defaults) — the four keys the placeholder
+    # SealedSecret carries. endpoint = the ua-mis-db-1 tailnet address.
+    secretKeyMapping:
+      endpoint: endpoint
+      port: port
+      username: username
+      password: password

@@ -109,6 +109,19 @@ spec:
                   type: string
                   description: Public base domain for ingress hosts.
                   default: capstone.uamishub.com
+                database:
+                  type: string
+                  description: >-
+                    Automatic per-(team,env) database provisioning (ADR-033). `mysql`
+                    provisions a MariaDB schema + scoped user + grant per environment on
+                    the off-cluster DB tier (provider-sql), pushes the credentials into
+                    Vault at tenants/<team>/<env>/database, and the app's DATABASE_URL
+                    ExternalSecret reads them. `none` provisions no database (the default;
+                    DB-less stacks like the React static SPA leave it unset). The DB
+                    scaffolder templates (Next.js/Prisma, .NET/EF, Python/FastAPI) set
+                    `mysql`; react-static leaves `none`.
+                  enum: [none, mysql]
+                  default: none
             status:
               type: object
               properties:

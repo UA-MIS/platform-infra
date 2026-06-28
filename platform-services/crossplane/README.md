@@ -45,7 +45,7 @@ applicationsets/   crossplane-{core,runtime,apis,claims}-app.yaml (ArgoCD instal
 | Wave | Application | Installs |
 | --- | --- | --- |
 | -1 | `platform-crossplane-core` | Crossplane v2 control plane (Helm `crossplane` 2.3.2) |
-| 0 | `platform-crossplane-runtime` | the 4 Providers + 2 Functions + ProviderConfigs + RBAC + creds |
+| 0 | `platform-crossplane-runtime` | the 5 Providers + 2 Functions + ProviderConfigs + RBAC + creds |
 | 1 | `platform-crossplane-apis` | `capstone-tenants` ns + the XRD + the Composition |
 | 2 | `platform-crossplane-claims` | the committed `CapstoneTenant` XRs |
 
@@ -76,6 +76,18 @@ Composition. The "Where" column points at the resource in `apis/composition.yaml
 | 12 | Image tag 12- vs 7-char gotcha | centralized in the one reusable workflow (track-1) | (CI) |
 | 13 | SEC-001 malformed RBAC names (blanket `sed`) | XRD `pattern` validation + function rendering (no `sed`) | `apis/xrd.yaml` |
 | 14 | SEC-002 stray files / SEC-006 dangling refs | function emits only known kinds; AppProject+RBAC rendered together | whole Composition |
+
+### ADR-033 — automatic per-tenant database provisioning (`database: mysql`)
+
+Optional `database: none|mysql` field on the XR. When `mysql`, the Composition mints,
+per (team,env) on the off-cluster DB tier (`ua-mis-db-1`, MariaDB 11.8) via
+**provider-sql**, a `Database` + `User` + `Grant`; the generated credential is bridged
+into Vault at `tenants/<team>/<env>/database` by an ESO `PushSecret` (same producer
+plane as the Harbor robots). The app's `DATABASE_URL` ExternalSecret reads it. DB-less
+stacks (react-static) leave `none` → zero provider-sql resources. Design + the exact
+Vault path contract: `artifacts/design/decisions/adr-033-auto-database-provisioning.md`.
+⚠ DB tier is draft PR #29 (boxes NOT live) → not e2e-testable yet; admin cred placeholder
+in `creds/mysql-admin-creds-sealed.yaml` (SRE review + reseal at go-live).
 
 ## Provision-before-deploy (reliability-first)
 
