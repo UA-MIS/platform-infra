@@ -131,6 +131,28 @@ spec:
           type: string
           description: One-line description of your project (shown in the catalog).
           default: A UA-MIS capstone project.
+        # App layout: single-component (the DEFAULT golden path — one app/ dir, one
+        # Deployment, e.g. v1check) OR frontend-backend (a webapp with a SEPARATE
+        # frontend + backend in ONE repo — two Dockerfiles, two images, two Deployments,
+        # one Ingress routing "/"->frontend and "/api"->backend, declared in
+        # .devops/components.yaml). Single stays the default; frontend-backend renders the
+        # multi-component skeleton instead. (For >2 components, scaffold frontend-backend
+        # then edit .devops/components.yaml + the chart — see the repo's .devops/README.md.)
+        layout:
+          title: App layout
+          type: string
+          description: >-
+            Single-component (one app) or a frontend + backend webapp in one repo.
+            The Container port above applies to the single-component layout; the
+            frontend-backend layout's per-component ports default to 8080 and are
+            edited in .devops/components.yaml.
+          enum:
+            - single
+            - frontend-backend
+          enumNames:
+            - 'Single component (one app — default)'
+            - 'Frontend + backend (two components, one repo)'
+          default: single
 
     # NOTE: there is intentionally NO separate "Repository" page / repoUrl input.
     # The repo is created at github.com/UA-MIS/<appName> — owner is fixed to UA-MIS and
@@ -145,8 +167,14 @@ spec:
 
   steps:
     # 1) Render the per-team starter (app/ + the 4-field app-metadata.yaml + catalog).
+    #    SINGLE-COMPONENT path (the default). Guarded by layout so the proven golden-path
+    #    render is byte-for-byte unchanged when layout=single (the default); the
+    #    frontend-backend path is the separate fetch-skeleton-multi step below. Exactly
+    #    one of the two fetch steps runs; both write the same workspace, so all downstream
+    #    steps (publish/register/harbor/render-tenant/tenant-pr) are shared + unchanged.
     - id: fetch-skeleton
-      name: Render project skeleton
+      name: Render project skeleton (single component)
+      if: ${{ parameters.layout === "single" }}
       action: fetch:template
       input:
         url: ./skeleton
@@ -194,6 +222,53 @@ spec:
         # (`.github/**`) and the `**/`-prefixed form match a root-level subtree under those
         # options (globby's `**` matches zero leading segments); both are listed so the
         # exclusion holds regardless of where the subtree sits and is obvious to a reader.
+        copyWithoutTemplating:
+          - '.github/**'
+          - '**/.github/**'
+          - '.devops/ci/**'
+          - '**/.devops/ci/**'
+
+    # 1-multi) Render the per-team starter — FRONTEND + BACKEND layout. Same downstream
+    #    contract as single, but from ./skeleton-multi: backend/ + frontend/ dirs (each a
+    #    Dockerfile + minimal app), .devops/components.yaml (the component model), and a
+    #    chart that renders N Deployments/Services + a path-routing Ingress. The
+    #    `components` list below is the SINGLE source the skeleton loops over (nunjucks) to
+    #    render both components.yaml AND the chart, so they cannot drift. The CI workflow +
+    #    .devops/ci/ scripts are copyWithoutTemplating (shipped verbatim), same as single.
+    - id: fetch-skeleton-multi
+      name: Render project skeleton (frontend + backend)
+      if: ${{ parameters.layout === "frontend-backend" }}
+      action: fetch:template
+      input:
+        url: ./skeleton-multi
+        values:
+          appName: ${{ parameters.appName }}
+          team: ${{ parameters.team }}
+          semester: ${{ parameters.year }}-${{ parameters.season | lower }}
+          semesterDisplay: Capstone ${{ parameters.season }} ${{ parameters.year }}
+          port: ${{ parameters.port }}
+          description: ${{ parameters.description }}
+          destination: ${{ ("github.com?owner=UA-MIS&repo=" + parameters.appName) | parseRepoUrl }}
+          # The component model (Track 6 contract). Fixed default = frontend + backend.
+          # image repo per component is derived in the skeleton as <appName>-<name>; ports
+          # default to 8080 (edit .devops/components.yaml post-scaffold to change them or
+          # add components). The skeleton renders one Deployment/Service per entry + one
+          # Ingress path per entry (frontend "/" + backend "/api").
+          components:
+            - name: frontend
+              kind: frontend
+              context: frontend
+              dockerfile: Dockerfile
+              port: 8080
+              path: /
+            - name: backend
+              kind: backend
+              context: backend
+              dockerfile: Dockerfile
+              port: 8080
+              path: /api
+        # Same nunjucks-protection as the single path: ship the GitHub-Actions workflow +
+        # the .devops/ci/ shell scripts VERBATIM (they use ${{ github.* }} / ${VAR}).
         copyWithoutTemplating:
           - '.github/**'
           - '**/.github/**'

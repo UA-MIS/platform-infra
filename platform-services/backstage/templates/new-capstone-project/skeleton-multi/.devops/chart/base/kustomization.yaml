@@ -1,0 +1,26 @@
+# Environment-agnostic base for a MULTI-COMPONENT app. Unlike the single-component
+# chart (one deployment.yaml/service.yaml), this renders N Deployments + N Services
+# (one per component in .devops/components.yaml) plus ONE path-routing Ingress.
+# Overlays patch the per-component image tags, replicas, ingress host, and the
+# mandatory platform.capstone/* labels per env, and each adds its own per-namespace
+# ESO SecretStore + ExternalSecret (ADR-030 B1).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# App-level common labels carried by every object. The platform.capstone/* selector
+# labels (team/semester/env) are set by overlays. includeSelectors:false so these
+# decorative labels do NOT leak into pod selectors — each component's own
+# app.kubernetes.io/component selector (set in the manifests) keeps Services bound to
+# their OWN pods (§3.1).
+labels:
+  - pairs:
+      app.kubernetes.io/name: ${{ values.appName }}
+      app.kubernetes.io/managed-by: argocd
+      platform.capstone/team: ${{ values.team }}
+    includeSelectors: false
+
+resources:
+  - serviceaccount.yaml
+  - deployments.yaml
+  - services.yaml
+  - ingress.yaml

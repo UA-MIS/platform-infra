@@ -1,0 +1,62 @@
+# dev overlay — tracks main, auto-synced by the env ApplicationSet (§2.3).
+# Image seam: dev follows the latest main build (promotion.yaml: dev=main digest).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: ${{ values.team }}-dev
+resources:
+  - ../../base
+  # Per-tenant ESO store + SA (vault-tenant / eso-tenant, scoped to this team's
+  # Vault path) — the tenant half of the ADR-030 B1 secrets contract.
+  - secretstore.yaml
+  # ${{ values.appName }}-secret ExternalSecret (demonstrates the secret path; APP_SECRET in
+  # base is optional + deletionPolicy Delete so a fresh repo with no Vault value still
+  # deploys — M4 zero-config).
+  - app-secret.externalsecret.yaml
+  # harbor-pull image-pull cred (SA imagePullSecrets:[harbor-pull], #C3) is NOT shipped by
+  # this overlay. It is owned SOLELY by the platform operator's tenant directory
+  # (platform-infra/tenants/<team>/harbor-pull-<env>-sealed.yaml, synced by the tenant-<team>
+  # Application and minted by `make harbor-robot`). The base ServiceAccount keeps
+  # imagePullSecrets:[harbor-pull] so the pod still pulls from the private Harbor project;
+  # the secret is provided out-of-band by that single owner. Shipping a placeholder
+  # SealedSecret here too made harbor-pull a dual-owner resource, triggering ArgoCD's
+  # SharedResourceWarning and blocking sync (twin of the harbor-push fix, #117). RESERVED
+  # for a post-v1 ESO flip: Vault path `secret/data/tenants/<team>/<env>/harbor-pull` (key
+  # .dockerconfigjson); ADR-030 follow-on, coordinated with eso-vault.
+  # capstone:secrets — The Process "Secrets" tab (M3 ESO rework, ADR-030 §5) adds user
+  # secret keys by APPENDING a `data[]` entry to app-secret.externalsecret.yaml above
+  # (one ExternalSecret / one k8s Secret `${{ values.appName }}-secret` per env; all keys
+  # share the Vault object `tenants/${{ values.team }}/<env>/app`) — it does NOT add files
+  # here. Manifests must stay INSIDE this overlay dir: a kustomize resource that escapes
+  # the chart/ root (e.g. ../../../secrets/...) fails ArgoCD's default load restrictor.
+# env-specific selector label (§3.1). semester comes from app-metadata via the
+# tenant; set here for the workload's own label contract.
+labels:
+  - pairs:
+      platform.capstone/env: dev
+      platform.capstone/semester: 2026-fall
+    includeSelectors: false
+# Image-tag SEAM (§4.1): ONE images[] entry PER COMPONENT (nunjucks loop). The CI
+# image-bump rewrites every component's newTag to the just-built tag (all components
+# share the one git-describe tag — see .devops/ci/bump-image.sh).
+images:
+{%- for c in values.components %}
+  - name: ${{ values.appName }}-${{ c.name }}
+    newName: harbor.capstone.uamishub.com/${{ values.team }}/${{ values.appName }}-${{ c.name }}
+    newTag: v0.0.0
+{%- endfor %}
+replicas:
+{%- for c in values.components %}
+  - name: ${{ values.appName }}-${{ c.name }}
+    count: 1
+{%- endfor %}
+patches:
+  - target:
+      kind: Ingress
+      name: ${{ values.appName }}
+    patch: |
+      - op: replace
+        path: /spec/rules/0/host
+        value: ${{ values.appName }}.dev.capstone.uamishub.com
+      - op: replace
+        path: /spec/tls/0/hosts/0
+        value: ${{ values.appName }}.dev.capstone.uamishub.com
