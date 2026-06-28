@@ -21,6 +21,16 @@ kind: PrometheusRule
 metadata:
   name: platform-failure-modes
   namespace: monitoring
+  annotations:
+    # Sync-deadlock fix (#127). PrometheusRule is a CRD installed by
+    # platform-kube-prometheus-stack; on a fresh cluster it may not exist when
+    # platform-svc-monitoring first syncs. SkipDryRunOnMissingResource stops the whole
+    # app's sync from hard-failing on the missing type; retry/selfHeal applies this
+    # rule once the CRD registers. sync-wave "1" orders it after the in-app Namespace
+    # (wave 0). Per-resource because platform-svc-monitoring is ApplicationSet-generated
+    # (shared template — no per-app syncOptions). See servicemonitors.yaml.
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+    argocd.argoproj.io/sync-wave: "1"
   labels:
     platform.capstone/component: platform
     release: kube-prometheus-stack
