@@ -1,0 +1,102 @@
+# PER-TEAM ARC runner scale set (retro #4). TEMPLATE: literal `__TEAM__` tokens —
+# NOT a synced manifest. Render per onboarded team and commit into applicationsets/
+# (or let the M4 scaffolder / track-5 Crossplane Composition emit it).
+#
+# WHY one scale set per team (not one org-wide set): the container hook cannot select
+# a secret per job, so per-team push isolation = per-team scale set, each with its own
+# hook-template ConfigMap (per-team/hook-template.template.yaml) → its own
+# `harbor-push-__TEAM__` secret. `runs-on: __TEAM__-kaniko` selects this set.
+#
+# A1 (this template — shared `arc-runners` ns): all per-team scale sets live in
+# arc-runners and SHARE the existing `arc-github-app` SealedSecret, `platform-ca`
+# ConfigMap, and runner NetworkPolicy. Solves last-write-wins + concurrency with the
+# least new wiring. Residual: a runner SA in the shared ns can, in principle, read a
+# sibling team's harbor-push-<other> Secret. To close that (A2) move each team to its
+# own `arc-__TEAM__` ns (then the runner SA is ns-confined) — see per-team/README.md.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-arc-runner-__TEAM__
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+    platform.capstone/team: __TEAM__
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"   # after the controller CRDs (wave 0)
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: ghcr.io/actions/actions-runner-controller-charts
+    chart: gha-runner-scale-set
+    targetRevision: 0.14.2               # pinned (match the controller chart)
+    helm:
+      # releaseName == the runs-on label the team's workflow selects.
+      releaseName: __TEAM__-kaniko
+      values: |
+        githubConfigUrl: "https://github.com/UA-MIS"
+        githubConfigSecret: arc-github-app   # SHARED SealedSecret in arc-runners (A1)
+        controllerServiceAccount:
+          name: arc-gha-rs-controller
+          namespace: arc-system
+        minRunners: 0
+        maxRunners: 3
+        containerMode:
+          type: "kubernetes"
+          kubernetesModeWorkVolumeClaim:
+            accessModes: ["ReadWriteOnce"]
+            storageClassName: "ceph-block"
+            resources:
+              requests:
+                storage: "5Gi"
+        template:
+          spec:
+            securityContext:
+              runAsNonRoot: true
+              runAsUser: 1001
+              fsGroup: 1001
+              seccompProfile:
+                type: RuntimeDefault
+            containers:
+              - name: runner
+                image: ghcr.io/actions/actions-runner:2.335.1
+                command: ["/home/runner/run.sh"]
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  capabilities:
+                    drop: ["ALL"]
+                env:
+                  # Point the hook at THIS team's template (mounted below) → the build
+                  # pod mounts secret harbor-push-__TEAM__ at /kaniko/.docker.
+                  - name: ACTIONS_RUNNER_CONTAINER_HOOK_TEMPLATE
+                    value: /home/runner/pod-templates/hook-template.yaml
+                volumeMounts:
+                  - name: hook-template
+                    mountPath: /home/runner/pod-templates
+                    readOnly: true
+                resources:
+                  requests: { cpu: "250m", memory: "512Mi" }
+                  limits:   { cpu: "2",    memory: "2Gi" }
+            volumes:
+              # Per-team hook template ConfigMap (per-team/hook-template.template.yaml,
+              # rendered → arc-hook-template-__TEAM__).
+              - name: hook-template
+                configMap:
+                  name: arc-hook-template-__TEAM__
+                  items:
+                    - key: content
+                      path: hook-template.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: arc-runners
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }
