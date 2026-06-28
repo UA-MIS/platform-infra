@@ -1,0 +1,120 @@
+# Vault Raft snapshot CronJob (ADR-030 B1, Track-2 DR) — periodic disaster-recovery
+# backups of the main Vault's integrated Raft storage to a Ceph PVC.
+#
+# WHY: Vault is now load-bearing (the single store behind ESO). A corrupt PVC, a
+# fat-fingered `vault delete`, or a botched upgrade has no recovery path WITHOUT a
+# snapshot. `vault operator raft snapshot save` is the supported OSS backup path
+# (the `sys/storage/raft/snapshot-auto` automated API is Vault ENTERPRISE only — so
+# we drive `snapshot save` from this Kubernetes CronJob instead).
+#
+# AUTH (the scoped cred): the job authenticates to Vault via the KUBERNETES auth
+# method as the `vault-snapshot` ServiceAccount, bound to the `snapshot` role whose
+# only policy grants `read` on `sys/storage/raft/snapshot`. NO static token is
+# stored in git — the SA's projected token is exchanged for a short-lived Vault
+# token at run time. The policy + role are created by the human runbook
+# (artifacts/design/vault-dr-runbook.md §D); this manifest only ships the SA, PVC,
+# and CronJob (the GitOps-able half).
+#
+# RESTORE: `vault operator raft snapshot restore <file>` against a running, unsealed
+# Vault — see the runbook §E. RETENTION: the job keeps the newest $RETAIN snapshots
+# (default 14 daily) and prunes older ones from the PVC.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vault-snapshot
+  namespace: vault
+  labels:
+    platform.capstone/component: platform
+---
+# Dedicated PVC for snapshots (Ceph RBD, replica-3 — survives a node loss). Separate
+# from the Vault data PVC so a Vault-data failure does NOT take the backups with it.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vault-snapshots
+  namespace: vault
+  labels:
+    platform.capstone/component: platform
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: ceph-block
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: vault-raft-snapshot
+  namespace: vault
+  labels:
+    platform.capstone/component: platform
+spec:
+  schedule: "0 3 * * *"            # daily at 03:00 (cluster TZ); tune as needed
+  concurrencyPolicy: Forbid        # never overlap snapshot runs
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 600
+      template:
+        metadata:
+          labels:
+            platform.capstone/component: platform
+            app.kubernetes.io/name: vault-raft-snapshot
+        spec:
+          serviceAccountName: vault-snapshot
+          restartPolicy: Never
+          securityContext:
+            # Official hashicorp/vault image runs as uid 100 (vault) / gid 1000;
+            # fsGroup lets that user write the snapshot file onto the Ceph PVC.
+            runAsNonRoot: true
+            runAsUser: 100
+            runAsGroup: 1000
+            fsGroup: 1000
+          containers:
+            - name: snapshot
+              image: hashicorp/vault:1.21.2     # same pinned image as the server
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: VAULT_ADDR
+                  value: "https://vault.vault.svc:8200"
+                - name: VAULT_CACERT
+                  value: "/vault/tls/ca.crt"     # CA that signed the server cert (from vault-server-tls)
+                - name: VAULT_ROLE
+                  value: "snapshot"              # k8s auth role (runbook §D)
+                - name: RETAIN
+                  value: "14"                    # keep newest N snapshots; prune older
+              command: ["/bin/sh", "-ec"]
+              args:
+                - |
+                  JWT="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+                  VAULT_TOKEN="$(vault write -field=token auth/kubernetes/login \
+                      role="${VAULT_ROLE}" jwt="${JWT}")"
+                  export VAULT_TOKEN
+                  TS="$(date -u +%Y%m%dT%H%M%SZ)"
+                  DEST="/snapshots/vault-raft-${TS}.snap"
+                  echo "[snapshot] saving ${DEST}"
+                  vault operator raft snapshot save "${DEST}"
+                  echo "[snapshot] saved $(wc -c < "${DEST}") bytes"
+                  # Retention: keep the newest ${RETAIN}, delete older snapshots.
+                  ls -1t /snapshots/vault-raft-*.snap 2>/dev/null \
+                    | tail -n +"$((RETAIN + 1))" | xargs -r rm -f
+                  echo "[snapshot] retained newest ${RETAIN}:"
+                  ls -1t /snapshots/vault-raft-*.snap 2>/dev/null || true
+              volumeMounts:
+                - name: snapshots
+                  mountPath: /snapshots
+                - name: vault-tls
+                  mountPath: /vault/tls
+                  readOnly: true
+          volumes:
+            - name: snapshots
+              persistentVolumeClaim:
+                claimName: vault-snapshots
+            - name: vault-tls
+              secret:
+                secretName: vault-server-tls   # must include ca.crt (cert-manager provides it)
