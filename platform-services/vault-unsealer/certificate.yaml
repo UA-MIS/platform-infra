@@ -1,0 +1,45 @@
+# Server-TLS Certificate for the unsealer Vault (ADR-030 B1, Track-2 DR).
+#
+# The vault-unsealer StatefulSet (applicationsets/vault-unsealer-app.yaml) mounts the
+# `vault-unsealer-server-tls` Secret for its TLS listener. #126 shipped the StatefulSet
+# but NOT a Certificate to create that Secret → the pod crashed FailedMount. This CR is
+# the fix: cert-manager issues the Secret automatically, so a cluster rebuild / DR
+# reproduces the listener cert with no manual/out-of-band step.
+#
+# Issued by the SAME ClusterIssuer as the main Vault (platform-ca-issuer,
+# cert-manager/clusterissuer.yaml) so the `ca.crt` bytes match — the main Vault verifies
+# the unsealer's TLS via that shared CA (seal.tls_ca_cert / vault-unsealer-ca, runbook §B).
+# A Certificate CR carries NO secret material (cert-manager generates the private key
+# into the Secret), so committing it does not violate B1 (no secrets in git).
+#
+# SANs mirror vault/README.md §C for the unsealer's in-cluster service names. The
+# Namespace in this same dir is created first by ArgoCD's resource-kind ordering; the
+# cross-app dependency on the CA issuer self-heals (cert-manager retries until ready).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: vault-unsealer-server-tls
+  namespace: vault-unsealer
+  labels:
+    platform.capstone/component: platform
+spec:
+  secretName: vault-unsealer-server-tls   # the TLS Secret the StatefulSet mounts
+  duration: 8760h                          # 1y, auto-renewed by cert-manager
+  renewBefore: 720h                        # renew 30d before expiry
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  commonName: vault-unsealer
+  dnsNames:
+    - vault-unsealer
+    - vault-unsealer.vault-unsealer
+    - vault-unsealer.vault-unsealer.svc
+    - vault-unsealer.vault-unsealer.svc.cluster.local
+    - vault-unsealer-internal
+    - "*.vault-unsealer-internal"
+  ipAddresses:
+    - "127.0.0.1"                          # the pod's own VAULT_ADDR=https://127.0.0.1:8200
+  issuerRef:
+    name: platform-ca-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io

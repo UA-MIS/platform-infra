@@ -61,13 +61,14 @@ GitOps surfaces (PR — **do NOT merge/sync until §C is done**, see §D ⚠ ORD
 | --- | --- | --- |
 | Unsealer Shamir keys + root token | **offline** (password manager / sealed env) | unseal + admin the unsealer |
 | Main Vault recovery keys + root token | **offline** | post-migration the main Vault issues *recovery* keys (not unseal keys); needed for `operator` ops (rekey, generate-root) |
-| `vault-unsealer-server-tls` (`tls.crt`,`tls.key`,`ca.crt`) | `vault-unsealer` ns Secret | the unsealer's listener cert |
+| `vault-unsealer-server-tls` (`tls.crt`,`tls.key`,`ca.crt`) | `vault-unsealer` ns Secret | the unsealer's listener cert — **issued automatically by cert-manager** from the committed `platform-services/vault-unsealer/certificate.yaml` (not hand-created) |
 | `vault-unsealer-ca` (`ca.crt`) | `vault` ns Secret | lets the main Vault verify the unsealer's TLS (`seal.tls_ca_cert`) |
 | `vault-transit-unseal-token` (`token`) | `vault` ns Secret | the auto-unseal token (→ `VAULT_TOKEN` in the main Vault) |
 | `vault-server-tls` (`tls.crt`,`tls.key`,`ca.crt`) | `vault` ns Secret | main Vault listener cert (already in vault/README.md §C) — **must include `ca.crt`** so the snapshot CronJob can verify TLS |
 
-**Unsealer cert SANs** (cert-manager `Certificate` or openssl; same pattern as
-vault/README.md §C):
+**Unsealer cert SANs** — these are now baked into the committed
+`platform-services/vault-unsealer/certificate.yaml` (cert-manager Certificate, same
+pattern as vault/README.md §C); listed here for reference:
 
 ```
 vault-unsealer, vault-unsealer.vault-unsealer, vault-unsealer.vault-unsealer.svc,
@@ -88,8 +89,13 @@ same bytes. (cert-manager populates `ca.crt` automatically for CA issuers.)
 > `seal "transit"` change from `vault-app.yaml` has **NOT** yet reached the cluster.
 
 ```bash
-# 1) Create the unsealer's server-TLS Secret (§B SANs) BEFORE its pod can go Ready.
-kubectl -n vault-unsealer get secret vault-unsealer-server-tls   # confirm it exists
+# 1) The unsealer's server-TLS Secret is issued AUTOMATICALLY by cert-manager from
+#    platform-services/vault-unsealer/certificate.yaml (committed — a Certificate CR, no
+#    secret material; same platform-ca-issuer as the main Vault, so ca.crt matches). No
+#    manual/out-of-band step. Just confirm cert-manager has materialized the Secret
+#    BEFORE the pod tries to mount it (else FailedMount until it appears):
+kubectl -n vault-unsealer get certificate vault-unsealer-server-tls   # READY=True
+kubectl -n vault-unsealer get secret vault-unsealer-server-tls        # confirm it exists
 
 # 2) Sync the unsealer app (wave -1) and bring it online (ONE-TIME init + unseal).
 argocd app sync platform-vault-unsealer
@@ -109,8 +115,10 @@ kubectl -n vault-unsealer exec -it vault-unsealer-0 -- sh -ec '
 # 4) Mint a SCOPED auto-unseal token (policy = encrypt/decrypt the autounseal key ONLY).
 kubectl -n vault-unsealer exec -i vault-unsealer-0 -- sh -ec '
   vault policy write autounseal - <<EOF
-path "transit/encrypt/autounseal" { capabilities = ["update"] }
-path "transit/decrypt/autounseal" { capabilities = ["update"] }
+# NB: BOTH "create" and "update" are required (Vault 1.21.2). transit/encrypt evaluates
+# as a CREATE op, so a plain ["update"] policy returns 403 at unseal time (proven live).
+path "transit/encrypt/autounseal" { capabilities = ["create", "update"] }
+path "transit/decrypt/autounseal" { capabilities = ["create", "update"] }
 EOF
   # periodic token so it auto-renews (the main Vault renews it: disable_renewal=false)
   vault token create -policy=autounseal -period=24h -orphan -field=token'
@@ -156,6 +164,13 @@ kubectl -n vault exec -it vault-0 -- vault status   # Sealed=false, Seal Type=tr
 
 # 4) NOTE: after migration the main Vault issues RECOVERY keys (not unseal keys).
 #    Re-key/save them offline:  vault operator rekey -target=recovery ...
+
+# 5) ESO RECOVERY: after the -migrate, External-Secrets will show
+#    `InvalidProviderConfig` on the ClusterSecretStore — this is STALE validation cached
+#    from while the main Vault was sealed during the migration, NOT a real config error.
+#    The main Vault is now unsealed; force ESO to re-validate by restarting it:
+kubectl -n external-secrets rollout restart deploy external-secrets
+kubectl -n external-secrets get clustersecretstore   # STATUS Valid once it reconnects
 ```
 
 ### Snapshot CronJob auth (Vault-side policy + k8s role — one-time)
@@ -240,3 +255,5 @@ kubectl -n vault exec -it vault-0 -- vault kv list secret/   # data present
 | TLS verify error in main Vault logs | `vault-unsealer-ca` wrong/missing | re-create from the unsealer's CA (§C-5) |
 | snapshot CronJob fails `permission denied` | `snapshot` policy/role not created | run §D snapshot-auth block |
 | snapshot CronJob TLS error | `vault-server-tls` missing `ca.crt` | re-issue the cert with `ca.crt` (cert-manager CA issuer) |
+| ESO `InvalidProviderConfig` after a seal migration / Vault outage | stale validation cached while Vault was sealed (not a real config error) | `kubectl -n external-secrets rollout restart deploy external-secrets` (§D-5) |
+| unsealer pod CrashLoop `FailedMount` `vault-unsealer-server-tls` | Certificate not committed / not yet issued | confirm `platform-services/vault-unsealer/certificate.yaml` is applied + cert READY=True (§C-1) |
