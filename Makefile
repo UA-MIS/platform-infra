@@ -595,9 +595,18 @@ harbor-robot: _check-harbor-target ## (P2.2) Create a pull robot for project <na
 # elsewhere (contract with developer).
 RUNNER_NS ?= arc-runners
 
+# Name of the sealed PUSH Secret. Default `harbor-push` is the SHARED, single-team
+# secret the org-wide `ua-mis-kaniko` scale set's hook-template mounts (last-write-
+# wins across teams — retro #4). For the PER-TEAM model (multiple scale sets, one
+# per team, each hook-template referencing its own secret) override this to
+# `harbor-push-<team>` so two teams can hold push creds concurrently without
+# collision — see platform-services/arc/per-team/README.md.
+#   make harbor-push-robot NAME=v1check PUSH_SECRET_NAME=harbor-push-v1check ...
+PUSH_SECRET_NAME ?= harbor-push
+
 .PHONY: harbor-push-robot
-harbor-push-robot: _check-harbor-target ## (P2.3) Create a CI PUSH robot for project <name> -> `harbor-push` SealedSecret on stdout. NAME=<name> [RUNNER_NS=arc-runners]. Override KUBE_CONTEXT (+ TARGET) for non-k3d clusters.
-	@test -n "$(NAME)" || { echo "usage: make harbor-push-robot NAME=<team-slug> [RUNNER_NS=arc-runners] > harbor-push-sealed.yaml"; exit 1; }
+harbor-push-robot: _check-harbor-target ## (P2.3) Create a CI PUSH robot for project <name> -> CI push SealedSecret on stdout. NAME=<name> [RUNNER_NS=arc-runners] [PUSH_SECRET_NAME=harbor-push]. Override KUBE_CONTEXT (+ TARGET) for non-k3d clusters.
+	@test -n "$(NAME)" || { echo "usage: make harbor-push-robot NAME=<team-slug> [RUNNER_NS=arc-runners] [PUSH_SECRET_NAME=harbor-push-<team>] > harbor-push-sealed.yaml"; exit 1; }
 	@command -v kubeseal >/dev/null || { echo "ERROR: kubeseal not found (install to ~/.local/bin)."; exit 1; }
 	@kubectl config get-contexts "$(KUBE_CONTEXT)" >/dev/null 2>&1 \
 	  || { echo "ERROR: kube-context '$(KUBE_CONTEXT)' not found. For the Talos cluster set KUBECONFIG=clusters/real-talos/talos-kubeconfig and KUBE_CONTEXT=admin@capstone." >&2; exit 1; }
@@ -636,8 +645,8 @@ harbor-push-robot: _check-harbor-target ## (P2.3) Create a CI PUSH robot for pro
 	  rsec=$$(printf '%s'  "$$json" | sed -n 's/.*"secret":"\([^"]*\)".*/\1/p'); \
 	  kubectl --context "$$ctx" -n "$$ns" delete job "$$job" --ignore-not-found >/dev/null 2>&1 || true; \
 	  if [ -z "$$rname" ] || [ -z "$$rsec" ]; then echo "ERROR: could not parse robot {name,secret} from: $$json" >&2; exit 1; fi; \
-	  echo "==> robot '$$rname' created (pull+push on '$(NAME)' ONLY); sealing as 'harbor-push' into $(RUNNER_NS)..." >&2; \
-	  kubectl create secret docker-registry harbor-push \
+	  echo "==> robot '$$rname' created (pull+push on '$(NAME)' ONLY); sealing as '$(PUSH_SECRET_NAME)' into $(RUNNER_NS)..." >&2; \
+	  kubectl create secret docker-registry "$(PUSH_SECRET_NAME)" \
 	    --docker-server="$(HARBOR_HOST)" \
 	    --docker-username="$$rname" --docker-password="$$rsec" \
 	    -n "$(RUNNER_NS)" --dry-run=client -o yaml \
@@ -677,6 +686,32 @@ vault-onboard: ## (ESO+Vault) Onboard a tenant for secrets: per-team Vault role 
 	  printf '%s' "$$ca" | kubectl --context "$$ctx" -n "$$tns" create configmap vault-ca --from-file=ca.crt=/dev/stdin \
 	    --dry-run=client -o yaml | kubectl --context "$$ctx" apply -f -; \
 	  echo "vault-onboard: DONE for '$$tns'. NEXT: apply the rendered SecretStore+ExternalSecret (scaffolder #106 / secretstore-template.yaml), then put values via the Backstage secrets-UX or 'vault kv put secret/tenants/$(NAME)/$(ENV)/app KEY=val'."
+
+# ---- GitOps vault-ca (declarative alternative to vault-onboard's [2/2] step) ------
+# Emits the per-tenant `vault-ca` ConfigMap (the PUBLIC Vault CA, git-safe — NOT secret
+# material) to STDOUT so the operator can commit it into tenants/team-<team>/ and let
+# ArgoCD reconcile it declaratively (selfHeal keeps the stable CA correct — safe ONLY
+# because the value is the REAL CA, never a placeholder). This moves vault-ca off the
+# imperative `make vault-onboard` path and into git, per the ESO+Vault onboarding goal.
+# The Vault ROLE still needs the operator's keyboard (tenant-role.sh / vault-onboard);
+# only the CA ConfigMap is GitOps-able. Reads the public CA from the cluster, so the
+# OPERATOR runs this (a prod read) — agents are classifier-gated from prod secret reads.
+#   make vault-ca-manifest NAME=v1check ENV=dev KUBE_CONTEXT=admin@capstone \
+#     > tenants/team-v1check/vault-ca-dev.yaml   # then commit
+.PHONY: vault-ca-manifest
+vault-ca-manifest: ## (ESO+Vault) Emit the per-tenant `vault-ca` ConfigMap (public CA) for GitOps. NAME=<team> ENV=<env> > tenants/team-<team>/vault-ca-<env>.yaml. Override KUBE_CONTEXT for non-k3d.
+	@test -n "$(NAME)" || { echo "usage: make vault-ca-manifest NAME=<team-slug> ENV=<env> > tenants/team-<team>/vault-ca-<env>.yaml" >&2; exit 1; }
+	@test -n "$(ENV)"  || { echo "usage: make vault-ca-manifest NAME=<team-slug> ENV=<env> (dev/staging/prod/preview)" >&2; exit 1; }
+	@kubectl config get-contexts "$(KUBE_CONTEXT)" >/dev/null 2>&1 \
+	  || { echo "ERROR: kube-context '$(KUBE_CONTEXT)' not found. For Talos set KUBECONFIG=clusters/real-talos/talos-kubeconfig and KUBE_CONTEXT=admin@capstone." >&2; exit 1; }
+	@ctx="$(KUBE_CONTEXT)"; tns="$(NAME)-$(ENV)"; \
+	  echo "==> reading PUBLIC Vault CA (vault-server-tls) and emitting vault-ca ConfigMap for ns '$$tns'..." >&2; \
+	  ca=$$(kubectl --context "$$ctx" -n "$(VAULT_NS)" get secret vault-server-tls -o jsonpath='{.data.ca\.crt}' | base64 -d); \
+	  if [ -z "$$ca" ]; then echo "ERROR: vault-server-tls ca.crt empty/not found in ns $(VAULT_NS)" >&2; exit 1; fi; \
+	  printf '%s' "$$ca" | kubectl --context "$$ctx" -n "$$tns" create configmap vault-ca \
+	    --from-file=ca.crt=/dev/stdin --dry-run=client -o yaml \
+	  | kubectl label --local -f - -o yaml --dry-run=client \
+	      platform.capstone/team="$(NAME)" platform.capstone/env="$(ENV)" platform.capstone/component=tenant
 
 # ---- validation gate (T12 hardening) ---------------------------------------
 # Catches the failure classes security flagged so they can't ship again:

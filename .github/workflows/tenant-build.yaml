@@ -1,0 +1,431 @@
+# ============================================================================
+# tenant-build.yaml — the CENTRAL, reusable tenant CI pipeline (P2.3, D-032;
+# ADR-031 §8). `on: workflow_call`. STAGED: prepare -> (scan + checks) ->
+# build-and-push -> bump-dev, as SEPARATE jobs wired with `needs:` (ease +
+# reliability over speed — a failed gate stops everything downstream).
+#
+# WHY THIS FILE EXISTS (the retro's #1 fix — stop copying).
+#   The whole pipeline was COPIED verbatim into every tenant repo, the scaffolder
+#   skeleton, and the Makefile, so a CI fix had to be re-landed in N places — the
+#   root cause behind the ~14-bug onboarding saga. Now the orchestration lives
+#   HERE, once. Every tenant ships a ~10-line CALLER that does
+#     uses: UA-MIS/platform-infra/.github/workflows/tenant-build.yaml@v1
+#   so a fix ships ONCE and every tenant picks it up at the pinned @v1 ref.
+#   (ADR-031 §8 sketched the central file as build-and-push.yaml; we name it
+#   tenant-build.yaml to keep it distinct from the tenant-side CALLER, which is
+#   itself .github/workflows/build-and-push.yaml in each tenant repo.)
+#
+# STAGED PIPELINE (user north star: ease-of-use / reliability / consistency > speed)
+#   1. prepare        — resolve the image identity (tag/env/push/registry) ONCE,
+#                       and discover the COMPONENT MATRIX (single- or multi-component).
+#   2. scan           — secret scan of the source (gitleaks), BLOCKING. The IMAGE
+#                       vuln scan stays Harbor-on-push (D-028); this is the
+#                       complementary SOURCE gate, not a dup.
+#   3. checks         — per-component lint + unit test (language-detected),
+#                       BLOCKING. Runs in parallel with scan.
+#   4. build-and-push — per-component Kaniko build+push. `needs: [scan, checks]`,
+#                       so a failed gate never reaches the registry.
+#   5. bump-dev       — the GitOps dev-overlay image bump (push-to-main only).
+#
+# MULTI-COMPONENT (FE+BE in ONE repo) — consumes the multicomp COMPONENT MODEL.
+#   The component model (`.devops/components.yaml`: per-component name / build
+#   context / Dockerfile / image / port / route / kind) is owned + defined SOLELY
+#   by the multicomp track (one-way authority — this workflow CONSUMES it, never
+#   redefines it). The matrix is produced by `.devops/ci/resolve-components.sh`
+#   (multicomp, task #7) when present; otherwise this workflow falls back to a
+#   SINGLE-component matrix synthesized from promotion.yaml — so single-component
+#   repos (v1check / sample) build EXACTLY as before (full back-compat). The
+#   TAG/ENV/PUSH/REGISTRY are per-COMMIT (identical for every component); only the
+#   image name + build context + Dockerfile differ per component.
+#
+# WHAT STAYS PER-REPO (single source of truth, NOT a copy):
+#   .devops/promotion.yaml          registry/app + trigger->env->tag map
+#   .devops/ci/resolve-image.sh     trigger->image resolver (shared w/ local loop)
+#   .devops/ci/bump-image.sh        the GitOps overlay-tag bump (multicomp #7
+#                                   generalizes it to bump N component entries;
+#                                   single-component behaviour is unchanged)
+#   .devops/ci/resolve-components.sh  the component matrix (multicomp #7; optional)
+#   .devops/chart/overlays/*        the student's deployment surface
+#   These are deliberately scripts (NOT inlined here): the SAME tested
+#   resolver/bumper the LOCAL dev loop uses. Inlining a copy would re-create the
+#   drift this change removes. This workflow CALLS them from the caller's checkout.
+#
+# HOW THE CALLER'S REPO IS USED.
+#   A reusable workflow's `github` context is the CALLER's (event_name/ref/sha/PR
+#   head sha), and `actions/checkout` with no `repository:` checks out the CALLER
+#   (tenant) repo — so this builds the tenant's components, reads the tenant's
+#   promotion.yaml/components.yaml, and runs the tenant's .devops/ci/*. @v1 only
+#   versions THIS yaml.
+#
+# CONTAINER-MODE SHAPE. The ARC runners are containerMode:kubernetes — every job
+# MUST declare a job `container:` or the runner hard-fails at "Set up job". The
+# heavy work (Kaniko build, language toolchains, scanners) runs as `uses: docker://`
+# CONTAINER-ACTION STEPs, which the runner-container-hooks execute in a SEPARATE
+# pod (shared _work volume), so the small node job-container is enough for the
+# Actions internals + checkout.
+# ============================================================================
+name: tenant-build (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      # The self-hosted ARC runner label / scale-set name (every job's runs-on).
+      # Default = the shared platform Kaniko scale set, so single-scale-set tenants
+      # (A1, today) pass NOTHING. Two reasons it's an input:
+      #   - central retarget: rename the shared scale set -> bump this default + @v1,
+      #     no per-tenant edit.
+      #   - PER-TEAM scale sets (finish-eso A2 target, PR #128): when a team moves to
+      #     its own scale set (<team>-kaniko, for a per-team harbor-push robot), the
+      #     caller passes `with: { runner: <team>-kaniko }` — a one-value cutover, no
+      #     workflow change. (Caller seam: see the skeleton build-and-push.yaml.)
+      runner:
+        description: "Self-hosted ARC runner label / scale-set (job runs-on). Per-team: <team>-kaniko."
+        type: string
+        required: false
+        default: ua-mis-kaniko
+
+# Least-privilege DEFAULT. `contents: read` is all the build/scan/checks jobs need.
+# bump-dev RE-DECLARES `contents: write` for itself. NOTE: a reusable workflow can
+# only DOWNGRADE the caller's grant, so the caller's calling job MUST grant
+# `permissions: contents: write` for bump-dev to keep its write scope.
+permissions:
+  contents: read
+
+# Don't pile up redundant builds for the same ref; cancel superseded runs. Scoped
+# per-caller-repo (github.ref is the caller's), so tenants never collide here.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1) prepare — resolve the image identity ONCE (component-independent) and emit
+  # the component MATRIX. Every downstream job keys off these outputs so the
+  # tag/env/push decision is computed in exactly one place (no drift).
+  # ---------------------------------------------------------------------------
+  prepare:
+    runs-on: ${{ inputs.runner }}
+    # node:24-trixie (NOT -slim): resolve-image.sh's git-describe needs git, and we
+    # curl yq. -slim ships neither git nor curl.
+    container:
+      image: node:24-trixie
+    outputs:
+      # The build job COMPOSES the full image ref per component from these:
+      #   IMAGE = <REGISTRY>/<matrix.image (leaf)>:<TAG>
+      # resolve-components.sh emits only the LEAF image (contract 4d8af4a) — registry +
+      # the one per-commit tag come from resolve-image.sh here. PUSH+TAG also drive bump-dev.
+      REGISTRY: ${{ steps.resolve.outputs.REGISTRY }}
+      PUSH: ${{ steps.resolve.outputs.PUSH }}
+      TAG: ${{ steps.resolve.outputs.TAG }}
+      MATRIX: ${{ steps.components.outputs.matrix }}
+    steps:
+      - name: Install yq (pinned + checksum-verified)
+        env:
+          YQ_VERSION: v4.44.3
+          YQ_SHA256: a2c097180dd884a8d50c956ee16a9cec070f30a7947cf4ebf87d5f36213e9ed7
+        run: |
+          set -eu
+          curl -fsSL -o /usr/local/bin/yq \
+            "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+          echo "${YQ_SHA256}  /usr/local/bin/yq" | sha256sum -c -
+          chmod +x /usr/local/bin/yq
+          yq --version
+
+      - name: Checkout (build context + promotion.yaml + .devops/ci + tags)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          # fetch-depth: 0 = full history + ALL TAGS, REQUIRED for resolve-image.sh's
+          # `git describe --tags` (Deploy Model A readable dev tag).
+          fetch-depth: 0
+
+      - name: Install canonical CI scripts (central @v1 — overrides per-repo copies)
+        # Pulls resolve-image.sh / resolve-components.sh / bump-image.sh from platform-infra
+        # @v1 into .devops/ci, so CI runs the ONE central, component-aware script set — a
+        # script fix ships once (no per-repo drift). No cross-repo token (composite action).
+        uses: UA-MIS/platform-infra/.github/actions/tenant-ci-scripts@v1
+
+      - name: Resolve image identity from promotion.yaml (tag/env/push/registry)
+        id: resolve
+        env:
+          # For a pull_request, feed the PR HEAD sha so the preview tag (pull-<head-sha>)
+          # matches what the preview ApplicationSet pulls. Empty for push/tag builds
+          # (resolver falls back to GITHUB_SHA).
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          sh .devops/ci/resolve-image.sh | tee -a "$GITHUB_OUTPUT"
+
+      - name: Discover component matrix (resolve-components.sh)
+        id: components
+        run: |
+          set -eu
+          # resolve-components.sh is the multi-component track's canonical script (installed
+          # centrally by the composite step above, so it is ALWAYS present). Contract 4d8af4a:
+          # it is a pure "list the components" reader — NO tag/registry/push inputs — emitting
+          # a COMPACT JSON ARRAY whose objects carry:
+          #   name       component id            context    build dir (Kaniko --context)
+          #   dockerfile path relative to context
+          #   image      Harbor repo LEAF (e.g. <appName>-<name>); NOT the full ref
+          # The build job composes the full ref: <REGISTRY>/<image>:<TAG>. It emits the
+          # IMPLICIT single component when there is NO components.yaml (image=<promotion.app>),
+          # so it is the single source for both layouts (single stays byte-for-byte).
+          ARR="$(sh .devops/ci/resolve-components.sh)"
+          echo "resolve-components.sh -> $ARR"
+          # strategy.matrix consumes {"include":[...]} — each array entry's keys become
+          # matrix.name / matrix.context / matrix.dockerfile / matrix.image (leaf).
+          echo "matrix={\"include\":${ARR}}" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------------
+  # 2) scan — SOURCE secret scan (gitleaks), BLOCKING. Catches committed secrets
+  # before anything is built or pushed. The IMAGE vulnerability scan is Harbor's
+  # on-push scan (D-028) — this is the complementary source-level gate, not a dup.
+  # Repo-wide (not per-component), so it runs once.
+  # ---------------------------------------------------------------------------
+  scan:
+    needs: prepare
+    runs-on: ${{ inputs.runner }}
+    container:
+      image: node:24-trixie-slim
+    steps:
+      - name: Checkout (working tree to scan)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 1
+      - name: Secret scan (gitleaks — BLOCKING)
+        # Digest-pinned (SEC). gitleaks v8.21.2. `dir` scans the checked-out files
+        # (not git history) — fast, and the working tree is what gets built. Exits
+        # non-zero on any finding, failing the gate before build.
+        uses: docker://zricethezav/gitleaks@sha256:0e99e8821643ea5b235718642b93bb32486af9c8162c8b8731f7cbdc951a7f46 # v8.21.2
+        with:
+          args: dir ${{ github.workspace }} --no-banner --redact --exit-code 1
+
+  # ---------------------------------------------------------------------------
+  # 3) checks — per-component lint + unit test, BLOCKING. Language is auto-detected
+  # from the component's build context (go.mod / package.json / pyproject|requirements)
+  # and the toolchain runs as a `uses: docker://` step in its own pod. Unknown
+  # languages SKIP cleanly (a notice, not a failure) so a valid repo is never
+  # blocked spuriously — but real test failures DO block the build.
+  # ---------------------------------------------------------------------------
+  checks:
+    needs: prepare
+    runs-on: ${{ inputs.runner }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.MATRIX) }}
+    container:
+      image: node:24-trixie-slim
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 1
+      - name: Detect language for component '${{ matrix.name }}'
+        id: detect
+        env:
+          CONTEXT: ${{ matrix.context }}
+        run: |
+          set -eu
+          lang=none
+          if   [ -f "${CONTEXT}/go.mod" ]; then lang=go
+          elif [ -f "${CONTEXT}/package.json" ]; then lang=node
+          elif [ -f "${CONTEXT}/pyproject.toml" ] || [ -f "${CONTEXT}/requirements.txt" ]; then lang=python
+          fi
+          echo "component '${{ matrix.name }}' (context ${CONTEXT}) -> lang=${lang}"
+          echo "lang=${lang}" >> "$GITHUB_OUTPUT"
+
+      - name: Go vet + test
+        if: ${{ steps.detect.outputs.lang == 'go' }}
+        # Digest-pinned (SEC). golang:1.26-alpine (matches the starter Dockerfile's
+        # build base). go vet = lint, go test = unit tests. Both BLOCKING.
+        uses: docker://golang@sha256:3ad57304ad93bbec8548a0437ad9e06a455660655d9af011d58b993f6f615648 # 1.26-alpine
+        with:
+          entrypoint: /bin/sh
+          args: >-
+            -c 'set -eu;
+            cd "${{ github.workspace }}/${{ matrix.context }}";
+            echo "==> go vet"; go vet ./...;
+            echo "==> go test"; go test ./...'
+
+      - name: Node lint + test
+        if: ${{ steps.detect.outputs.lang == 'node' }}
+        # Digest-pinned (SEC). node:24-trixie-slim. `npm run lint --if-present` and
+        # `npm test` (guarded: skip if the package has no test script — npm test
+        # errors otherwise). Both BLOCKING when present.
+        uses: docker://node@sha256:366fdef91728b1b7fa18c84fba63b6e79ed77b7e10cc206878e9705da4d7b169 # 24-trixie-slim
+        with:
+          entrypoint: /bin/sh
+          args: >-
+            -c 'set -eu;
+            cd "${{ github.workspace }}/${{ matrix.context }}";
+            npm ci || npm install;
+            echo "==> npm lint (if present)"; npm run lint --if-present;
+            if npm run | grep -qE "^[[:space:]]+test"; then echo "==> npm test"; npm test;
+            else echo "no test script — skipping"; fi'
+
+      - name: Python lint + test
+        if: ${{ steps.detect.outputs.lang == 'python' }}
+        # Digest-pinned (SEC). python:3-slim. ruff (lint, advisory) + pytest (unit
+        # tests, BLOCKING). Best-effort tool install over :443.
+        uses: docker://python@sha256:63a4c7f612a00f92042cbdcc7cdc6a306f38485af0a200b9c89de7d9b1607d15 # 3-slim
+        with:
+          entrypoint: /bin/sh
+          args: >-
+            -c 'set -eu;
+            cd "${{ github.workspace }}/${{ matrix.context }}";
+            python -m pip install --quiet --root-user-action=ignore pytest ruff;
+            echo "==> ruff (advisory)"; ruff check . || true;
+            echo "==> pytest"; pytest -q'
+
+      - name: No recognized language — checks skipped
+        if: ${{ steps.detect.outputs.lang == 'none' }}
+        run: |
+          echo "::notice::component '${{ matrix.name }}' (context ${{ matrix.context }}):" \
+               "no go.mod/package.json/pyproject — lint+test auto-checks skipped." \
+               "Add a recognized manifest to enable them."
+
+  # ---------------------------------------------------------------------------
+  # 4) build-and-push — per-component Kaniko build (and push). `needs: [scan,
+  # checks]` so a failed gate never reaches the registry. One matrix job per
+  # component; the tag/env/push/registry come from prepare (component-independent).
+  # ---------------------------------------------------------------------------
+  build-and-push:
+    needs: [prepare, scan, checks]
+    runs-on: ${{ inputs.runner }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.MATRIX) }}
+    container:
+      image: node:24-trixie-slim
+    env:
+      DOCKER_CONFIG_DIR: /kaniko/.docker
+    steps:
+      - name: Checkout (build context)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - name: Guard — push builds must have the Harbor cred mounted
+        if: ${{ needs.prepare.outputs.PUSH == 'true' }}
+        run: |
+          echo "push build for ${{ needs.prepare.outputs.REGISTRY }}/${{ matrix.image }}:${{ needs.prepare.outputs.TAG }}" \
+               "— Harbor cred expected at ${DOCKER_CONFIG_DIR}/config.json in the Kaniko step pod"
+
+      # --- Kaniko build as a container-action STEP (its own pod; shared _work) ---
+      # SECURITY — preview (pull_request) PUSHES untrusted PR code, authenticated by
+      # the SAME least-privilege harbor-push robot (pull+push on THIS team's OWN
+      # Harbor project only). The tag is pull-<head-sha>, DISJOINT from dev's
+      # git-describe + prod's semver, so a PR can never overwrite dev/staging/prod;
+      # the image only ever lands in the fenced <team>-pr-<n> preview namespace.
+      - name: Build (and push) component '${{ matrix.name }}' with Kaniko
+        # Digest-pinned (SEC, D-030): the Kaniko image holds the Harbor push cred.
+        # digest = gcr.io/kaniko-project/executor:v1.23.2-debug.
+        uses: docker://gcr.io/kaniko-project/executor@sha256:c3109d5926a997b100c4343944e06c6b30a6804b2f9abe0994d3de6ef92b028e # v1.23.2-debug
+        with:
+          entrypoint: /busybox/sh
+          args: >-
+            -c '
+            set -eu;
+            CFG="${DOCKER_CONFIG_DIR}/config.json";
+            if [ "${PUSH}" = "true" ] && [ ! -s "$CFG" ]; then
+              echo "ERROR: Harbor push credential not found at $CFG — the platform" \
+                   "runner must inject secret harbor-push (container-hook template)." \
+                   "Refusing an unauthenticated push." >&2;
+              exit 1;
+            fi;
+            COMMON="--context=dir://${GITHUB_WORKSPACE}/${CONTEXT}
+                    --dockerfile=${DOCKERFILE}
+                    --destination=${IMAGE}
+                    --reproducible
+                    --verbosity=info";
+            if [ "${PUSH}" = "true" ]; then
+              echo "==> building + pushing ${IMAGE}";
+              /kaniko/executor $COMMON;
+            else
+              echo "==> PR build-only validation for ${IMAGE} (no push)";
+              /kaniko/executor $COMMON --no-push --tar-path=/tmp/image.tar;
+            fi
+            '
+        env:
+          # COMPOSE the full ref from the LEAF (matrix.image, contract 4d8af4a) + the
+          # registry + the one per-commit tag from prepare/resolve-image.sh.
+          IMAGE: ${{ needs.prepare.outputs.REGISTRY }}/${{ matrix.image }}:${{ needs.prepare.outputs.TAG }}
+          PUSH: ${{ needs.prepare.outputs.PUSH }}
+          CONTEXT: ${{ matrix.context }}
+          DOCKERFILE: ${{ matrix.dockerfile }}
+          DOCKER_CONFIG_DIR: ${{ env.DOCKER_CONFIG_DIR }}
+
+  # ============================================================================
+  # 5) bump-dev — the GitOps image-bump (D-030 automated promotion: push -> builds
+  # -> DEPLOYS, hands-free). After build-and-push pushes the dev image(s), rewrite
+  # the dev overlay's images[].newTag to the just-built tag and commit it to main;
+  # ArgoCD syncs the new image into <team>-dev.
+  #
+  # MULTI-COMPONENT: bump-image.sh is generalized by multicomp (task #7) to bump
+  # EVERY component's overlay images[] entry to TAG (one tag per commit for all
+  # components). For single-component repos its behaviour is unchanged. We call it
+  # once with the prepare TAG; the script handles 1..N entries.
+  #
+  # SECURITY (least privilege — SEPARATE job):
+  #   - `if:` restricts to a real push to main OR a manual workflow_dispatch on
+  #     main. NEVER runs on pull_request, so UNTRUSTED PR code can't reach the
+  #     write token.
+  #   - job-scoped `permissions: contents: write` (build/scan/checks keep read).
+  #     Reusable-workflow caveat: the caller's calling job MUST grant
+  #     contents: write or this downgrades to read.
+  #   - loop guard: bump-image.sh's commit message carries `[skip ci]` so the bump
+  #     commit does NOT re-trigger the caller's build (no infinite loop).
+  #
+  # BRANCH PROTECTION (Option A, D-030): main requires PRs; the platform allowlists
+  # `github-actions[bot]` in main's bypass-pull-request-allowances so this job's
+  # GITHUB_TOKEN can push the overlay-tag commit. If the bypass isn't configured the
+  # push fails LOUD (set -e) — never a silent no-deploy.
+  # ============================================================================
+  bump-dev:
+    needs: [prepare, build-and-push]
+    if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && needs.prepare.outputs.PUSH == 'true' }}
+    runs-on: ${{ inputs.runner }}
+    # FULL node image (NOT -slim): bump-image.sh git-commits the overlay and this
+    # job `git push`es it to main; actions/checkout needs git for a real .git +
+    # persist-credentials. -slim ships neither git nor curl.
+    container:
+      image: node:24-trixie
+    permissions:
+      contents: write
+    steps:
+      - name: Install yq (pinned + checksum-verified; bump-image.sh needs it)
+        env:
+          YQ_VERSION: v4.44.3
+          YQ_SHA256: a2c097180dd884a8d50c956ee16a9cec070f30a7947cf4ebf87d5f36213e9ed7
+        run: |
+          set -eu
+          curl -fsSL -o /usr/local/bin/yq \
+            "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+          echo "${YQ_SHA256}  /usr/local/bin/yq" | sha256sum -c -
+          chmod +x /usr/local/bin/yq
+          yq --version
+      - name: Checkout main (writable; full history for a clean commit base)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Install canonical CI scripts (central @v1 — overrides per-repo copies)
+        # Same central bump-image.sh every tenant runs (the component-aware version that
+        # bumps EVERY overlay images[] entry; single-component = the one entry).
+        uses: UA-MIS/platform-infra/.github/actions/tenant-ci-scripts@v1
+
+      - name: Bump dev overlay newTag -> built tag + commit + push
+        env:
+          TAG: ${{ needs.prepare.outputs.TAG }}
+          GIT_AUTHOR_NAME: ua-mis-ci
+          GIT_AUTHOR_EMAIL: ci@capstone.uamishub.com
+          GIT_COMMITTER_NAME: ua-mis-ci
+          GIT_COMMITTER_EMAIL: ci@capstone.uamishub.com
+        run: |
+          set -eu
+          # CONSUME prepare's TAG (readable git-describe; no recompute). bump-image.sh
+          # (COMMIT=1) rewrites the dev overlay newTag(s) + git-commits with a
+          # "[skip ci]" message (so this push does NOT re-trigger build), and marks
+          # the workspace a safe.directory (CI checks out as a different uid).
+          COMMIT=1 sh .devops/ci/bump-image.sh dev "${TAG}"
+          git push origin HEAD:main

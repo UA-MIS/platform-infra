@@ -1,0 +1,50 @@
+# ============================================================================
+# tenant-ci-scripts — the CENTRAL home for the tenant CI shell scripts.
+#
+# WHY (closes the retro #1 residual). PR #125 centralized the orchestration YAML
+# (the reusable workflow), but the CI *scripts* still shipped per-repo, so a future
+# SCRIPT fix was still N-place. This composite action makes the scripts central too:
+# the reusable workflow installs them from HERE at @v1, overwriting whatever copy a
+# tenant repo carries, so a script fix ships ONCE (edit here + re-point @v1) and every
+# tenant's CI picks it up — exactly like the workflow itself.
+#
+# WHY A COMPOSITE ACTION (not a 2nd `actions/checkout` of platform-infra). Checking
+# out a different PRIVATE repo needs a PAT/GitHub-App token (GITHUB_TOKEN is scoped to
+# the caller repo) — that would reintroduce the cross-repo secret #125/D-030 Option A
+# deliberately avoided. A composite action in a private org repo is fetched by the
+# runner via the SAME "accessible from org repos" setting the reusable workflow already
+# needs — NO extra secret. (Context7-verified.)
+#
+# OWNERSHIP (team lock). The script CONTENT under scripts/ is owned + maintained by the
+# multi-component track (resolve-image.sh, resolve-components.sh, bump-image.sh — the
+# generalized, component-aware set that supersedes the old ${APP}-only bump). This
+# action only OWNS THE LOCATION + the install mechanism. Edit the scripts here (the
+# single canonical copy); the tenant skeleton no longer needs to ship them.
+#
+# HOW. The scripts are written to run in-place from the caller's `.devops/ci/` (they
+# locate promotion.yaml / components.yaml relative to themselves and operate on the
+# caller's repo). So this action simply copies the bundled canonical scripts into
+# `$GITHUB_WORKSPACE/.devops/ci/` (after the caller's checkout), overriding any per-repo
+# copy. The workflow then runs `.devops/ci/<script>.sh` exactly as before.
+# ============================================================================
+name: Tenant CI scripts
+description: >-
+  Installs the canonical platform CI scripts (resolve-image, resolve-components,
+  bump-image) into the caller workspace .devops/ci so the reusable workflow runs ONE
+  central, @v1-versioned copy (no per-repo drift, no cross-repo checkout token).
+
+runs:
+  using: composite
+  steps:
+    - name: Install canonical CI scripts into the workspace
+      shell: bash
+      run: |
+        set -euo pipefail
+        dst="${GITHUB_WORKSPACE}/.devops/ci"
+        mkdir -p "$dst"
+        for s in resolve-image.sh resolve-components.sh bump-image.sh; do
+          cp "${GITHUB_ACTION_PATH}/scripts/${s}" "$dst/${s}"
+          chmod +x "$dst/${s}"
+        done
+        echo "installed canonical platform CI scripts into ${dst} (override per-repo copies):"
+        ls -l "$dst"/resolve-image.sh "$dst"/resolve-components.sh "$dst"/bump-image.sh

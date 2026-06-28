@@ -1,0 +1,68 @@
+# PER-TEAM ARC container-hook template (retro #4 — retires the shared `harbor-push`
+# last-write-wins hole). TEMPLATE: literal `__TEAM__` tokens — NOT a synced manifest
+# (the tokens would fail RFC-1123 + the recurse-sync guard). Render per onboarded
+# team (sed 's/__TEAM__/<team>/g') alongside per-team/runner-scaleset-app.template.yaml.
+#
+# This is the SAME Option-C container-hook as platform-services/arc/hook-template.yaml,
+# but parameterized so EACH team's scale set mounts its OWN push secret. The k8s
+# container hook does NOT template/substitute per job (runner-container-hooks reads the
+# pod-spec patch verbatim), so a SINGLE org-wide scale set + ONE static template can
+# only ever name ONE secret — hence per-team isolation requires per-team scale sets,
+# each pointing ACTIONS_RUNNER_CONTAINER_HOOK_TEMPLATE at its own copy of THIS template.
+#
+# WHAT CHANGES vs the shared template:
+#   - ConfigMap name      : arc-hook-template-__TEAM__   (one per scale set)
+#   - mounted push secret : harbor-push-__TEAM__         (project-scoped robot, this
+#                           team's Harbor project ONLY — `make harbor-push-robot
+#                           NAME=__TEAM__ PUSH_SECRET_NAME=harbor-push-__TEAM__`)
+# Everything else (the in-cluster Traefik hostAlias for the registry data plane, the
+# platform-ca trust mount) is identical and shared across teams in the arc-runners ns.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arc-hook-template-__TEAM__
+  namespace: arc-runners
+  labels:
+    platform.capstone/component: platform
+    platform.capstone/team: __TEAM__
+data:
+  content: |
+    spec:
+      # Resolve the Harbor registry host to Traefik IN-CLUSTER so the Kaniko PUSH
+      # never traverses the Cloudflare edge (CF Free/Pro caps request bodies at 100MB
+      # → a >100MB image layer 413s). Points the build pod straight at Traefik's
+      # ClusterIP, which terminates the wildcard TLS and routes by SNI to harbor-core.
+      # ⚠ HARDCODED Traefik ClusterIP (10.97.22.53) — keep in sync with the shared
+      # platform-services/arc/hook-template.yaml (single source of the value):
+      #   kubectl -n kube-system get svc traefik -o jsonpath='{.spec.clusterIP}'
+      hostAliases:
+        - ip: "10.97.22.53"
+          hostnames:
+            - harbor.capstone.uamishub.com
+      containers:
+        - name: "$job"
+          volumeMounts:
+            - name: harbor-push
+              mountPath: /kaniko/.docker
+              readOnly: true
+            - name: platform-ca
+              mountPath: /kaniko/ssl/certs/platform-ca.crt
+              subPath: ca.crt
+              readOnly: true
+      volumes:
+        # PER-TEAM push secret — this scale set's builds can ONLY mount this team's
+        # cred (a build pod never sees another team's harbor-push-<other>).
+        - name: harbor-push
+          secret:
+            secretName: harbor-push-__TEAM__
+            optional: true
+            items:
+              - key: .dockerconfigjson
+                path: config.json
+        - name: platform-ca
+          configMap:
+            name: platform-ca
+            optional: true
+            items:
+              - key: ca.crt
+                path: ca.crt

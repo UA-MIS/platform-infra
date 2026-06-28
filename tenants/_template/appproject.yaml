@@ -35,9 +35,14 @@ spec:
   description: "Tenant project for team __TEAM__ (__SEMESTER__). Team-scoped; no cluster-scoped resources."
 
   # --- source repos: the team's app repo + platform-infra (for its tenant dir) ---
+  # App repo = UA-MIS/<appName> (the scaffolder creates the repo AS the app name,
+  # no `-app` suffix — see template.yaml publish:github). __APPNAME__ is substituted
+  # to the appName, NOT `__TEAM__-app` (those differ for any team whose app isn't
+  # literally named `<team>-app`; the old `__TEAM__-app` form pointed ArgoCD at a
+  # non-existent repo -> "repository not found").
   sourceRepos:
-    - https://github.com/UA-MIS/__TEAM__-app
-    - https://github.com/UA-MIS/__TEAM__-app.git
+    - https://github.com/UA-MIS/__APPNAME__
+    - https://github.com/UA-MIS/__APPNAME__.git
     - https://github.com/UA-MIS/platform-infra
     - https://github.com/UA-MIS/platform-infra.git
 
