@@ -1,0 +1,101 @@
+# Grafana Alloy Application (Observability, retro #3) — the log SHIPPER that tails
+# every pod's logs and pushes them to Loki (platform-loki). Runs as a DaemonSet (one
+# collector per node). Alloy is Grafana's current, supported collector; Promtail is
+# deprecated/EOL, so we ship Alloy rather than Promtail.
+#
+# Deploy method A (D-022/D-028): Helm-source Application, chart repo pinned +
+# allowlisted in the `platform` AppProject sourceRepos (the grafana.github.io repo,
+# already added for Loki). Root-app recurses applicationsets/, so this is registered.
+#
+# Chart: grafana/alloy 1.10.0 (appVersion Alloy v1.17.0), pinned. Bump deliberately.
+#
+# Collection model: loki.source.kubernetes reads pod logs via the Kubernetes API
+# (no host /var/log/pods hostPath mount needed — simpler + works on Talos). Each log
+# line is labelled with namespace / pod / container / node / app so it joins up with
+# the metrics in Grafana.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-alloy
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://grafana.github.io/helm-charts   # PINNED chart repo (sourceRepos allowlist)
+    chart: alloy
+    targetRevision: 1.10.0                            # pinned chart version (appVersion v1.17.0); no ^/~/latest
+    helm:
+      releaseName: alloy
+      values: |
+        controller:
+          type: daemonset                  # one log collector per node
+
+        alloy:
+          configMap:
+            content: |
+              logging {
+                level  = "info"
+                format = "logfmt"
+              }
+
+              // Discover pods cluster-wide; loki.source.kubernetes only tails the
+              // ones whose containers are on THIS node (DaemonSet-local).
+              discovery.kubernetes "pods" {
+                role = "pod"
+              }
+
+              // Promote pod metadata into Loki stream labels.
+              discovery.relabel "pods" {
+                targets = discovery.kubernetes.pods.targets
+                rule {
+                  source_labels = ["__meta_kubernetes_pod_node_name"]
+                  target_label  = "node"
+                }
+                rule {
+                  source_labels = ["__meta_kubernetes_namespace"]
+                  target_label  = "namespace"
+                }
+                rule {
+                  source_labels = ["__meta_kubernetes_pod_name"]
+                  target_label  = "pod"
+                }
+                rule {
+                  source_labels = ["__meta_kubernetes_pod_container_name"]
+                  target_label  = "container"
+                }
+                rule {
+                  source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name"]
+                  target_label  = "app"
+                }
+              }
+
+              loki.source.kubernetes "pods" {
+                targets    = discovery.relabel.pods.output
+                forward_to = [loki.write.default.receiver]
+              }
+
+              loki.write "default" {
+                endpoint {
+                  url = "http://loki.monitoring.svc.cluster.local:3100/loki/api/v1/push"
+                }
+              }
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 256Mi }
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false      # monitoring ns ships via platform-services/monitoring
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

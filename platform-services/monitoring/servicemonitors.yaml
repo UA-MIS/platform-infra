@@ -1,0 +1,79 @@
+# Cross-component scrape configs (Observability, retro #3). These tell Prometheus to
+# scrape the /metrics of platform components that live in OTHER namespaces, so the
+# alerts in alerts.yaml have data. Prometheus discovers these because
+# kube-prometheus-stack sets serviceMonitor/podMonitorSelectorNilUsesHelmValues:false
+# (match-all, all namespaces); the `release` label is belt-and-suspenders.
+#
+# The kube-prometheus-stack components (Prometheus, Alertmanager, Grafana, node-
+# exporter, kube-state-metrics) and Loki ship their OWN ServiceMonitors via their
+# charts — only the three below need to be added by us (their charts don't create a
+# ServiceMonitor by default in this install).
+---
+# ArgoCD application-controller metrics — source of argocd_app_info{health_status,
+# sync_status} for the ArgoCDAppDegraded / ArgoCDAppStuckOutOfSync alerts. The
+# `argocd-metrics` Service is part of the upstream ArgoCD install (bootstrap/argocd-
+# install, v3.4.3).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: argocd-application-controller
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames: ["argocd"]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: argocd-metrics
+  endpoints:
+    - port: metrics
+      interval: 30s
+---
+# cert-manager controller metrics — source of
+# certmanager_certificate_expiration_timestamp_seconds for CertManagerCertExpiringSoon.
+# The `cert-manager` Service (port tcp-prometheus-servicemonitor / 9402) is part of
+# the upstream cert-manager install (platform-services/cert-manager, v1.20.2).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: cert-manager
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames: ["cert-manager"]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cert-manager
+      app.kubernetes.io/component: controller
+  endpoints:
+    - port: tcp-prometheus-servicemonitor
+      interval: 30s
+---
+# External Secrets Operator controller metrics — source of
+# externalsecret_status_condition / clustersecretstore_status_condition /
+# secretstore_status_condition for the ESO alerts. The ESO chart does NOT create a
+# metrics Service by default, so we scrape the controller POD directly (PodMonitor)
+# on its named `metrics` port (8080). The matchLabels select ONLY the main controller
+# (the webhook + cert-controller pods have different app.kubernetes.io/name values).
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: external-secrets
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames: ["external-secrets"]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: external-secrets
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 30s

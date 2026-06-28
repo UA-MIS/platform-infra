@@ -1,0 +1,26 @@
+# Observability platform-service (retro #3) — the `monitoring` namespace + the
+# platform alert rules + the cross-component scrape configs. The actual stacks
+# (kube-prometheus-stack, Loki, Alloy) are SEPARATE Helm-source Applications
+# (applicationsets/{kube-prometheus-stack,loki,alloy}-app.yaml, deploy method A) — the
+# same split as harbor/vault/external-secrets (the dir ships the ns + CRs, the chart
+# is its own app), so they do NOT render through this dir.
+#
+# Generated as `platform-svc-monitoring` by the platform-services-appset (git
+# directory generator over platform-services/*).
+#
+# ⚠ ORDERING: alerts.yaml (PrometheusRule) + servicemonitors.yaml (ServiceMonitor /
+# PodMonitor) are instances of CRDs installed by platform-kube-prometheus-stack. On a
+# fresh cluster this app may briefly fail to sync until those CRDs exist; ArgoCD's
+# retry/selfHeal converges it (same cross-app CRD-ordering pattern used elsewhere).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - alerts.yaml
+  - servicemonitors.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false

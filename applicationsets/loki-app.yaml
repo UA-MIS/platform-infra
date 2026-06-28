@@ -1,0 +1,126 @@
+# Loki Application (Observability, retro #3) — log aggregation behind Grafana.
+#
+# ⚠ SCOPE — SINGLE-BINARY (monolithic) mode, the anti-gold-plate choice the retro
+# called out explicitly. NOT the SSD (read/write/backend) split, NOT the
+# microservices mode, NO MinIO/S3 object store, NO memcached caches, NO gateway. One
+# StatefulSet, filesystem storage on a Ceph RBD PVC. This is the correct altitude
+# for a homelab/student-capstone platform; scale up to SSD mode later if log volume
+# ever demands it (a values change, not a re-architecture).
+#
+# Deploy method A (D-022/D-028): Helm-source Application, chart repo pinned +
+# allowlisted in the `platform` AppProject sourceRepos (bootstrap/platform-appproject
+# .yaml — INSTALL-OWNED, re-apply via `make bootstrap-reapply`). Root-app recurses
+# applicationsets/, so this Application is registered.
+#
+# Chart: grafana/loki 6.55.0 (appVersion Loki 3.6.7 — TSDB schema v13), pinned.
+# Bump deliberately. (The 7.x major exists; 6.55.0 is the mature single-binary path.)
+#
+# Wiring: Grafana (platform-kube-prometheus-stack) reads logs from this Loki via the
+# additionalDataSources entry (http://loki.monitoring.svc.cluster.local:3100). Grafana
+# Alloy (applicationsets/alloy-app.yaml) ships pod logs INTO it.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-loki
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://grafana.github.io/helm-charts   # PINNED chart repo (sourceRepos allowlist)
+    chart: loki
+    targetRevision: 6.55.0                            # pinned chart version (appVersion 3.6.7); no ^/~/latest
+    helm:
+      releaseName: loki
+      values: |
+        deploymentMode: SingleBinary
+
+        loki:
+          # Single-tenant: no X-Scope-OrgID required from Grafana/Alloy.
+          auth_enabled: false
+          commonConfig:
+            replication_factor: 1
+          storage:
+            type: filesystem
+          schemaConfig:
+            configs:
+              - from: "2024-04-01"
+                store: tsdb
+                object_store: filesystem
+                schema: v13
+                index:
+                  prefix: loki_index_
+                  period: 24h
+          limits_config:
+            retention_period: 168h          # 7d — bounded so the PVC can't fill
+            allow_structured_metadata: true
+            volume_enabled: true
+          compactor:
+            retention_enabled: true         # actually deletes data past retention_period
+            delete_request_store: filesystem
+          pattern_ingester:
+            enabled: false                  # anti-gold-plate (pattern detection not needed)
+
+        singleBinary:
+          replicas: 1
+          persistence:
+            enabled: true
+            storageClass: ceph-block        # replica-3 Ceph RBD (survives node loss)
+            accessModes: ["ReadWriteOnce"]
+            size: 10Gi
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { memory: 512Mi }
+
+        # ── Zero out every distributed target + the optional sidecars/caches/store ──
+        # so the chart renders ONLY the single-binary StatefulSet (no surprise pods).
+        backend: { replicas: 0 }
+        read: { replicas: 0 }
+        write: { replicas: 0 }
+        ingester: { replicas: 0 }
+        querier: { replicas: 0 }
+        queryFrontend: { replicas: 0 }
+        queryScheduler: { replicas: 0 }
+        distributor: { replicas: 0 }
+        compactor: { replicas: 0 }
+        indexGateway: { replicas: 0 }
+        bloomPlanner: { replicas: 0 }
+        bloomBuilder: { replicas: 0 }
+        bloomGateway: { replicas: 0 }
+        chunksCache:
+          enabled: false
+        resultsCache:
+          enabled: false
+        minio:
+          enabled: false                    # filesystem store, not S3/MinIO
+        gateway:
+          enabled: false                    # clients hit the loki Service :3100 directly
+        test:
+          enabled: false
+        lokiCanary:
+          enabled: false
+        # Let Prometheus scrape Loki's own /metrics (the ServiceMonitor CRD comes from
+        # kube-prometheus-stack); no self-monitoring grafana-agent sidecar.
+        monitoring:
+          selfMonitoring:
+            enabled: false
+            grafanaAgent:
+              installOperator: false
+          serviceMonitor:
+            enabled: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false      # monitoring ns ships via platform-services/monitoring
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

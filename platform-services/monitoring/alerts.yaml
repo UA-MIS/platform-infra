@@ -1,0 +1,154 @@
+# Platform failure-mode alerts (Observability, retro #3 — "no alert even on 'Vault
+# sealed'"). Six PrometheusRule groups on failure modes this platform has ACTUALLY
+# hit. Prometheus (platform-kube-prometheus-stack) discovers this rule cluster-wide
+# because the chart sets ruleSelectorNilUsesHelmValues:false; the `release` label is
+# belt-and-suspenders. Critical|warning alerts route to the `platform-oncall`
+# Alertmanager receiver (see the chart values + monitoring/README.md).
+#
+# Where each signal comes from:
+#   (a,d,f) kube-state-metrics — SHIPS WITH the stack, so these work day-one, no
+#           per-component wiring.
+#   (b)     External Secrets Operator /metrics — scraped via the PodMonitor in
+#           servicemonitors.yaml.
+#   (c)     ArgoCD application-controller /metrics — scraped via the ServiceMonitor.
+#   (e)     cert-manager controller /metrics — scraped via the ServiceMonitor.
+#
+# NOTE: kube-prometheus-stack's defaultRules already include generic versions of the
+# CrashLoop/NodeNotReady alerts; (d) and (f) are restated here explicitly so all six
+# retro-named failure modes live in one auditable place (harmless minor overlap).
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: platform-failure-modes
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    release: kube-prometheus-stack
+spec:
+  groups:
+    # ── (a) Vault sealed or down ──────────────────────────────────────────────
+    # The vault StatefulSet reports 0 ready replicas whenever the pod is sealed
+    # (Running but not Ready), crash-looping, or absent. Robust regardless of the
+    # transit auto-unseal work (if auto-unseal fails, the pod stays not-Ready).
+    - name: vault
+      rules:
+        - alert: VaultSealedOrDown
+          expr: kube_statefulset_status_replicas_ready{namespace="vault", statefulset="vault"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Vault is sealed or down"
+            description: >-
+              The vault StatefulSet has 0 ready replicas for 5m — Vault is sealed,
+              crash-looping, or down. ESO keeps serving already-materialized Secrets,
+              but NEW/refreshed secret sync is paused. Check `kubectl -n vault get pods`
+              and unseal/recover per artifacts/design/vault-dr-runbook.md.
+
+    # ── (b) External Secrets Operator: store not Ready / sync error ────────────
+    - name: external-secrets
+      rules:
+        - alert: ExternalSecretSyncError
+          expr: externalsecret_status_condition{condition="Ready", status="False"} == 1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "ExternalSecret {{ $labels.namespace }}/{{ $labels.name }} not syncing"
+            description: >-
+              ExternalSecret {{ $labels.namespace }}/{{ $labels.name }} has been
+              Ready=False (SecretSyncError) for 10m. The backing k8s Secret is stale
+              or missing. Check the ExternalSecret status and the SecretStore it
+              references.
+        - alert: ClusterSecretStoreNotReady
+          expr: clustersecretstore_status_condition{condition="Ready", status="False"} == 1
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "ClusterSecretStore {{ $labels.name }} not Ready"
+            description: >-
+              ClusterSecretStore {{ $labels.name }} has been Ready=False for 10m —
+              ESO cannot reach/authenticate to Vault. ALL ExternalSecrets that use it
+              are blocked. Check Vault reachability + the k8s-auth role.
+        - alert: SecretStoreNotReady
+          expr: secretstore_status_condition{condition="Ready", status="False"} == 1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "SecretStore {{ $labels.namespace }}/{{ $labels.name }} not Ready"
+            description: >-
+              Namespaced SecretStore {{ $labels.namespace }}/{{ $labels.name }} has
+              been Ready=False for 10m. ExternalSecrets in that namespace are blocked.
+
+    # ── (c) ArgoCD app Degraded or stuck OutOfSync ────────────────────────────
+    # Excludes platform-netpol-controlplane: it is INTENTIONALLY OutOfSync (SEC-011
+    # manual security gate), the one known-permanent drift.
+    - name: argocd
+      rules:
+        - alert: ArgoCDAppDegraded
+          expr: argocd_app_info{health_status="Degraded"} == 1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "ArgoCD app {{ $labels.name }} is Degraded"
+            description: >-
+              ArgoCD Application {{ $labels.name }} (project {{ $labels.project }})
+              has been Degraded for 10m. Inspect with `argocd app get {{ $labels.name }}`.
+        - alert: ArgoCDAppStuckOutOfSync
+          expr: argocd_app_info{sync_status="OutOfSync", name!~"platform-netpol-controlplane.*"} == 1
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "ArgoCD app {{ $labels.name }} stuck OutOfSync"
+            description: >-
+              ArgoCD Application {{ $labels.name }} has been OutOfSync for 15m (not the
+              SEC-011 manually-gated netpol). selfHeal should have reconciled it —
+              check for a sync error or a drifted manually-edited resource.
+
+    # ── (d) Pod CrashLoopBackOff / ImagePullBackOff ───────────────────────────
+    - name: workloads
+      rules:
+        - alert: PodCrashLoopOrImagePullBackOff
+          expr: kube_pod_container_status_waiting_reason{reason=~"CrashLoopBackOff|ImagePullBackOff|ErrImagePull"} == 1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} stuck ({{ $labels.reason }})"
+            description: >-
+              Container {{ $labels.container }} in pod {{ $labels.namespace }}/{{ $labels.pod }}
+              has been waiting with reason {{ $labels.reason }} for 10m. Check
+              `kubectl -n {{ $labels.namespace }} describe pod {{ $labels.pod }}`.
+
+    # ── (e) cert-manager certificate expiring soon ────────────────────────────
+    - name: cert-manager
+      rules:
+        - alert: CertManagerCertExpiringSoon
+          expr: (certmanager_certificate_expiration_timestamp_seconds - time()) < (14 * 24 * 3600)
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "Certificate {{ $labels.namespace }}/{{ $labels.name }} expiring soon"
+            description: >-
+              Certificate {{ $labels.namespace }}/{{ $labels.name }} expires in under
+              14 days and has not been renewed. cert-manager should auto-renew —
+              check the Certificate + its issuer if this persists.
+
+    # ── (f) Node NotReady ─────────────────────────────────────────────────────
+    - name: nodes
+      rules:
+        - alert: NodeNotReady
+          expr: kube_node_status_condition{condition="Ready", status="true"} == 0
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Node {{ $labels.node }} is NotReady"
+            description: >-
+              Node {{ $labels.node }} has been NotReady for 10m. Pods on it may be
+              evicted/unschedulable. Check `kubectl describe node {{ $labels.node }}`.
