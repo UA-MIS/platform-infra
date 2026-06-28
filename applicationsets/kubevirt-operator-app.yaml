@@ -1,0 +1,53 @@
+# KubeVirt OPERATOR Application (ADR-032 — "true VM as an app", v1 capability).
+# The virt-operator + the `kubevirts.kubevirt.io` CRD + RBAC + the `kubevirt`
+# Namespace, from the pinned upstream release manifest (v1.8.4).
+#
+# Two-app split (mirrors rook-ceph operator/cluster):
+#   wave 0 — THIS app: operator + CRD (platform-services/kubevirt/operator).
+#   wave 1 — kubevirt-cr-app.yaml: the KubeVirt CR that triggers the runtime
+#            (virt-api/virt-controller/virt-handler). The CRD from THIS app must
+#            exist before that CR applies — hence the wave ordering.
+#
+# Source = the platform-infra git repo (already in the `platform` AppProject
+# sourceRepos) pointing at a kustomize dir whose ONLY resource is the pinned
+# upstream operator manifest (fetched by kustomize, NOT an ArgoCD source) — so NO
+# sourceRepos addition and NO `make bootstrap-reapply` are needed (the cert-manager
+# / sealed-secrets pattern). NOTE: the platform-services-appset EXCLUDES
+# platform-services/kubevirt so this dedicated app is the sole manager of it.
+#
+# ⚠ INSTALL-OWNED / HUMAN-GATED: ADR-032 is a security-gated capability and is NOT
+# yet approved-to-apply. KVM-on-Talos (/dev/kvm) is an unverified prerequisite
+# (open Q1) — the KubeVirt CR sets useEmulation:true so the install works even if
+# /dev/kvm is absent. Root-app recurses applicationsets/, so this is registered.
+#
+# Chart/version: KubeVirt v1.8.4 (stable GA, Context7-confirmed 2026-06-28). Pin.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-kubevirt-operator
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"   # operator + CRD first, before the KubeVirt CR (wave 1)
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/UA-MIS/platform-infra
+    targetRevision: HEAD
+    path: platform-services/kubevirt/operator
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kubevirt            # the upstream manifest ships its own Namespace object
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false      # the upstream operator manifest creates the `kubevirt` ns
+      - ServerSideApply=true       # the kubevirts CRD is large — SSA avoids the 256KB last-applied-config limit
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

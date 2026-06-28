@@ -1,0 +1,31 @@
+# KubeVirt OPERATOR install (ADR-032 — "true VM as an app"). The virt-operator +
+# the `kubevirts.kubevirt.io` CRD + the operator RBAC/PriorityClass + the
+# `kubevirt` Namespace. The operator is what reconciles the KubeVirt CR (the CR
+# ships in ../cr, applied one sync-wave later by platform-kubevirt-cr).
+#
+# Install pattern = the cert-manager / sealed-secrets pattern in this repo: a
+# pinned UPSTREAM RELEASE MANIFEST referenced as a remote kustomize resource (NOT
+# a Helm chart — KubeVirt ships no official chart). Because this URL is fetched by
+# kustomize at render time (it is NOT an ArgoCD `source`), it does NOT need a
+# bootstrap/platform-appproject.yaml `sourceRepos` entry and does NOT require
+# `make bootstrap-reapply` — exactly like cert-manager.yaml / sealed-secrets
+# controller.yaml, neither of which is in sourceRepos. (Helm-SOURCE apps are the
+# only ones that need the allowlist.)
+#
+# VERSION PIN: v1.8.4 — the current KubeVirt stable GA (the canonical pin from
+# https://storage.googleapis.com/kubevirt-prow/release/kubevirt/kubevirt/stable.txt,
+# verified 2026-06-28; Context7 /kubevirt/user-guide confirms this is the
+# operator+CR install path). Pin exactly; bump deliberately. Do NOT track `latest`.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  # Pinned upstream operator: Namespace `kubevirt` + `kubevirts.kubevirt.io` CRD +
+  # virt-operator Deployment + ClusterRole(s)/Role(s)/bindings + ServiceAccount +
+  # the kubevirt-cluster-critical PriorityClass.
+  - https://github.com/kubevirt/kubevirt/releases/download/v1.8.4/kubevirt-operator.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false
