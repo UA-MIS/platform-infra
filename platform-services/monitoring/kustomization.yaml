@@ -8,10 +8,15 @@
 # Generated as `platform-svc-monitoring` by the platform-services-appset (git
 # directory generator over platform-services/*).
 #
-# ⚠ ORDERING: alerts.yaml (PrometheusRule) + servicemonitors.yaml (ServiceMonitor /
-# PodMonitor) are instances of CRDs installed by platform-kube-prometheus-stack. On a
-# fresh cluster this app may briefly fail to sync until those CRDs exist; ArgoCD's
-# retry/selfHeal converges it (same cross-app CRD-ordering pattern used elsewhere).
+# ⚠ ORDERING (sync-deadlock fix #127): alerts.yaml (PrometheusRule) +
+# servicemonitors.yaml (ServiceMonitor / PodMonitor) are instances of CRDs installed
+# by platform-kube-prometheus-stack. On a fresh cluster those CRDs may not exist when
+# this app first syncs — WITHOUT mitigation ArgoCD's dry-run rejects the whole sync
+# ("one or more synchronization tasks are not valid") and, combined with the stack
+# previously waiting on this app to create the ns, neither could go first (deadlock).
+# Each CR now carries `argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true`
+# (skip the dry-run on the missing type) + sync-wave "1" (after the Namespace);
+# ArgoCD's retry/selfHeal then applies them once the CRDs register.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 

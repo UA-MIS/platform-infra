@@ -44,6 +44,18 @@ metadata:
   namespace: argocd
   labels:
     platform.capstone/component: platform
+  annotations:
+    # Sync-deadlock fix (#127): this app is the monitoring-stack ORIGIN — it owns the
+    # `monitoring` namespace (CreateNamespace=true below) AND installs the
+    # prometheus-operator CRDs (ServiceMonitor/PodMonitor/PrometheusRule/...). wave 0
+    # marks it as the first-to-go owner. NOTE: root-app (bootstrap/root-app.yaml) is a
+    # single flat directory.recurse app-of-apps, so this wave is GLOBAL across all
+    # platform apps (default wave is 0) — it is documentary here, not a per-app cross-
+    # ordering lever. The actual ordering safety is structural: this app no longer
+    # depends on anyone (it creates its own ns + CRDs), and the CR-bearing consumers
+    # (platform-svc-monitoring, platform-loki) carry SkipDryRunOnMissingResource so
+    # they don't hard-fail before these CRDs register; ArgoCD retry/selfHeal converges.
+    argocd.argoproj.io/sync-wave: "0"
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
@@ -189,7 +201,13 @@ spec:
       prune: true
       selfHeal: true
     syncOptions:
-      - CreateNamespace=false      # monitoring ns ships via platform-services/monitoring
+      # Sync-deadlock fix (#127): this app CREATES the `monitoring` ns itself so it no
+      # longer waits on platform-svc-monitoring (which couldn't sync until these CRDs
+      # existed → ns was never created → both stuck). platform-services/monitoring/
+      # still ships a tracked Namespace manifest (the declarative GitOps owner); this
+      # is a create-if-missing bootstrap convenience, not managedNamespaceMetadata, so
+      # there is no field-manager/ownership conflict between the two.
+      - CreateNamespace=true       # owns the monitoring ns (was false → deadlock)
       - ServerSideApply=true       # large prometheus-operator CRDs
     retry:
       limit: 5
