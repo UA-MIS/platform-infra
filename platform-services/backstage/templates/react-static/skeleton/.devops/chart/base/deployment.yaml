@@ -1,0 +1,95 @@
+# Workload Deployment for the static SPA.
+#
+# ARCHETYPE: this is a STATIC front-end (Vite -> nginx serving the built dist/).
+# There is no application server and no runtime secret: a browser SPA cannot hold
+# server-side secrets (everything shipped to the browser is public), so build-time
+# config is baked in via VITE_* vars at `vite build` time — NOT injected here. Hence
+# this Deployment has no `env:`/APP_SECRET seam (the proven service template's secret
+# env is intentionally dropped for this archetype). The ESO SecretStore/ExternalSecret
+# still ship in the overlays (zero-config, deletionPolicy: Delete) so the platform's
+# per-team Vault wiring + The Process "Secrets" tab stay uniform across templates.
+#
+# Image: the `image:` field is the GitOps image-tag SEAM (§4.1). The base pins a
+# placeholder; each overlay sets the registry/tag via a kustomize `images:`
+# override driven by promotion.yaml (dev=main digest, staging=tag, prod=gated tag).
+#
+# READ-ONLY ROOT FS + NON-ROOT nginx: the container runs as UID 65532 with
+# readOnlyRootFilesystem: true, so nginx cannot write to its default pid/temp/cache
+# paths. We mount three small emptyDir volumes (/var/cache/nginx, /var/run, /tmp) for
+# the ephemeral writes nginx needs (pid file + temp buffers); access/error logs go to
+# stdout/stderr (see app/nginx.conf), so nothing is persisted. nginx listens on the
+# unprivileged container port below (>1024, so non-root can bind it).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${{ values.appName }}
+  labels:
+    app.kubernetes.io/name: ${{ values.appName }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ${{ values.appName }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ${{ values.appName }}
+    spec:
+      serviceAccountName: ${{ values.appName }}
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          # SEAM: overlays override registry + tag via kustomize images:.
+          image: ${{ values.appName }}:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            # Named "http" so the Service/Ingress reference it by name, not number —
+            # the container port number is the app-metadata `port` (default 8080).
+            - name: http
+              containerPort: ${{ values.port }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            # Writable scratch for nginx under the read-only root filesystem.
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-run
+              mountPath: /var/run
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: nginx-cache
+          emptyDir: {}
+        - name: nginx-run
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
