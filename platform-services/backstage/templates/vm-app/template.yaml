@@ -1,0 +1,404 @@
+# "New Capstone VM" — The Process scaffolder for the layout: vm capability (ADR-032).
+#
+# THE "NO DOCKER" GOLDEN PATH. Some capstone teams cannot or will not containerize:
+# a legacy Windows/desktop app, a professor-supplied appliance, an OS/sysadmin course,
+# or a whole stack that expects "a real machine" (and bundles its own DB/services
+# inside the box). This template gives them a first-class IDP path: a student picks
+# "Virtual machine", points at a base disk image, edits a cloud-init block, and pushes
+# — The Process stands up a KubeVirt VirtualMachine that runs as a workload inside the
+# cluster, reachable at the SAME kind of URL as any container app.
+#
+# WHY A SEPARATE TEMPLATE (not a third `layout: vm` in new-capstone-project):
+#   ADR-032 §6d sketches a `layout: vm` enum branch, but the VM path diverges from the
+#   container golden path in ways that would force `if:` guards across most of the
+#   proven template (risking the LIVE container path — the #1 bug generator per the
+#   project retro is touching/copying the proven path):
+#     - DIFFERENT PARAMETERS — base disk image + vCPU/RAM/disk sizing, not a Dockerfile.
+#     - NO KANIKO BUILD — the disk is an imported OS image, not a container build, so the
+#       CI caller is validation-only and never invokes the reusable tenant-build.yaml.
+#     - SINGLE ENVIRONMENT — a lifted legacy app is one self-contained VM, not a
+#       dev/staging/prod pipeline; the VM deploys into ONE namespace (<team>-vm-<env>).
+#     - NO ROBOT MINT — no image push means no per-team Harbor push robot in the
+#       onboarding PR; a pull robot is only needed if a team imports a PRIVATE disk.
+#   So this is a DEDICATED template that REUSES the proven STEP shapes verbatim
+#   (publish:github / catalog:register / capstone:harbor-onboard / capstone:render-tenant
+#   / publish:github:pull-request) while keeping new-capstone-project byte-for-byte
+#   untouched. The downstream tenancy fence + GitOps planes are the same; only the
+#   workload kind and the CI build differ.
+#
+# WHAT IT DOES (steps below):
+#   1. fetch:template — render ./skeleton-vm (the VM chart: VirtualMachine +
+#      DataVolume(template) on ceph-block + cloud-init + Service/Ingress, a VM-aware
+#      promotion.yaml [single env, no build], a validation-only CI workflow, the
+#      catalog-info.yaml + mkdocs/TechDocs). SELF-CONTAINED — no external fetch:plain.
+#   3. publish:github — create UA-MIS/<repo>, push, set branch protection (PRs only).
+#   4. catalog:register — register the component in The Process catalog.
+#   4b. capstone:harbor-onboard — create the team's Harbor project (idempotent). For the
+#      no-build VM path this is OPTIONAL home for a private containerDisk; kept so a team
+#      that later bakes/pushes its own disk image (v2.1) needs no extra onboarding.
+#   5a. capstone:render-tenant — render tenants/team-<name>/ from the canonical
+#      tenants/_template/ blueprint (which the platform security track extends with the
+#      <team>-vm-<env> tier: baseline PSA + the VM-kind AppProject whitelist + the VM
+#      env ApplicationSet — ADR-032 §2/§6b/§6c). render-tenant itself is unchanged.
+#   5b. publish:github:pull-request — open the REVIEW-GATED onboarding PR to
+#      platform-infra. Merging is the grant (D-049); a student never mints cluster RBAC.
+#
+# ⚠ COORDINATION (ADR-032 is the spec; this template does NOT edit tier manifests):
+#   The <team>-vm-<env> namespace tier (baseline PSA, VM-sized quota), the AppProject
+#   VM-kind whitelist (kubevirt.io/VirtualMachine + cdi.kubevirt.io/DataVolume), and the
+#   VM env ApplicationSet (destination namespace <team>-vm-<env>, reading THIS repo's
+#   .devops/promotion.yaml) are owned by the platform security/devops track in
+#   tenants/_template/. This template's app overlay sets `namespace: <team>-vm-<env>` so
+#   the VM workload lands in that tier; the contract between the two is ADR-032.
+#
+# ⚠ PREREQUISITE (ADR-032 open Q1 — BLOCKING for go-live, NOT for this template):
+#   KubeVirt + CDI must be installed (platform ArgoCD apps) and KVM confirmed on the
+#   Talos nodes. This scaffolder template is buildable/reviewable now; a rendered VM
+#   only RUNS once that capability is live and the onboarding PR is merged.
+apiVersion: scaffolder.backstage.io/v1beta3
+kind: Template
+metadata:
+  name: new-capstone-vm
+  title: New Capstone VM (no Docker)
+  description: >-
+    Deploy a REAL virtual machine as an app — for teams that can't or won't
+    containerize (legacy/desktop/appliance stacks that bring their own DB/services).
+    Pick a base disk image, edit a cloud-init block, push — The Process runs it as a
+    KubeVirt VM reachable at https://<app>.capstone.uamishub.com. No Dockerfile, no
+    image build, one self-contained environment.
+  tags:
+    - capstone
+    - vm
+    - kubevirt
+    - no-docker
+spec:
+  owner: group:default/platform
+  type: service
+
+  parameters:
+    - title: Your project
+      required:
+        - appName
+        - team
+        - season
+        - year
+      properties:
+        appName:
+          title: App name
+          type: string
+          description: >-
+            Short slug for your app + repo (lowercase letters, digits, hyphens — no
+            spaces, uppercase, or dots). Becomes the repo name, the VirtualMachine
+            name, and the ingress host <app-name>.<platform-domain>, so it MUST be a
+            DNS-1123 label.
+          # DNS-1123 label — same charset as a repo name, a k8s object name, and a DNS
+          # hostname segment; all three derive from this one value, so enforce the
+          # strictest (DNS) form here (matches new-capstone-project + renderTenant.ts).
+          pattern: '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'
+          maxLength: 30
+          ui:autofocus: true
+          ui:help: 'Lowercase letters, digits, and hyphens only; must start and end with a letter or digit (e.g. my-legacy-app).'
+        team:
+          title: Team slug
+          type: string
+          description: >-
+            Your team's canonical slug — MUST equal your GitHub Team slug and your
+            AppProject name (the platform keys per-team namespaces, RBAC, and the VM
+            tier <team>-vm-<env> on this single value, D-026).
+          pattern: '^[a-z]([-a-z0-9]*[a-z0-9])?$'
+          maxLength: 30
+        # Cohort = Season + Year (org convention "Capstone {Season} {Year}"), composed
+        # into two derived forms downstream exactly like new-capstone-project:
+        #   DISPLAY "Capstone {Season} {Year}" (human text: PR body, catalog cohort).
+        #   SLUG    "{year}-{season|lower}"     (machine: semester label/tag + the value
+        #           passed to capstone:render-tenant — year-first to match its regex).
+        season:
+          title: Season
+          type: string
+          description: The cohort season (part of "Capstone {Season} {Year}").
+          enum:
+            - Spring
+            - Summer
+            - Fall
+          default: Fall
+        year:
+          title: Year
+          type: integer
+          description: The cohort year, e.g. 2026 (part of "Capstone {Season} {Year}").
+          minimum: 2020
+          maximum: 2099
+          default: 2026
+        description:
+          title: Description
+          type: string
+          description: One-line description of your project (shown in the catalog).
+          default: A UA-MIS capstone VM project.
+
+    - title: Virtual machine
+      required:
+        - baseImage
+      properties:
+        # BRING-YOUR-OWN / IMPORTED DISK IMAGE (ADR-032 §1, §4). The "image" is a whole
+        # OS disk CDI imports into a PVC — NOT a container build. Point this at:
+        #   - a KubeVirt containerDisk in a registry: docker://<host>/<repo>:<tag>
+        #     (the default below is a public Fedora cloud containerDisk that boots +
+        #     runs cloud-init), or
+        #   - a private containerDisk in YOUR team's Harbor project (then a pull robot
+        #     is added at onboarding — see the PR checklist), or
+        #   - an http(s) cloud-image URL (edit the DataVolume source in
+        #     .devops/chart/base/virtualmachine.yaml from `registry:` to `http:`).
+        # cloud-init then ADAPTS the base image into your app (install your stack, your
+        # DB, your services) on first boot — this is the "no Dockerfile" equivalent of a
+        # build. Prefer a curated/known base over an arbitrary URL (supply chain).
+        baseImage:
+          title: Base disk image (containerDisk ref)
+          type: string
+          description: >-
+            The base OS disk CDI imports for your VM, as a containerDisk registry ref
+            (docker://host/repo:tag). Default is a public Fedora cloud image that runs
+            cloud-init. Override with your own image; for an http(s) cloud-image URL,
+            edit the DataVolume source in .devops/chart/base/virtualmachine.yaml.
+          default: docker://quay.io/containerdisks/fedora:40
+        cpuCores:
+          title: vCPUs
+          type: integer
+          description: >-
+            Virtual CPU cores reserved for the VM for its whole lifetime (no overcommit
+            like a container). Sized for a real app; keep modest on the shared cluster.
+          default: 2
+          minimum: 1
+          maximum: 8
+        memoryGi:
+          title: Memory (GiB)
+          type: integer
+          description: >-
+            Guest RAM in GiB, RESERVED for the VM's whole lifetime (ADR-032 §5 — VMs do
+            not overcommit; the VM-tier quota caps this). Sized for a real app.
+          default: 4
+          minimum: 1
+          maximum: 16
+        diskGi:
+          title: Root disk (GiB)
+          type: integer
+          description: >-
+            Size of the imported root disk PVC on ceph-block (RBD). Make it large enough
+            for the base image + your app + its data.
+          default: 20
+          minimum: 5
+          maximum: 200
+        port:
+          title: App port (inside the VM)
+          type: integer
+          description: >-
+            The TCP port your app listens on INSIDE the VM. The Service/Ingress forward
+            to it; the cloud-init starter brings up a small web server on this port so a
+            fresh VM serves something immediately.
+          default: 8080
+          minimum: 1
+          maximum: 65535
+
+    # NOTE (same as new-capstone-project): there is intentionally NO repoUrl input — the
+    # repo is created at github.com/UA-MIS/<appName> (owner fixed; repo name = app name),
+    # constructed inline at the publish steps. Repo creation runs as the platform GitHub
+    # App via integrations.github (no user OAuth, no token input — D-017).
+
+  steps:
+    # 1) Render the VM starter (chart + cloud-init + VM-aware promotion.yaml + catalog +
+    #    validation-only CI). Single fetch (this template is VM-only — no layout branch).
+    - id: fetch-skeleton-vm
+      name: Render VM skeleton
+      action: fetch:template
+      input:
+        url: ./skeleton-vm
+        values:
+          appName: ${{ parameters.appName }}
+          team: ${{ parameters.team }}
+          # Cohort in two forms (see season/year above): machine SLUG (year-first) +
+          # readable DISPLAY name.
+          semester: ${{ parameters.year }}-${{ parameters.season | lower }}
+          semesterDisplay: Capstone ${{ parameters.season }} ${{ parameters.year }}
+          description: ${{ parameters.description }}
+          baseImage: ${{ parameters.baseImage }}
+          cpuCores: ${{ parameters.cpuCores }}
+          memoryGi: ${{ parameters.memoryGi }}
+          diskGi: ${{ parameters.diskGi }}
+          port: ${{ parameters.port }}
+          destination: ${{ ("github.com?owner=UA-MIS&repo=" + parameters.appName) | parseRepoUrl }}
+        # ⚠ INDENTATION IS LOAD-BEARING (new-capstone-project lesson): this key MUST be
+        # nested under `input:` (8-space indent, a sibling of url:/values:). Misplaced at
+        # 6 spaces it is silently dropped, nunjucks templates EVERY file, and the CI
+        # workflow's `${{ github.* }}` / `${{ vars.* }}` crash the render. The VM CI
+        # workflow is the file that needs this (it carries GitHub-Actions ${{ }}); the
+        # `**` form matches a root-level subtree under globby's options. The
+        # .devops/ci/** glob is kept for parity/safety though the VM skeleton ships no
+        # build scripts.
+        copyWithoutTemplating:
+          - '.github/**'
+          - '**/.github/**'
+          - '.devops/ci/**'
+          - '**/.devops/ci/**'
+
+    # 3) Create UA-MIS/<repo>, push, protect main (PRs only — platform policy). Verbatim
+    #    from new-capstone-project (the repo-creation contract is identical for VM apps).
+    - id: publish
+      name: Publish to GitHub (UA-MIS)
+      action: publish:github
+      input:
+        repoUrl: github.com?owner=UA-MIS&repo=${{ parameters.appName }}
+        description: ${{ parameters.description }}
+        defaultBranch: main
+        repoVisibility: private
+        protectDefaultBranch: true
+        requireCodeOwnerReviews: true
+        # Role-based access by GitHub TEAM (not creator): the project team gets push,
+        # labmx (platform staff) gets admin. Unknown team slugs are skipped gracefully.
+        collaborators:
+          - team: ${{ parameters.team }}
+            access: push
+          - team: labmx
+            access: admin
+        # No `token:` — authenticates via integrations.github (the platform GitHub App).
+
+    # 4) Register the component so it appears in The Process catalog right away.
+    - id: register
+      name: Register in catalog
+      action: catalog:register
+      input:
+        repoContentsUrl: ${{ steps['publish'].output.repoContentsUrl }}
+        catalogInfoPath: '/catalog-info.yaml'
+
+    # 4b) Create the team's Harbor project (idempotent). The no-build VM path pushes NO
+    #     container image, so this is not on the critical path — it is kept so a team can
+    #     later store a PRIVATE containerDisk (a baked/own base image, ADR-032 §4 v2.1)
+    #     in its own Harbor project with no extra onboarding. Safe re-run (409 = exists).
+    - id: harbor-onboard
+      name: Create Harbor project (optional containerDisk home)
+      action: capstone:harbor-onboard
+      input:
+        team: ${{ parameters.team }}
+
+    # =====================================================================
+    # PLATFORM SIDE — the D-049 review-gated grant path. The steps above created the
+    # STUDENT's own repo. The steps below open a *request* (a PR to platform-infra) that
+    # a reviewer *grants* (merge) — a student NEVER silently mints cluster RBAC/quotas/
+    # the VM tier. The merge is the gate.
+    # =====================================================================
+
+    # 5a) Render the tenant manifests from the SINGLE canonical blueprint
+    #     tenants/_template/ (D-M4-2: render, do NOT fork). VERBATIM inputs from
+    #     new-capstone-project — the action is shared and unchanged. The VM-tier
+    #     additions (<team>-vm-<env> namespace, VM-kind AppProject whitelist, VM env
+    #     ApplicationSet) live in _template, owned by the security/devops track
+    #     (ADR-032) — so a single render emits both the container fence AND the VM tier.
+    - id: render-tenant
+      name: Render tenant manifests (tenants/team-<name>/)
+      action: capstone:render-tenant
+      input:
+        templateUrl: https://github.com/UA-MIS/platform-infra/tree/main/tenants/_template
+        team: ${{ parameters.team }}
+        appName: ${{ parameters.appName }}
+        semester: ${{ parameters.year }}-${{ parameters.season | lower }}
+        targetPath: ./tenant-pr
+
+    # 5b) Open the review-gated onboarding PR to platform-infra. Uses the PLATFORM
+    #     GitHub App token (NOT the student's), so ANY signed-in UA-MIS member can OPEN
+    #     it; branch protection on platform-infra/main is the gate (only a CODEOWNER
+    #     merges). Distinct branch/title from the container onboarding so a team can be
+    #     reviewed independently. The PR body is the VM-AWARE operator checklist: there
+    #     is NO push-robot step (no image build); a pull robot is needed ONLY if the
+    #     base disk is a PRIVATE containerDisk.
+    - id: tenant-pr
+      name: Open platform onboarding PR (platform-infra)
+      action: publish:github:pull-request
+      input:
+        repoUrl: github.com?owner=UA-MIS&repo=platform-infra
+        branchName: onboard-vm-team-${{ parameters.team }}
+        targetBranchName: main
+        title: "onboard VM tenant: team-${{ parameters.team }} (Capstone ${{ parameters.season }} ${{ parameters.year }})"
+        sourcePath: ./tenant-pr
+        description: |
+          ## VM tenant onboarding request — `team-${{ parameters.team }}` (Capstone ${{ parameters.season }} ${{ parameters.year }})
+
+          Scaffolded by **The Process** ("New Capstone VM") for VM app
+          **${{ parameters.appName }}** (repo: ${{ steps['publish'].output.remoteUrl }}).
+
+          This is a **`layout: vm`** workload (ADR-032): a real KubeVirt VirtualMachine,
+          **no Dockerfile / no image build**. The disk is imported by CDI from
+          `${{ parameters.baseImage }}` and cloud-init brings the app up on first boot.
+
+          This PR adds `tenants/team-${{ parameters.team }}/` (rendered from the canonical
+          `tenants/_template/` blueprint). **Merging is the grant**: on merge the
+          `tenants-appset` git generator reconciles the team's namespaces + ApplicationSets,
+          including the **`${{ parameters.team }}-vm-prod`** VM tier
+          (`baseline` PSA + the VM-sized quota + the AppProject whitelist for
+          `kubevirt.io/VirtualMachine` and `cdi.kubevirt.io/DataVolume` — ADR-032 §2/§6).
+
+          ---
+
+          ### Reviewer checklist
+          - [ ] **KubeVirt + CDI are installed and KVM is confirmed** on the Talos nodes
+                (ADR-032 open Q1) — a VM cannot run until this prerequisite is met.
+          - [ ] Manifests render cleanly (`make validate` on `tenants/team-${{ parameters.team }}/`).
+          - [ ] AppProject is team-scoped (empty `clusterResourceWhitelist`; the VM kinds
+                are NAMESPACED additions only; destinations limited to `team-${{ parameters.team }}-*`).
+          - [ ] The VM tier namespace is `baseline` PSA (NOT `restricted` — virt-launcher
+                needs it) and carries a VM-sized ResourceQuota (ADR-032 §2d/§6c).
+          - [ ] `__TEAM__`/`__SEMESTER__` fully substituted (no leftover tokens).
+
+          ### Operator steps (run AFTER merge)
+          ```bash
+          # 0) cluster context (Talos)
+          export KUBECONFIG=clusters/real-talos/talos-kubeconfig
+
+          # 1) (idempotent) Harbor project + OIDC mapping — already done at scaffold time
+          #    by capstone:harbor-onboard; safe re-run (409 = already exists). Only needed
+          #    at all if this team will store a PRIVATE containerDisk in its Harbor project.
+          make harbor-onboard NAME=${{ parameters.team }} \
+            TARGET=real-talos KUBE_CONTEXT=admin@capstone
+
+          # 2) (ONLY if baseImage is a PRIVATE containerDisk in this team's Harbor project)
+          #    per-env PULL robot -> sealed `harbor-pull` into ${{ parameters.team }}-vm-prod,
+          #    and reference it from the DataVolume source.registry.secretRef. Skip this for
+          #    the default PUBLIC base image. Guarded write (non-empty seal):
+          make harbor-robot NAME=${{ parameters.team }} ENV=vm-prod \
+            TARGET=real-talos KUBE_CONTEXT=admin@capstone \
+            > /tmp/${{ parameters.team }}-pull-vm.yaml \
+            && test -s /tmp/${{ parameters.team }}-pull-vm.yaml \
+            && grep -q 'kind: SealedSecret' /tmp/${{ parameters.team }}-pull-vm.yaml \
+            && mv /tmp/${{ parameters.team }}-pull-vm.yaml \
+                  tenants/team-${{ parameters.team }}/harbor-pull-vm-prod-sealed.yaml \
+            && git add tenants/team-${{ parameters.team }}/harbor-pull-vm-prod-sealed.yaml \
+            && git commit -m "harbor pull robot (vm): team-${{ parameters.team }}"
+          ```
+
+          > **No CI push robot** — the VM path has no Kaniko build (ADR-032 §6 CI). The
+          > only image work, if any, is an OPTIONAL future disk-bake pipeline (v2.1).
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+  output:
+    links:
+      - title: Repository
+        url: ${{ steps['publish'].output.remoteUrl }}
+      - title: Open in catalog
+        icon: catalog
+        entityRef: ${{ steps['register'].output.entityRef }}
+      - title: Platform onboarding PR (awaiting reviewer merge)
+        icon: github
+        url: ${{ steps['tenant-pr'].output.remoteUrl }}
+    text:
+      - title: Next steps
+        content: |
+          Your VM repo **${{ parameters.appName }}** is live under UA-MIS. Now:
+          1. Clone it and edit `.devops/chart/base/cloud-init.yaml` — install YOUR stack
+             (runtime, DB, services) on first boot. This is your "no Dockerfile" build.
+          2. (optional) Point `.devops/vm-metadata.yaml` / the DataVolume at your OWN base
+             disk image, and tune vCPUs / memory / disk size.
+          3. Open a PR — CI **validates** your VM manifests + cloud-init (no image build).
+          4. Merge to `main` — once the onboarding PR below is merged, ArgoCD deploys your
+             VirtualMachine; CDI imports the disk and cloud-init runs your app on first boot.
+          Your VM will be reachable at `https://${{ parameters.appName }}.capstone.uamishub.com`.
+
+          **Two things are gated:** (a) a **platform onboarding PR** was opened against
+          `UA-MIS/platform-infra` to stand up your team's VM tier (link above) — a reviewer
+          must **merge** it; and (b) the platform's **KubeVirt capability** must be live
+          (ADR-032). Until both are done your VM manifests validate in CI but do not yet run.

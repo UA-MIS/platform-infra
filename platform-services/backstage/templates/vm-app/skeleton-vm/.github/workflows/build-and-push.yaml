@@ -1,0 +1,60 @@
+# ============================================================================
+# build-and-push.yaml — the VM layout's CI (ADR-032 §6 CI: NO Kaniko build).
+#
+# A VM app has NO container image to build or push: the "image" is a whole OS disk
+# that CDI imports from a base image (.devops/chart/base/virtualmachine.yaml's
+# DataVolume), and cloud-init adapts it on first boot. So this workflow does NOT call
+# the reusable container pipeline UA-MIS/platform-infra/.github/workflows/tenant-build.yaml
+# — it is a self-contained VALIDATION-ONLY gate (ADR-032 §6: "v1, recommended — no-op
+# the build; validation/lint only"). This is the "no-op caller" half of the contract:
+# the reusable build workflow is left completely UNTOUCHED (zero risk to container
+# tenants), and the build step is "gated out" for VM apps simply by never invoking it.
+#
+# It keeps the SAME filename as the container caller so the platform-managed CI surface
+# is consistent across layouts; only the body differs. A future optional disk-bake
+# pipeline (ADR-032 §4 v2.1) would add a VM-aware reusable workflow call here.
+#
+# "Deploy" for a VM = ArgoCD syncing the merged VM manifests (CDI imports the disk,
+# cloud-init runs the app) per promotion.yaml — there is no image-tag bump.
+#
+# CONTAINER-MODE SHAPE (same as tenant-build.yaml): the ARC runners are
+# containerMode:kubernetes, so the job MUST declare a `container:`; the heavy step runs
+# as a `uses: docker://` container-action in its own pod (shared _work volume).
+# ============================================================================
+name: build-and-push
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  validate:
+    # PER-TEAM RUNNER seam (same as the container caller): the repo Actions variable
+    # RUNNER_SCALE_SET picks this team's scale set; unset -> the shared ua-mis-kaniko.
+    # `vars.*` survives the scaffolder's copyWithoutTemplating (no post-copy sed).
+    runs-on: ${{ vars.RUNNER_SCALE_SET || 'ua-mis-kaniko' }}
+    permissions:
+      contents: read
+    container:
+      image: node:24-trixie-slim
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 1
+
+      - name: Validate VM manifests + cloud-init (no build)
+        # Digest-pinned (SEC) — same python:3-slim digest the reusable pipeline trusts.
+        # PyYAML over :443 (the runner's external egress is :443-only). The validator
+        # checks cloud-init is a valid #cloud-config, every chart manifest parses, the
+        # VM/Service/Ingress trio is present, and promotion.yaml is the no-build shape.
+        uses: docker://python@sha256:63a4c7f612a00f92042cbdcc7cdc6a306f38485af0a200b9c89de7d9b1607d15 # 3-slim
+        with:
+          entrypoint: /bin/sh
+          args: >-
+            -c 'set -eu;
+            cd "${{ github.workspace }}";
+            python -m pip install --quiet --root-user-action=ignore pyyaml;
+            python .devops/ci/validate-vm.py'

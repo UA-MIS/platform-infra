@@ -1,0 +1,26 @@
+# Ingress for the VM. Host = <app>.capstone.uamishub.com — the SAME clean "app URL"
+# pattern as a container app (the VM layout is single-environment, so there is no
+# .dev/.staging prefix; the one running VM IS the app). TLS is served at the Cloudflare
+# edge (paid Advanced cert for *.capstone.uamishub.com); the tunnel publishes to
+# in-cluster Traefik. appName is globally unique (UA-MIS/<appName>) so no team segment.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ${{ values.appName }}
+  labels:
+    app.kubernetes.io/name: ${{ values.appName }}
+spec:
+  rules:
+    - host: ${{ values.appName }}.capstone.uamishub.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ${{ values.appName }}
+                port:
+                  name: http
+  tls:
+    - hosts:
+        - ${{ values.appName }}.capstone.uamishub.com
