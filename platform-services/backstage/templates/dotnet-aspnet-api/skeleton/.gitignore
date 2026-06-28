@@ -1,0 +1,10 @@
+# .NET build output
+**/bin/
+**/obj/
+*.user
+
+# Editor / OS cruft
+.DS_Store
+.idea/
+.vscode/
+.vs/
