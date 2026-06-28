@@ -36,8 +36,8 @@ spec:
 
   # --- source repos: the team's app repo + platform-infra (for its tenant dir) ---
   sourceRepos:
-    - https://github.com/UA-MIS/v1check-app
-    - https://github.com/UA-MIS/v1check-app.git
+    - https://github.com/UA-MIS/v1check
+    - https://github.com/UA-MIS/v1check.git
     - https://github.com/UA-MIS/platform-infra
     - https://github.com/UA-MIS/platform-infra.git
 
@@ -77,6 +77,14 @@ spec:
       kind: Ingress
     - group: bitnami.com
       kind: SealedSecret
+    # ESO tenant secrets (ADR-030 B1). The dev/staging/prod/preview overlays each
+    # ship a per-namespace SecretStore (vault-tenant) + ExternalSecret (app-secret)
+    # that materialize the workload Secret from the team's Vault subtree. Raw Secret
+    # stays ABSENT — ESO/sealed-secrets controllers (platform services) mint it.
+    - group: external-secrets.io
+      kind: ExternalSecret
+    - group: external-secrets.io
+      kind: SecretStore
 
   # --- ArgoCD RBAC role for the team (§3.3) -----------------------------------
   # Phase 1: bound to the local admin for demonstration. Phase 2: bound to a

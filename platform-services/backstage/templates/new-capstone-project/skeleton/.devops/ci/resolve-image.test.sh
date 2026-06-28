@@ -71,12 +71,16 @@ assert_kv "tag->prod" TAG 1.4.0
 assert_kv "tag->prod" PUSH true
 assert_kv "tag->prod" IMAGE "harbor.127-0-0-1.sslip.io/sample/sample:1.4.0"
 
-# 3) pull_request -> preview, build-only (NO push) — untrusted-code guard
+# 3) pull_request -> preview, pushes a preview-scoped pull-<sha> image. The push is
+# UNTRUSTED PR code, bounded to the team's own Harbor project + the disjoint
+# pull-<sha> tag + the fenced <team>-pr-<n> ns (see resolve-image.sh's pull_request
+# case). The TAG keys on the SHA the workflow feeds (the PR HEAD sha, so it matches
+# the preview ApplicationSet's pull-{{.head_short_sha_7}} image override).
 run "pr->preview" pull_request "refs/pull/7/merge" "abc1234def"
 assert_rc "pr->preview" 0
 assert_kv "pr->preview" ENV preview
 assert_kv "pr->preview" TAG pull-abc1234
-assert_kv "pr->preview" PUSH false
+assert_kv "pr->preview" PUSH true
 
 # 4) push to a non-main branch -> rejected (only main + v* tags build)
 run "feature-branch" push "refs/heads/feature-x" "abc1234"
@@ -123,7 +127,7 @@ else
   assert_kv "noyq-tag" IMAGE "harbor.127-0-0-1.sslip.io/sample/sample:2.0.1"
   run_noyq "noyq-pr" pull_request "refs/pull/3/merge" "cafef00dbabe"
   assert_rc "noyq-pr" 0
-  assert_kv "noyq-pr" PUSH false
+  assert_kv "noyq-pr" PUSH true
   assert_kv "noyq-pr" TAG pull-cafef00
 fi
 

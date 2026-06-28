@@ -154,3 +154,17 @@ capstone:
       # volume here; the default API-server-audience token will NOT satisfy the Vault role).
       saTokenPath: /var/run/secrets/vault/vault-token
       caPath: /etc/backstage/vault-ca/ca.crt
+  # ── Harbor provisioning (capstone:harbor-onboard) ────────────────────────────────────
+  # Creates the team's Harbor PROJECT + OIDC Developer mapping at scaffold time so a fresh
+  # team's first CI build can push (else `UNAUTHORIZED: project <team> not found`). The
+  # action authenticates with a DEDICATED LEAST-PRIVILEGE PROVISIONER ROBOT — project-create
+  # + member-add only — NOT the full harbor-admin account (admin in a web-facing backend is
+  # too much blast radius). DEPLOY DEPENDENCY (devops): mint a Harbor SYSTEM robot with only
+  # those two permissions and seal its username/secret into `backstage-process-secrets` as
+  # HARBOR_PROVISIONER_USERNAME / HARBOR_PROVISIONER_SECRET BEFORE this image deploys (the
+  # scaffolder step fails closed if they're unset). baseUrl is the in-cluster Harbor core.
+  harbor:
+    baseUrl: http://harbor-core.harbor.svc:80
+    username: ${HARBOR_PROVISIONER_USERNAME}
+    secret: ${HARBOR_PROVISIONER_SECRET}
+    oidcGroupPrefix: UA-MIS
