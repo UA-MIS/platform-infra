@@ -20,6 +20,7 @@ resources:
   - apiserver-cnp.yaml          # Cilium: kube-apiserver egress by entity (ipBlock can't — flannel->Cilium gap)
   - vault-netpol.yaml           # ADR-030 B1: default-deny + ESO-only ingress for the vault ns (was unwired — #107 gap)
   - vault-unsealer-netpol.yaml  # Track-2 DR: default-deny + vault-ns-only ingress for the unsealer ns
+  - vault-cnp.yaml              # SEC-B1: Cilium apiserver/cluster egress by entity for vault+unsealer (ipBlock can't — flannel->Cilium gap)
 
 labels:
   - pairs:
