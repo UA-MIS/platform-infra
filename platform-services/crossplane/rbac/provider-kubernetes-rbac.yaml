@@ -19,18 +19,19 @@
 #   - core Namespace/ResourceQuota/LimitRange/ConfigMap/ServiceAccount → the ns bundle
 #       + the in-ns vault-ca ConfigMap + the eso-tenant SA
 #   - networking.k8s.io NetworkPolicy → the default-deny + allowances
-#   - rbac.authorization.k8s.io Role/RoleBinding → the team-developer namespaced RBAC
+#   - rbac.authorization.k8s.io RoleBinding → the team-developer namespaced binding
+#       (to the pre-reviewed ClusterRole capstone-tenant-developer — NOT an inline Role)
 #   - external-secrets.io SecretStore/ExternalSecret/PushSecret → the ESO wiring +
 #       the Harbor-robot→Vault bridge
 #
-# ⚠ K8s privilege-escalation prevention: to CREATE a Role/RoleBinding, the creator
-# must already hold the permissions it grants (or the `escalate`/`bind` verbs). To
-# avoid granting the blunt `escalate` verb, this ClusterRole ALSO enumerates the
-# exact permissions the tenant `team-developer` Role contains (the apps/core/
-# networking/bitnami read+limited-write rules from tenants/_template/namespaces/*.yaml)
-# so the provider can create those Roles without escalation. If the tenant Role's
-# rules change, update the "tenant-role mirror" block below IN LOCKSTEP — the SRE
-# review checks this pairing.
+# ⚠ K8s privilege-escalation prevention (CXP-2): to CREATE a RoleBinding the creator
+# must hold the permissions it grants OR the `bind` verb on the referenced role. This
+# ClusterRole takes the `bind` path SCOPED to the single reviewed ClusterRole
+# capstone-tenant-developer (resourceNames). It therefore holds NO standing pods/exec
+# or deployment-write anywhere — the old cluster-wide "tenant-role mirror" block (which
+# made a provider-SA compromise a cluster takeover) has been REMOVED. The developer
+# rule set now lives once in rbac/capstone-tenant-developer-clusterrole.yaml; if it
+# changes, the SRE reviews that file — the provider grant here does not change.
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -55,34 +56,28 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
-  # --- Namespaced RBAC: the team-developer Role + RoleBinding ----------------
+  # --- Namespaced RBAC: the team-developer RoleBinding ONLY (CXP-2) -----------
+  # The provider creates the per-namespace RoleBinding but NO Role (no `roles`
+  # create verb). The binding targets the pre-reviewed ClusterRole
+  # capstone-tenant-developer; the `bind` rule below authorizes exactly that one
+  # role (escalation-prevention without holding the role's powers).
   - apiGroups: ["rbac.authorization.k8s.io"]
-    resources: ["roles", "rolebindings"]
+    resources: ["rolebindings"]
     verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
   # --- ESO wiring: per-tenant store + secrets + the Harbor-robot→Vault bridge -
   - apiGroups: ["external-secrets.io"]
     resources: ["secretstores", "externalsecrets", "pushsecrets"]
     verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
-  # --- tenant-role MIRROR (escalation-prevention; keep in lockstep with -------
-  #     tenants/_template/namespaces/*.yaml team-developer Role). These rules are
-  #     NOT used by the provider directly — they are present ONLY so the provider
-  #     may CREATE a team-developer Role containing them without tripping the
-  #     API server's privilege-escalation check. Mirror EXACTLY; no broader.
-  - apiGroups: ["apps"]
-    resources: ["deployments", "replicasets"]
-    verbs: ["get", "list", "watch", "update", "patch"]
-  - apiGroups: [""]
-    resources: ["services", "configmaps", "serviceaccounts", "pods", "pods/log", "events"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: [""]
-    resources: ["pods/exec"]
-    verbs: ["create"]
-  - apiGroups: ["networking.k8s.io"]
-    resources: ["ingresses"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["bitnami.com"]
-    resources: ["sealedsecrets"]
-    verbs: ["get", "list", "watch"]
+  # --- bind authorization (CXP-2): permit creating RoleBindings that reference --
+  #     ONLY the reviewed ClusterRole capstone-tenant-developer. `bind` lets the
+  #     provider attach that one role to a tenant namespace WITHOUT itself holding
+  #     pods/exec/deployment-patch anywhere (the old "tenant-role mirror" block —
+  #     a cluster-wide exec/deploy-patch grant — is GONE). resourceNames pins it to
+  #     the single reviewed role so no other (e.g. cluster-admin) role can be bound.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles"]
+    verbs: ["bind"]
+    resourceNames: ["capstone-tenant-developer"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

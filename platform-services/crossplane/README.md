@@ -154,8 +154,11 @@ reliability-first criterion (no reconcile churn):
 
 1. SRE review of `rbac/` + `apis/composition.yaml` + `creds/` scopes.
 2. Reseal the real provider creds (`creds/README.md`).
-3. Create the Vault `tenant-provisioner` + `crossplane-push` policies/roles
-   (`creds/README.md` + `config/vault-push-secretstore.yaml`).
+3. Create the Vault `tenant-provisioner` + `crossplane-push` policies/roles. The
+   `crossplane-push` writer policy + k8s-auth role is committed for review and run as
+   `../external-secrets/vault-policies/crossplane-push-role.sh` (the read counterpart
+   is `eso-role.sh`); `tenant-provisioner` scope is in `creds/README.md`. The writer
+   SecretStore is `config/vault-push-secretstore.yaml`.
 4. `make bootstrap-reapply` (adds the Crossplane chart repo to the AppProject) + VERIFY.
 5. Phase-0/1 (ADR-031 §11): hand-apply ONE XR; confirm the full fan-out reconciles
    green; run `crossplane render` / `crossplane beta validate` against the pinned

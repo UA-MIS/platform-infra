@@ -1,0 +1,56 @@
+# ============================================================================
+# capstone-tenant-developer — the ONE reviewed tenant-developer role (CXP-2).
+# ============================================================================
+# This is the cluster-wide, hand-curated set of permissions a tenant's developers
+# get INSIDE their own namespaces. It is referenced (never duplicated) by the
+# per-tenant-namespace RoleBindings the Composition emits — a namespaced RoleBinding
+# to a ClusterRole grants these verbs ONLY within that tenant namespace.
+#
+# WHY this exists as a pre-created ClusterRole (not an inline Role minted per tenant):
+# previously the Composition rendered an inline Role carrying these rules, which forced
+# provider-kubernetes to hold a cluster-wide MIRROR of every rule (incl. pods/exec
+# create + deployments/replicasets update/patch) just to satisfy the API server's
+# privilege-escalation check on Role creation. That made a compromise of the provider
+# SA a cluster-takeover (cluster-wide exec/deploy-patch). By pinning the rule set HERE
+# once (SRE-reviewed) and having the provider only `bind` to it (rbac/
+# provider-kubernetes-rbac.yaml, resourceNames: [capstone-tenant-developer]), the
+# provider holds NO standing pods/exec or deployment-write anywhere — it can only
+# attach this exact reviewed role to tenant namespaces.
+#
+# ⚠ This rule set IS the tenant developer contract. Changing it changes what every
+# tenant developer can do. Keep it in lockstep with tenants/_template/namespaces/*.yaml
+# (the legacy imperative path's team-developer Role) — the SRE review checks the pair.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: capstone-tenant-developer
+  labels:
+    platform.capstone/component: platform
+rules:
+  # Workload read + restart/scale (the developer's day-to-day): get/list/watch plus
+  # update/patch on Deployments/ReplicaSets (rollout restart, image bump via GitOps is
+  # the norm, but kubectl rollout/scale is the break-glass).
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  # Read-only on the supporting workload objects.
+  - apiGroups: [""]
+    resources: ["services", "configmaps", "serviceaccounts"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["bitnami.com"]
+    resources: ["sealedsecrets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+  # Debug exec into own-namespace pods (kubectl exec). Scoped to the tenant namespace
+  # by the namespaced RoleBinding — NOT a cluster-wide grant.
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]

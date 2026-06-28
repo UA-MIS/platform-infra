@@ -364,9 +364,12 @@ spec:
                           - {{ printf "%s-developers" $team | quote }}
 
             {{- /* Per-env namespace bundle: Namespace+Quota+LimitRange+3 NetworkPolicies+
-                   Role+RoleBinding + eso-tenant SA + vault-ca ConfigMap + SecretStore +
+                   RoleBinding + eso-tenant SA + vault-ca ConfigMap + SecretStore +
                    app-secrets ExternalSecret + harbor-pull ExternalSecret. One
-                   provider-kubernetes Object per manifest, ranged over envs (DRY; no sed). */}}
+                   provider-kubernetes Object per manifest, ranged over envs (DRY; no sed).
+                   The developer RBAC is a RoleBinding to the pre-reviewed ClusterRole
+                   capstone-tenant-developer (CXP-2) — no inline Role, so the provider
+                   needs no cluster-wide mirror of pods/exec + deploy-patch. */}}
             {{- range $e := $envs }}
             {{- $ns := printf "%s-%s" $team $e.name }}
             ---
@@ -535,48 +538,10 @@ spec:
                       - to:
                           - podSelector: {}
             ---
-            apiVersion: kubernetes.crossplane.io/v1alpha1
-            kind: Object
-            metadata:
-              annotations:
-                {{ setResourceNameAnnotation (printf "k8s-role-%s" $e.name) }}
-            spec:
-              providerConfigRef:
-                name: default
-              forProvider:
-                manifest:
-                  apiVersion: rbac.authorization.k8s.io/v1
-                  kind: Role
-                  metadata:
-                    name: team-developer
-                    namespace: {{ $ns | quote }}
-                    labels:
-                      platform.capstone/team: {{ $team | quote }}
-                      platform.capstone/semester: {{ $sem | quote }}
-                      platform.capstone/env: {{ $e.name | quote }}
-                  rules:
-                    - apiGroups: ["apps"]
-                      resources: ["deployments", "replicasets"]
-                      verbs: ["get", "list", "watch", "update", "patch"]
-                    - apiGroups: [""]
-                      resources: ["services", "configmaps", "serviceaccounts"]
-                      verbs: ["get", "list", "watch"]
-                    - apiGroups: ["networking.k8s.io"]
-                      resources: ["ingresses"]
-                      verbs: ["get", "list", "watch"]
-                    - apiGroups: ["bitnami.com"]
-                      resources: ["sealedsecrets"]
-                      verbs: ["get", "list", "watch"]
-                    - apiGroups: [""]
-                      resources: ["pods", "pods/log"]
-                      verbs: ["get", "list", "watch"]
-                    - apiGroups: [""]
-                      resources: ["pods/exec"]
-                      verbs: ["create"]
-                    - apiGroups: [""]
-                      resources: ["events"]
-                      verbs: ["get", "list", "watch"]
-            ---
+            # Developer RBAC (CXP-2): a namespaced RoleBinding to the pre-reviewed
+            # ClusterRole capstone-tenant-developer (rbac/capstone-tenant-developer-
+            # clusterrole.yaml). No inline Role is minted — so the provider holds NO
+            # cluster-wide pods/exec or deployment-write; it only `bind`s this one role.
             apiVersion: kubernetes.crossplane.io/v1alpha1
             kind: Object
             metadata:
@@ -598,8 +563,8 @@ spec:
                       platform.capstone/env: {{ $e.name | quote }}
                   roleRef:
                     apiGroup: rbac.authorization.k8s.io
-                    kind: Role
-                    name: team-developer
+                    kind: ClusterRole
+                    name: capstone-tenant-developer
                   subjects:
                     - apiGroup: rbac.authorization.k8s.io
                       kind: Group

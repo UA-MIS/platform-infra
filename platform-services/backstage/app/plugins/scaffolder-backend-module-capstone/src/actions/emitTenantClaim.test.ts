@@ -167,4 +167,38 @@ describe('capstone:emit-tenant-claim', () => {
       ),
     ).rejects.toThrow(/invalid githubTeam/);
   });
+
+  // CXP-1 reserved-name guard (privilege escalation / tenant isolation). These slugs
+  // are DNS-1123-VALID but reserved — they must be rejected before the XR is emitted.
+  it.each(['platform', 'argocd', 'kube-system', 'vault', 'harbor', 'arc-runners'])(
+    'fails closed on reserved team slug %s',
+    async team => {
+      const action = createEmitTenantClaimAction();
+      await expect(
+        action.handler(
+          createMockActionContext({
+            input: { team, appName: 'acme-app', semester: '2026-fall' },
+            workspacePath: mockDir.resolve(`wsresv-team-${team}`),
+          }),
+        ),
+      ).rejects.toThrow(/reserved platform\/namespace name/);
+    },
+  );
+
+  // `.github` is also reserved but is rejected earlier by the DNS-1123 format check
+  // (leading dot); these two pass format yet must still be denied as reserved.
+  it.each(['platform-infra', 'capstone-app-template'])(
+    'fails closed on reserved appName %s',
+    async appName => {
+      const action = createEmitTenantClaimAction();
+      await expect(
+        action.handler(
+          createMockActionContext({
+            input: { team: 'acme', appName, semester: '2026-fall' },
+            workspacePath: mockDir.resolve(`wsresv-app-${appName}`),
+          }),
+        ),
+      ).rejects.toThrow(/reserved org-infrastructure repo name/);
+    },
+  );
 });

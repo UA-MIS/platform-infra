@@ -34,6 +34,37 @@ const APP_SLUG = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
 /** Semester slug `YYYY-(spring|summer|fall)` (mirrors the XRD `semester` pattern). */
 const SEMESTER = /^[0-9]{4}-(spring|summer|fall)$/;
 
+/**
+ * Reserved-name denylist (CXP-1 — privilege escalation / tenant isolation). The XR
+ * auto-commits to main via the GitHub App with NO human merge, so `team`/`appName`
+ * are low-trust inputs used directly with org-admin + cluster-wide creds. DNS-1123
+ * format alone does not stop `team: platform` (clobbers the privileged platform
+ * AppProject) or `appName: platform-infra` (hands the tenant push to the infra repo).
+ * These MUST stay in lockstep with the XRD x-kubernetes-validations (apis/xrd.yaml) —
+ * the XRD is the admission gate; this is defense in depth at emit time (fail closed).
+ */
+const RESERVED_TEAMS = new Set([
+  'platform',
+  'argocd',
+  'default',
+  'kube-system',
+  'crossplane-system',
+  'vault',
+  'vault-unsealer',
+  'harbor',
+  'arc-runners',
+  'arc-system',
+  'sealed-secrets',
+  'external-secrets',
+  'monitoring',
+  'cert-manager',
+]);
+const RESERVED_APPNAMES = new Set([
+  'platform-infra',
+  'capstone-app-template',
+  '.github',
+]);
+
 /** Render a string scalar safely for the small, known XR field set (YAML-quote). */
 function yamlStr(v: string): string {
   return JSON.stringify(v); // valid YAML double-quoted scalar for our slug charset
@@ -156,6 +187,20 @@ export function createEmitTenantClaimAction() {
         throw new Error(
           `capstone:emit-tenant-claim: invalid appName '${appName}' — must be a DNS ` +
             `label matching ${APP_SLUG}.`,
+        );
+      }
+      // Reserved-name guard (CXP-1) — reject names that would collide with privileged
+      // platform RBAC or org infra repos. Mirrors the XRD admission denylist.
+      if (RESERVED_TEAMS.has(team)) {
+        throw new Error(
+          `capstone:emit-tenant-claim: team '${team}' is a reserved platform/namespace ` +
+            `name and cannot be used as a tenant team slug.`,
+        );
+      }
+      if (RESERVED_APPNAMES.has(appName)) {
+        throw new Error(
+          `capstone:emit-tenant-claim: appName '${appName}' is a reserved ` +
+            `org-infrastructure repo name and cannot be used as a tenant app name.`,
         );
       }
       if (!SEMESTER.test(semester)) {

@@ -40,6 +40,30 @@ spec:
             spec:
               type: object
               required: [team, appName, semester]
+              # ⚠ RESERVED-NAME GUARD (CXP-1, privilege-escalation / tenant-isolation).
+              # The XR auto-commits to main via the GitHub App with NO human merge
+              # (branch-protection bypass — ADR-031 §7), so `team`/`appName` are
+              # LOW-TRUST inputs used directly with org-admin + cluster-wide creds.
+              # DNS-1123 format alone is NOT enough: `team: platform` would clobber the
+              # privileged platform AppProject, and `appName: platform-infra` would hand
+              # the tenant push to the infra repo. These CEL rules (Crossplane v2 XRDs
+              # support x-kubernetes-validations) reject reserved names at ADMISSION —
+              # the same denylist is mirrored in the scaffolder (emitTenantClaim.ts) for
+              # defense in depth. Keep the two lists in lockstep.
+              x-kubernetes-validations:
+                - rule: >-
+                    !(self.team in ['platform','argocd','default','kube-system',
+                    'crossplane-system','vault','vault-unsealer','harbor','arc-runners',
+                    'arc-system','sealed-secrets','external-secrets','monitoring',
+                    'cert-manager'])
+                  message: >-
+                    spec.team is a reserved platform/namespace name and cannot be used as
+                    a tenant team slug (would collide with privileged platform RBAC).
+                - rule: >-
+                    !(self.appName in ['platform-infra','capstone-app-template','.github'])
+                  message: >-
+                    spec.appName is a reserved org-infrastructure repo name and cannot be
+                    used as a tenant app name (would collide with an infra repo).
               properties:
                 team:
                   type: string
