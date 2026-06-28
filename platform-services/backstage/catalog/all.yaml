@@ -16,6 +16,14 @@ spec:
   targets:
     # The "New Capstone Project" Scaffolder template (the headline IDP feature).
     - https://github.com/UA-MIS/platform-infra/blob/main/platform-services/backstage/templates/new-capstone-project/template.yaml
+    # The "Next.js Full-stack" Scaffolder template (TypeScript + Prisma + MySQL, #143).
+    - https://github.com/UA-MIS/platform-infra/blob/main/platform-services/backstage/templates/nextjs-fullstack/template.yaml
+    # The "React + Express" Scaffolder template (Vite SPA + Node/Express multi-component, #144).
+    - https://github.com/UA-MIS/platform-infra/blob/main/platform-services/backstage/templates/react-express/template.yaml
+    # The "C# ASP.NET Core API" Scaffolder template (.NET 8 + EF Core + MySQL, #140).
+    - https://github.com/UA-MIS/platform-infra/blob/main/platform-services/backstage/templates/dotnet-aspnet-api/template.yaml
+    # The "React Static SPA" Scaffolder template (Vite, no-DB, #142).
+    - https://github.com/UA-MIS/platform-infra/blob/main/platform-services/backstage/templates/react-static/template.yaml
     # Seed org entities (the platform Group that owns the templates, etc.).
     - https://github.com/UA-MIS/platform-infra/blob/main/platform-services/backstage/catalog/org.yaml
 ---
