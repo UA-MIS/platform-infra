@@ -290,6 +290,11 @@ spec:
         # bump deliberately like the .devops contract pin above).
         templateUrl: https://github.com/UA-MIS/platform-infra/tree/main/tenants/_template
         team: ${{ parameters.team }}
+        # App repo name — the tenant ApplicationSets/AppProject point repoURL/sourceRepos
+        # at UA-MIS/<appName> (the repo publish:github creates, #101). MUST be appName,
+        # NOT <team>-app: the old __TEAM__-app form pointed ArgoCD at a non-existent repo
+        # ("repository not found") whenever appName != <team>-app.
+        appName: ${{ parameters.appName }}
         # SLUG form (year-first, e.g. 2026-fall) — this becomes the
         # platform.capstone/semester LABEL value substituted into every tenant
         # object, and MUST match capstone:render-tenant's SEMESTER regex (year-first).
