@@ -9,7 +9,10 @@
 #                  probes hit THIS path, so keep it cheap and dependency-free.
 #   GET /health  : alias of /healthz (convenience).
 #   GET /        : 200 — proves it read APP_SECRET WITHOUT echoing the value.
-#   /items       : sample CRUD over a SQLAlchemy model (see routers/items.py).
+#   /api/items   : sample CRUD over a SQLAlchemy model (see routers/items.py). The
+#                  backend ALWAYS serves its API under /api/... so it works identically
+#                  as a single component (ingress "/") and as the backend half of a
+#                  frontend+backend app (ingress routes "/api" -> here, no prefix strip).
 import hashlib
 import os
 from contextlib import asynccontextmanager
@@ -35,7 +38,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.include_router(items.router)
+app.include_router(items.router, prefix="/api")
 
 
 @app.get("/healthz", tags=["health"])

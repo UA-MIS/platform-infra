@@ -137,17 +137,46 @@ spec:
                         singleFragment:
                           title: App stack
                           type: string
-                          description: The single-component stack to scaffold.
+                          description: >-
+                            The single-component stack to scaffold (a backend API, a
+                            fullstack app, or a static site). Generated from the fragment
+                            library by _tools/gen-wizard-enums.py (single slot).
                           enum:
+                            - backend/django
+                            - backend/dotnet-aspnet
                             - backend/express
                             - backend/fastapi
-                            - backend/dotnet-aspnet
+                            - backend/flask
+                            - backend/go
+                            - backend/laravel
+                            - backend/nestjs
+                            - backend/node-bare
+                            - backend/rails
+                            - backend/rust-axum
+                            - backend/spring-boot
+                            - frontend/angular
+                            - fullstack/nuxt
+                            - fullstack/sveltekit
+                            - static/bare-html
                             - static/react-static
                           enumNames:
+                            - 'Python / Django + DRF API (MySQL)'
+                            - '.NET / ASP.NET Core API (EF Core + MySQL)'
                             - 'Node / Express API (TypeScript + MySQL)'
                             - 'Python / FastAPI API (SQLAlchemy + MySQL)'
-                            - '.NET / ASP.NET Core API (EF Core + MySQL)'
-                            - 'React static site (no backend, no DB)'
+                            - 'Python / Flask API (SQLAlchemy + MySQL)'
+                            - 'Go API (Gin + MySQL)'
+                            - 'PHP / Laravel API (MySQL)'
+                            - 'NestJS API (TypeScript + MySQL)'
+                            - 'Node.js (bare http, no framework + MySQL)'
+                            - 'Ruby on Rails API (API-only, MySQL)'
+                            - 'Rust / Axum API (sqlx + MySQL)'
+                            - 'Java / Spring Boot API (Spring Web + JDBC + MySQL)'
+                            - 'Angular (TypeScript + Tailwind) SPA'
+                            - 'Nuxt 3 fullstack (Vue + Nitro API + MySQL)'
+                            - 'SvelteKit fullstack (Svelte + server routes + MySQL)'
+                            - 'Static HTML/CSS/JS site (no framework)'
+                            - 'React static site (Vite + React Router, no backend)'
                           default: backend/fastapi
                         database:
                           title: Database
@@ -171,22 +200,53 @@ spec:
                         frontendFragment:
                           title: Frontend
                           type: string
+                          description: >-
+                            The SPA served at "/". Generated from the fragment library
+                            (frontend slot). Talks to the backend via relative /api calls.
                           enum:
+                            - frontend/angular
                             - frontend/react
+                            - frontend/solid
+                            - frontend/vue
                           enumNames:
+                            - 'Angular (TypeScript + Tailwind) SPA'
                             - 'React (Vite + TypeScript + Tailwind) SPA'
+                            - 'SolidJS (Vite + TypeScript + Tailwind) SPA'
+                            - 'Vue 3 (Vite + TypeScript + Tailwind) SPA'
                           default: frontend/react
                         backendFragment:
                           title: Backend
                           type: string
+                          description: >-
+                            The API served behind "/api" (longest-prefix ingress route, no
+                            prefix strip — the backend serves under /api/...). Generated
+                            from the fragment library (backend slot).
                           enum:
+                            - backend/django
+                            - backend/dotnet-aspnet
                             - backend/express
                             - backend/fastapi
-                            - backend/dotnet-aspnet
+                            - backend/flask
+                            - backend/go
+                            - backend/laravel
+                            - backend/nestjs
+                            - backend/node-bare
+                            - backend/rails
+                            - backend/rust-axum
+                            - backend/spring-boot
                           enumNames:
+                            - 'Python / Django + DRF API (MySQL)'
+                            - '.NET / ASP.NET Core API (EF Core + MySQL)'
                             - 'Node / Express API (TypeScript + MySQL)'
                             - 'Python / FastAPI API (SQLAlchemy + MySQL)'
-                            - '.NET / ASP.NET Core API (EF Core + MySQL)'
+                            - 'Python / Flask API (SQLAlchemy + MySQL)'
+                            - 'Go API (Gin + MySQL)'
+                            - 'PHP / Laravel API (MySQL)'
+                            - 'NestJS API (TypeScript + MySQL)'
+                            - 'Node.js (bare http, no framework + MySQL)'
+                            - 'Ruby on Rails API (API-only, MySQL)'
+                            - 'Rust / Axum API (sqlx + MySQL)'
+                            - 'Java / Spring Boot API (Spring Web + JDBC + MySQL)'
                           default: backend/express
                         database:
                           title: Database
@@ -210,21 +270,48 @@ spec:
                     The mobile app stack. Builds a signed artifact (.ipa/.apk) via a build
                     workflow — it is NOT deployed to the cluster.
                   enum:
-                    - mobile/_EXAMPLE
+                    - mobile/android-kotlin
+                    - mobile/flutter
+                    - mobile/ios-swift
+                    - mobile/react-native
                   enumNames:
-                    - 'EXAMPLE mobile fragment (placeholder — real ones added via fan-out)'
-                  default: mobile/_EXAMPLE
+                    - 'Android app (Kotlin / Jetpack Compose, .apk)'
+                    - 'Mobile app (Flutter / Dart, cross-platform .apk + .ipa)'
+                    - 'iOS app (Swift / SwiftUI, .ipa)'
+                    - 'Mobile app (React Native / Expo, cross-platform .apk + .ipa)'
+                  default: mobile/flutter
                 backendFragment:
                   title: Backend (the API your app calls)
                   type: string
+                  description: >-
+                    The deployed API your mobile app calls. Generated from the fragment
+                    library (backend slot).
                   enum:
+                    - backend/django
+                    - backend/dotnet-aspnet
                     - backend/express
                     - backend/fastapi
-                    - backend/dotnet-aspnet
+                    - backend/flask
+                    - backend/go
+                    - backend/laravel
+                    - backend/nestjs
+                    - backend/node-bare
+                    - backend/rails
+                    - backend/rust-axum
+                    - backend/spring-boot
                   enumNames:
+                    - 'Python / Django + DRF API (MySQL)'
+                    - '.NET / ASP.NET Core API (EF Core + MySQL)'
                     - 'Node / Express API (TypeScript + MySQL)'
                     - 'Python / FastAPI API (SQLAlchemy + MySQL)'
-                    - '.NET / ASP.NET Core API (EF Core + MySQL)'
+                    - 'Python / Flask API (SQLAlchemy + MySQL)'
+                    - 'Go API (Gin + MySQL)'
+                    - 'PHP / Laravel API (MySQL)'
+                    - 'NestJS API (TypeScript + MySQL)'
+                    - 'Node.js (bare http, no framework + MySQL)'
+                    - 'Ruby on Rails API (API-only, MySQL)'
+                    - 'Rust / Axum API (sqlx + MySQL)'
+                    - 'Java / Spring Boot API (Spring Web + JDBC + MySQL)'
                   default: backend/express
                 database:
                   title: Database (for the backend)

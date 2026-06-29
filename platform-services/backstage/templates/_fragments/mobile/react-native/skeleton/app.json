@@ -1,0 +1,19 @@
+{
+  "expo": {
+    "name": "${{ values.appName }}",
+    "slug": "app",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "bundleIdentifier": "com.uamishub.capstone.app",
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "com.uamishub.capstone.app"
+    },
+    "extra": {
+      "apiBaseUrl": "https://CHANGEME-backend.capstone.uamishub.com"
+    }
+  }
+}

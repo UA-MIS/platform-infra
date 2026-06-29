@@ -1,0 +1,5 @@
+/* Tailwind CSS v4 — the single import pulls in the full utility layer. It is processed by
+   the @tailwindcss/postcss plugin (see .postcssrc.json), which Angular's build applies
+   automatically. No tailwind.config.js needed; Tailwind scans your source for class names.
+   Customise via a CSS-first @theme block instead of a JS config. */
+@import "tailwindcss";

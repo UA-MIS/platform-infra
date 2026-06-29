@@ -1,0 +1,7 @@
+# Test/lint-only dependencies (NOT in the runtime image). conftest.py installs these
+# (plus requirements.txt) on demand so tests can import the app. Keep test deps OUT of
+# requirements.txt so the runtime image stays lean.
+-r requirements.txt
+pytest==8.3.4
+pytest-django==4.9.0
+ruff==0.8.4

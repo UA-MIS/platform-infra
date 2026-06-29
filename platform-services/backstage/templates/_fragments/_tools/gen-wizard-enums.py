@@ -23,7 +23,10 @@ def load():
     for f in sorted(glob.glob(os.path.join(FRAGMENTS, "*", "*", "fragment.yaml"))):
         d = yaml.safe_load(open(f))
         cat = os.path.basename(os.path.dirname(os.path.dirname(f)))
-        if cat.startswith("_"):
+        # Skip the _contract dir (a category starting with "_") AND placeholder/example
+        # fragments whose id starts with "_" (e.g. mobile/_EXAMPLE) — those document the
+        # contract for fan-out authors and must NOT surface as user-facing wizard choices.
+        if cat.startswith("_") or str(d.get("id", "")).startswith("_"):
             continue
         d["_path"] = f"{cat}/{d['id']}"
         out.append(d)

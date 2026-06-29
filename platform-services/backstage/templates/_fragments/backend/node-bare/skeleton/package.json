@@ -1,0 +1,14 @@
+{
+  "name": "${{ values.appName }}-backend",
+  "version": "0.0.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "mysql2": "^3.11.5"
+  }
+}
