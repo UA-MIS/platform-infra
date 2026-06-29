@@ -1,0 +1,42 @@
+# Ingress for a MULTI-COMPONENT app: ONE host, N paths — one path per component
+# (nunjucks loop, expanded at create time), routing each component's `path` to its
+# own Service. Host pattern is <app>.${PLATFORM_DOMAIN} (§5.2): the base carries the
+# real PLATFORM_DOMAIN (capstone.uamishub.com) and is the canonical/prod host; each
+# non-prod overlay patches /spec/rules/0/host with its env prefix (there is still ONE
+# rule, so the existing JSON6902 host patch in the overlays is unchanged).
+#
+# The host drops the team segment — appName is GLOBALLY UNIQUE (UA-MIS/<appName>), so
+# <app>.capstone.uamishub.com is unambiguous; team stays the namespace/AppProject/RBAC
+# key, not part of the public host. TLS is served at the Cloudflare edge (paid
+# Advanced cert for *.capstone.uamishub.com); the tunnel publishes to in-cluster Traefik.
+#
+# PATH ROUTING: each component contributes one path (frontend "/" + backend "/api").
+# Matching is LONGEST-PREFIX (pathType: Prefix), so "/api/hello" goes to the backend
+# and everything else to the frontend regardless of the order the paths are listed —
+# Traefik (the platform ingress controller) prioritises longer prefixes.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ${{ values.appName }}
+  labels:
+    app.kubernetes.io/name: ${{ values.appName }}
+spec:
+  rules:
+    # Base = canonical/prod host. Non-prod overlays patch in their env prefix
+    # (e.g. <app>.dev.capstone.uamishub.com for dev) on this single rule.
+    - host: ${{ values.appName }}.capstone.uamishub.com
+      http:
+        paths:
+{%- for c in values.components %}
+          # ${{ c.kind }} component -> ${{ c.path }}
+          - path: ${{ c.path }}
+            pathType: Prefix
+            backend:
+              service:
+                name: ${{ values.appName }}-${{ c.name }}
+                port:
+                  name: http
+{%- endfor %}
+  tls:
+    - hosts:
+        - ${{ values.appName }}.capstone.uamishub.com
