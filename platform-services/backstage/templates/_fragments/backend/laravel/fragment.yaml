@@ -1,0 +1,24 @@
+# fragment.yaml — see _fragments/backend/express/fragment.yaml (and ADR-034) for the
+# BACKEND CONTRACT. Backend fragment: PHP / Laravel (API routes) on MySQL.
+apiVersion: platform.capstone/fragment.v1
+id: laravel
+displayName: PHP / Laravel API (MySQL)
+category: backend
+language: php
+framework: laravel
+slots:
+  - backend
+  - single
+defaultPort: 8080
+ingressPath: /api
+needsDB: true
+buildType: container
+dockerfile: Dockerfile
+healthPath: /healthz
+notes: >-
+  Laravel 12 (API routes) with a sample /api/items CRUD resource (Eloquent). The
+  DB-independent GET /healthz stays 200 with no database. Reads DATABASE_URL (a mysql://
+  URI, parsed by Laravel's connection-URL support) via the pdo_mysql driver. When
+  DATABASE_URL is unset the data routes degrade to a clear 503 while /healthz stays green.
+  Run `php artisan migrate` at deploy time (see MIGRATIONS.md). Listens on $PORT; non-root,
+  read-only-fs (logs to stderr, array cache/session, no Blade compilation).

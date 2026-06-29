@@ -1,0 +1,27 @@
+source "https://rubygems.org"
+
+gem "rails", "~> 8.1.3"
+
+# Trilogy: a MySQL-compatible client that needs NO libmysqlclient system library at
+# runtime, which keeps the final image slim. The DB is wired via DATABASE_URL (a
+# mysql:// URI); config/database.yml rewrites the scheme to trilogy://.
+gem "trilogy", "~> 2.7"
+
+# Puma web server — binds to $PORT (see config/puma.rb).
+gem "puma", ">= 5.0"
+
+# Windows does not include zoneinfo files, so bundle the tzinfo-data gem
+gem "tzinfo-data", platforms: %i[ windows jruby ]
+
+group :development, :test do
+  # See https://guides.rubyonrails.org/debugging_rails_applications.html#debugging-with-the-debug-gem
+  gem "debug", platforms: %i[ mri windows ], require: "debug/prelude"
+end
+
+group :test do
+  # SQLite is used ONLY for the test suite (config/database.yml `test:`), so the tests
+  # need no MySQL service. Production/development use Trilogy/MySQL.
+  gem "sqlite3", ">= 2.1"
+  # Pin minitest to 5.x: minitest 6.0.x breaks the Rails 8.1 `bin/rails test` runner.
+  gem "minitest", "~> 5.25"
+end
