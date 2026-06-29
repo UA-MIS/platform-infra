@@ -1,0 +1,47 @@
+# mkdocs.yml — TechDocs config for the Capstone IDP platform documentation.
+#
+# Backstage TechDocs builds this site from the repo (catalog-info.yaml carries
+# `backstage.io/techdocs-ref: dir:.`) and serves it in the catalog's Docs tab, so
+# the platform overview + the developer/operator guides live INSIDE The Process.
+# Also buildable standalone: `pip install mkdocs-techdocs-core && mkdocs serve`.
+#
+# docs_dir defaults to ./docs. The Operator Guide pages (docs/operator/*) are owned
+# by a separate operator-docs change; the nav references them so the site is wired
+# up the moment they land.
+site_name: UA-MIS Capstone IDP
+site_description: >-
+  Internal Developer Platform for University of Alabama MIS capstone teams —
+  platform overview, developer guide, and operator handbook.
+
+nav:
+  - Overview: index.md
+  - Developer Guide:
+      - Getting started: developer/getting-started.md
+      - CI/CD pipeline: developer/cicd.md
+      - Secrets: developer/secrets.md
+      - Multi-component apps: developer/multi-component.md
+  - Operator Guide:
+      - Vault & DR: operator/vault-and-dr.md
+      - ArgoCD & GitOps: operator/argocd-gitops.md
+      - Harbor registry: operator/harbor.md
+      - Secrets (ESO): operator/secrets-eso.md
+      - Crossplane onboarding: operator/crossplane-onboarding.md
+      - Observability: operator/observability.md
+      - Runbooks: operator/runbooks.md
+      - Gotchas & lessons: operator/gotchas-and-lessons.md
+  - Reference runbooks:
+      - Operations & handoff: OPERATIONS-AND-HANDOFF.md
+      - Phase 4 (Talos bring-up): phase-4-runbook.md
+      - Cilium CNI swap: cilium-cni-runbook.md
+      - DB tier: db-tier-runbook.md
+      - Phase 1 golden path: phase-1-golden-path.md
+
+plugins:
+  - techdocs-core
+
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+  - pymdownx.superfences
+  - pymdownx.details

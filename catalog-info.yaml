@@ -1,0 +1,28 @@
+# catalog-info.yaml — registers the platform documentation in The Process (Backstage)
+# software catalog and wires its TechDocs. catalog ingestion (GithubMultiOrg + this
+# location) tracks the component; the techdocs-ref annotation tells TechDocs to build
+# the site from the in-repo mkdocs.yml (dir = repo root). This is the platform-infra
+# repo's OWN catalog entity — the developer/operator handbook surfaced in the Docs tab.
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: capstone-platform-docs
+  title: Capstone IDP — Platform Documentation
+  description: >-
+    Platform overview/architecture, capstone-team developer guide, and operator
+    handbook for the UA-MIS Internal Developer Platform.
+  annotations:
+    # TechDocs built from the in-repo mkdocs.yml (dir:. = this repo root).
+    backstage.io/techdocs-ref: dir:.
+    # Link the catalog entity back to its source for the "View Source" action.
+    github.com/project-slug: UA-MIS/platform-infra
+  tags:
+    - capstone
+    - platform
+    - documentation
+spec:
+  type: documentation
+  lifecycle: production
+  # Owner = the platform team (the AppProject / OIDC group that owns platform-infra,
+  # D-026). Resolves to a Group entity ingested from the UA-MIS org.
+  owner: group:default/platform

@@ -16,6 +16,8 @@ spec:
   targets:
     # The "New Capstone Project" Scaffolder template (the headline IDP feature).
     - https://github.com/UA-MIS/platform-infra/blob/main/platform-services/backstage/templates/new-capstone-project/template.yaml
+    # The "Python FastAPI API" Scaffolder template (the Python backend family, #137 P4).
+    - https://github.com/UA-MIS/platform-infra/blob/main/platform-services/backstage/templates/python-fastapi-api/template.yaml
     # The "New Capstone VM" Scaffolder template (layout: vm — a real KubeVirt VM as an
     # app, for teams that can't/won't containerize; ADR-032).
     - https://github.com/UA-MIS/platform-infra/blob/main/platform-services/backstage/templates/vm-app/template.yaml
