@@ -1,0 +1,23 @@
+# vm-metadata.yaml — the student-tunable knobs for your VM (the VM analogue of
+# app-metadata.yaml). These mirror the values rendered into
+# .devops/chart/base/virtualmachine.yaml at scaffold time. The chart base is the LIVE
+# source ArgoCD deploys; to change a value after scaffolding, edit it BOTH here (the
+# record) and in virtualmachine.yaml (the live manifest), or just edit virtualmachine.yaml.
+#
+# The DEEP customization — what your VM actually runs — lives in
+# .devops/chart/base/cloud-init.yaml (install your stack on first boot).
+team: ${{ values.team }}
+semester: ${{ values.semester }}
+app-name: ${{ values.appName }}
+
+# Base disk image CDI imports (containerDisk registry ref, or switch the DataVolume
+# source to http in virtualmachine.yaml). Point this at your OWN image.
+base-image: ${{ values.baseImage }}
+
+# Sizing — reserved for the VM's whole lifetime (no overcommit; the VM-tier quota caps it).
+cpu-cores: ${{ values.cpuCores }}
+memory-gi: ${{ values.memoryGi }}
+disk-gi: ${{ values.diskGi }}
+
+# The port your app listens on INSIDE the VM (Service/Ingress forward to it).
+port: ${{ values.port }}

@@ -1,0 +1,20 @@
+apiVersion: platform.capstone/v1
+# promotion.yaml — the canonical trigger->env mapping for this VM app (ADR-008 schema),
+# read by the platform's VM env ApplicationSet (tenants/_template, security/devops-owned)
+# via an ArgoCD git-files generator, exactly like a container app's promotion.yaml.
+#
+# VM DIFFERENCES (ADR-032 §6 CI):
+#   - NO `registry:` / `app:` — the VM "image" is an OS disk imported by CDI (see the
+#     DataVolume source in .devops/chart/base/virtualmachine.yaml), NOT a container
+#     build. There is no Kaniko stage and nothing pushed to a registry.
+#   - SINGLE environment — a lifted legacy app is one self-contained VM. `merge to main`
+#     auto-deploys it; there is no dev/staging/prod promotion ladder and no `tagConvention`
+#     (no image tag to compute).
+layout: vm
+environments:
+  prod:
+    # merge to main -> ArgoCD syncs the VM manifests; CDI imports the disk and cloud-init
+    # runs the app on first boot. No image build precedes it.
+    trigger: "branch:main"
+    overlay: ".devops/chart/overlays/prod"
+    gate: auto

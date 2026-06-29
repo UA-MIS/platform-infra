@@ -1,0 +1,9 @@
+# Editor / OS cruft
+.DS_Store
+.idea/
+.vscode/
+
+# Local VM/cloud-init scratch
+*.qcow2
+*.img
+__pycache__/

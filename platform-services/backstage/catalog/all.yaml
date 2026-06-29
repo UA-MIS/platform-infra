@@ -26,6 +26,9 @@ spec:
     - https://github.com/UA-MIS/platform-infra/blob/main/platform-services/backstage/templates/dotnet-aspnet-api/template.yaml
     # The "React Static SPA" Scaffolder template (Vite, no-DB, #142).
     - https://github.com/UA-MIS/platform-infra/blob/main/platform-services/backstage/templates/react-static/template.yaml
+    # The "New Capstone VM" Scaffolder template (layout: vm — a real KubeVirt VM as an
+    # app, for teams that can't/won't containerize; ADR-032).
+    - https://github.com/UA-MIS/platform-infra/blob/main/platform-services/backstage/templates/vm-app/template.yaml
     # Seed org entities (the platform Group that owns the templates, etc.).
     - https://github.com/UA-MIS/platform-infra/blob/main/platform-services/backstage/catalog/org.yaml
 ---

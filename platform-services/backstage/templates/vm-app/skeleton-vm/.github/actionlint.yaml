@@ -1,0 +1,6 @@
+# actionlint config — declares the platform's self-hosted runner scale-set label so
+# `runs-on: ua-mis-kaniko` lints clean (same ARC scale-set name as the container CI,
+# CI <-> workflow contract, D-032).
+self-hosted-runner:
+  labels:
+    - ua-mis-kaniko
