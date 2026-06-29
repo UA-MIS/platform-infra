@@ -1,0 +1,13 @@
+# Keep the Kaniko build context (this dir) small + reproducible.
+node_modules
+.next
+.git
+.gitignore
+npm-debug.log*
+Dockerfile
+.dockerignore
+README.md
+*.local
+.env
+.env.*
+coverage
