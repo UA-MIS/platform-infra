@@ -5,8 +5,10 @@
 # add tenants/team-<name>/ and commit; this generator detects the dir and ArgoCD
 # reconciles the whole tenant (no imperative kubectl).
 #
-# The `_template` directory is EXCLUDED — it is the canonical blueprint copied to
-# onboard a team, not itself a live tenant.
+# Underscore-prefixed dirs (tenants/_*) are EXCLUDED — `_template` is the canonical
+# blueprint copied to onboard a team, `_claims` holds Crossplane CapstoneTenant
+# claims; neither is a live tenant, and a "_"-leading basename would also yield an
+# invalid k8s Application name (tenant-_*) that aborts the whole appset reconcile.
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
 metadata:
@@ -23,8 +25,11 @@ spec:
         revision: HEAD
         directories:
           - path: tenants/*
-          - path: tenants/_template
-            exclude: true        # the blueprint is not a live tenant
+          - path: tenants/_*
+            exclude: true        # skip all underscore-prefixed meta dirs
+                                 # (_template blueprint, _claims Crossplane claims):
+                                 # not live tenants, and "_"-leading basenames
+                                 # are invalid k8s Application names.
   template:
     metadata:
       name: 'tenant-{{.path.basename}}'
