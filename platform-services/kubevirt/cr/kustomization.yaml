@@ -1,0 +1,11 @@
+# KubeVirt CR kustomization — ships ONLY the local KubeVirt CR (the instance the
+# virt-operator reconciles). Applied by the platform-kubevirt-cr Application at
+# sync-wave 1, AFTER platform-kubevirt-operator (wave 0) has installed the operator
+# + the `kubevirts.kubevirt.io` CRD. Splitting the CR into its own wave-1 app (the
+# rook-ceph operator/cluster precedent) guarantees the CRD exists before the CR is
+# applied — no first-sync "no matches for kind KubeVirt" race.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - kubevirt-cr.yaml
