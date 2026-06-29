@@ -739,3 +739,32 @@ validate: ## Static validation of tenant manifests (kubeconform + RBAC-name + st
 	  if [ "$$fail" = "1" ]; then echo "  known AppProjects: $$projects"; exit 1; fi; \
 	  echo "  OK — all argocd-rbac policy projects ($$refs) resolve to AppProjects"
 	@echo "validate: PASS"
+
+# ---- reversible tenant on/off switch ---------------------------------------
+# Pause a tenant (stop it running + make it VANISH from k9s) and bring it back,
+# WITHOUT touching git/repo/Harbor/Vault. Purely imperative kubectl against live
+# ArgoCD objects. All the logic (incl. the GitOps reversion-chain handling and
+# the PVC data-loss guard) lives in hack/tenant-onoff.sh — see docs/operator/
+# tenant-on-off-switch.md.
+#
+#   make tenant-off TEAM=sample                 # DRY-RUN: print the plan only
+#   make tenant-off TEAM=sample DRY_RUN=false   # act (refuses if a ns has a PVC)
+#   make tenant-off TEAM=sample DRY_RUN=false FORCE=true   # act + allow PVC loss
+#   make tenant-on  TEAM=sample DRY_RUN=false   # reverse it
+# For the real Talos cluster add: KUBE_CONTEXT=admin@capstone KUBECONFIG=clusters/real-talos/talos-kubeconfig
+DRY_RUN         ?= true
+FORCE           ?= false
+ARGOCD_NS       ?= argocd
+TENANT_ONOFF_SH := hack/tenant-onoff.sh
+
+.PHONY: tenant-off
+tenant-off: ## Reversibly PAUSE a tenant: neutralize ArgoCD + delete its namespaces. TEAM=<slug> [DRY_RUN=false] [FORCE=true]. Override KUBE_CONTEXT for Talos.
+	@test -n "$(TEAM)" || { echo "usage: make tenant-off TEAM=<slug> [DRY_RUN=false] [FORCE=true]" >&2; exit 1; }
+	@DRY_RUN="$(DRY_RUN)" FORCE="$(FORCE)" KUBE_CONTEXT="$(KUBE_CONTEXT)" ARGOCD_NS="$(ARGOCD_NS)" \
+	  bash $(TENANT_ONOFF_SH) off "$(TEAM)"
+
+.PHONY: tenant-on
+tenant-on: ## Reverse tenant-off: re-enable ArgoCD so it recreates the tenant from git. TEAM=<slug> [DRY_RUN=false]. Override KUBE_CONTEXT for Talos.
+	@test -n "$(TEAM)" || { echo "usage: make tenant-on TEAM=<slug> [DRY_RUN=false]" >&2; exit 1; }
+	@DRY_RUN="$(DRY_RUN)" KUBE_CONTEXT="$(KUBE_CONTEXT)" ARGOCD_NS="$(ARGOCD_NS)" \
+	  bash $(TENANT_ONOFF_SH) on "$(TEAM)"
