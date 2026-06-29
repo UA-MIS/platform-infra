@@ -1,0 +1,7 @@
+# actionlint config — register the self-hosted ARC runner scale-set labels so
+# `runs-on:` doesn't trip the built-in "unknown label" check (these are real
+# self-hosted runners managed by Actions Runner Controller, not GitHub-hosted).
+#   - ua-mis-kaniko : shared org-wide Kaniko build scale set (containerMode:kubernetes)
+self-hosted-runner:
+  labels:
+    - ua-mis-kaniko
