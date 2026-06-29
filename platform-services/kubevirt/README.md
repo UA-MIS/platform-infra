@@ -103,3 +103,49 @@ extension** and VT-x/`/dev/kvm` presence is **unverified**. With
 `useEmulation: true` the capability installs + proves out regardless; for real
 workloads, KVM must be confirmed (BIOS VT-x + possibly a Talos machine-config /
 schematic re-cut + a 3-node rolling reboot). See ADR-032 §5 and the kvm-spike.
+
+## VM-tier security deny-test (`deny-test.sh`)
+
+`deny-test.sh` automates the **SEC-011-style VM-tier deny-test**
+(`artifacts/reviews/kubevirt-vm-tier-security-review.md` §6, checks **T1–T13**).
+It is the **security gate that must PASS before any team is onboarded onto the VM
+tier**. It renders the real `tenants/_template/vm/*` blueprint for a throwaway
+team (`TEAM=denytest`) into a scratch namespace, runs every allow/deny assertion
+(one colored PASS/FAIL line per check, tagged with its T-number), prints a
+summary, and **exits non-zero if any check fails**. It is idempotent and
+self-cleaning (a `trap` tears down all scratch resources on exit, including on
+failure).
+
+```bash
+# run AFTER KubeVirt + CDI are installed/Available and Cilium is the active CNI:
+bash platform-services/kubevirt/deny-test.sh
+```
+
+It does **cluster writes** (creates/deletes scratch namespaces, an AppProject, a
+minimal cirros VM, a DataVolume, and probe pods) — so it is the **human's
+keyboard**, run with context `admin@capstone` (override `KUBE_CONTEXT=`). Other
+overridable env vars: `TEAM`, `SEMESTER`, `STORAGE_CLASS`, `NET_TIMEOUT`,
+`VM_TIMEOUT`, `DV_TIMEOUT`, and the `IMG_*` / `DV_SOURCE_URL` image pins.
+
+| T | Assertion | Expect |
+| --- | --- | --- |
+| T1 | `virt-launcher` admits under **baseline** PSA | ALLOW |
+| T2 | privileged + hostPath pods | DENY (PSA) |
+| T3 | container `Deployment` via the VM AppProject | DENY (fence) |
+| T4 | VM-shaped pod in a **restricted** namespace | DENY (PSA) |
+| T5 | cross-tenant egress | DENY |
+| T6 | apiserver ClusterIP egress | DENY |
+| T7 | guest external egress | DENY |
+| T8 | CDI importer egress (DataVolume import) | ALLOW |
+| T9 | Traefik-path ingress to the VM Service | ALLOW |
+| T10 | cross-tenant ingress | DENY |
+| T11 | kubelet probe under default-deny | ALLOW |
+| T12 | SA-token → apiserver via node IP | RBAC-gated (401/403/blocked) |
+| T13 | 2nd VM vs `count/virtualmachines=1` quota | DENY |
+
+> ⚠ **Cilium must be the active CNI.** On Talos default flannel, NetworkPolicies
+> are inert and the deny tests (T5/T6/T7/T10) would falsely pass-through — the
+> script warns if the `cilium` daemonset is absent. T5/T6/T7 are run from a curl
+> probe pod in the VM namespace, which is governed by the **identical**
+> `podSelector:{}` NetworkPolicies that constrain the `virt-launcher`/guest
+> egress (the guest NATs out via the launcher under masquerade).
