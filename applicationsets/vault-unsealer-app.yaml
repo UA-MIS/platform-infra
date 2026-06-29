@@ -48,8 +48,9 @@ spec:
         # --- TLS ON. The seal "transit" connection from the main Vault carries the
         #     auto-unseal token, so it MUST be encrypted (tls_skip_verify=false on the
         #     main side). The unsealer's server cert lives in the
-        #     `vault-unsealer-server-tls` Secret, built by the human runbook (NOT in
-        #     git, B1). SANs in artifacts/design/vault-dr-runbook.md §B.
+        #     `vault-unsealer-server-tls` Secret, issued by cert-manager from the
+        #     committed platform-services/vault-unsealer/certificate.yaml (the Secret
+        #     itself stays out of git, B1). SANs in artifacts/design/vault-dr-runbook.md §B.
         global:
           tlsDisable: false
 
@@ -88,6 +89,11 @@ spec:
               storage "file" {
                 path = "/vault/data"
               }
+
+              # ⚠ Do NOT add `service_registration "kubernetes"` here: it is incompatible
+              #   with `storage "file"` (standalone) and CrashLoops the pod (fixed in #134).
+              #   The unsealer has a single direct consumer (the main Vault's seal) and
+              #   needs no readiness-label registration.
 
               # NOTE: the transit secrets engine (`transit/`) + the `autounseal` key +
               # the auto-unseal policy/token are created by the human runbook
