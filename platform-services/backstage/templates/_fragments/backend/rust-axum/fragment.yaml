@@ -1,0 +1,23 @@
+# fragment.yaml — see _fragments/backend/express/fragment.yaml for the BACKEND CONTRACT
+# and ADR-034 for the architecture. Backend fragment: Rust / Axum + sqlx on MySQL.
+apiVersion: platform.capstone/fragment.v1
+id: rust-axum
+displayName: Rust / Axum API (sqlx + MySQL)
+category: backend
+language: rust
+framework: axum
+slots:
+  - backend
+  - single
+defaultPort: 8080
+ingressPath: /api
+needsDB: true
+buildType: container
+dockerfile: Dockerfile
+healthPath: /healthz
+notes: >-
+  Rust + Axum + sqlx (MySQL, runtime queries — no compile-time DB needed) with a sample
+  /api/items CRUD. Reads DATABASE_URL (a standard mysql:// URI accepted directly by sqlx,
+  via a lazy pool); the data routes return a clear 503 until it is set, while /healthz is
+  DB-independent and stays green for the chart probes. NEVER hardcodes credentials.
+  Multi-stage build (rust:slim -> distroless/cc:nonroot, uid 65532, read-only-root safe).
