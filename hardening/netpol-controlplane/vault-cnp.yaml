@@ -1,0 +1,65 @@
+# Cilium intra-cluster + apiserver egress allow (CiliumNetworkPolicy)
+#   — vault / vault-unsealer (ADR-030 B1, Track-2 DR). Companion to apiserver-cnp.yaml.
+#
+# WHY THIS EXISTS (SEC-B1 — flannel -> Cilium gap, same class as apiserver-cnp.yaml):
+# vault-netpol.yaml + vault-unsealer-netpol.yaml permit their in-cluster egress with
+# k8s NetworkPolicy `ipBlock` CIDRs — the apiserver via node IP (10.237.168.0/22:6443)
+# and (for vault) the intra-cluster pod/svc CIDRs (10.244.0.0/16, 10.96.0.0/12) that
+# cover the in-cluster Transit unsealer + raft peers. Per the Cilium docs, "by default
+# CIDR-based selectors do NOT match in-cluster entities" — Cilium identifies that
+# traffic by IDENTITY (`reserved:kube-apiserver`, per-pod identities), NOT by IP. So
+# once platform-netpol-controlplane is synced and these policies are ENFORCED:
+#   - vault's k8s-auth TokenReview + service_registration to the apiserver
+#     (10.96.0.1:443 VIP / node :6443) is DENIED -> ESO cannot authenticate to Vault
+#     -> platform-wide ExternalSecret pull outage.
+#   - vault -> vault-unsealer.svc:8200 (the Transit seal call) is DENIED -> auto-unseal
+#     fails on every vault-0 restart (Vault comes up sealed, stays sealed).
+#   - vault-unsealer's service_registration to the apiserver is DENIED.
+# (apiserver-cnp.yaml already fixes this exact failure for argocd/dex/harbor; vault and
+#  vault-unsealer were simply never given the equivalent CNP — this closes that gap.)
+#
+# THE FIX — Cilium entity selectors (same justification as apiserver-cnp.yaml):
+#   - `toEntities: kube-apiserver` — the apiserver (Cilium: "generally expected to
+#     work" for egress; matches both the VIP and the node-IP path).
+#   - `toEntities: cluster` (vault ONLY) — ALL in-cluster endpoints, the Cilium-native
+#     equivalent of vault's intra-cluster ipBlock allows. Restores vault -> unsealer
+#     :8200 + future raft peers. SAFE for vault: it is trusted control-plane and its
+#     only intra-cluster peers are the unsealer + its own raft members.
+#     vault-unsealer deliberately does NOT get `cluster` — it INITIATES nothing
+#     in-cluster (it is purely a server: vault dials it; it only egresses to the
+#     apiserver for service_registration). Granting `cluster` would needlessly widen
+#     the unsealer's reach; kube-apiserver alone is its complete egress surface.
+#
+# CNP + k8s NetworkPolicy on the same endpoint/direction are ADDITIVE (OR'd) — this
+# manifest only ADDS these entity-based egress allows; the default-deny + the k8s
+# scoped allows (DNS, ingress, kubelet probes) in the vault-netpol.yaml /
+# vault-unsealer-netpol.yaml stay in force. Namespace-wide (endpointSelector: {}).
+# Lives in the `platform` AppProject; manual-sync via platform-netpol-controlplane
+# (same lockout-protection + SEC-011 live-apply gate as the k8s netpols).
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-egress-apiserver
+  namespace: vault
+  labels:
+    platform.capstone/component: platform
+spec:
+  endpointSelector: {}
+  egress:
+    - toEntities:
+        - kube-apiserver
+        - cluster
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-egress-apiserver
+  namespace: vault-unsealer
+  labels:
+    platform.capstone/component: platform
+spec:
+  endpointSelector: {}
+  egress:
+    - toEntities:
+        - kube-apiserver

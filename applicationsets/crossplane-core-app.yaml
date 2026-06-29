@@ -1,0 +1,76 @@
+# Crossplane core Application (ADR-031 — zero-touch tenant onboarding). Installs
+# the Crossplane v2 control plane (the package manager + the apiextensions engine
+# that serves CompositeResourceDefinition / Composition / Function / Provider).
+# Everything else in the onboarding stack layers on top of this one app:
+#   crossplane-core (this)         wave -1  — control plane + its CRDs
+#   crossplane-runtime-app         wave  0  — Providers, Functions, ProviderConfigs, RBAC, creds
+#   crossplane-apis-app            wave  1  — the CapstoneTenant XRD + Composition
+#   crossplane-claims-app          wave  2  — the committed CapstoneTenant XRs (tenants/_claims/)
+#
+# Helm-source Application, deploy method A (D-028, same pattern as ESO/Vault/Harbor):
+# the chart repo `https://charts.crossplane.io/stable` is added to the `platform`
+# AppProject sourceRepos allowlist (bootstrap/platform-appproject.yaml in this PR;
+# security audits the addition; ⚠ INSTALL-OWNED — reaches the live AppProject only
+# via `make bootstrap`/`make bootstrap-reapply`, the AppProject is not GitOps-reconciled).
+#
+# Chart: crossplane 2.3.2 (appVersion v2.3.2), pinned (bump deliberately). v2 is
+# REQUIRED — ADR-031 uses apiextensions.crossplane.io/v2 namespaced XRs (no Claim).
+#
+# ⚠ DO NOT APPLY without the one-time SRE review (ADR-031 constraint #4): this app
+# installs a control plane that, via the four ProviderConfigs + the curated
+# provider-kubernetes ClusterRole (platform-services/crossplane/rbac/), can mint
+# repos, Harbor projects/robots, Vault policy, and in-cluster RBAC. The review
+# focus is rbac/provider-kubernetes-rbac.yaml + creds/ (see the crossplane README).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-crossplane-core
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"   # control plane before providers/apis/claims
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://charts.crossplane.io/stable   # PINNED chart repo (sourceRepos allowlist)
+    chart: crossplane
+    targetRevision: 2.3.2                           # pinned chart version (appVersion v2.3.2); no ^/~/latest
+    helm:
+      releaseName: crossplane
+      values: |
+        # Single-replica control plane for the homelab (Phase-4 3-node cluster).
+        # The control plane is on the onboarding (sync-time) path, not the app
+        # runtime data path — HA it later only if reconcile throughput needs it.
+        replicas: 1
+        # Pre-declare the provider + function packages the Composition needs so the
+        # package manager pulls them at install; the actual Provider/Function CRs
+        # (with controllerConfig/runtimeConfig) are still managed declaratively in
+        # platform-services/crossplane/providers/ (crossplane-runtime-app) so they
+        # are reviewable + version-pinned in git rather than buried in Helm values.
+        # Leaving provider/function .packages EMPTY here on purpose — git is the
+        # source of truth for what's installed (see providers/).
+        provider:
+          packages: []
+        function:
+          packages: []
+        # Keep the bundled RBAC manager (grants installed providers the RBAC they
+        # request) — but note provider-kubernetes gets an EXPLICIT curated ClusterRole
+        # in rbac/, NOT the broad aggregation, per the ADR trust boundary.
+        rbacManager:
+          deploy: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: crossplane-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true     # crossplane-system is owned by this app
+      - ServerSideApply=true     # Crossplane CRDs are large — SSA avoids the 256KB anno limit
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

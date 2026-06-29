@@ -1,0 +1,28 @@
+# ProviderConfig for provider-vault (upbound). ADR-031 §6 — authenticates with a
+# Vault token whose policy (`tenant-provisioner`) may write `policy` +
+# `auth/kubernetes/role` scoped to tenants/* ONLY (reviewed once). References the
+# placeholder-sealed credentials Secret (creds/vault-provisioner-creds-sealed.yaml),
+# materialized to `vault-provider-creds`. The `credentials` key is the JSON the
+# Upjet vault provider expects:
+#   {"token":"<vault-token>","address":"https://vault.vault.svc.cluster.local:8200"}
+# In-cluster Vault over TLS; the provider Pod trusts the Vault CA (mount the
+# vault-server-tls CA via the provider runtime config, or set skip-tls-verify=false
+# with the CA in the credentials JSON — verify the exact field at Phase-0).
+#
+# ⚠ provider-vault is v0.1.0 (early). Verify the ProviderConfig apiVersion
+# (vault.upbound.io/v1beta1) + credentials keys against the installed CRDs at Phase-0.
+# A static token is the v1 stand-in; a Vault auth-method-issued, short-lived token
+# (k8s auth for the provider SA) is the hardening follow-up.
+apiVersion: vault.upbound.io/v1beta1
+kind: ProviderConfig
+metadata:
+  name: default
+  labels:
+    platform.capstone/component: platform
+spec:
+  credentials:
+    source: Secret
+    secretRef:
+      namespace: crossplane-system
+      name: vault-provider-creds
+      key: credentials

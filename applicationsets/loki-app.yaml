@@ -119,7 +119,14 @@ spec:
       prune: true
       selfHeal: true
     syncOptions:
-      - CreateNamespace=false      # monitoring ns ships via platform-services/monitoring
+      # Sync-deadlock fix (#127): create the monitoring ns if missing so Loki doesn't
+      # block on the same ns gap that stuck the stack (idempotent create-if-missing;
+      # platform-svc-monitoring's namespace.yaml stays the declarative owner).
+      - CreateNamespace=true
+      # This chart renders a ServiceMonitor (monitoring.serviceMonitor.enabled: true)
+      # — a CR of a kube-prometheus-stack CRD. Skip the dry-run so Loki's sync doesn't
+      # hard-fail before that CRD registers; retry/selfHeal applies it once it exists.
+      - SkipDryRunOnMissingResource=true
       - ServerSideApply=true
     retry:
       limit: 5

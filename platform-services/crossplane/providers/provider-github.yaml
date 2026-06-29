@@ -1,0 +1,19 @@
+# provider-upjet-github (crossplane-contrib, Upjet — wraps the GitHub Terraform
+# provider). ADR-031: mints the team's repo (from the capstone-app-template),
+# branch protection, team access, and the CI-caller RepositoryFile.
+#
+# Auth: the EXISTING `ua-mis-backstage` GitHub App (App ID 4097147, install
+# 141394298 — see memory capstone-github-app-m2), via the `app_auth` ProviderConfig
+# (config/providerconfig-github.yaml). The same App already used by ARC + the
+# ArgoCD repo-creds + the Backstage scaffolder; one App, reused.
+#
+# ⚠ Version pin: confirm the latest provider-upjet-github tag at Phase-0 apply
+# (SRE review). v0.21.0 is a recent known-good; bump deliberately + version-pin.
+apiVersion: pkg.crossplane.io/v1
+kind: Provider
+metadata:
+  name: provider-github
+  labels:
+    platform.capstone/component: platform
+spec:
+  package: xpkg.upbound.io/crossplane-contrib/provider-upjet-github:v0.21.0

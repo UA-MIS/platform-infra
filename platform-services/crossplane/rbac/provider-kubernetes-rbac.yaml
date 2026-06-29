@@ -1,0 +1,95 @@
+# ============================================================================
+# THE RECONCILE BOUND — the curated provider-kubernetes ClusterRole (ADR-031 §6).
+# ============================================================================
+# This is THE most security-sensitive file in the Crossplane onboarding stack and
+# the focal point of the one-time SRE review (ADR-031 constraint #4). It defines the
+# EXACT set of kinds/verbs the provider-kubernetes controller may create/manage when
+# the CapstoneTenant Composition fans out. It is a hand-curated ALLOW-LIST — NEVER
+# `cluster-admin`, NEVER `*`/`*`.
+#
+# Bound (ClusterRoleBinding below) to the fixed-named SA
+# `system:serviceaccount:crossplane-system:provider-kubernetes`
+# (providers/provider-kubernetes.yaml DeploymentRuntimeConfig). Together with the
+# Composition, this ClusterRole IS the blast radius: a flawed XR cannot escalate
+# beyond these kinds, and a flawed Composition cannot mint anything outside them.
+#
+# WHY each entry is here (every kind maps to a managed resource the Composition's
+# provider-kubernetes `Object`s render — see apis/composition.yaml):
+#   - argoproj.io AppProject + ApplicationSet → the tenancy fence + env/preview app gen
+#   - core Namespace/ResourceQuota/LimitRange/ConfigMap/ServiceAccount → the ns bundle
+#       + the in-ns vault-ca ConfigMap + the eso-tenant SA
+#   - networking.k8s.io NetworkPolicy → the default-deny + allowances
+#   - rbac.authorization.k8s.io RoleBinding → the team-developer namespaced binding
+#       (to the pre-reviewed ClusterRole capstone-tenant-developer — NOT an inline Role)
+#   - external-secrets.io SecretStore/ExternalSecret/PushSecret → the ESO wiring +
+#       the Harbor-robot→Vault bridge
+#
+# ⚠ K8s privilege-escalation prevention (CXP-2): to CREATE a RoleBinding the creator
+# must hold the permissions it grants OR the `bind` verb on the referenced role. This
+# ClusterRole takes the `bind` path SCOPED to the single reviewed ClusterRole
+# capstone-tenant-developer (resourceNames). It therefore holds NO standing pods/exec
+# or deployment-write anywhere — the old cluster-wide "tenant-role mirror" block (which
+# made a provider-SA compromise a cluster takeover) has been REMOVED. The developer
+# rule set now lives once in rbac/capstone-tenant-developer-clusterrole.yaml; if it
+# changes, the SRE reviews that file — the provider grant here does not change.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: crossplane-provider-kubernetes-tenancy
+  labels:
+    platform.capstone/component: platform
+rules:
+  # --- ArgoCD tenancy objects (created in the argocd namespace) --------------
+  # applications: the per-team ARC runner scale-set is an ArgoCD Application
+  # (finish-eso A1 per-team CI push); appprojects/applicationsets: the tenancy fence.
+  - apiGroups: ["argoproj.io"]
+    resources: ["appprojects", "applicationsets", "applications"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  # --- Namespace + per-namespace governance (the ns bundle) ------------------
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["resourcequotas", "limitranges", "configmaps", "serviceaccounts"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  # --- Namespaced RBAC: the team-developer RoleBinding ONLY (CXP-2) -----------
+  # The provider creates the per-namespace RoleBinding but NO Role (no `roles`
+  # create verb). The binding targets the pre-reviewed ClusterRole
+  # capstone-tenant-developer; the `bind` rule below authorizes exactly that one
+  # role (escalation-prevention without holding the role's powers).
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["rolebindings"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  # --- ESO wiring: per-tenant store + secrets + the Harbor-robot→Vault bridge -
+  - apiGroups: ["external-secrets.io"]
+    resources: ["secretstores", "externalsecrets", "pushsecrets"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  # --- bind authorization (CXP-2): permit creating RoleBindings that reference --
+  #     ONLY the reviewed ClusterRole capstone-tenant-developer. `bind` lets the
+  #     provider attach that one role to a tenant namespace WITHOUT itself holding
+  #     pods/exec/deployment-patch anywhere (the old "tenant-role mirror" block —
+  #     a cluster-wide exec/deploy-patch grant — is GONE). resourceNames pins it to
+  #     the single reviewed role so no other (e.g. cluster-admin) role can be bound.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles"]
+    verbs: ["bind"]
+    resourceNames: ["capstone-tenant-developer"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: crossplane-provider-kubernetes-tenancy
+  labels:
+    platform.capstone/component: platform
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: crossplane-provider-kubernetes-tenancy
+subjects:
+  - kind: ServiceAccount
+    name: provider-kubernetes        # the fixed SA from the DeploymentRuntimeConfig
+    namespace: crossplane-system

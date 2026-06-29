@@ -1,0 +1,9 @@
+# Keep the Kaniko build context small + reproducible — never ship build output or the
+# test project into the image build.
+**/bin/
+**/obj/
+**/.vs/
+**/.vscode/
+**/.idea/
+../tests/
+*.user

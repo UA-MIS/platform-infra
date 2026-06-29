@@ -1,0 +1,33 @@
+# Crossplane composition Functions (ADR-031 §4 / open-question 5 → resolved:
+# function-go-templating). The CapstoneTenant Composition is a `mode: Pipeline`
+# Composition whose steps run these functions:
+#
+#   - function-go-templating  — renders every downstream managed resource from the
+#     ONE XR spec using Go text/template (the SAME mental model as the platform's
+#     existing ApplicationSets `goTemplate: true`). This is the type-checked,
+#     reconciling, drift-correcting replacement for the imperative `sed` token
+#     substitution that produced the SEC-001 malformed-name bug class.
+#   - function-auto-ready     — marks the XR Ready once its composed managed
+#     resources report Ready (standard health checks + the MR Ready condition).
+#
+# Both are first-party crossplane-contrib functions (High reputation). Pinned —
+# bump deliberately. Packages are pulled from xpkg.upbound.io by the Crossplane
+# package manager (not an ArgoCD source), so no AppProject sourceRepos entry needed.
+---
+apiVersion: pkg.crossplane.io/v1
+kind: Function
+metadata:
+  name: function-go-templating
+  labels:
+    platform.capstone/component: platform
+spec:
+  package: xpkg.upbound.io/crossplane-contrib/function-go-templating:v0.12.1
+---
+apiVersion: pkg.crossplane.io/v1
+kind: Function
+metadata:
+  name: function-auto-ready
+  labels:
+    platform.capstone/component: platform
+spec:
+  package: xpkg.upbound.io/crossplane-contrib/function-auto-ready:v0.6.4

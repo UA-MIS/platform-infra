@@ -94,7 +94,11 @@ spec:
       prune: true
       selfHeal: true
     syncOptions:
-      - CreateNamespace=false      # monitoring ns ships via platform-services/monitoring
+      # Sync-deadlock fix (#127): create the monitoring ns if missing so Alloy doesn't
+      # block on the same ns gap that stuck the stack (idempotent create-if-missing;
+      # platform-svc-monitoring's namespace.yaml stays the declarative owner). Alloy
+      # ships no CRs, so no SkipDryRunOnMissingResource is needed here.
+      - CreateNamespace=true
       - ServerSideApply=true
     retry:
       limit: 5

@@ -78,13 +78,16 @@ spec:
           ports:
             - name: metrics
               containerPort: 2000
-          livenessProbe:
-            httpGet:
-              path: /ready
-              port: 2000
-            initialDelaySeconds: 10
-            periodSeconds: 10
-            failureThreshold: 3
+          # NO livenessProbe. cloudflared's /ready returns 200 only while it holds a
+          # live edge connection, so it DIPS during normal edge reconnects / QUIC(HTTP2)
+          # churn. A liveness probe on /ready (failureThreshold:3, periodSeconds:10) thus
+          # SIGTERMs the pod on a transient blip → the tunnel drops (Cloudflare Error 1033)
+          # → restart → reconnect — the probe causes the very outage it claims to detect
+          # (316 restarts / 34h, all clean exit-0). cloudflared reconnects on its own and
+          # registers multiple HA connections; let it. Liveness is the wrong tool for a
+          # process whose health legitimately oscillates with upstream connectivity.
+          # Endpoint gating stays correctly with the readinessProbe below (it removes the
+          # pod from Service endpoints without killing it).
           readinessProbe:
             httpGet:
               path: /ready

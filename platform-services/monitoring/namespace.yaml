@@ -7,9 +7,11 @@
 # the dir ships the ns + CRs, the chart is its own app).
 #
 # Generated as `platform-svc-monitoring` by the platform-services-appset (git
-# directory generator over platform-services/*). The Helm apps target this ns with
-# CreateNamespace=false, relying on this object (+ ArgoCD selfHeal/retry for ordering,
-# same as vault).
+# directory generator over platform-services/*). This object is the declarative
+# (tracked) owner of the namespace. The Helm apps (kube-prometheus-stack, loki, alloy)
+# ALSO set CreateNamespace=true so none of them blocks on the ns existing first
+# (sync-deadlock fix #127) — that is an idempotent create-if-missing, not
+# managedNamespaceMetadata, so it does not conflict with this manifest's ownership.
 apiVersion: v1
 kind: Namespace
 metadata:

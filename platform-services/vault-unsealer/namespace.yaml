@@ -1,0 +1,14 @@
+# vault-unsealer namespace (ADR-030 B1, Track-2 DR). The tiny SECOND Vault whose
+# ONLY job is to hold one Transit key the main Vault (vault ns) auto-unseals against
+# on every restart (Transit auto-unseal, vault/README.md §A option 2 — the chosen
+# strategy). Kept in its OWN namespace so the seal-key Vault is isolated from the
+# secret-store Vault it unseals (the unseal key never lives next to the data it
+# protects). The Helm chart is a SEPARATE Application
+# (applicationsets/vault-unsealer-app.yaml, method A) — this kustomize dir ships ONLY
+# the namespace (the prereq the chart app installs into), same split as vault/.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vault-unsealer
+  labels:
+    platform.capstone/component: platform

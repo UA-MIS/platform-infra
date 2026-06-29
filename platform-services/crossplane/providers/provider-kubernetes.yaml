@@ -1,0 +1,46 @@
+# provider-kubernetes (crossplane-contrib). ADR-031's WORKHORSE: its `Object`
+# resource manages ARBITRARY in-cluster k8s objects, so the entire tenancy fence —
+# AppProject, namespaces (Quota/LimitRange/NetworkPolicy/Role/RoleBinding/PSA),
+# the vault-ca ConfigMap, the ESO SecretStore/ExternalSecret/PushSecret CRs, and
+# the env + preview ApplicationSets — is rendered as `Object`s by the Composition.
+#
+# RUNTIME IDENTITY (the trust boundary): this Provider runs as a FIXED, named
+# ServiceAccount (`provider-kubernetes` in crossplane-system) pinned by the
+# DeploymentRuntimeConfig below, so that — and ONLY that — SA can be bound to the
+# hand-curated ClusterRole in rbac/provider-kubernetes-rbac.yaml. The provider then
+# authenticates in-cluster via that SA (config/providerconfig-kubernetes.yaml,
+# source: InjectedIdentity). It is therefore bounded to EXACTLY the kinds/verbs in
+# that ClusterRole — NEVER cluster-admin. This ClusterRole + the Composition are
+# the reconcile bound the one-time SRE review scrutinizes (ADR-031 §6).
+#
+# ⚠ Version pin: confirm the latest provider-kubernetes tag at Phase-0 apply.
+# v0.18.0 is a recent known-good; bump deliberately + version-pin.
+---
+apiVersion: pkg.crossplane.io/v1
+kind: Provider
+metadata:
+  name: provider-kubernetes
+  labels:
+    platform.capstone/component: platform
+spec:
+  package: xpkg.upbound.io/crossplane-contrib/provider-kubernetes:v0.18.0
+  # Bind the provider to the named runtime config below so it runs as the SA we
+  # grant the curated ClusterRole to (rather than an auto-named SA we can't target).
+  runtimeConfigRef:
+    name: provider-kubernetes
+---
+# DeploymentRuntimeConfig — pins the provider Pod's ServiceAccount NAME so the
+# ClusterRoleBinding in rbac/ can reference it deterministically. Without this the
+# package manager generates a hash-suffixed SA name that we cannot bind ahead of time.
+apiVersion: pkg.crossplane.io/v1beta1
+kind: DeploymentRuntimeConfig
+metadata:
+  name: provider-kubernetes
+  labels:
+    platform.capstone/component: platform
+spec:
+  serviceAccountTemplate:
+    metadata:
+      # Fixed SA name → the curated ClusterRole binds to
+      # system:serviceaccount:crossplane-system:provider-kubernetes.
+      name: provider-kubernetes

@@ -1,0 +1,49 @@
+# Crossplane claims Application (ADR-031 §7 Option A — the GitOps-committed XR).
+# This is the seam that makes onboarding ZERO-TOUCH: the Backstage scaffolder
+# commits ONE CapstoneTenant XR to tenants/_claims/<team>-<app>.yaml on main (via
+# the platform GitHub App, on the branch-protection bypass list — constraint #3);
+# this Application directory-syncs tenants/_claims/ so the XR lands in the cluster;
+# Crossplane reconciles it into the full tenant. No onboarding PR, no human merge,
+# no operator `make` steps.
+#
+# De-provisioning symmetry (matches the existing platform.capstone/semester GC
+# model): graduate a cohort = `git rm` its claim files; ArgoCD prunes the XRs;
+# Crossplane (and the team AppProject finalizers) tear the tenants down.
+#
+# Excludes _*.yaml (e.g. _example-acme-app.yaml — a documented sample, not a live
+# claim) and README.md, mirroring how tenants-appset excludes tenants/_template.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-crossplane-claims
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"   # after apis (1) — XRs need the XRD + Composition
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/UA-MIS/platform-infra
+    targetRevision: HEAD
+    path: tenants/_claims
+    directory:
+      recurse: false
+      # `_`-prefixed files are samples/blueprints, not live claims (the example XR);
+      # README is docs. Everything else in this dir is a real committed tenant claim.
+      exclude: '{_*.yaml,README.md}'
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: capstone-tenants     # the namespace CapstoneTenant XRs live in (apis/namespace.yaml)
+  syncPolicy:
+    automated:
+      prune: true       # `git rm` a claim → the XR is pruned → the tenant is torn down
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false   # capstone-tenants ships via platform-crossplane-apis
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

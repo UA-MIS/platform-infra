@@ -1,0 +1,22 @@
+# ProviderConfig for provider-upjet-github — GitHub App auth (ADR-031 §6).
+# References the placeholder-sealed credentials Secret (creds/github-app-creds-sealed.yaml),
+# which the SealedSecrets controller materializes to `github-provider-creds` in
+# crossplane-system. The Secret's `credentials` key is the JSON the provider's
+# `app_auth` source expects:
+#   {"app_auth":[{"id":"<APP_ID>","installation_id":"<INSTALL_ID>","pem_file":"<PEM \n-escaped>"}],"owner":"UA-MIS"}
+# Values are the EXISTING ua-mis-backstage App (App ID 4097147, install 141394298 —
+# memory capstone-github-app-m2). The .pem stays with the operator; it is sealed at
+# Phase-0, never committed in cleartext.
+apiVersion: github.upbound.io/v1beta1
+kind: ProviderConfig
+metadata:
+  name: default
+  labels:
+    platform.capstone/component: platform
+spec:
+  credentials:
+    source: Secret
+    secretRef:
+      namespace: crossplane-system
+      name: github-provider-creds
+      key: credentials

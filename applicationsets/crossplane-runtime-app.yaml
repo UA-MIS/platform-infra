@@ -1,0 +1,54 @@
+# Crossplane runtime Application (ADR-031). Installs the FOUR providers + the two
+# composition functions + their ProviderConfigs + the curated provider-kubernetes
+# RBAC + the (placeholder) provider credentials — everything under
+# platform-services/crossplane/ EXCEPT apis/ (the XRD/Composition, which need the
+# provider + function CRDs to exist first → crossplane-apis-app, wave 1).
+#
+# Directory-source Application (recurse) over platform-services/crossplane, with
+# apis/ and docs excluded. Within the app, sync-waves order:
+#   wave 0: Provider + Function packages (providers/) + RBAC (rbac/) + creds (creds/)
+#   wave 1: ProviderConfigs (config/) — reference the provider CRDs + the creds Secrets,
+#           which only exist once the packages install (wave 0) + are healthy. ArgoCD
+#           retries/self-heals the ProviderConfigs until the CRDs register (same
+#           eventual-consistency pattern as ESO's ClusterSecretStore).
+#
+# ⚠ DO NOT APPLY without the one-time SRE review (ADR-031 constraint #4). THE review
+# focus lives here: rbac/provider-kubernetes-rbac.yaml (the privileged ClusterRole —
+# it can mint AppProjects + namespaced RBAC; it is hand-curated, never cluster-admin)
+# and creds/ (the four scoped provider credentials — shipped as PLACEHOLDER
+# SealedSecret stubs; the real values are the operator's keyboard).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-crossplane-runtime
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"   # after core (-1), before apis (1)
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/UA-MIS/platform-infra
+    targetRevision: HEAD
+    path: platform-services/crossplane
+    directory:
+      recurse: true
+      # apis/ (XRD+Composition) is its own app (needs provider+function CRDs first);
+      # docs are not manifests.
+      exclude: '{apis/**,README.md,creds/README.md}'
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: crossplane-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false    # crossplane-system created by platform-crossplane-core
+      - ServerSideApply=true
+    retry:
+      limit: 10                  # ProviderConfigs wait for provider CRDs to register
+      backoff: { duration: 15s, factor: 2, maxDuration: 5m }

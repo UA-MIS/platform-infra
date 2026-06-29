@@ -25,15 +25,20 @@ There is **no cloud KMS on Talos**, so cloud auto-unseal (`awskms` / `gcpckms` /
 | **2. ⭐ Transit auto-unseal (RECOMMENDED)** | A tiny **second "unsealer" Vault** holds a Transit key; the main Vault auto-unseals against it on boot | **LOW** — main Vault self-unseals on every restart; you only unseal the *small* unsealer (or run IT manual since it restarts rarely) | The unseal key never touches the main Vault's disk; rotatable; audited | **Pick this** — turns Vault into a low-maintenance service, which is the user's stated goal |
 | **3. Stored/auto-init keys** | Scripts stash the unseal keys in a k8s Secret + auto-unseal from it | LOW | **WEAK** — the unseal key sits next to the thing it unseals (defeats the seal); avoid | ❌ Not recommended |
 
-### ⭐ Recommendation: **Option 2 — Transit auto-unseal from a small in-cluster unsealer Vault.**
+### ⭐ CHOSEN: **Option 2 — Transit auto-unseal from a small in-cluster unsealer Vault.** (now WIRED)
 
 It is the only option that is **both** low-maintenance **and** keeps the seal key
 off the main Vault's disk. The unsealer is a single tiny Vault pod whose ONLY job is
 to hold one Transit key; it restarts rarely, so even leaving the unsealer on manual
-unseal is a once-in-a-blue-moon keyboard task. **Day-1 ships MANUAL** (Option 1, so
-the platform is operable immediately with zero extra infra); promote to Option 2
-when ready via the runbook in §D — `seal "transit"` is already stubbed (commented)
-in `vault-app.yaml`.
+unseal is a once-in-a-blue-moon keyboard task. **This is now implemented** (Track-2
+DR): the `seal "transit"` stanza is **active** in `vault-app.yaml`, the unsealer
+ships as `applicationsets/vault-unsealer-app.yaml` (+ `platform-services/vault-unsealer/`),
+and the one-time Shamir→Transit `-migrate` ceremony + key custody live in
+**`artifacts/design/vault-dr-runbook.md`**. The migrate is a human keyboard step;
+until you run it, do **not** sync the updated `vault-app.yaml` (see the ORDERING
+warning in that file's header). If you instead want the absolute simplest footprint
+and accept the manual toil for v1, revert the `seal "transit"` stanza to stay on
+Option 1 — secure, just higher-touch.
 
 > If the user decides the manual toil is acceptable for v1 and wants the absolute
 > simplest footprint, **stay on Option 1** — it is secure, just higher-touch. This
@@ -156,13 +161,11 @@ kubectl -n vault exec -it vault-0 -- sh -c \
 # 8) Apply the ClusterSecretStore (+ per-tenant SecretStores as teams onboard).
 #    See external-secrets/README.md §3.
 
-# 9) (OPTIONAL, RECOMMENDED) Promote to Transit auto-unseal (§A option 2):
-#    - stand up the small unsealer Vault, enable transit, create key `autounseal`,
-#      mint a token with the autounseal policy;
-#    - uncomment the `seal "transit"` block in vault-app.yaml (token via
-#      server.extraSecretEnvironmentVars -> VAULT_TOKEN, NOT inline), re-sync;
-#    - one-time `vault operator unseal -migrate` (×3 shares) to migrate Shamir->Transit.
-#    After this the main Vault auto-unseals on every restart.
+# 9) Transit auto-unseal + Raft snapshots (Track-2 DR) — NOW IMPLEMENTED. The full
+#    keyboard procedure (stand up the unsealer, enable transit, mint the scoped
+#    auto-unseal token, seed the k8s Secrets, run the one-time `vault operator unseal
+#    -migrate`, and configure the snapshot CronJob's policy/role) lives in:
+#        artifacts/design/vault-dr-runbook.md   (§C bring-up, §D migrate, §E restore)
 ```
 
 ### Rollback / recovery

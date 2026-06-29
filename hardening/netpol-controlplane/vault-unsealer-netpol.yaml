@@ -1,0 +1,94 @@
+# Control-plane NetworkPolicies — vault-unsealer namespace (ADR-030 B1, Track-2 DR).
+#
+# The unsealer Vault holds ONE Transit key and has exactly ONE client: the main
+# Vault (vault ns), which calls it on :8200 to encrypt/decrypt its root key for
+# auto-unseal. So ingress is locked to the vault namespace + kubelet probes; egress
+# to DNS + the apiserver (service_registration "kubernetes") only. NO external
+# egress (in-cluster only). Same default-deny + scoped-allow posture as vault/.
+#
+# Lives in hardening/netpol-controlplane/ so it inherits the MANUAL-SYNC Application
+# (platform-netpol-controlplane) — default-deny reaches this namespace only via the
+# deliberate, watched `argocd app sync` + SEC-011 deny-test, never auto-applied.
+# NetworkPolicies are ADDITIVE (OR); these sit alongside the Cilium CNPs.
+#
+# Talos/Cilium CIDRs (proven-enforced, SEC-011): pods 10.244.0.0/16,
+# services 10.96.0.0/12, nodes 10.237.168.0/22 (apiserver :6443 + kubelet probes).
+
+# --- default-deny (ingress + egress) for every pod in vault-unsealer ---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: zz-default-deny
+  namespace: vault-unsealer
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# --- INGRESS: from the main Vault (vault ns) -> :8200 (the seal "transit" calls),
+#     intra-namespace, and kubelet probes from the node. ---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-vault-and-probes
+  namespace: vault-unsealer
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    # The main Vault (vault ns) is the ONLY application client — it dials the
+    # unsealer's transit engine on :8200 for every auto-unseal.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: vault
+      ports:
+        - protocol: TCP
+          port: 8200
+    # Intra-namespace (harmless at single-pod standalone).
+    - from:
+        - podSelector: {}
+    # Kubelet readiness/liveness probes originate from the NODE IP — without this,
+    # default-deny fails the unsealer's probes and the pod never goes Ready.
+    - from:
+        - ipBlock:
+            cidr: 10.237.168.0/22
+---
+# --- EGRESS: DNS + the apiserver (service_registration "kubernetes"). NO external
+#     egress, NO outbound to other namespaces (the unsealer initiates nothing else). ---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-scoped
+  namespace: vault-unsealer
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # DNS to CoreDNS (kube-system), UDP+TCP 53.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # kube-apiserver on the node IPs (:6443) — service_registration "kubernetes"
+    # calls the apiserver to label the pod (active/standby/sealed).
+    - to:
+        - ipBlock:
+            cidr: 10.237.168.0/22
+      ports:
+        - protocol: TCP
+          port: 6443

@@ -1,0 +1,23 @@
+# EXAMPLE CapstoneTenant XR — NOT a live claim (the `_` prefix excludes it from
+# platform-crossplane-claims sync, like tenants/_template). This is exactly what the
+# Backstage scaffolder commits per onboarding: one small, schema-validated object.
+# Copy/rename to <team>-<app>.yaml (no underscore) to make it a real claim — or just
+# let The Process emit it.
+apiVersion: platform.capstone.uamishub.com/v1alpha1
+kind: CapstoneTenant
+metadata:
+  name: acme-acme-app          # <team>-<app>
+  namespace: capstone-tenants  # the XR namespace (apis/namespace.yaml)
+  labels:
+    platform.capstone/team: acme
+    platform.capstone/semester: 2026-fall
+    platform.capstone/component: tenant
+spec:
+  team: acme                   # DNS-1123 label — the one canonical key (D-026)
+  appName: acme-app            # DNS-1123 label — repo/workload/image/host all derive from this
+  semester: 2026-fall          # year-first slug — the GC/report selector
+  # --- optional (XRD defaults shown) ---
+  githubTeam: acme             # defaults to team
+  port: 8080
+  previewEnabled: false        # per-PR preview ApplicationSet (security-gated)
+  domain: capstone.uamishub.com

@@ -6,12 +6,14 @@
 # The server-TLS Secret (vault-server-tls) and the audit device are created OUT-OF-
 # BAND by the human runbook (vault/README.md §C) — a server cert is generated at
 # init time and is NOT committed (no secret material in git; that is the whole point
-# of B1). So this dir ships only the namespace.
+# of B1). So this dir ships the namespace + the GitOps-able DR adjuncts (the Raft
+# snapshot CronJob/PVC/SA; the snapshot Vault policy+role are runbook-created).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
   - namespace.yaml
+  - raft-snapshot.yaml   # Track-2 DR: periodic `vault operator raft snapshot save` -> Ceph PVC
 
 labels:
   - pairs:
