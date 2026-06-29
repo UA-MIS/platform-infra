@@ -87,14 +87,13 @@ spec:
         #     is not supported." We are RWO single-replica, so Recreate is correct.
         #     (Revisit ONLY if we move registry to RWX/S3 + multi-replica HA, where
         #     RollingUpdate becomes safe again — that is a Phase-4+ HA decision.)
+        # The chart's ONLY knob is updateStrategy.type (Context7 /goharbor/harbor-helm,
+        # 2026-06-28 — there is no rollingUpdate value to set; the registry/jobservice
+        # templates hardcode `rollingUpdate: null` whenever type=Recreate). The apply
+        # failure is NOT a values bug — see the syncPolicy.syncOptions block below for
+        # the real (ArgoCD + ServerSideApply) root cause and fix.
         updateStrategy:
           type: Recreate
-          # NULL the chart's default rollingUpdate sub-block: the goharbor template
-          # renders strategy.rollingUpdate from the chart default even when type=Recreate,
-          # which k8s REJECTS ("spec.strategy.rollingUpdate: Forbidden when type is
-          # 'Recreate'") → registry+jobservice Deployments fail to apply → platform-harbor
-          # stuck OutOfSync. Explicit null emits `type: Recreate` alone.
-          rollingUpdate: null
 
         # Single-replica everything for Phase-2 local (laptop). Phase-4 scales.
         portal:    { replicas: 1 }
@@ -110,7 +109,24 @@ spec:
       selfHeal: true
     syncOptions:
       - CreateNamespace=false      # harbor ns ships as its own object (platform-services/harbor)
-      - ServerSideApply=true       # Harbor CRDs/large objects
+      # ROOT CAUSE of the platform-harbor OutOfSync stall: the goharbor chart renders the
+      # registry + jobservice (RWO ceph-block PVC) Deployments with
+      #   strategy: { type: Recreate, rollingUpdate: null }
+      # — the Helm "delete this key" idiom. ArgoCD STRIPS null-valued fields before it
+      # applies, so under ServerSideApply it sent only `strategy.type: Recreate`, while the
+      # stale `strategy.rollingUpdate` block (API-server-defaulted back when these
+      # Deployments were RollingUpdate, and OWNED BY kube-controller-manager) stayed put.
+      # SSA cannot drop a field it does not own → the merged object is invalid
+      # ("spec.strategy.rollingUpdate: Forbidden when type is 'Recreate'") and every sync
+      # was rejected (verified via managedFields: argocd-controller owned only f:strategy.f:type).
+      # FIX: Replace=true uses `kubectl replace` (full overwrite, not a field-merge), so the
+      # rendered spec — Recreate with NO rollingUpdate — lands verbatim and is valid.
+      # ApplyOutOfSyncOnly scopes replace to DRIFTED resources only, so the in-sync
+      # StatefulSets (database/redis/trivy) and ClusterIP Services are never replaced
+      # (their volumeClaimTemplates / clusterIP are immutable and would reject a replace).
+      # (goharbor ships no CRDs/large objects, so the former ServerSideApply=true was inert here.)
+      - Replace=true
+      - ApplyOutOfSyncOnly=true
     retry:
       limit: 5
       backoff: { duration: 10s, factor: 2, maxDuration: 5m }
