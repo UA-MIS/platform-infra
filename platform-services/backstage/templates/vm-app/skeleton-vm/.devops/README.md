@@ -29,7 +29,9 @@ is ArgoCD syncing the merged manifests; there is no image-tag bump.
 ## How a VM becomes "an app with a URL"
 
 1. **Disk** — `dataVolumeTemplates` (CDI) imports your base image into a PVC on
-   `ceph-block` (RBD, `volumeMode: Block`). The PVC lives + dies with the VM.
+   `ceph-block` (RBD, `volumeMode: Filesystem` — CDI writes a `disk.img` on the PVC so
+   the importer needs no raw-block privilege and runs under the VM-tier baseline PSA).
+   The PVC lives + dies with the VM.
 2. **First-boot setup** — `cloudInitNoCloud.secretRef` -> the Secret kustomize builds
    from `cloud-init.yaml` (key `userdata`). This replaces the Dockerfile.
 3. **Networking** — `masquerade` puts the VM on the pod network (NAT behind the
