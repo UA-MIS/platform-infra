@@ -1,0 +1,87 @@
+# ============================================================================
+# .mobile-ci/build.yaml — Flutter cross-platform (.apk / .ipa) build workflow.
+#
+# Shipped VERBATIM by the compose engine (copyWithoutTemplating); the engine installs it
+# as the repo's mobile build workflow (a mobile fragment has NO Dockerfile / k8s workload).
+#
+# The native android/ + ios/ projects are GENERATED at build time with `flutter create .`
+# (it adds the missing platform folders and never clobbers lib/), so the repo ships only
+# lib/ + pubspec.yaml.
+#
+# RUNNER PREREQ:
+#   - android job: Linux `ubuntu-latest`. Builds a DEBUG .apk.
+#   - ios job:     macOS `macos-14` (REQUIRED for any iOS build). Does an UNSIGNED
+#                  `flutter build ios --no-codesign` for validation.
+#
+# DISTRIBUTABLE artifacts: a signed iOS .ipa needs `flutter build ipa` with Apple signing
+# secrets; a signed Android release needs a keystore (`flutter build appbundle`). Then
+# upload to TestFlight / the Play Console.
+# ============================================================================
+name: mobile-build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Generate native platform folders
+        run: flutter create . --platforms=android,ios
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Build debug APK
+        run: flutter build apk --debug
+
+      - name: Upload .apk artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: build/app/outputs/flutter-apk/*.apk
+          if-no-files-found: error
+
+  ios:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Generate native platform folders
+        run: flutter create . --platforms=android,ios
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Build iOS app (unsigned validation)
+        run: flutter build ios --release --no-codesign
+      # For a distributable iOS .ipa: `flutter build ipa` with Apple signing secrets, then
+      # upload to TestFlight (e.g. `xcrun altool` / `fastlane pilot`).

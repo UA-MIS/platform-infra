@@ -1,0 +1,53 @@
+# ============================================================================
+# .mobile-ci/build.yaml — Android (.apk) build workflow for a MOBILE fragment.
+#
+# Shipped VERBATIM by the compose engine (copyWithoutTemplating); the engine installs it
+# as the repo's mobile build workflow (a mobile fragment has NO Dockerfile / k8s workload).
+#
+# RUNNER PREREQ: Linux only — GitHub-hosted `ubuntu-latest` + a JDK. No macOS needed. The
+# Android SDK ships on ubuntu-latest; Gradle is provisioned by gradle/actions/setup-gradle
+# (so there is NO checked-in Gradle wrapper binary).
+#
+# This produces a DEBUG .apk (auto-signed with the debug keystore) for build validation.
+# A DISTRIBUTABLE release .apk/.aab needs a release signing keystore: add it + its
+# passwords as repo secrets, wire a signingConfig into app/build.gradle.kts, build
+# `bundleRelease`, then upload to the Play Console.
+# ============================================================================
+name: mobile-build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10"
+
+      - name: Build debug APK
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Upload .apk artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error

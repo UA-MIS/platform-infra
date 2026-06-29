@@ -1,0 +1,69 @@
+# ============================================================================
+# .mobile-ci/build.yaml — iOS (.ipa) build workflow for a MOBILE fragment.
+#
+# Shipped VERBATIM by the compose engine (copyWithoutTemplating); the engine installs it
+# as the repo's mobile build workflow (a mobile fragment has NO Dockerfile / k8s workload).
+#
+# RUNNER PREREQ: building an iOS .ipa REQUIRES a macOS runner. This uses the GitHub-hosted
+# `macos-14` runner — it does NOT run on the platform's Linux ARC/Kaniko runners.
+#
+# This produces an UNSIGNED .ipa for build validation. A DISTRIBUTABLE .ipa needs Apple
+# code-signing: add a certificate (.p12) + provisioning profile as repo secrets, import
+# them, then replace the unsigned package step with `xcodebuild -exportArchive` using an
+# ExportOptions.plist, and upload to TestFlight (e.g. `xcrun altool` / `fastlane pilot`).
+# ============================================================================
+name: mobile-build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ios:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Archive (unsigned)
+        run: |
+          xcodebuild \
+            -project App.xcodeproj \
+            -scheme App \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath build/App.xcarchive \
+            archive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM=""
+
+      - name: Package unsigned .ipa
+        run: |
+          cd build
+          rm -rf Payload app.ipa
+          mkdir -p Payload
+          cp -R App.xcarchive/Products/Applications/App.app Payload/App.app
+          zip -qry app.ipa Payload
+
+      - name: Upload .ipa artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-ipa
+          path: build/app.ipa
+          if-no-files-found: error
