@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <!--
+    The capstone ASP.NET Core Web API starter project.
+
+    Fixed assembly/namespace `App` ON PURPOSE: the repo/app name may contain hyphens
+    (it is a DNS-1123 label), which are NOT valid C# identifiers — deriving the
+    namespace from the app name would break compilation for a hyphenated app. The
+    image/k8s/ingress names still come from the app name via the .devops contract;
+    only the C# code uses the neutral `App` namespace.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>App</RootNamespace>
+    <AssemblyName>App</AssemblyName>
+    <!-- Smaller, faster container start; the API is invariant-culture. -->
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Tests live in ../tests (a separate project), so the Web SDK never globs them.
+         This Remove is belt-and-suspenders in case a test file is ever added here. -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="../tests/**/*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- EF Core 8 + the org's MySQL provider (Pomelo, NOT SQL Server). Pomelo 8.x
+         targets EF Core 8 / .NET 8. -->
+    <PackageReference Include="Pomelo.EntityFrameworkCore.MySql" Version="8.0.3" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="8.0.10" />
+    <!-- OpenAPI for the dev /swagger explorer (no-op in prod unless enabled). -->
+    <PackageReference Include="Swashbuckle.AspNetCore" Version="6.6.2" />
+  </ItemGroup>
+
+</Project>
