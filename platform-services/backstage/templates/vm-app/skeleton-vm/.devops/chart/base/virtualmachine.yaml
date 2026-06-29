@@ -29,9 +29,18 @@ spec:
   runStrategy: Always
 
   # CDI imports the base disk image into a PVC on ceph-block (RBD). The PVC is created
-  # AND deleted with the VM (template lifecycle). volumeMode: Block (raw block device)
-  # is the efficient path for RBD-backed VMs; RBD is RWO (single-node attach — no
+  # AND deleted with the VM (template lifecycle). RBD is RWO (single-node attach — no
   # live-migration on this storage class, ADR-032 §5/open Q3).
+  #
+  # volumeMode: Filesystem (NOT Block): the CDI importer writes a raw disk.img onto a
+  # filesystem PVC, which needs no raw-block privilege and so runs under the VM-tier
+  # baseline PSA. Block mode requires a privileged importer (it does `blockdev` on
+  # /dev/cdi-block-volume) that baseline PSA correctly denies -> importer
+  # CrashLoopBackOff ("Permission denied"). The VM boots fine from the file-backed
+  # PVC (CDI names the image disk.img, raw format, uid 107). Minor tradeoff: a thin
+  # filesystem layer + ~10% FS overhead vs raw RBD block — negligible at capstone
+  # scale. Confirmed via Context7 /kubevirt/containerized-data-importer +
+  # /kubevirt/user-guide (CDI v1.65 / KubeVirt v1.8.4, 2026-06-28).
   dataVolumeTemplates:
     - metadata:
         name: ${{ values.appName }}-rootdisk
@@ -39,7 +48,7 @@ spec:
         storage:
           accessModes:
             - ReadWriteOnce
-          volumeMode: Block
+          volumeMode: Filesystem
           storageClassName: ceph-block
           resources:
             requests:

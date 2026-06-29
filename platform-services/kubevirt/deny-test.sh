@@ -276,6 +276,12 @@ spec:
     registry: { url: "$DV_SOURCE_URL" }
   storage:
     accessModes: [ "ReadWriteOnce" ]
+    # Filesystem (not Block): CDI importer writes a disk.img onto a filesystem PVC
+    # with NO raw-block privilege, so it runs under the VM-ns baseline PSA. Block
+    # mode needs a privileged importer (blockdev open /dev/cdi-block-volume) which
+    # baseline (correctly) denies -> importer CrashLoopBackOff. Confirmed via
+    # Context7 /kubevirt/containerized-data-importer (2026-06-28).
+    volumeMode: Filesystem
     storageClassName: $STORAGE_CLASS
     resources: { requests: { storage: 1Gi } }
 EOF
