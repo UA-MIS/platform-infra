@@ -1,0 +1,40 @@
+# The KubeVirt CR (kind: KubeVirt) — the instance request that tells the
+# virt-operator to actually deploy the runtime (virt-api, virt-controller, the
+# virt-handler DaemonSet). Namespaced — lives in the `kubevirt` namespace created
+# by the operator install (../operator). Schema verified against Context7
+# /kubevirt/user-guide (2026-06-28).
+#
+# ── EMULATION FALLBACK (ADR-032 open Q1 — the KVM-on-Talos blocker) ──────────────
+# `useEmulation: true` lets virt-launcher run guests via SOFTWARE emulation when
+# `/dev/kvm` is ABSENT, instead of failing. The 3 OptiPlex 7080 nodes' Talos
+# installer schematic (factory 8957) carries NO virtualization extension and VT-x /
+# `/dev/kvm` presence is UNVERIFIED (the kvm-spike agent is confirming this in
+# parallel). With this flag set, KubeVirt still PREFERS hardware KVM when `/dev/kvm`
+# IS present and only falls back to emulation when it is not — so the capability
+# installs and proves out regardless of the spike outcome. Software emulation is
+# MUCH slower (spike/fallback only, not for real workloads); once KVM-on-Talos is
+# confirmed this flag can be removed (or left as a safety net). See the README.
+#
+# ── FEATURE GATES (ADR-032) ─────────────────────────────────────────────────────
+# Left EMPTY on purpose. Every capability the ADR-032 design needs is GA / default
+# in KubeVirt v1.8.4 and requires NO gate: DataVolume / `dataVolumeTemplates` (CDI
+# integration), `masquerade` pod-network, `cloudInitNoCloud`, and `runStrategy`.
+# Adding gates we don't need only widens the surface (least-privilege). Add gates
+# here later — and only with a justification — if a v2.x feature (e.g. VSOCK,
+# live-migration VolumesUpdateStrategy) requires one.
+apiVersion: kubevirt.io/v1
+kind: KubeVirt
+metadata:
+  name: kubevirt
+  namespace: kubevirt
+  labels:
+    platform.capstone/component: platform
+spec:
+  certificateRotateStrategy: {}
+  customizeComponents: {}
+  imagePullPolicy: IfNotPresent
+  workloadUpdateStrategy: {}
+  configuration:
+    developerConfiguration:
+      useEmulation: true   # /dev/kvm-absent fallback — see header (ADR-032 open Q1)
+      featureGates: []     # none needed: DataVolumes/masquerade/cloudInit/runStrategy are GA-default in v1.8.4

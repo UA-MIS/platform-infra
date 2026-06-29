@@ -1,0 +1,33 @@
+# The CDI CR (kind: CDI) — the instance request that tells the cdi-operator to
+# deploy the CDI runtime (cdi-apiserver, cdi-deployment/controller,
+# cdi-uploadproxy). CLUSTER-SCOPED (no namespace) — `cdis.cdi.kubevirt.io` is a
+# cluster resource; the runtime pods land in the `cdi` namespace from ../operator.
+# This is the upstream v1.65.0 default CR (the GA-recommended config) with the
+# platform component label added. Verified against the pinned upstream cdi-cr.yaml
+# and Context7 /kubevirt/containerized-data-importer (2026-06-28).
+#
+# featureGates (CDI's own, distinct from KubeVirt's):
+#   - HonorWaitForFirstConsumer: respect a storage class's WaitForFirstConsumer
+#     binding mode — don't start the importer until the consumer pod is scheduled
+#     (avoids importing onto a node the VM can't land on). Safe + recommended.
+#   - WebhookPvcRendering: render DataVolume->PVC via the mutating webhook (the GA
+#     default rendering path in current CDI).
+# nodeSelector linux: pin CDI infra + workload pods to linux nodes (upstream default).
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: CDI
+metadata:
+  name: cdi
+  labels:
+    platform.capstone/component: platform
+spec:
+  imagePullPolicy: IfNotPresent
+  config:
+    featureGates:
+      - HonorWaitForFirstConsumer
+      - WebhookPvcRendering
+  infra:
+    nodeSelector:
+      kubernetes.io/os: linux
+  workload:
+    nodeSelector:
+      kubernetes.io/os: linux

@@ -1,0 +1,41 @@
+# CDI CR Application (ADR-032). The `kind: CDI` instance (CLUSTER-SCOPED) that
+# triggers the cdi-operator to deploy the CDI runtime (cdi-apiserver,
+# cdi-deployment, cdi-uploadproxy). sync-wave 1 → lands AFTER the operator + CRD
+# (cdi-operator-app.yaml, wave 0), so the `cdis.cdi.kubevirt.io` CRD exists before
+# this CR is applied.
+#
+# The CR (platform-services/cdi/cr/cdi-cr.yaml) is the upstream v1.65.0 default
+# config (HonorWaitForFirstConsumer + WebhookPvcRendering feature gates, linux
+# nodeSelector). Source = platform-infra git repo (local file, no remote fetch).
+# Destination namespace is the neutral `cdi` (the CR itself is cluster-scoped, so
+# the dest ns is only a default for any namespaced object — there are none here).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-cdi-cr
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"   # CR after the operator+CRD (wave 0)
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/UA-MIS/platform-infra
+    targetRevision: HEAD
+    path: platform-services/cdi/cr
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: cdi                 # cluster-scoped CR; dest ns is only a default (unused here)
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false      # `cdi` ns already exists from the wave-0 operator app
+      - ServerSideApply=true       # consistent with the operator app
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

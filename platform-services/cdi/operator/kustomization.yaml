@@ -1,0 +1,29 @@
+# CDI (Containerized Data Importer) OPERATOR install (ADR-032). The cdi-operator +
+# the `cdis.cdi.kubevirt.io` CRD + the operator RBAC + the `cdi` Namespace. CDI
+# imports a disk image (cloud image / ISO / containerDisk) into a PVC via a
+# `DataVolume`, so a VM's root disk is GitOps-declared, not hand-copied. The CDI CR
+# (the instance) ships in ../cr, applied one sync-wave later by platform-cdi-cr.
+#
+# Install pattern = the cert-manager / sealed-secrets pattern: a pinned UPSTREAM
+# RELEASE MANIFEST as a remote kustomize resource (CDI ships no official Helm
+# chart). Fetched by kustomize at render time (NOT an ArgoCD `source`), so it needs
+# NO bootstrap/platform-appproject.yaml `sourceRepos` entry and NO
+# `make bootstrap-reapply` — same as cert-manager.yaml / sealed-secrets controller.yaml.
+#
+# VERSION PIN: v1.65.0 — the current CDI stable GA (GitHub releases/latest, verified
+# 2026-06-28; Context7 /kubevirt/containerized-data-importer confirms the
+# cdi-operator.yaml + cdi-cr.yaml install path). Pin exactly; bump deliberately.
+# (Keep roughly in step with the KubeVirt minor — CDI v1.65.x pairs with KubeVirt
+# v1.8.x.)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  # Pinned upstream operator: Namespace `cdi` + `cdis.cdi.kubevirt.io` CRD +
+  # cdi-operator Deployment + ClusterRole(s)/bindings + ServiceAccount.
+  - https://github.com/kubevirt/containerized-data-importer/releases/download/v1.65.0/cdi-operator.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false
