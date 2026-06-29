@@ -23,6 +23,7 @@ nav:
   - Operator Guide:
       - Vault & DR: operator/vault-and-dr.md
       - ArgoCD & GitOps: operator/argocd-gitops.md
+      - Tenant on/off switch: operator/tenant-on-off-switch.md
       - Harbor registry: operator/harbor.md
       - Secrets (ESO): operator/secrets-eso.md
       - Crossplane onboarding: operator/crossplane-onboarding.md
