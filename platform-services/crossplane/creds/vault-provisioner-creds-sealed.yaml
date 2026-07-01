@@ -9,6 +9,8 @@ metadata:
   namespace: crossplane-system
   labels:
     platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"   # creds Secret ready before the ProviderConfig (wave 2) references it
 spec:
   encryptedData:
     credentials: PLACEHOLDER_RESEAL_AT_GO_LIVE_vault_provisioner_json_DO_NOT_USE

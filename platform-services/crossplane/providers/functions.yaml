@@ -20,6 +20,8 @@ metadata:
   name: function-go-templating
   labels:
     platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"   # package installs first (before ProviderConfigs, wave 2)
 spec:
   package: xpkg.upbound.io/crossplane-contrib/function-go-templating:v0.12.1
 ---
@@ -29,5 +31,7 @@ metadata:
   name: function-auto-ready
   labels:
     platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"   # package installs first (before ProviderConfigs, wave 2)
 spec:
   package: xpkg.upbound.io/crossplane-contrib/function-auto-ready:v0.6.4

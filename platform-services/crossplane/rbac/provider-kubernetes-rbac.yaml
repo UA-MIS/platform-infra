@@ -39,6 +39,8 @@ metadata:
   name: crossplane-provider-kubernetes-tenancy
   labels:
     platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"   # no provider CRD dep; bound to the wave-0 provider SA
 rules:
   # --- ArgoCD tenancy objects (created in the argocd namespace) --------------
   # applications: the per-team ARC runner scale-set is an ArgoCD Application
@@ -85,6 +87,8 @@ metadata:
   name: crossplane-provider-kubernetes-tenancy
   labels:
     platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"   # subject SA need not exist yet; binds provider-kubernetes SA
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole

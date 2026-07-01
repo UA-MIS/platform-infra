@@ -19,6 +19,8 @@ metadata:
   name: default
   labels:
     platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"   # vault.upbound.io CRD is installed by provider-vault (wave 0)
 spec:
   credentials:
     source: Secret
