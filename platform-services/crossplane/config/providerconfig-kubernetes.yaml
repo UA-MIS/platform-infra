@@ -12,6 +12,8 @@ metadata:
   name: default
   labels:
     platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"   # kubernetes.crossplane.io CRD is installed by provider-kubernetes (wave 0)
 spec:
   credentials:
     source: InjectedIdentity

@@ -17,5 +17,7 @@ metadata:
   name: provider-vault
   labels:
     platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"   # installs the vault.upbound.io CRDs (ProviderConfig lands wave 2)
 spec:
   package: xpkg.upbound.io/upbound/provider-vault:v0.1.0

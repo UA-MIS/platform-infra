@@ -21,5 +21,7 @@ metadata:
   name: provider-harbor
   labels:
     platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"   # installs the harbor.crossplane.io CRDs (ProviderConfig lands wave 2)
 spec:
   package: xpkg.upbound.io/globallogicuki/provider-harbor:v0.1.1

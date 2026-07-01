@@ -15,5 +15,7 @@ metadata:
   name: provider-github
   labels:
     platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"   # installs the github.upbound.io CRDs (ProviderConfig lands wave 2)
 spec:
   package: xpkg.upbound.io/crossplane-contrib/provider-upjet-github:v0.21.0

@@ -26,6 +26,8 @@ metadata:
   name: capstone-tenant-developer
   labels:
     platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"   # pre-created role the provider only `bind`s (wave 0)
 rules:
   # Workload read + restart/scale (the developer's day-to-day): get/list/watch plus
   # update/patch on Deployments/ReplicaSets (rollout restart, image bump via GitOps is
