@@ -12,9 +12,22 @@
 # ALSO set CreateNamespace=true so none of them blocks on the ns existing first
 # (sync-deadlock fix #127) — that is an idempotent create-if-missing, not
 # managedNamespaceMetadata, so it does not conflict with this manifest's ownership.
+#
+# pod-security: PRIVILEGED. The kube-prometheus-stack node-exporter DaemonSet needs
+# host access to read per-node metrics — hostNetwork=true, hostPID=true, hostPath
+# volumes (proc, sys, root) and hostPort 9100 — all of which violate the cluster's
+# default `baseline` PSA. Without this label node-exporter is admission-rejected
+# (0/3) so per-node CPU/mem/disk metrics never appear and ArgoCD waits on the
+# DaemonSet (app Progressing). This is a platform-operator-only namespace (no tenant
+# workloads), so privileged here is the same justified-privileged precedent as
+# rook-ceph/kubevirt — scoped to the monitoring operator, not a tenant escape surface.
 apiVersion: v1
 kind: Namespace
 metadata:
   name: monitoring
   labels:
     platform.capstone/component: platform
+    # node-exporter needs host access (hostNetwork/hostPID/hostPath/hostPort 9100).
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: privileged
+    pod-security.kubernetes.io/audit: privileged
