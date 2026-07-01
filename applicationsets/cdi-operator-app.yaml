@@ -37,6 +37,19 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: cdi                 # the upstream manifest ships its own Namespace object
+  # The cdi-operator MUTATES its own CRD after ArgoCD applies it: the upstream
+  # v1.65.0 manifest ships spec.versions = [v1alpha1 (served), v1beta1 (served+storage)],
+  # but the operator PRUNES the deprecated v1alpha1, leaving live spec.versions = [v1beta1]
+  # only (confirmed via managedFields: manager `cdi-operator`, operation Update, owns
+  # f:spec.f:versions). That is a permanent operator-owned drift → the CRD shows
+  # OutOfSync forever and selfHeal can never converge it. Ignore the operator-managed
+  # versions list so ArgoCD treats this CRD as Synced while still managing group/names/scope.
+  ignoreDifferences:
+    - group: apiextensions.k8s.io
+      kind: CustomResourceDefinition
+      name: cdis.cdi.kubevirt.io
+      jsonPointers:
+        - /spec/versions
   syncPolicy:
     automated:
       prune: true
