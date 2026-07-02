@@ -32,10 +32,11 @@
 #   5. capstone:emit-tenant-claim — render the SINGLE CapstoneTenant XR (the zero-touch
 #      seam) into the workspace as tenants/_claims/<team>-<app>.yaml. Replaces the
 #      imperative trio harbor-onboard + render-tenant + the onboarding PR.
-#   6. publish:github:pull-request — land that ONE claim file on platform-infra `main`.
-#      autoMerge is requested so the platform GitHub App (on the branch-protection
-#      BYPASS LIST for tenants/_claims/**, ADR-031 §7 Option A) self-merges it — no
-#      human merge. ArgoCD (platform-crossplane-claims) syncs it; Crossplane reconciles.
+#   6. publish:github:pull-request — open a PR landing that ONE claim file on
+#      platform-infra `main`. A reviewer merges it with ONE click (true auto-merge is a
+#      follow-up — the installed scaffolder-backend-module-github @0.9.10 has no autoMerge
+#      input, and it would need branch protection with required checks on platform-infra).
+#      ArgoCD (platform-crossplane-claims) then syncs it; Crossplane reconciles.
 #
 # ⚠ REQUIRES (wired at go-live — see platform-services/backstage/README.md):
 #   - The GitHub integration token (${GITHUB_TOKEN}, the UA-MIS GitHub App) with repo
@@ -364,22 +365,23 @@ spec:
         # one tenants/_claims/<team>-<app>.yaml file.
         targetPath: ./claim
 
-    # 6) Land the claim on platform-infra `main` — NO human merge (ADR-031 §7 Option A).
-    #    The platform GitHub App is on the branch-protection BYPASS LIST for
-    #    tenants/_claims/**, so with autoMerge it self-merges the moment the PR opens.
-    #    ArgoCD (platform-crossplane-claims) then syncs the XR; Crossplane reconciles the
-    #    whole tenant. This uses the SAME proven publish:github:pull-request mechanism the
-    #    imperative template used (in the deployed image), just carrying the single XR to
-    #    tenants/_claims/ instead of a full tenants/team-<name>/ tree.
+    # 6) Open a PR landing the claim on platform-infra `main`. A reviewer merges it with
+    #    ONE click; ArgoCD (platform-crossplane-claims) then syncs the XR and Crossplane
+    #    reconciles the whole tenant. This uses the SAME proven publish:github:pull-request
+    #    mechanism the imperative template used (in the deployed image), just carrying the
+    #    single XR to tenants/_claims/ instead of a full tenants/team-<name>/ tree.
     #
-    #    ⚠ autoMerge is a best-effort input: if the deployed
-    #    scaffolder-backend-module-github version does not honor it, the action still
-    #    OPENS the claim PR (it is not rejected — extra inputs are ignored, not fatal) and
-    #    a reviewer's single click merges it. The clean "no-PR direct commit" realization
-    #    (a capstone:commit-to-main action, ADR-031 §7 Option A(b)) is the documented
-    #    fast-follow; this PR-with-autoMerge is Option A(a).
+    #    ⚠ TRUE auto-merge is a follow-up — needs plugin support + branch protection with
+    #    required checks on platform-infra. The installed
+    #    @backstage/plugin-scaffolder-backend-module-github @0.9.10 has NO autoMerge input
+    #    on publish:github:pull-request (its JSON-schema REJECTS the unknown property and
+    #    fails the WHOLE step — the live-scaffold error this change fixes), and there is no
+    #    github:pull-request:merge action in that module. To restore zero-touch later,
+    #    either (a) add a merge step/action once the plugin supports it, or (b) the clean
+    #    "no-PR direct commit" realization (a capstone:commit-to-main action, ADR-031 §7
+    #    Option A(b)). Until then this is a 1-click merge.
     - id: commit-claim
-      name: Land tenant claim on platform-infra (auto-merge)
+      name: Land tenant claim on platform-infra (1-click merge)
       action: publish:github:pull-request
       input:
         repoUrl: github.com?owner=UA-MIS&repo=platform-infra
@@ -387,9 +389,6 @@ spec:
         targetBranchName: main
         title: "onboard tenant (zero-touch): ${{ parameters.team }}-${{ parameters.appName }} (Capstone ${{ parameters.season }} ${{ parameters.year }})"
         sourcePath: ./claim
-        # Land the XR on main automatically (App bypasses branch protection on
-        # tenants/_claims/**). If autoMerge is unsupported, the PR still opens (1-click).
-        autoMerge: true
         description: |
           ## Zero-touch tenant claim — `${{ parameters.team }}-${{ parameters.appName }}` (Capstone ${{ parameters.season }} ${{ parameters.year }})
 
