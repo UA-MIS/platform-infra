@@ -62,92 +62,25 @@ spec:
                   (dict "name" "prod"    "cpuReq" "4" "memReq" "4Gi" "cpuLim" "8" "memLim" "8Gi"  "pods" "20") }}
 
             {{- /* =====================================================================
-                   GITHUB — repo + branch protection + team access + CI caller.
-                   Bug #5 (appName/repo-name mismatch): repo name derives from the one
-                   $app field. Bug #8: org-wide repo cred is platform infra; provider
-                   reuses the same ua-mis-backstage App. Bug #9: the CI caller is a
-                   tiny RepositoryFile pointing at the reusable workflow @v1.
+                   GITHUB — DELIBERATELY EMPTY (ADR-035 §D2, human-approved).
+                   The SCAFFOLDER owns the code repo end-to-end; the claim owns only
+                   platform tenancy. The zero-touch wizard's `publish:github` step
+                   (new-capstone-project-zerotouch/template.yaml) creates UA-MIS/<app>,
+                   pushes the COMPOSED FRAGMENT skeleton the student chose, protects
+                   `main` (protectDefaultBranch: true), grants the team push
+                   (collaborators), and ships CI via the skeleton's thin caller
+                   (.github/workflows/build-and-push.yaml → tenant-build.yaml@v1).
+                   This Composition previously ALSO created the repo bootstrapped from
+                   capstone-app-template + BranchProtection + TeamRepository + a ci.yaml
+                   RepositoryFile — a repo-ownership COLLISION that would clobber the
+                   student's fragment code with the template bootstrap and defeat the
+                   wizard. All four GitHub MRs are dropped: NO Repository / no template
+                   bootstrap / no BranchProtection / no TeamRepository / no RepositoryFile.
+                   Blast-radius win: the auto-committed claim no longer needs org-admin
+                   repo-create. See §D2 rejected alternatives. $repoUrl (above) is
+                   retained — the AppProject sourceRepos still references the (now
+                   scaffolder-created) repo; the Composition observes it, never seeds it.
                    ===================================================================== */}}
-            ---
-            apiVersion: repo.github.upbound.io/v1alpha1
-            kind: Repository
-            metadata:
-              annotations:
-                {{ setResourceNameAnnotation "github-repo" }}
-            spec:
-              forProvider:
-                name: {{ $app | quote }}
-                description: {{ printf "UA-MIS capstone app %s (team %s, %s)" $app $team $sem | quote }}
-                visibility: private
-                # Bootstrap the repo content from the platform's app template repo.
-                # (Hybrid, ADR-031 §9a: Backstage fetch:template still renders the
-                # per-team starter content; this template gives a non-empty default.)
-                template:
-                  - owner: UA-MIS
-                    repository: capstone-app-template
-                  - {}
-              providerConfigRef:
-                name: default
-            ---
-            apiVersion: repo.github.upbound.io/v1alpha1
-            kind: BranchProtection
-            metadata:
-              annotations:
-                {{ setResourceNameAnnotation "github-branch-protection" }}
-            spec:
-              forProvider:
-                repository: {{ $app | quote }}
-                pattern: main
-                requireConversationResolution: true
-                requiredPullRequestReviews:
-                  - requiredApprovingReviewCount: 1
-                    requireCodeOwnerReviews: true
-                    dismissStaleReviews: true
-              providerConfigRef:
-                name: default
-            ---
-            # Team push access. ⚠ Verify kind/group against provider-upjet-github CRDs
-            # at Phase-0 (team_repository → TeamRepository, group team.github.upbound.io).
-            apiVersion: team.github.upbound.io/v1alpha1
-            kind: TeamRepository
-            metadata:
-              annotations:
-                {{ setResourceNameAnnotation "github-team-repo" }}
-            spec:
-              forProvider:
-                username: {{ $ghTeam | quote }}     # team slug
-                repository: {{ $app | quote }}
-                permission: push
-              providerConfigRef:
-                name: default
-            ---
-            # The CI caller (bug #9): a ~10-line static workflow that calls the central
-            # reusable workflow @v1 (track-1). Static content (no Argo-expression
-            # collision) → provider-github RepositoryFile writes it verbatim. A CI fix ships once
-            # (the reusable workflow), every tenant picks it up at the pinned tag.
-            apiVersion: repo.github.upbound.io/v1alpha1
-            kind: RepositoryFile
-            metadata:
-              annotations:
-                {{ setResourceNameAnnotation "github-ci-caller" }}
-            spec:
-              forProvider:
-                repository: {{ $app | quote }}
-                branch: main
-                file: .github/workflows/ci.yaml
-                commitMessage: "platform: CI reusable-workflow caller (managed by Crossplane)"
-                content: |
-                  # Managed by the platform (Crossplane CapstoneTenant). Do not edit.
-                  # Calls the central reusable build/push workflow (track-1) — a fix
-                  # there ships once to every tenant at the pinned @v1 tag (bug #9).
-                  name: ci
-                  on: [push, pull_request]
-                  jobs:
-                    build:
-                      uses: UA-MIS/platform-infra/.github/workflows/tenant-build.yaml@v1
-                      secrets: inherit
-              providerConfigRef:
-                name: default
 
             {{- /* =====================================================================
                    HARBOR — project + push/pull robots (provider-harbor, the spike path).
