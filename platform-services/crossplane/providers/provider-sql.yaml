@@ -1,0 +1,33 @@
+# provider-sql (crossplane-contrib) — ADR-033 automatic per-tenant database
+# provisioning. Pointed at the off-cluster DB tier (ua-mis-db-1, MariaDB 11.8 —
+# MySQL wire-compatible) over the Tailscale overlay. Mints, per (team,env), a
+# MySQL `Database` + `User` + `Grant` so a CapstoneTenant with `database: mysql`
+# gets a schema + a scoped login with ZERO manual steps. The generated password
+# lands in a connection secret in crossplane-system, bridged to Vault by an ESO
+# PushSecret (see apis/composition.yaml, the DATABASE section).
+#
+# ⚠ Provider maturity / pin: v0.15.0 is the current stable crossplane-contrib
+# release (v0.16.0-beta.0 exists; stay on stable). The SRE confirms the exact MR
+# API group/kind (mysql.sql.crossplane.io/v1alpha1 — Database / User / Grant) and
+# the ProviderConfig credentials keys against the INSTALLED CRDs at Phase-0 apply
+# (the Composition annotates these for verification, same posture as provider-vault).
+#
+# ⚠ NETWORK: the provider-sql controller Pod (in crossplane-system) must be able to
+# reach ua-mis-db-1:3306 over the Tailscale tailnet (100.64.0.0/10). The Talos nodes
+# are Tailscale-everywhere (Phase-4 build kit), so the Pod egresses via the node's
+# tailnet route. Confirm a crossplane-system egress NetworkPolicy permits TCP/3306 to
+# the tailnet CIDR at Phase-0 (Cilium is enforcing — SEC-011).
+#
+# ⚠ DB TIER NOT LIVE: ua-mis-db-1 is draft PR #29 (boxes not yet provisioned). This
+# stack is branch+PR only and CANNOT be tested end-to-end until the DB tier is up and
+# the admin credential is resealed (creds/README.md). Until then the ProviderConfig's
+# credential stays a placeholder and provider-sql sits unauthenticated — the safe
+# failure mode (no Database/User is created).
+apiVersion: pkg.crossplane.io/v1
+kind: Provider
+metadata:
+  name: provider-sql
+  labels:
+    platform.capstone/component: platform
+spec:
+  package: xpkg.upbound.io/crossplane-contrib/provider-sql:v0.15.0

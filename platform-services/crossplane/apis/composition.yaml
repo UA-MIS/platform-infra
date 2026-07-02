@@ -48,6 +48,10 @@ spec:
             {{- $port := $spec.port | default 8080 }}
             {{- $domain := $spec.domain | default "capstone.uamishub.com" }}
             {{- $preview := $spec.previewEnabled | default false }}
+            {{- $database := $spec.database | default "none" }}
+            {{- /* MySQL identifiers from the team slug: hyphens -> underscores, since
+                   `<team>_<env>` becomes a MariaDB schema + username (ADR-033). */}}
+            {{- $teamDb := $team | replace "-" "_" }}
             {{- $registry := printf "harbor.%s" $domain }}
             {{- $repoUrl := printf "https://github.com/UA-MIS/%s" $app }}
             {{- $infraUrl := "https://github.com/UA-MIS/platform-infra" }}
@@ -1180,6 +1184,151 @@ spec:
                       retry:
                         limit: 5
                         backoff: { duration: 10s, factor: 2, maxDuration: 5m }
+
+            {{- /* =====================================================================
+                   DATABASE — automatic per-(team,env) MySQL provisioning (ADR-033).
+                   GATED on the XR's `database` field: only rendered when == "mysql"
+                   (the DB scaffolder templates set it; react-static leaves "none"). So
+                   a DB-less app emits ZERO provider-sql resources — no idle Database,
+                   no admin-cred reach for stacks that don't need a DB.
+
+                   Per env (dev/staging/prod) we mint, on the off-cluster DB tier via
+                   provider-sql (mysql.sql.crossplane.io), a:
+                     • Database `<teamDb>_<env>`  (the schema)
+                     • User     `<teamDb>_<env>`  (scoped login; password AUTO-GENERATED
+                                                   by provider-sql — never templated, so
+                                                   no per-reconcile churn; same reliability
+                                                   rationale as the Harbor robot Variant-2)
+                     • Grant    ALL on that schema to that user (the tenant owns its own DB)
+                   The User's connection secret (crossplane-system, via
+                   writeConnectionSecretToRef) carries the generated password; an ESO
+                   PushSecret bridges it into Vault at the SAME leaf track-4's app
+                   ExternalSecret reads — tenants/<team>/<env>/database (ADR-033 contract).
+
+                   ⚠ external-name = the actual MySQL identifier. In a Composition the
+                   composed MR's metadata.name is auto-generated, so we PIN
+                   crossplane.io/external-name to make the schema/username deterministic
+                   (the consumer assembles DATABASE_URL from a fixed `<teamDb>_<env>`).
+
+                   ⚠ Phase-0 (DB tier not live, PR #29): confirm against provider-sql
+                   v0.15.0 CRDs — (a) Database/User/Grant group mysql.sql.crossplane.io/
+                   v1alpha1; (b) the User connection-secret KEY NAMES (provider-sql
+                   publishes username/password/endpoint/port for User; host/port/username/
+                   password/database for Database — we map endpoint->host below); (c) that
+                   the captured password does NOT diff on steady-state reconcile.
+                   ===================================================================== */}}
+            {{- if eq $database "mysql" }}
+            {{- range $e := $envs }}
+            {{- $dbName := printf "%s_%s" $teamDb $e.name }}
+            {{- $connSecret := printf "%s-%s-db" $team $e.name }}
+            ---
+            # The per-env schema.
+            apiVersion: mysql.sql.crossplane.io/v1alpha1
+            kind: Database
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation (printf "sql-db-%s" $e.name) }}
+                crossplane.io/external-name: {{ $dbName | quote }}
+            spec:
+              forProvider:
+                defaultCharacterSet: utf8mb4
+                defaultCollation: utf8mb4_unicode_ci
+              providerConfigRef:
+                name: db-tier-mariadb
+            ---
+            # The per-env scoped login. No passwordSecretRef -> provider-sql generates
+            # the password and writes it (plus username/endpoint/port) to the connection
+            # secret in crossplane-system. STABLE across reconciles (generated once).
+            apiVersion: mysql.sql.crossplane.io/v1alpha1
+            kind: User
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation (printf "sql-user-%s" $e.name) }}
+                crossplane.io/external-name: {{ $dbName | quote }}
+            spec:
+              forProvider: {}
+              writeConnectionSecretToRef:
+                namespace: crossplane-system
+                name: {{ $connSecret | quote }}
+              providerConfigRef:
+                name: db-tier-mariadb
+            ---
+            # ALL privileges on the tenant's own schema (the team owns its DB). user +
+            # database reference the DB-level names (the external-names pinned above).
+            apiVersion: mysql.sql.crossplane.io/v1alpha1
+            kind: Grant
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation (printf "sql-grant-%s" $e.name) }}
+            spec:
+              forProvider:
+                user: {{ $dbName | quote }}
+                database: {{ $dbName | quote }}
+                privileges:
+                  - ALL
+              providerConfigRef:
+                name: db-tier-mariadb
+            ---
+            # Bridge the generated DB creds into Vault at the ADR-033 contract path
+            # tenants/<team>/<env>/database (properties: username, password, host, port).
+            # The app's DATABASE_URL ExternalSecret (DB template, track-4) reads these and
+            # assembles mysql://<user>:<pass>@<host>:<port>/<teamDb>_<env> via target.template
+            # — the dbname follows the fixed rule (NOT pushed; it is structural, not secret).
+            # Rendered via provider-kubernetes Object so it lands in crossplane-system next
+            # to the connection secret, and uses the platform `vault-push` writer SecretStore
+            # (config/vault-push-secretstore.yaml) — the SAME producer plane as the Harbor
+            # robot PushSecrets. ONE writer per Vault leaf (no dual-owner clobber).
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              name: {{ printf "xp-%s-%s-db-push" $team $e.name | quote }}
+              annotations:
+                {{ setResourceNameAnnotation (printf "push-db-%s" $e.name) }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: external-secrets.io/v1alpha1
+                  kind: PushSecret
+                  metadata:
+                    name: {{ printf "%s-%s-db" $team $e.name | quote }}
+                    namespace: crossplane-system
+                    labels:
+                      platform.capstone/component: platform
+                      platform.capstone/team: {{ $team | quote }}
+                  spec:
+                    refreshInterval: "1h"
+                    secretStoreRefs:
+                      - name: vault-push
+                        kind: SecretStore
+                    selector:
+                      secret:
+                        name: {{ $connSecret | quote }}   # provider-sql User connection secret
+                    data:
+                      - match:
+                          secretKey: username
+                          remoteRef:
+                            remoteKey: {{ printf "tenants/%s/%s/database" $team $e.name | quote }}
+                            property: username
+                      - match:
+                          secretKey: password
+                          remoteRef:
+                            remoteKey: {{ printf "tenants/%s/%s/database" $team $e.name | quote }}
+                            property: password
+                      # provider-sql publishes the server as `endpoint` -> store as `host`.
+                      - match:
+                          secretKey: endpoint
+                          remoteRef:
+                            remoteKey: {{ printf "tenants/%s/%s/database" $team $e.name | quote }}
+                            property: host
+                      - match:
+                          secretKey: port
+                          remoteRef:
+                            remoteKey: {{ printf "tenants/%s/%s/database" $team $e.name | quote }}
+                            property: port
+            {{- end }}
+            {{- end }}
 
             {{- /* =====================================================================
                    STATUS — surface the derived repo + Harbor project on the XR.
