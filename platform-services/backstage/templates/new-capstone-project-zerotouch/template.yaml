@@ -170,6 +170,26 @@ spec:
             - 'Single component (one app — default)'
             - 'Frontend + backend (two components, one repo)'
           default: single
+        # Database: does the app need a managed SQL database? `mysql` provisions a
+        # per-environment MariaDB schema + scoped user + credentials AUTOMATICALLY
+        # (Crossplane, ADR-033) and the app reads them from Vault via DATABASE_URL —
+        # nothing to click. `none` (default) is for DB-less apps (static SPAs, APIs
+        # backed by an external store). This sets spec.database on the emitted
+        # CapstoneTenant XR, which the Composition acts on.
+        database:
+          title: Database
+          type: string
+          description: >-
+            Does your app need a managed SQL database? "MySQL" provisions a per-env
+            MariaDB schema + user + credentials automatically (read via DATABASE_URL);
+            "None" for DB-less apps.
+          enum:
+            - none
+            - mysql
+          enumNames:
+            - 'None (no database — default)'
+            - 'MySQL (auto-provisioned per-env MariaDB schema + user + creds)'
+          default: none
 
     # NOTE: there is intentionally NO separate "Repository" page / repoUrl input.
     # The repo is created at github.com/UA-MIS/<appName> — owner is fixed to UA-MIS and
@@ -205,6 +225,10 @@ spec:
           semesterDisplay: Capstone ${{ parameters.season }} ${{ parameters.year }}
           port: ${{ parameters.port }}
           description: ${{ parameters.description }}
+          # Database choice (none|mysql) — declared in .devops/app-metadata.yaml so the
+          # repo records whether it uses the auto-provisioned MySQL. Kept in lockstep
+          # with spec.database on the emitted XR (emit-claim step below).
+          database: ${{ parameters.database }}
           destination: ${{ ("github.com?owner=UA-MIS&repo=" + parameters.appName) | parseRepoUrl }}
         # SELF-CONTAINED CONTRACT: the golden-path `.devops/` tree (chart base + 4
         # overlays, promotion.yaml, ci/ scripts) AND the `.github/` CI workflow are
@@ -265,6 +289,9 @@ spec:
           semesterDisplay: Capstone ${{ parameters.season }} ${{ parameters.year }}
           port: ${{ parameters.port }}
           description: ${{ parameters.description }}
+          # Database choice (none|mysql) — see the single-component step above; kept in
+          # lockstep with spec.database on the emitted XR (emit-claim step below).
+          database: ${{ parameters.database }}
           destination: ${{ ("github.com?owner=UA-MIS&repo=" + parameters.appName) | parseRepoUrl }}
           # The component model (Track 6 contract). Fixed default = frontend + backend.
           # image repo per component is derived in the skeleton as <appName>-<name>; ports
@@ -361,6 +388,11 @@ spec:
         # GC/report selector; matches the XRD `semester` pattern + the skeleton values.
         semester: ${{ parameters.year }}-${{ parameters.season | lower }}
         port: ${{ parameters.port }}
+        # Database provisioning choice — sets spec.database on the XR. `mysql` makes the
+        # Composition provision a per-env MariaDB schema + user + Vault creds (ADR-033);
+        # `none` (default) provisions no database. Kept in lockstep with the
+        # .devops/app-metadata.yaml `database` field rendered above.
+        database: ${{ parameters.database }}
         # Write under ./claim so the publish step (sourcePath: ./claim) lands exactly the
         # one tenants/_claims/<team>-<app>.yaml file.
         targetPath: ./claim

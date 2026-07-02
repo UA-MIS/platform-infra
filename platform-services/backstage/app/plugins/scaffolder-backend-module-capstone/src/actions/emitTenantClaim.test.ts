@@ -27,6 +27,7 @@ describe('renderCapstoneTenant', () => {
       port: 3000,
       previewEnabled: true,
       domain: 'example.com',
+      database: 'mysql',
     });
     expect(out).toContain('kind: CapstoneTenant');
     expect(out).toContain('name: acme-acme-app');
@@ -38,9 +39,10 @@ describe('renderCapstoneTenant', () => {
     expect(out).toContain('port: 3000');
     expect(out).toContain('previewEnabled: true');
     expect(out).toContain('domain: "example.com"');
+    expect(out).toContain('database: "mysql"');
   });
 
-  it('applies defaults (githubTeam=team, port=8080, previewEnabled=false, domain)', () => {
+  it('applies defaults (githubTeam=team, port=8080, previewEnabled=false, domain, database=none)', () => {
     const out = renderCapstoneTenant({
       team: 'acme',
       appName: 'acme-app',
@@ -50,6 +52,7 @@ describe('renderCapstoneTenant', () => {
     expect(out).toContain('port: 8080');
     expect(out).toContain('previewEnabled: false');
     expect(out).toContain('domain: "capstone.uamishub.com"');
+    expect(out).toContain('database: "none"');
   });
 });
 
@@ -149,6 +152,47 @@ describe('capstone:emit-tenant-claim', () => {
         }),
       ),
     ).rejects.toThrow(/invalid semester/);
+  });
+
+  it('emits spec.database when database=mysql is passed', async () => {
+    const action = createEmitTenantClaimAction();
+    const workspacePath = mockDir.resolve('wsdb');
+    await fs.ensureDir(workspacePath);
+
+    await action.handler(
+      createMockActionContext({
+        input: {
+          team: 'acme',
+          appName: 'acme-app',
+          semester: '2026-fall',
+          database: 'mysql',
+        },
+        workspacePath,
+      }),
+    );
+
+    const content = await fs.readFile(
+      path.join(workspacePath, 'tenants', '_claims', 'acme-acme-app.yaml'),
+      'utf8',
+    );
+    expect(content).toContain('database: "mysql"');
+  });
+
+  it('fails closed on an invalid database value', async () => {
+    const action = createEmitTenantClaimAction();
+    await expect(
+      action.handler(
+        createMockActionContext({
+          input: {
+            team: 'acme',
+            appName: 'acme-app',
+            semester: '2026-fall',
+            database: 'postgres',
+          },
+          workspacePath: mockDir.resolve('wsbaddb'),
+        }),
+      ),
+    ).rejects.toThrow(/invalid database/);
   });
 
   it('fails closed on an invalid githubTeam', async () => {
