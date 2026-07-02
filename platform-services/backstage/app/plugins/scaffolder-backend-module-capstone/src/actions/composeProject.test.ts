@@ -112,7 +112,7 @@ describe('capstone:compose-project', () => {
     const ws = mockDir.resolve('ws1');
     await fs.ensureDir(ws);
     const ctx = createMockActionContext({
-      input: { ...common, projectType: 'web', layout: 'single', singleFragment: 'backend/fastapi', database: 'host-mysql' },
+      input: { ...common, projectType: 'web' as const, layout: 'single' as const, singleFragment: 'backend/fastapi', database: 'host-mysql' as const },
       workspacePath: ws,
     });
 
@@ -142,7 +142,7 @@ describe('capstone:compose-project', () => {
     const ws = mockDir.resolve('ws2');
     await fs.ensureDir(ws);
     const ctx = createMockActionContext({
-      input: { ...common, projectType: 'web', layout: 'frontend-backend', frontendFragment: 'frontend/react', backendFragment: 'backend/express', database: 'host-mysql' },
+      input: { ...common, projectType: 'web' as const, layout: 'frontend-backend' as const, frontendFragment: 'frontend/react', backendFragment: 'backend/express', database: 'host-mysql' as const },
       workspacePath: ws,
     });
 

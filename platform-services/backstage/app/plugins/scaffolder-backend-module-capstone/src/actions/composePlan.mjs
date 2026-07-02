@@ -1,5 +1,5 @@
 /*
- * composePlan.js — the PURE planning core of the unified "New Project" wizard's compose
+ * composePlan.mjs — the PURE planning core of the unified "New Project" wizard's compose
  * engine (capstone:compose-project, ADR-034). Given the wizard choices + the chosen
  * fragments' fragment.yaml metadata, it computes:
  *   - components[]  : the .devops/components.yaml model (1 entry for single, 2 for FE+BE,
@@ -14,10 +14,15 @@
  * test (composePlan.test.cjs). This is the project's "one source, build-read it" rule
  * (copy-not-reference is the bug generator).
  *
- * CommonJS on purpose: importable by the esbuild/TS backend build, by `node --test`, and by
- * a plain `require()` harness alike.
+ * NATIVE ESM (.mjs) on purpose: the Backstage backend bundle (rollup via `backstage-cli
+ * package build`) only applies the CommonJS→ESM interop to node_modules, NOT to first-party
+ * `src/**` — it parses every src file as ESM. A `module.exports = { ... }` planner therefore
+ * exposed ZERO exports to rollup ("planComposition is not exported by composePlan.js") and
+ * broke the image build. As an .mjs with real `export` statements it binds natively into the
+ * bundle, while node still loads it as ESM everywhere: composeProject.ts imports it directly,
+ * and the two `require()`-based consumers (composePlan.test.cjs + the dry-render node shim)
+ * load it via `import()` — the single source of truth is preserved (no drift).
  */
-'use strict';
 
 /** A category maps to a components.yaml `kind` (descriptive; ingress is `path`, DB is needsDb). */
 const CATEGORY_KIND = {
@@ -174,7 +179,7 @@ function planComposition(input) {
   };
 }
 
-module.exports = {
+export {
   planComposition,
   validateMeta,
   CATEGORY_KIND,

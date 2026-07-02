@@ -2,7 +2,7 @@
 """dry-render.py — OFFLINE proof of the unified "New Project" compose engine (ADR-034).
 
 Without a running Backstage, this replays a scaffold: it parses the chosen fragment.yaml
-metadata, asks the REAL Node planner (composePlan.js — the same module the live
+metadata, asks the REAL Node planner (composePlan.mjs — the same module the live
 capstone:compose-project action uses, so NO drift) for the component plan, then renders the
 shared _contract/ + the chosen fragment skeleton(s) into an output tree exactly as the
 action would (jinja2 with Backstage's ${{ }} / {% %} delimiters; .github/** and
@@ -29,7 +29,7 @@ FRAGMENTS = HERE.parent                      # .../templates/_fragments
 CONTRACT = FRAGMENTS / "_contract"
 PLANNER = (
     FRAGMENTS.parent.parent                  # .../backstage
-    / "app/plugins/scaffolder-backend-module-capstone/src/actions/composePlan.js"
+    / "app/plugins/scaffolder-backend-module-capstone/src/actions/composePlan.mjs"
 )
 
 # Files shipped VERBATIM (never templated) — the copyWithoutTemplating contract.
@@ -59,11 +59,15 @@ def load_meta(rel):
 
 
 def run_planner(plan_input):
+    # composePlan is native ESM (composePlan.mjs), so load it with dynamic import() rather than
+    # require(). import() needs a file:// URL for an absolute path, hence pathToFileURL.
     js = (
-        "const{planComposition}=require(process.argv[1]);"
-        "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>"
+        "import('node:url').then(({pathToFileURL})=>"
+        "import(pathToFileURL(process.argv[1]).href)).then(({planComposition})=>"
+        "{let s='';process.stdin.on('data',d=>s+=d).on('end',()=>"
         "{try{process.stdout.write(JSON.stringify(planComposition(JSON.parse(s))))}"
-        "catch(e){console.error(e.message);process.exit(2)}});"
+        "catch(e){console.error(e.message);process.exit(2)}});})"
+        ".catch(e=>{console.error(e.message);process.exit(2)});"
     )
     r = subprocess.run(["node", "-e", js, str(PLANNER)], input=json.dumps(plan_input),
                        capture_output=True, text=True)

@@ -138,6 +138,27 @@ jobs:
       # checked-out repo mounted. We override the entrypoint with a tiny sh wrapper
       # so we can (a) fail closed if a push build is missing its cred, and (b) build
       # vs. --no-push from the resolver's PUSH decision.
+      #
+      # KANIKO MEMORY (OOM fix): the build stage runs `yarn install` (~2800 pkgs,
+      # +1.09 GiB node_modules + native modules), then Kaniko snapshots the full
+      # filesystem. The Kaniko step-pod (patched by arc/hook-template.yaml) has NO
+      # memory limit, so the default `full` snapshot mode + in-memory compressed-layer
+      # cache grew until the NODE OOM-killed the pod mid-snapshot ("Taking snapshot of
+      # full filesystem..." -> container-hook failure, run 28622490073). Two
+      # correctness-safe reducers on the executor below (they change HOW snapshots are
+      # computed/cached, not the produced image):
+      #   --snapshot-mode=redo        hash mtime+size+perms, not file CONTENT (cheaper)
+      #   --compressed-caching=false  do not retain compressed layers in RAM (big saver
+      #                               on the 1 GiB node_modules layer)
+      #   --use-new-run               detect RUN-command changes WITHOUT a full-fs
+      #                               snapshot -- redo+compressed-caching alone cleared
+      #                               the yarn-install snapshot but the retained
+      #                               per-RUN snapshot memory then stacked with the next
+      #                               heavy build process (`yarn tsc`) and re-OOMed the
+      #                               unbounded pod (run 28623210989, died 11s into tsc).
+      #                               new-run removes those RUN snapshots entirely.
+      # --reproducible is kept (deterministic timestamps); its memory cost is at
+      # finalize, after the peak-snapshot memory is freed.
       - name: Build (and push) with Kaniko
         uses: docker://gcr.io/kaniko-project/executor:v1.23.2-debug
         with:
@@ -157,6 +178,9 @@ jobs:
                     --dockerfile=packages/backend/Dockerfile
                     --destination=${IMAGE}
                     --reproducible
+                    --snapshot-mode=redo
+                    --compressed-caching=false
+                    --use-new-run
                     --verbosity=info";
             if [ "${PUSH}" = "true" ]; then
               echo "==> building + pushing ${IMAGE}";
