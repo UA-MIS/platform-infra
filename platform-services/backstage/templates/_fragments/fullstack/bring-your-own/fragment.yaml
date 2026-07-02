@@ -1,0 +1,48 @@
+# fragment.yaml — see _fragments/backend/express/fragment.yaml for the load-bearing
+# DB/healthz contract and ADR-034 for the architecture. ADR-035 §D4 is the authority for
+# THIS fragment (the blank / bring-your-own-code path).
+#
+# Blank / bring-your-own-code fragment: a MINIMAL WORKING PLACEHOLDER the student replaces,
+# NOT an empty repo that fails CI. It ships a real multi-stage Dockerfile + a tiny stdlib HTTP
+# server so the very first CI build and deploy are GREEN before the student writes a line;
+# they then swap in their own app (any language) + their own Dockerfile incrementally.
+#
+# CATEGORY NOTE (ADR-035 reconciliation): ADR-035 §D4 names a NEW `blank` category, but the
+# compose engine's VALID_CATEGORIES (composePlan.mjs) does not include `blank`, so a live
+# scaffold would fail validation even though this is meant to be a data-only, no-image-rebuild
+# fragment. This fragment therefore uses the engine-accepted `fullstack` category — the exact
+# structural analog of the other single-slot whole-app fragments (sveltekit, nuxt): fills the
+# `single` slot, owns "/", buildType container. Behaviour is identical to a `blank` category
+# (kind: backend); only the taxonomy label differs. See the PR description for the open
+# reconciliation point (add `blank` to the engine in the D6 image rebuild, or keep this).
+apiVersion: platform.capstone/fragment.v1
+id: bring-your-own
+displayName: Blank / bring-your-own-code (green placeholder + Dockerfile)
+category: fullstack
+language: none              # no language assumed — the placeholder is throwaway; bring any
+framework: none            # bring-your-own — no framework
+# A blank project is a complete self-contained app (the only component), so it fills the
+# `single` slot only. FE+BE bring-your-own is future (ADR-035 §D4).
+slots:
+  - single
+defaultPort: 8080
+ingressPath: /             # a single app owns "/"
+needsDB: true              # reads DATABASE_URL when a DB is chosen — so the wizard's database
+                           # question is EFFECTIVE for BYO (the placeholder itself uses no DB
+                           # and stays green with or without one). See ADR-035 §D3.
+buildType: container
+dockerfile: Dockerfile
+healthPath: /healthz
+# BLANK/BYO CONTRACT (mirrors the backend/fullstack contract): the shipped placeholder MUST
+#   - serve GET /healthz -> 200, DB-INDEPENDENT (the chart probes hit this; green with no DB),
+#   - serve GET / -> a friendly "replace me" page,
+#   - listen on the PORT env (chart-set; default 8080).
+# The student replaces the app + Dockerfile but keeps /healthz 200 + $PORT to stay green.
+notes: >-
+  A minimal, language-agnostic PLACEHOLDER (a ~30-line Go stdlib HTTP server, built by a real
+  multi-stage Dockerfile into a static binary on `scratch`) so a bring-your-own-code repo is
+  green out of the box. Serves GET /healthz (200, DB-independent) and GET / (a "replace me"
+  page), listens on $PORT. The student deletes it and drops in their own app + Dockerfile,
+  keeping only the two contracts (/healthz 200, listen on $PORT). Uses NO database (needsDB is
+  declared true only so the wizard's database choice can wire DATABASE_URL for the app the
+  student brings). Build pulls no modules (stdlib only) — no runner egress needed.
