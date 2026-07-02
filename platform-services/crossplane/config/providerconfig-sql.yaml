@@ -8,12 +8,15 @@
 #
 # The referenced Secret `db-tier-mysql-admin` is materialized from the PLACEHOLDER
 # SealedSecret in creds/mysql-admin-creds-sealed.yaml. provider-sql's
-# `MySQLConnectionSecret` source reads four keys from it — the default secretKeyMapping
-# is endpoint/port/username/password (made explicit below so the SRE can audit it
-# against the sealed keys).
+# `MySQLConnectionSecret` source reads four FIXED keys from it —
+# endpoint/port/username/password — which is exactly what the placeholder
+# SealedSecret carries (see creds/README.md; the SRE audits those keys there).
 #
-# ⚠ Phase-0: confirm the ProviderConfig apiVersion (mysql.sql.crossplane.io/v1alpha1)
-# and the secretKeyMapping field names against the installed provider-sql v0.15.0 CRDs.
+# ⚠ NOTE (v0.15.0 schema): the installed provider-sql v0.15.0 ProviderConfig CRD
+# does NOT expose a `spec.credentials.secretKeyMapping` field (verified against the
+# live CRD + Context7 crossplane-contrib/provider-sql). secretKeyMapping is a
+# master-branch/unreleased addition; on v0.15.0 the four secret key names are
+# hardcoded to endpoint/port/username/password, so no mapping is declared here.
 # TLS: MariaDB on ua-mis-db-1 is reachable over the trusted Tailscale overlay; if TLS
 # is later enabled on the DB, add the CA via the provider's runtime config (the tailnet
 # is the current transport-security boundary — DB-tier runbook §4).
@@ -29,10 +32,3 @@ spec:
     connectionSecretRef:
       namespace: crossplane-system
       name: db-tier-mysql-admin
-    # Explicit mapping (these ARE the defaults) — the four keys the placeholder
-    # SealedSecret carries. endpoint = the ua-mis-db-1 tailnet address.
-    secretKeyMapping:
-      endpoint: endpoint
-      port: port
-      username: username
-      password: password
