@@ -67,13 +67,14 @@ spec:
                   key: app-secret
                   optional: true
 {%- if c.needsDb %}
-            # DATABASE_URL — this component's MySQL connection string. The SOURCE Secret is
+            # DATABASE_URL — this component's DB connection string. The SOURCE Secret is
             # chosen ONCE here (base) by the tenant's DB mode (ADR-033):
-            #   - database: mysql (auto-DB)  -> `<appName>-db`, the assembled DSN that the
-            #     per-env database.externalsecret.yaml builds from the Crossplane-provisioned
-            #     parts in Vault (tenants/<team>/<env>/database);
-            #   - bring-your-own / postgres  -> `<appName>-secret` key DATABASE_URL, typed by
-            #     the team via The Process "Secrets" tab (Vault object tenants/<team>/<env>/app).
+            #   - database: mysql | postgres (auto-DB)  -> `<appName>-db`, the assembled DSN
+            #     that the per-env database.externalsecret.yaml builds from the Crossplane-
+            #     provisioned parts in Vault (tenants/<team>/<env>/database). The scheme
+            #     (mysql:// vs postgresql://) is set there by the same `values.database`;
+            #   - bring-your-own (none/other)  -> `<appName>-secret` key DATABASE_URL, typed
+            #     by the team via The Process "Secrets" tab (Vault tenants/<team>/<env>/app).
             # Either way optional:true so a fresh repo with nothing in Vault still starts (the
             # backend degrades to a clear "DATABASE_URL not set" error on the data routes,
             # /healthz stays green — M4 zero-config). NEVER commit creds to git. This env is
@@ -81,7 +82,7 @@ spec:
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
-{%- if values.database == 'mysql' %}
+{%- if values.database == 'mysql' or values.database == 'postgres' %}
                   name: ${{ values.appName }}-db       # auto-DB: DSN assembled by database.externalsecret.yaml (ADR-033)
 {%- else %}
                   name: ${{ values.appName }}-secret   # bring-your-own: DATABASE_URL set via the Secrets tab
