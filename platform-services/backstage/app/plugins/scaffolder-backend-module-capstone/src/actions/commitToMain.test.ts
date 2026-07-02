@@ -303,6 +303,84 @@ describe('capstone:commit-to-main action', () => {
     expect(octokitFactory).not.toHaveBeenCalled();
   });
 
+  it('ALLOWS a claim path under the default tenants/_claims/ prefix', async () => {
+    const { octokit, putCalls } = mockOctokit({ existingSha: undefined });
+    const action = createCommitToMainAction({
+      config: config(),
+      githubCredentialsProvider: credsProvider,
+      octokitFactory: () => octokit,
+    });
+    const ctx = ctxFor({ repoUrl: REPO_URL, path: CLAIM_PATH, content: CLAIM_CONTENT });
+    await action.handler(ctx);
+    expect(putCalls).toHaveLength(1);
+    expect(putCalls[0].path).toBe(CLAIM_PATH);
+  });
+
+  it('REJECTS a path outside the allowlist (.github/workflows/evil.yaml) — no GitHub call', async () => {
+    const octokitFactory = jest.fn();
+    const action = createCommitToMainAction({
+      config: config(),
+      githubCredentialsProvider: credsProvider,
+      octokitFactory,
+    });
+    const ctx = ctxFor({
+      repoUrl: REPO_URL,
+      path: '.github/workflows/evil.yaml',
+      content: 'x',
+    });
+    await expect(action.handler(ctx)).rejects.toThrow(/outside the allowed prefix/i);
+    expect(credsProvider.getCredentials).not.toHaveBeenCalled();
+    expect(octokitFactory).not.toHaveBeenCalled();
+  });
+
+  it('REJECTS a sibling-prefix bypass (tenants/_claimsX/evil.yaml)', async () => {
+    const octokitFactory = jest.fn();
+    const action = createCommitToMainAction({
+      config: config(),
+      githubCredentialsProvider: credsProvider,
+      octokitFactory,
+    });
+    const ctx = ctxFor({
+      repoUrl: REPO_URL,
+      path: 'tenants/_claimsX/evil.yaml',
+      content: 'x',
+    });
+    await expect(action.handler(ctx)).rejects.toThrow(/outside the allowed prefix/i);
+    expect(octokitFactory).not.toHaveBeenCalled();
+  });
+
+  it('honors a custom allowedPathPrefix (allow under it, reject the default claim subtree)', async () => {
+    const { octokit, putCalls } = mockOctokit({ existingSha: undefined });
+    const action = createCommitToMainAction({
+      config: config(),
+      githubCredentialsProvider: credsProvider,
+      octokitFactory: () => octokit,
+    });
+
+    // A path under the custom prefix succeeds.
+    await action.handler(
+      ctxFor({
+        repoUrl: REPO_URL,
+        path: 'catalog/imports/team-acme.yaml',
+        content: 'x',
+        allowedPathPrefix: 'catalog/imports/',
+      }),
+    );
+    expect(putCalls[0].path).toBe('catalog/imports/team-acme.yaml');
+
+    // The default claim path is now OUTSIDE the (narrowed) allowlist → rejected.
+    await expect(
+      action.handler(
+        ctxFor({
+          repoUrl: REPO_URL,
+          path: CLAIM_PATH,
+          content: 'x',
+          allowedPathPrefix: 'catalog/imports/',
+        }),
+      ),
+    ).rejects.toThrow(/outside the allowed prefix/i);
+  });
+
   it('rejects providing BOTH content and sourcePath', async () => {
     const action = createCommitToMainAction({
       config: config(),

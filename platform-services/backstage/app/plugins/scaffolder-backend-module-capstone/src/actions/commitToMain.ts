@@ -84,12 +84,20 @@ function isNotFound(err: unknown): boolean {
   return (err as { status?: number } | undefined)?.status === 404;
 }
 
+/** Default allowlist prefix — the zero-touch onboarding claim subtree (ADR-031). */
+export const DEFAULT_ALLOWED_PATH_PREFIX = 'tenants/_claims/';
+
 /**
- * Reject anything that is not a clean, repo-relative file path. Committing to `main` with
- * App creds and no review means the destination path is security-relevant: an absolute path
- * or a `..` segment could target a file outside the intended subtree. Fails closed.
+ * Reject anything that is not a clean, repo-relative file path UNDER the allowed prefix.
+ * Committing to `main` with App creds and no review means the destination path is
+ * security-relevant: an absolute path, a `..` segment, or a path outside the intended
+ * subtree could write anywhere on the protected branch (e.g. `.github/workflows/evil.yaml`).
+ * We fail closed on all three — the prefix allowlist is the primary blast-radius control,
+ * defaulting to the claim subtree so the action can only ever touch tenant claims unless a
+ * caller deliberately widens it. `allowedPrefix` is normalized to a directory boundary so
+ * a sibling like `tenants/_claimsX/...` cannot slip past a `startsWith` check.
  */
-function assertSafeRepoPath(p: string): void {
+function assertSafeRepoPath(p: string, allowedPrefix: string): void {
   if (!p || p.trim() === '') {
     throw new Error('capstone:commit-to-main: `path` is required and must be non-empty.');
   }
@@ -105,6 +113,15 @@ function assertSafeRepoPath(p: string): void {
   ) {
     throw new Error(
       `capstone:commit-to-main: path must not contain '..' traversal, got '${p}'.`,
+    );
+  }
+  // Enforce the allowlist: the file must live strictly UNDER the prefix directory. Normalize
+  // the prefix and require a trailing '/' boundary so `tenants/_claimsX/y` is rejected.
+  const prefixDir = `${path.posix.normalize(allowedPrefix).replace(/\/+$/, '')}/`;
+  if (!normalized.startsWith(prefixDir)) {
+    throw new Error(
+      `capstone:commit-to-main: path '${p}' is outside the allowed prefix ` +
+        `'${prefixDir}' — refusing to commit outside the tenant-claim subtree.`,
     );
   }
 }
@@ -232,8 +249,18 @@ export function createCommitToMainAction(deps: CommitToMainActionDeps) {
           z.string({
             description:
               'Repo-relative destination path for the file (e.g. ' +
-              'tenants/_claims/<team>-<app>.yaml). No absolute paths, no `..` traversal.',
+              'tenants/_claims/<team>-<app>.yaml). No absolute paths, no `..` traversal, ' +
+              'and must live under allowedPathPrefix.',
           }),
+        allowedPathPrefix: z =>
+          z
+            .string({
+              description:
+                'Allowlist: the target path MUST live under this repo-relative prefix ' +
+                '(blast-radius control for a no-review commit to main). Defaults to ' +
+                '"tenants/_claims/" (the zero-touch tenant-claim subtree).',
+            })
+            .optional(),
         content: z =>
           z
             .string({
@@ -280,10 +307,12 @@ export function createCommitToMainAction(deps: CommitToMainActionDeps) {
       const branch = ctx.input.branch ?? 'main';
       const commitMessage =
         ctx.input.commitMessage ?? `chore: commit ${repoPath}`;
+      const allowedPathPrefix =
+        ctx.input.allowedPathPrefix ?? DEFAULT_ALLOWED_PATH_PREFIX;
 
-      // Fail closed on an unsafe destination path BEFORE resolving any credentials or
-      // reading any source (no GitHub call on a bad path).
-      assertSafeRepoPath(repoPath);
+      // Fail closed on an unsafe or out-of-allowlist destination path BEFORE resolving any
+      // credentials or reading any source (no GitHub call on a bad path).
+      assertSafeRepoPath(repoPath, allowedPathPrefix);
 
       // Resolve the file content: exactly one of inline `content` or workspace `sourcePath`.
       const { content, sourcePath } = ctx.input;
