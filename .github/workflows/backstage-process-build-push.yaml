@@ -150,6 +150,13 @@ jobs:
       #   --snapshot-mode=redo        hash mtime+size+perms, not file CONTENT (cheaper)
       #   --compressed-caching=false  do not retain compressed layers in RAM (big saver
       #                               on the 1 GiB node_modules layer)
+      #   --use-new-run               detect RUN-command changes WITHOUT a full-fs
+      #                               snapshot -- redo+compressed-caching alone cleared
+      #                               the yarn-install snapshot but the retained
+      #                               per-RUN snapshot memory then stacked with the next
+      #                               heavy build process (`yarn tsc`) and re-OOMed the
+      #                               unbounded pod (run 28623210989, died 11s into tsc).
+      #                               new-run removes those RUN snapshots entirely.
       # --reproducible is kept (deterministic timestamps); its memory cost is at
       # finalize, after the peak-snapshot memory is freed.
       - name: Build (and push) with Kaniko
@@ -173,6 +180,7 @@ jobs:
                     --reproducible
                     --snapshot-mode=redo
                     --compressed-caching=false
+                    --use-new-run
                     --verbosity=info";
             if [ "${PUSH}" = "true" ]; then
               echo "==> building + pushing ${IMAGE}";
