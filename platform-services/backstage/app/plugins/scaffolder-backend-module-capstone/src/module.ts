@@ -20,6 +20,7 @@ import { createSealSecretAction } from './actions/sealSecret';
 import { createRenderTenantAction } from './actions/renderTenant';
 import { createHarborOnboardAction } from './actions/harborOnboard';
 import { createEmitTenantClaimAction } from './actions/emitTenantClaim';
+import { createCommitToMainAction } from './actions/commitToMain';
 import { createComposeProjectAction } from './actions/composeProject';
 
 export const capstoneScaffolderModule = createBackendModule({
@@ -69,6 +70,14 @@ export const capstoneScaffolderModule = createBackendModule({
           // (ADR-031 §11 Phase 2) — see CROSSPLANE-CUTOVER.md. Registering it now is
           // inert (no template references it yet) and ships the capability.
           createEmitTenantClaimAction(),
+          // ADR-031 §7 Option A(b) — capstone:commit-to-main: land the emitted
+          // CapstoneTenant XR (or any single file) DIRECTLY on platform-infra `main`
+          // via the GitHub App, with NO pull request. This is the true zero-touch seam:
+          // it replaces the 1-click-merge claim PR (publish:github:pull-request) so
+          // onboarding needs no human merge. Same integrations.github auth as
+          // publish:github (no token input). Inert until the zero-touch template's
+          // commit step references it + the image is rebuilt.
+          createCommitToMainAction({ config }),
           // ADR-034 — capstone:compose-project: the unified "New Project" wizard's
           // composition engine. Reads composable language fragments + the ONE shared
           // .devops/.github contract and assembles the project repo (replaces the

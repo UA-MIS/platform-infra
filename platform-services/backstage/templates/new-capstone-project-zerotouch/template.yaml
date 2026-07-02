@@ -32,20 +32,21 @@
 #   5. capstone:emit-tenant-claim — render the SINGLE CapstoneTenant XR (the zero-touch
 #      seam) into the workspace as tenants/_claims/<team>-<app>.yaml. Replaces the
 #      imperative trio harbor-onboard + render-tenant + the onboarding PR.
-#   6. publish:github:pull-request — open a PR landing that ONE claim file on
-#      platform-infra `main`. A reviewer merges it with ONE click (true auto-merge is a
-#      follow-up — the installed scaffolder-backend-module-github @0.9.10 has no autoMerge
-#      input, and it would need branch protection with required checks on platform-infra).
-#      ArgoCD (platform-crossplane-claims) then syncs it; Crossplane reconciles.
+#   6. capstone:commit-to-main — commit that ONE claim file DIRECTLY to platform-infra
+#      `main` via the GitHub App, with NO PR and NO human merge (true zero-touch, ADR-031
+#      §7 Option A(b)). Replaces the previous 1-click-merge claim PR: the installed
+#      scaffolder-backend-module-github @0.9.10 has no autoMerge input and no merge action,
+#      so a PR could never be truly auto-merged. ArgoCD (platform-crossplane-claims) then
+#      syncs it; Crossplane reconciles.
 #
 # ⚠ REQUIRES (wired at go-live — see platform-services/backstage/README.md):
 #   - The GitHub integration token (${GITHUB_TOKEN}, the UA-MIS GitHub App) with repo
-#     + admin:org. Used by publish:github (repo create) AND publish:github:pull-request
-#     (the platform-infra claim commit — on the tenants/_claims/** bypass list).
-#   - The capstone:emit-tenant-claim custom scaffolder action registered + COMPILED INTO
-#     THE BACKSTAGE IMAGE (plugins/scaffolder-backend-module-capstone). ⚠ It is NOT in
-#     the currently-deployed image (bdc917b, pre-#129) — enabling this template needs a
-#     Backstage image REBUILD + redeploy first. See CROSSPLANE-CUTOVER.md.
+#     + admin:org. Used by publish:github (repo create) AND capstone:commit-to-main
+#     (the platform-infra claim commit onto main — on the tenants/_claims/** bypass list).
+#   - The capstone:emit-tenant-claim + capstone:commit-to-main custom scaffolder actions
+#     registered + COMPILED INTO THE BACKSTAGE IMAGE (plugins/scaffolder-backend-module-
+#     capstone). ⚠ They are NOT in the currently-deployed image — enabling this template
+#     needs a Backstage image REBUILD + redeploy first. See CROSSPLANE-CUTOVER.md.
 #   - Crossplane installed + healthy (platform-crossplane-* apps) with the XRD +
 #     Composition Synced and all four ProviderConfigs valid (incl. the vault
 #     ProviderConfig spec.address fix in this PR).
@@ -365,43 +366,29 @@ spec:
         # one tenants/_claims/<team>-<app>.yaml file.
         targetPath: ./claim
 
-    # 6) Open a PR landing the claim on platform-infra `main`. A reviewer merges it with
-    #    ONE click; ArgoCD (platform-crossplane-claims) then syncs the XR and Crossplane
-    #    reconciles the whole tenant. This uses the SAME proven publish:github:pull-request
-    #    mechanism the imperative template used (in the deployed image), just carrying the
-    #    single XR to tenants/_claims/ instead of a full tenants/team-<name>/ tree.
+    # 6) Land the claim DIRECTLY on platform-infra `main` — NO PR, NO human merge (true
+    #    zero-touch, ADR-031 §7 Option A(b)). capstone:commit-to-main PUTs the single XR
+    #    file straight onto main via the platform GitHub App (on the tenants/_claims/**
+    #    branch-protection bypass list). ArgoCD (platform-crossplane-claims) then syncs the
+    #    XR and Crossplane reconciles the whole tenant.
     #
-    #    ⚠ TRUE auto-merge is a follow-up — needs plugin support + branch protection with
-    #    required checks on platform-infra. The installed
-    #    @backstage/plugin-scaffolder-backend-module-github @0.9.10 has NO autoMerge input
-    #    on publish:github:pull-request (its JSON-schema REJECTS the unknown property and
-    #    fails the WHOLE step — the live-scaffold error this change fixes), and there is no
-    #    github:pull-request:merge action in that module. To restore zero-touch later,
-    #    either (a) add a merge step/action once the plugin supports it, or (b) the clean
-    #    "no-PR direct commit" realization (a capstone:commit-to-main action, ADR-031 §7
-    #    Option A(b)). Until then this is a 1-click merge.
+    #    This REPLACES the previous 1-click-merge claim PR (publish:github:pull-request):
+    #    the installed @backstage/plugin-scaffolder-backend-module-github @0.9.10 has NO
+    #    autoMerge input and NO github:pull-request:merge action (Context7-verified), so a
+    #    PR could never be truly auto-merged. capstone:commit-to-main is the clean no-PR
+    #    realization. Auth is the SAME integrations.github App as publish:github (no token
+    #    input). sourcePath is the file capstone:emit-tenant-claim wrote under ./claim.
     - id: commit-claim
-      name: Land tenant claim on platform-infra (1-click merge)
-      action: publish:github:pull-request
+      name: Land tenant claim on platform-infra main (zero-touch, no PR)
+      action: capstone:commit-to-main
       input:
         repoUrl: github.com?owner=UA-MIS&repo=platform-infra
-        branchName: claim-${{ parameters.team }}-${{ parameters.appName }}
-        targetBranchName: main
-        title: "onboard tenant (zero-touch): ${{ parameters.team }}-${{ parameters.appName }} (Capstone ${{ parameters.season }} ${{ parameters.year }})"
-        sourcePath: ./claim
-        description: |
-          ## Zero-touch tenant claim — `${{ parameters.team }}-${{ parameters.appName }}` (Capstone ${{ parameters.season }} ${{ parameters.year }})
-
-          Emitted by **The Process** ("New Capstone Project (Zero-Touch)") for app
-          **${{ parameters.appName }}** (repo: ${{ steps['publish'].output.remoteUrl }}).
-
-          This PR adds ONE `tenants/_claims/${{ parameters.team }}-${{ parameters.appName }}.yaml`
-          (a schema-validated `CapstoneTenant` XR). A reviewed-once Crossplane
-          Composition expands it into the full tenant — Harbor project/robots, Vault
-          policy/role, and the k8s tenancy fence (AppProject, namespaces, quotas,
-          netpol, RBAC, ESO plumbing, env/preview ApplicationSets). **No operator
-          steps.** De-provision = `git rm` this file.
-        token: ${{ secrets.GITHUB_TOKEN }}
+        branch: main
+        # Repo-relative destination = the emitted claim path (tenants/_claims/<team>-<app>.yaml).
+        path: ${{ steps['emit-claim'].output.claimPath }}
+        # Read the emitted XR from the workspace (emit-claim wrote it under ./claim).
+        sourcePath: ./claim/${{ steps['emit-claim'].output.claimPath }}
+        commitMessage: "onboard tenant (zero-touch): ${{ parameters.team }}-${{ parameters.appName }} (Capstone ${{ parameters.season }} ${{ parameters.year }})"
 
   output:
     links:
@@ -410,9 +397,9 @@ spec:
       - title: Open in catalog
         icon: catalog
         entityRef: ${{ steps['register'].output.entityRef }}
-      - title: Tenant claim (auto-provisioning)
+      - title: Tenant claim commit (auto-provisioning)
         icon: github
-        url: ${{ steps['commit-claim'].output.remoteUrl }}
+        url: ${{ steps['commit-claim'].output.commitUrl }}
     text:
       - title: Next steps
         content: |
