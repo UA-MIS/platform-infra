@@ -36,7 +36,7 @@ EOF
 kubectl create secret generic github-provider-creds \
   --namespace crossplane-system --from-file=credentials=/tmp/gh.json \
   --dry-run=client -o yaml \
-| kubeseal --controller-namespace sealed-secrets --controller-name sealed-secrets \
+| kubeseal --controller-namespace kube-system --controller-name sealed-secrets-controller \
     --format yaml > platform-services/crossplane/creds/github-app-creds-sealed.yaml
 rm -f /tmp/gh.json
 # Repeat for harbor-provider-creds and vault-provider-creds with their scoped values.
@@ -61,11 +61,16 @@ just enough to mint per-tenant `Database` + `User` + `Grant` and nothing else:
 -- run as root on ua-mis-db-1 (MariaDB 11.8). Bind the account to the tailnet CIDR.
 CREATE USER 'crossplane_provisioner'@'100.64.0.0/255.192.0.0'
   IDENTIFIED BY '<STRONG_TOKEN>';
--- CREATE/DROP DATABASE, CREATE/DROP USER, and the ability to GRANT what it holds.
--- GRANT OPTION + ALL on *.* is the simplest least-effort grant that still excludes
--- SUPER/admin; tighten to `GRANT CREATE, DROP, GRANT OPTION ON *.*` + per-schema ALL
--- if your audit prefers (provider-sql Grant uses ALL PRIVILEGES on the tenant schema).
-GRANT ALL PRIVILEGES ON *.* TO 'crossplane_provisioner'@'100.64.0.0/255.192.0.0'
+-- Least privilege = the explicit schema-level privilege list (CREATE/DROP DATABASE,
+-- CREATE USER, and ALL-on-a-schema so provider-sql's `Grant` can be delegated), NOT
+-- `GRANT ALL PRIVILEGES ON *.*`. ⚠ At the GLOBAL level `ALL PRIVILEGES` INCLUDES
+-- SUPER/PROCESS/RELOAD/SHUTDOWN — it is near-root and does NOT exclude SUPER. Use the
+-- canonical explicit grant in docs/operator/db-tier-provisioner-setup.md §3 (the
+-- authoritative, deliberately SUPER-free list) — do not use the broad `*.*` grant.
+GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, REFERENCES, INDEX, ALTER,
+      CREATE TEMPORARY TABLES, LOCK TABLES, EXECUTE, CREATE VIEW, SHOW VIEW,
+      CREATE ROUTINE, ALTER ROUTINE, EVENT, TRIGGER, DELETE HISTORY, CREATE USER
+  ON *.* TO 'crossplane_provisioner'@'100.64.0.0/255.192.0.0'
   WITH GRANT OPTION;
 FLUSH PRIVILEGES;
 ```
@@ -81,6 +86,6 @@ kubectl create secret generic db-tier-mysql-admin \
   --from-literal=username="crossplane_provisioner" \
   --from-literal=password="<STRONG_TOKEN>" \
   --dry-run=client -o yaml \
-| kubeseal --controller-namespace sealed-secrets --controller-name sealed-secrets \
+| kubeseal --controller-namespace kube-system --controller-name sealed-secrets-controller \
     --format yaml > platform-services/crossplane/creds/mysql-admin-creds-sealed.yaml
 ```
