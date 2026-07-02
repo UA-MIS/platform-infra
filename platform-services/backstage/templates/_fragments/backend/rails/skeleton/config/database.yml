@@ -1,0 +1,35 @@
+# Database configuration.
+#
+# The ONE knob in the cluster is DATABASE_URL — a MySQL DSN supplied by the platform
+# Secrets tab (ESO -> Vault -> a Kubernetes Secret env'd into the pod), e.g.:
+#
+#     mysql://<user>:<password>@<host>:3306/<database>
+#
+# Rails maps a URL's *scheme* to the adapter, and there is no longer a bundled `mysql`
+# adapter — so we rewrite mysql:// (and mysql2://) to trilogy:// to use the pure-Ruby,
+# libmysqlclient-free Trilogy client. NEVER hardcode credentials here; the DSN comes only
+# from DATABASE_URL. When DATABASE_URL is UNSET, production has no usable connection and
+# the data routes degrade to a clear 503 (app/controllers/api/items_controller.rb) while
+# /healthz stays 200.
+default: &default
+  adapter: trilogy
+  encoding: utf8mb4
+  pool: <%= ENV.fetch("RAILS_MAX_THREADS") { 5 } %>
+
+development:
+  <<: *default
+  database: app_development
+  host: <%= ENV.fetch("DB_HOST", "127.0.0.1") %>
+  username: <%= ENV.fetch("DB_USERNAME", "root") %>
+  password: <%= ENV.fetch("DB_PASSWORD", "") %>
+
+# The test suite uses SQLite so it needs no MySQL service (see Gemfile `:test`).
+test:
+  adapter: sqlite3
+  database: storage/test.sqlite3
+
+production:
+  <<: *default
+  # Rewrite mysql://|mysql2:// -> trilogy://. Blank when DATABASE_URL is unset, in which
+  # case no connection is established and the data routes return 503.
+  url: <%= ENV["DATABASE_URL"].to_s.sub(%r{\Amysql2?://}, "trilogy://").presence %>

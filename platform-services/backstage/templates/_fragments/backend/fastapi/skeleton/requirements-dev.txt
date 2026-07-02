@@ -1,0 +1,8 @@
+# Test/lint-only dependencies (NOT in the runtime image). The platform CI's Python
+# checks step installs pytest+ruff itself; conftest.py installs requirements.txt +
+# this file so tests can import the app + use TestClient. Keep test deps OUT of
+# requirements.txt so the runtime image stays lean.
+-r requirements.txt
+pytest==8.3.4
+httpx==0.28.1
+ruff==0.8.4

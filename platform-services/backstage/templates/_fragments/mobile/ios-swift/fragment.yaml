@@ -1,0 +1,38 @@
+# fragment.yaml — MOBILE FRAGMENT: native iOS app (Swift / SwiftUI).
+#
+# Mobile is a DISTINCT, BUILD-ARTIFACT category (ADR-034 §D4): this fragment produces a
+# signed .ipa via a BUILD WORKFLOW (skeleton/.mobile-ci/build.yaml), NOT a Kubernetes
+# Deployment. There is NO Dockerfile and NO pod/Service/Ingress. The compose engine, on
+# seeing buildType: mobile-artifact, EXCLUDES this component from the chart and the Kaniko
+# build matrix, records it in components.yaml, and installs the .mobile-ci/ workflow.
+#
+# A mobile project's BACKEND is a NORMAL backend fragment (express/fastapi/dotnet),
+# deployed the usual way; this app talks to it over the backend's PUBLIC ingress host
+# (set API_BASE_URL — see Sources/AppConfig.swift). Always composed WITH a backend.
+apiVersion: platform.capstone/fragment.v1
+id: ios-swift
+displayName: iOS app (Swift / SwiftUI, .ipa)
+category: mobile
+language: swift
+framework: swiftui
+slots:
+  - mobile                         # composed alongside a backend fragment (the API it calls)
+defaultPort: 0                     # N/A — a mobile app has no listening port
+ingressPath: ""                   # N/A — not exposed via ingress
+needsDB: false                    # the app has no DB; its BACKEND fragment may
+buildType: mobile-artifact         # -> NO Deployment; produces .ipa via skeleton/.mobile-ci/
+dockerfile: ""                     # NONE — mobile has no container; build workflow instead
+buildWorkflow: .mobile-ci/build.yaml   # path within skeleton/ to the artifact build workflow
+artifact: app.ipa                  # the produced artifact (documentation)
+healthPath: ""                     # N/A
+notes: >-
+  Native iOS app: Swift + SwiftUI, a single screen that reads the backend API base URL
+  from config (Info.plist key API_BASE_URL, generated from project.yml) and calls
+  GET {API_BASE_URL}/healthz on its backend fragment. The Xcode project is generated at
+  build time with XcodeGen (project.yml) so the fragment ships only source — no binary
+  .xcodeproj. RUNNER PREREQ: the .ipa build REQUIRES a macOS runner (GitHub-hosted
+  `macos-14`); it CANNOT run on the platform's Linux ARC/Kaniko runners. The CI produces
+  an UNSIGNED .ipa for build validation; a DISTRIBUTABLE .ipa needs Apple signing secrets
+  (certificate + provisioning profile) wired into the workflow, then export + upload to
+  TestFlight / the App Store. The app is DISTRIBUTED to devices (TestFlight / App Store),
+  NOT hosted in the cluster. Its matching backend is a normal backend fragment.

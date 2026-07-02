@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>${{ values.appName }}</title>
+    <link rel="stylesheet" href="/css/styles.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <nav class="nav">
+        <span class="brand">${{ values.appName }}</span>
+        <div class="nav-links">
+          <a href="/" class="active">Home</a>
+          <a href="/about.html">About</a>
+        </div>
+      </nav>
+    </header>
+
+    <main class="container">
+      <h1>Welcome 👋</h1>
+      <p class="lead">${{ values.description }}</p>
+      <p>
+        A plain HTML / CSS / JavaScript static site — no framework, no build step — served by
+        nginx. Edit the files under this repo and redeploy via the platform golden path.
+      </p>
+
+      <button id="counter" type="button" class="btn">Clicked 0 times</button>
+
+      <p class="muted">
+        Visit the <a href="/about.html">About</a> page for real multi-page navigation.
+      </p>
+    </main>
+
+    <footer class="site-footer">
+      <p>&copy; <span id="year"></span> ${{ values.appName }} &middot; UA-MIS Capstone</p>
+    </footer>
+
+    <script src="/js/main.js" defer></script>
+  </body>
+</html>

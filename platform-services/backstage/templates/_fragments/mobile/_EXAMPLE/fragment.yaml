@@ -1,0 +1,35 @@
+# fragment.yaml — MOBILE FRAGMENT CONTRACT EXAMPLE (NOT a working seed; fan-out fills this in).
+#
+# Mobile is a DISTINCT category: it produces a BUILD ARTIFACT (.ipa / .apk), NOT a
+# Kubernetes Deployment. There is therefore NO Dockerfile and NO pod/Service/Ingress for a
+# mobile fragment. Instead of a container build it ships a BUILD WORKFLOW under
+# skeleton/.mobile-ci/ (e.g. a GitHub Actions workflow running xcodebuild / gradle) that
+# the compose engine wires into the repo. A mobile project's BACKEND is a NORMAL backend
+# fragment (express/fastapi/dotnet/...), deployed the usual way; the mobile app talks to it
+# over the public ingress host. See ADR-034 §"Mobile fragments".
+#
+# The compose engine, on seeing buildType: mobile-artifact, EXCLUDES this component from the
+# k8s chart (no Deployment/Service/Ingress) and from the Kaniko build matrix, and instead
+# installs its skeleton/.mobile-ci/ workflow. The component still appears in components.yaml
+# (so the artifact build is tracked) but with buildType: mobile-artifact.
+apiVersion: platform.capstone/fragment.v1
+id: _EXAMPLE                       # a real fragment would be e.g. "react-native", "flutter", "swift-ios", "kotlin-android"
+displayName: "EXAMPLE: Mobile app (build-artifact, no k8s workload)"
+category: mobile
+language: swift                    # swift | kotlin | dart | typescript ...
+framework: none                   # swiftui | jetpack-compose | flutter | react-native | none(bare)
+slots:
+  - mobile                         # composed alongside a backend fragment (the API the app calls)
+defaultPort: 0                     # N/A — a mobile app has no listening port
+ingressPath: ""                   # N/A — not exposed via ingress
+needsDB: false                    # the mobile app itself has no DB; its BACKEND fragment may
+buildType: mobile-artifact         # -> NO Deployment; produces .ipa/.apk via skeleton/.mobile-ci/
+dockerfile: ""                     # NONE — mobile has no container; build workflow instead
+buildWorkflow: .mobile-ci/build.yaml   # path within skeleton/ to the artifact build workflow
+artifact: app.ipa                  # the produced artifact (documentation)
+healthPath: ""                     # N/A
+notes: >-
+  CONTRACT EXAMPLE ONLY — replace with a real mobile starter during fan-out. A mobile
+  fragment ships app source + a skeleton/.mobile-ci/ build workflow (xcodebuild/gradle)
+  that produces a signed .ipa/.apk, and is ALWAYS composed together with a backend
+  fragment that provides its API. It never deploys to the cluster.

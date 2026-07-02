@@ -1,0 +1,3 @@
+/* Tailwind CSS v4 — the single import pulls in base, components, and utilities.
+   No tailwind.config.js needed; Tailwind scans your source for class names. */
+@import "tailwindcss";

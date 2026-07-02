@@ -1,0 +1,27 @@
+# fragment.yaml — see _fragments/frontend/react/fragment.yaml + ADR-034 for the contract.
+# Backend fragment: Node/Express + TypeScript JSON API on MySQL.
+apiVersion: platform.capstone/fragment.v1
+id: express
+displayName: Node / Express API (TypeScript + MySQL)
+category: backend
+language: typescript
+framework: express
+# A backend can be the `backend` half of a frontend+backend project OR a `single`
+# API-only project. (As single it owns "/"; as the backend half it owns "/api".)
+slots:
+  - backend
+  - single
+defaultPort: 8080
+ingressPath: /api          # the backend half owns "/api"; the engine forces "/" when it is the single component
+needsDB: true              # reads DATABASE_URL (mysql://...) — the wizard offers the DB question
+buildType: container
+dockerfile: Dockerfile
+healthPath: /healthz
+# BACKEND CONTRACT (load-bearing for the fan-out): a backend fragment MUST serve
+#   - GET /healthz  -> 200, DB-INDEPENDENT (the chart probes hit this; stays green with no DB)
+#   - its API under /api/... (so the ingress /api route reaches it in a frontend+backend app)
+# and MUST read its DB connection from the DATABASE_URL env (a standard mysql:// URI),
+# degrading cleanly (clear 503) when it is unset (M4 zero-config). NEVER hardcode creds.
+notes: >-
+  Express + TypeScript + mysql2 JSON API with sample /api/items CRUD. Reads DATABASE_URL;
+  /healthz is DB-independent. Harvested from the proven react-express template's backend.
