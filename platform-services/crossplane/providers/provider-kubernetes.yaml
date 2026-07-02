@@ -22,6 +22,8 @@ metadata:
   name: provider-kubernetes
   labels:
     platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"   # installs kubernetes.crossplane.io CRDs (ProviderConfig lands wave 2)
 spec:
   package: xpkg.upbound.io/crossplane-contrib/provider-kubernetes:v0.18.0
   # Bind the provider to the named runtime config below so it runs as the SA we
@@ -38,6 +40,12 @@ metadata:
   name: provider-kubernetes
   labels:
     platform.capstone/component: platform
+  annotations:
+    # Wave 0 WITH its Provider: provider-kubernetes.spec.runtimeConfigRef points here,
+    # so this must exist when the provider builds its Deployment or the provider never
+    # goes Healthy and the wave never completes. (Its CRD ships with Crossplane core,
+    # so it has no missing-CRD dry-run problem — safe in wave 0.)
+    argocd.argoproj.io/sync-wave: "0"
 spec:
   serviceAccountTemplate:
     metadata:

@@ -7,13 +7,19 @@
 # (config/providerconfig-github.yaml). The same App already used by ARC + the
 # ArgoCD repo-creds + the Backstage scaffolder; one App, reused.
 #
-# ⚠ Version pin: confirm the latest provider-upjet-github tag at Phase-0 apply
-# (SRE review). v0.21.0 is a recent known-good; bump deliberately + version-pin.
+# ⚠ Registry host: Upbound deprecated crossplane-contrib community packages off
+# xpkg.upbound.io; crossplane-contrib now publishes to xpkg.crossplane.io (backed
+# by ghcr.io). v0.21.0 NEVER EXISTED (404 MANIFEST_UNKNOWN on both hosts) — the
+# latest published tag is v0.19.1, verified to resolve to a digest on
+# xpkg.crossplane.io. Confirm the latest tag at Phase-0 apply (SRE review); bump
+# deliberately + version-pin.
 apiVersion: pkg.crossplane.io/v1
 kind: Provider
 metadata:
   name: provider-github
   labels:
     platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"   # installs the github.upbound.io CRDs (ProviderConfig lands wave 2)
 spec:
-  package: xpkg.upbound.io/crossplane-contrib/provider-upjet-github:v0.21.0
+  package: xpkg.crossplane.io/crossplane-contrib/provider-upjet-github:v0.19.1

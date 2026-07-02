@@ -1,0 +1,19 @@
+# app-metadata.yaml — the ONLY file you declare values in (§1.2).
+#
+# These four fields are the single declarative input to the whole .devops/ template:
+# the chart/ overlays derive workload names, the ingress host
+# (<app-name>.<platform-domain>; appName is globally unique so no team segment),
+# the namespace prefix (<team>-<env>), the
+# cohort selector labels, and the container port. The platform's tenant
+# ApplicationSets read the same team + semester values. Everything else in .devops/
+# is platform-managed and immutable.
+team: ${{ values.team }}
+semester: ${{ values.semester }}
+app-name: ${{ values.appName }}
+port: ${{ values.port }}
+# Database provisioning mode set by the "New Project" wizard (ADR-033/#146): `mysql`
+# auto-provisions a per-(team,env) MariaDB schema + scoped user and pushes DATABASE_URL
+# into Vault; `none` provisions nothing (DB-less stacks, or bring-your-own). The compose
+# engine derives this from the chosen fragment's needsDB + the wizard's DB choice, and
+# also sets it on the CapstoneTenant claim at onboarding so the platform provisions it.
+database: ${{ values.database }}

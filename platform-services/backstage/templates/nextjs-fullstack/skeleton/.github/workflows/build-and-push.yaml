@@ -1,0 +1,60 @@
+# ============================================================================
+# build-and-push.yaml — the tenant CI CALLER (P2.3, D-032; ADR-031 §8).
+#
+# PLATFORM-MANAGED (.devops golden path). Students do NOT edit it. This file used
+# to carry the ENTIRE ~250-line build+push+bump pipeline, copied verbatim into
+# every tenant repo — so a single CI fix had to be re-landed in N repos (the root
+# cause of the ~14-bug onboarding saga). It is now a THIN CALLER: the real logic
+# lives ONCE in the central reusable workflow and every tenant references it at a
+# pinned @v1 tag, so a fix ships once and every tenant picks it up.
+#
+#   reusable workflow: UA-MIS/platform-infra/.github/workflows/tenant-build.yaml
+#
+# The triggers MUST be declared HERE (a reusable workflow can't own its own
+# triggers); the called workflow reads github.event_name / github.ref / the PR
+# head sha — which, for a reusable workflow, are the CALLER's — and resolves the
+# image identity from THIS repo's .devops/promotion.yaml at runtime. Nothing here
+# is hand-edited per team.
+#
+# PINNING (@v1): @v1 is a ROLLING tag the platform team maintains on platform-infra
+# (it moves forward as CI fixes land). A rolling major tag — not an embedded copy
+# in N repos, and not a per-repo SHA pin — is exactly what lets one fix reach every
+# tenant. The security tradeoff (trusting whatever @v1 points to) is acceptable:
+# platform-infra is first-party and already the source of every tenant's platform
+# config. Operators: to ship a CI fix, land it on platform-infra and re-point @v1.
+# ============================================================================
+name: build-and-push
+
+on:
+  push:
+    branches: [main]          # -> dev image (mutable git-describe tag), pushed
+    tags: ["v*.*.*"]          # -> prod/staging image (immutable semver), pushed
+  pull_request:               # -> preview image (pull-<head-sha>, pushed). UNTRUSTED
+                              #    PR code, bounded to the team's own Harbor project +
+                              #    the disjoint pull-<sha> tag + the fenced
+                              #    <team>-pr-<n> preview ns.
+  workflow_dispatch:          # -> manual re-run; the ref decides the env (main -> dev,
+                              #    vX.Y.Z tag -> prod). Re-drive a build+deploy by hand.
+
+jobs:
+  ci:
+    # contents: write is required so the reusable workflow's bump-dev job can push
+    # the dev overlay-tag commit to main. A reusable workflow can only DOWNGRADE the
+    # caller's grant, so this must be write here; the reusable workflow's build job
+    # downgrades itself back to contents: read.
+    permissions:
+      contents: write
+    # secrets: inherit passes the caller's secrets (incl. GITHUB_TOKEN) through. The
+    # Harbor push cred is NOT a GitHub secret — the ARC runner's container-hook
+    # injects it as a Kubernetes secret — so no secret is listed explicitly.
+    secrets: inherit
+    uses: UA-MIS/platform-infra/.github/workflows/tenant-build.yaml@v1
+    with:
+      # PER-TEAM RUNNER (finish-eso A2 — per-team scale set + harbor-push robot, PR #128).
+      # The repo Actions variable RUNNER_SCALE_SET picks THIS team's scale set; unset →
+      # the shared `ua-mis-kaniko` (A1). `vars.*` is a GHA expression, so it survives the
+      # scaffolder's copyWithoutTemplating (no post-copy sed, nothing to template) and a
+      # reusable-workflow `with:` can read it (it can't read a file). A2 cutover = the
+      # scaffolder sets ONE repo variable at create time (same class as the branch-protection
+      # API calls it already makes) — no workflow edit. Default stays correct throughout.
+      runner: ${{ vars.RUNNER_SCALE_SET || 'ua-mis-kaniko' }}

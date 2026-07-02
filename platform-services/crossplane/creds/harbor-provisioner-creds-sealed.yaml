@@ -1,19 +1,13 @@
-# ⚠ SECURITY — PLACEHOLDER ciphertext. Reseal with a REAL least-privilege Harbor
-# PROVISIONER ROBOT (project+robot+member admin, NOT harbor-admin) before go-live
-# (see creds/README.md). This stub will NOT decrypt; provider-harbor sits
-# unauthenticated (safe failure mode) until the operator reseals.
+---
 apiVersion: bitnami.com/v1alpha1
 kind: SealedSecret
 metadata:
   name: harbor-provider-creds
   namespace: crossplane-system
-  labels:
-    platform.capstone/component: platform
 spec:
   encryptedData:
-    credentials: PLACEHOLDER_RESEAL_AT_GO_LIVE_harbor_provisioner_json_DO_NOT_USE
+    credentials: AgBo9QRhfmLEThu6kVIt0vxKTAeTu26JGsto3H3RvMtDDpNPXFH/F0MZ4odFSvggBziRMhrUe10y5Ih9QpKdgWQy5m+ibvu+nGmmwhAzTehdQsprM4nheIW5Me8yx7ECMUOGkV00lIGCOymjFWqD/fu/WKTnX3eG/y9P5RaYkRcljGQSet/DK7lmtdIqChvTtydNw0V/pmya8QQl3q87284ofmZnYR9j//PcWPgxS7ANc4V93AjhD232m9tkgV8i6wd6Z6dURGL7cehhQfg0NuYAH6xJhS00nobiesbA/GgY/KQ+JIzKLj2xWNKV4eVdupOJLRbiKHjI/MmaCDZ5vzdU2Ca7bNwFdqMh42vDWv8OivbRp6Gf/qAQXxzoT/T7II779cP9LGYKjNwdptANnt3MIluZhVZPuZXFucf77ofOl4+wJmy673jxrl1K35U+Bz56GTk9HrMyfH5vCw/Wa7kfaReLpHotwTiVmjpML4ks2tsiDBEgsdiLhpKkjKw3KZVH23NFIOqzf6rfI3UHTz1s4cUnqvDVRH6usDajJsO1qZzy5jGqYxt8Kg6vq3t+5HrwRIllsF3D+nOhmwjLD2d6iecqLrif43/NN7kUfZfhE2dEz31LxBSTZxOsz+pyBph8LwiB+SS8gYeDTzkRAPWPgaIn4q9zB/FUtZWsYdbXHJZDW5YO/CjHcyVr5Mialr8O07KxMTvvdYmkJBkDpeyyf3MS6xNoiF+lOOLs30VdU00ZrjACWsbAJB/srJplgUFb63JAAAl895DJOhnwhw3yniKqT20J2vDlWAr38CDL8eOwz7yQSVe09+GunFNeDTSTvsNlEIGhEZ4RcEk2n3oXjBuxwrBwYnO4D4VTrNddZXzvbw==
   template:
     metadata:
       name: harbor-provider-creds
       namespace: crossplane-system
-    type: Opaque

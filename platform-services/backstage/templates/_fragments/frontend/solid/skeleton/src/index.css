@@ -1,0 +1,3 @@
+/* Tailwind CSS v4 — the single import pulls in the full utility layer. Customise via the
+   CSS-first @theme block (https://tailwindcss.com/docs/theme) instead of a JS config. */
+@import "tailwindcss";

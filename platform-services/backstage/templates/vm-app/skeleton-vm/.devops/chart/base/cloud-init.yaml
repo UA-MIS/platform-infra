@@ -1,0 +1,67 @@
+#cloud-config
+# ============================================================================
+# cloud-init — THE file you edit. This is your "no Dockerfile" build step: it runs
+# ONCE on first boot to turn the base disk image into YOUR app (install your runtime,
+# your database, your services — a whole legacy stack can live inside this one VM).
+#
+# This starter brings up a tiny web server on port ${{ values.port }} so a freshly
+# scaffolded VM serves a page immediately (proving the path end to end). Replace the
+# write_files + runcmd below with your own setup. Keep it valid `#cloud-config` YAML —
+# CI validates this file on every PR.
+#
+# cloud-init runs only on FIRST boot. To re-run after editing, recreate the VM
+# (delete the VirtualMachine and let ArgoCD/GitOps recreate it).
+#
+# Wiring: kustomize packages this file into the Secret `${{ values.appName }}-cloudinit`
+# (key `userdata`), which the VirtualMachine references via cloudInitNoCloud.secretRef.
+# ============================================================================
+
+# Console/VNC login for debugging via `virtctl console`/`virtctl vnc` (access is
+# RBAC-scoped per the platform). CHANGE this password before you rely on it.
+password: changeme-on-first-edit
+chpasswd:
+  expire: false
+ssh_pwauth: true
+
+# A self-contained hello page + a systemd unit that serves it with python3 (present in
+# Fedora/Ubuntu cloud images — distro-agnostic, no package install needed). Swap this
+# for your real app's install + service.
+write_files:
+  - path: /var/www/app/index.html
+    permissions: '0644'
+    content: |
+      <!doctype html>
+      <html>
+        <head><title>${{ values.appName }}</title></head>
+        <body style="font-family: system-ui; max-width: 40rem; margin: 4rem auto;">
+          <h1>${{ values.appName }} is running</h1>
+          <p>${{ values.description }}</p>
+          <p>This is a KubeVirt VM scaffolded by <strong>The Process</strong>
+             (layout: vm). Edit <code>.devops/chart/base/cloud-init.yaml</code> to
+             install and run your own app on first boot.</p>
+        </body>
+      </html>
+  - path: /etc/systemd/system/capstone-app.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Capstone VM starter web server (${{ values.appName }})
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      # Replace this with your real app's start command. The starter serves the
+      # static page above on the app port.
+      ExecStart=/usr/bin/python3 -m http.server ${{ values.port }} --directory /var/www/app
+      Restart=always
+      User=root
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  # Bring up the starter service (your "app"). Replace with your own install/start steps.
+  - [ systemctl, daemon-reload ]
+  - [ systemctl, enable, --now, capstone-app.service ]
+
+final_message: "capstone-app first boot complete after $UPTIME seconds"

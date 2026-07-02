@@ -1,0 +1,11 @@
+.git
+.gitignore
+*.md
+test
+tmp/*
+!tmp/.keep
+log/*
+!log/.keep
+storage/*.sqlite3*
+vendor/bundle
+.env*

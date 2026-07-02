@@ -1,0 +1,32 @@
+# Environment-agnostic base for the VM app. The single prod overlay sets the namespace
+# (<team>-vm-prod) and the env/semester selector labels.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Common labels on every object (the platform.capstone/* selector labels env/semester
+# are set by the overlay). includeSelectors:false so the VirtualMachine's own
+# kubevirt.io/domain Service-selector contract is untouched.
+labels:
+  - pairs:
+      app.kubernetes.io/name: ${{ values.appName }}
+      app.kubernetes.io/managed-by: argocd
+      platform.capstone/team: ${{ values.team }}
+    includeSelectors: false
+
+resources:
+  - virtualmachine.yaml
+  - service.yaml
+  - ingress.yaml
+
+# Package cloud-init.yaml into the Secret the VM references (cloudInitNoCloud.secretRef).
+# key `userdata` is what KubeVirt reads. disableNameSuffixHash keeps the name STABLE
+# (${{ values.appName }}-cloudinit) so the VM's secretRef.name matches without a
+# nameReference transformer (kustomize does not rewrite CRD fields). NOTE: editing
+# cloud-init.yaml changes the Secret, but cloud-init only runs on FIRST boot — recreate
+# the VM to apply changes.
+secretGenerator:
+  - name: ${{ values.appName }}-cloudinit
+    files:
+      - userdata=cloud-init.yaml
+    options:
+      disableNameSuffixHash: true

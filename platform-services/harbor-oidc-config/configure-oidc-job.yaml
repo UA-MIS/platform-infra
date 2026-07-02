@@ -140,6 +140,12 @@ spec:
               # the shell into the heredoc (it is an env var, NOT on the command
               # line / argv / git). auth_mode=oidc_auth + the full Dex wiring +
               # oidc_verify_cert:false (SEC-009 parity; SEC-013 fences the path).
+              # oidc_admin_group=UA-MIS:labmx grants Harbor SYSTEM ADMIN to members
+              # of the GitHub `labmx` team (the platform admins) — Dex emits GitHub
+              # team slugs as `<org>:<team-slug>`, matching the oidc_groups_claim
+              # ("groups") format above. Without it, no OIDC group is admin and
+              # labmx members get no Administration menu. Takes effect on the user's
+              # NEXT login (group->admin mapping is evaluated at token exchange).
               cat > /tmp/oidc.json <<EOF
               {
                 "auth_mode": "oidc_auth",
@@ -149,6 +155,7 @@ spec:
                 "oidc_client_secret": "$OIDC_CLIENT_SECRET",
                 "oidc_scope": "openid,profile,email,groups",
                 "oidc_groups_claim": "groups",
+                "oidc_admin_group": "UA-MIS:labmx",
                 "oidc_auto_onboard": true,
                 "oidc_user_claim": "preferred_username",
                 "oidc_verify_cert": false

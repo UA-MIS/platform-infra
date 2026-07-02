@@ -2,15 +2,17 @@
 # (applicationsets/vault-unsealer-app.yaml) installs into. Auto-registered as
 # `platform-svc-vault-unsealer` by the platform-services-appset directory generator.
 #
-# The unsealer's server-TLS Secret (vault-unsealer-server-tls), its Transit key,
-# policy, and the auto-unseal token are created OUT-OF-BAND by the human runbook
-# (artifacts/design/vault-dr-runbook.md) — no secret material in git (B1). So this
-# dir ships only the namespace.
+# The unsealer's server-TLS Secret (vault-unsealer-server-tls) is issued by
+# cert-manager from certificate.yaml (a Certificate CR — no secret material in git, B1).
+# Its Transit key, policy, and the auto-unseal token remain created OUT-OF-BAND by the
+# human runbook (artifacts/design/vault-dr-runbook.md). So this dir ships the namespace
+# and the listener Certificate.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
   - namespace.yaml
+  - certificate.yaml
 
 labels:
   - pairs:

@@ -1,0 +1,40 @@
+# KubeVirt CR Application (ADR-032). The `kind: KubeVirt` instance that triggers
+# the virt-operator to deploy the runtime (virt-api, virt-controller, the
+# virt-handler DaemonSet). sync-wave 1 → lands AFTER the operator + CRD
+# (kubevirt-operator-app.yaml, wave 0), so the `kubevirts.kubevirt.io` CRD exists
+# before this CR is applied.
+#
+# The CR (platform-services/kubevirt/cr/kubevirt-cr.yaml) sets useEmulation:true
+# (the /dev/kvm-absent fallback, ADR-032 open Q1) and featureGates:[] (every
+# ADR-032 capability is GA-default in v1.8.4 — see the CR header). Source = the
+# platform-infra git repo (no remote fetch here — the CR is a local file).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-kubevirt-cr
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"   # CR after the operator+CRD (wave 0)
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/UA-MIS/platform-infra
+    targetRevision: HEAD
+    path: platform-services/kubevirt/cr
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kubevirt            # the KubeVirt CR is namespaced; ns created by the wave-0 operator app
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false      # `kubevirt` ns already exists from the wave-0 operator app
+      - ServerSideApply=true       # consistent with the operator app
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

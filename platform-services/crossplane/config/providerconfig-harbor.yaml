@@ -16,6 +16,8 @@ metadata:
   name: default
   labels:
     platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"   # harbor.crossplane.io CRD is installed by provider-harbor (wave 0)
 spec:
   credentials:
     source: Secret

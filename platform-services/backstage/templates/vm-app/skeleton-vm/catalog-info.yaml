@@ -1,0 +1,25 @@
+# catalog-info.yaml — registers this VM app in The Process software catalog.
+# catalog:register (the scaffolder's register step) points here.
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: ${{ values.appName }}
+  description: ${{ values.description }}
+  annotations:
+    backstage.io/techdocs-ref: dir:.
+    github.com/project-slug: UA-MIS/${{ values.appName }}
+    capstone.uamishub.com/cohort: ${{ values.semesterDisplay }}
+  tags:
+    - capstone
+    - vm
+    - ${{ values.semester }}
+  links:
+    # The VM is single-environment, so the catalog link is the clean canonical host.
+    - title: App
+      url: https://${{ values.appName }}.capstone.uamishub.com
+spec:
+  # 'service' with the vm tag — a VM workload exposed as a service. The infra/lifecycle
+  # are the same catalog model as a container app; only the runtime kind differs.
+  type: service
+  lifecycle: experimental
+  owner: group:default/${{ values.team }}

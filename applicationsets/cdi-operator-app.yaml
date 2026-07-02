@@ -1,0 +1,62 @@
+# CDI (Containerized Data Importer) OPERATOR Application (ADR-032). The
+# cdi-operator + the `cdis.cdi.kubevirt.io` CRD + RBAC + the `cdi` Namespace, from
+# the pinned upstream release manifest (v1.65.0). CDI imports VM disk images into
+# PVCs via `DataVolume` — the GitOps-declared "root disk" for a VM workload.
+#
+# Two-app split (rook-ceph precedent):
+#   wave 0 — THIS app: operator + CRD (platform-services/cdi/operator).
+#   wave 1 — cdi-cr-app.yaml: the CDI CR (cluster-scoped) that deploys the runtime.
+#
+# Independent of the KubeVirt apps at INSTALL time (the KubeVirt<->CDI DataVolume
+# integration only matters when a VM with dataVolumeTemplates is created — the
+# tenant layer, not this install). Source = platform-infra git repo + a kustomize
+# dir whose only resource is the pinned upstream manifest (fetched by kustomize,
+# not an ArgoCD source) → NO sourceRepos addition, NO `make bootstrap-reapply`
+# (cert-manager / sealed-secrets pattern). The platform-services-appset EXCLUDES
+# platform-services/cdi so this dedicated app is its sole manager.
+#
+# ⚠ INSTALL-OWNED / HUMAN-GATED (ADR-032 security gate — not yet approved-to-apply).
+# Chart/version: CDI v1.65.0 (stable GA, Context7-confirmed 2026-06-28). Pin.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-cdi-operator
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"   # operator + CRD first, before the CDI CR (wave 1)
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/UA-MIS/platform-infra
+    targetRevision: HEAD
+    path: platform-services/cdi/operator
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: cdi                 # the upstream manifest ships its own Namespace object
+  # The cdi-operator MUTATES its own CRD after ArgoCD applies it: the upstream
+  # v1.65.0 manifest ships spec.versions = [v1alpha1 (served), v1beta1 (served+storage)],
+  # but the operator PRUNES the deprecated v1alpha1, leaving live spec.versions = [v1beta1]
+  # only (confirmed via managedFields: manager `cdi-operator`, operation Update, owns
+  # f:spec.f:versions). That is a permanent operator-owned drift → the CRD shows
+  # OutOfSync forever and selfHeal can never converge it. Ignore the operator-managed
+  # versions list so ArgoCD treats this CRD as Synced while still managing group/names/scope.
+  ignoreDifferences:
+    - group: apiextensions.k8s.io
+      kind: CustomResourceDefinition
+      name: cdis.cdi.kubevirt.io
+      jsonPointers:
+        - /spec/versions
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false      # the upstream operator manifest creates the `cdi` ns
+      - ServerSideApply=true       # the cdis CRD is large — SSA avoids the 256KB last-applied-config limit
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

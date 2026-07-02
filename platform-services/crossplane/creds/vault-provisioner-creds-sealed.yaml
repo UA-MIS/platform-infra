@@ -1,19 +1,13 @@
-# ⚠ SECURITY — PLACEHOLDER ciphertext. Reseal with a REAL Vault token scoped to the
-# `tenant-provisioner` policy (write policy + auth/kubernetes/role under tenants/*
-# ONLY) before go-live (see creds/README.md). This stub will NOT decrypt;
-# provider-vault sits unauthenticated (safe failure mode) until the operator reseals.
+---
 apiVersion: bitnami.com/v1alpha1
 kind: SealedSecret
 metadata:
   name: vault-provider-creds
   namespace: crossplane-system
-  labels:
-    platform.capstone/component: platform
 spec:
   encryptedData:
-    credentials: PLACEHOLDER_RESEAL_AT_GO_LIVE_vault_provisioner_json_DO_NOT_USE
+    credentials: AgAXhPgSx5ijqdgo01RlEVkC84qOQK7s65xbikB4tlX/xY/Mgd+LGARy+VKuT4xv4/zSs407rSxdhAuQRugGiSvwgh6QzgC7N/MH7H8WQ6ARXJW3qMkEG8ugyUYprC5cgCAI6FOPQZDDYK5vPZHwCFHDNNIE/HSaEhT05qFnlJHOKi/YdOr41T3zP/S6SOgkjDgeyn6AC1zL7c48bR/VnOownGM21rb/z+xSjZFmg4oRxY5TnYKm4H2HPS4oL51643i5Khcpqtuc3S0UaYA0uGxGR08RHfTHH0eDTHyeHU7ywfmfqiQkRwa40RP5R3EcAJ/If6cR6APJRMGx0F1/l+thGtcGIBpotcnb16lSidhVn5XpjOlDhc6pm7Lu1FEk6ySRtGNzfuamzrR+DtherIGdna2D2TqseHj8pQc28w3EJ3mxIRnYvgVnKqb/xcMNVuvSoyPHC5p2LVEKRhspAITyGEOtxg8f/Y11GYYsOZojDBM8snsfcNgAkxl1EL7LjCxvbj3ahQS5j3/ktNGbtXWfMLdS+96MA2/9+lGo/DDRwCZxPhg7zt36DwDO98Ysl2OmiBt1b8gNXjQ3fvWs86mzH+ggvOZD600/PhYbQjRIm9gVKkorGj8uisAx5+OyYN6/2ic9fUbRzJf25LsgO25l5jLCxibU7pJA/fmBxhtHZbuH70k6G8GUAswaqL5UuBGLmwvTfbpec7zBkQISGwkxLY2vaKDyDBKQn3q6BxxgIzMW4+f26HjfSd0ysJOKLZSZ4pOdl+3jR2KgavMOROHIg5bl3DyUVmkS6TcghigUwRrRsy05wB29Hf+MMYn1lTqkU5FE4kWY8IRVOyJAg87eyrrx6clsOk2ZAMZVyYa4Hctd5YjkgsXsTfwasoPKXOUdXpSpI0E3GxBOiXvkL9h/0Dc=
   template:
     metadata:
       name: vault-provider-creds
       namespace: crossplane-system
-    type: Opaque

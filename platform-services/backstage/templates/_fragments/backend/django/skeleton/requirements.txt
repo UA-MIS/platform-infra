@@ -1,0 +1,9 @@
+# Runtime dependencies (baked into the image — see Dockerfile). Pinned for reproducible
+# builds; bump deliberately.
+Django==5.1.4
+djangorestframework==3.15.2
+gunicorn==23.0.0
+dj-database-url==2.3.0
+# Pure-Python MySQL driver (installed as MySQLdb in project/__init__.py) — no system
+# libs / compiler, so the image stays slim and apt-free. The DSN is mysql://... .
+PyMySQL==1.1.1

@@ -36,6 +36,20 @@ spec:
           # never re-emits a `platform-svc-traefik` if the dir reappears.
           - path: platform-services/traefik
             exclude: true
+          # EXCLUDE kubevirt/ + cdi/ (ADR-032, KubeVirt VM workloads): these are
+          # NOT single-dir kustomize services. Each is installed by a dedicated
+          # operator/CR two-app split (applicationsets/{kubevirt,cdi}-{operator,cr}-app.yaml,
+          # the rook-ceph precedent) pointing at the GRANDCHILD dirs
+          # platform-services/<x>/{operator,cr}. The single-level `platform-services/*`
+          # glob would match the PARENT platform-services/kubevirt + platform-services/cdi
+          # (which hold only a README + those subdirs, no root kustomization.yaml) and
+          # emit empty/erroring `platform-svc-kubevirt` / `platform-svc-cdi` apps that
+          # also double-manage nothing useful. Exclude the parents; the dedicated apps
+          # own the operator/ + cr/ subdirs (not matched by the single-level glob).
+          - path: platform-services/kubevirt
+            exclude: true
+          - path: platform-services/cdi
+            exclude: true
           # NOTE (P5/M1, D-046): platform-services/backstage IS generated as
           # `platform-svc-backstage` (ns + the REAL sealed secrets: backstage-process-secrets
           # / backstage-postgresql / harbor-pull) — the prereqs the dedicated chart app

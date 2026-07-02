@@ -1,0 +1,368 @@
+# "Next.js Full-Stack" — The Process scaffolder template (survey #137 P1).
+#
+# A sibling of "New Capstone Project" (new-capstone-project/template.yaml): SAME
+# golden-path steps, SAME embedded `.devops/` + `.github/` platform contract, SAME
+# review-gated platform-infra onboarding PR. The ONLY difference is the skeleton's
+# `app/`: a real, runnable Next.js (App Router, TypeScript) starter wired to MySQL via
+# Prisma + Tailwind, plus a known-good multi-stage Dockerfile. Everything a student
+# edits is in `app/`; the platform owns `.devops/`.
+#
+# WHAT IT DOES (steps below) — identical contract to new-capstone-project:
+#   1. fetch:template — render the ENTIRE ./skeleton (the Next.js app/ starter +
+#      the embedded `.devops/` golden-path contract [chart base+overlays,
+#      promotion.yaml, ci/ scripts] + the `.github/` CI caller + catalog-info.yaml +
+#      mkdocs/TechDocs) with the collected values. SELF-CONTAINED: the contract is
+#      EMBEDDED in the skeleton — there is NO fetch:plain from an external repo, NO
+#      sample-app dependency, NO contract tag. appName/team are substituted INTO the
+#      contract so a fresh scaffold is correct for its own team/app on the first build.
+#      The GitHub-Actions caller + the .devops/ci/ shell scripts are listed under
+#      copyWithoutTemplating so nunjucks never mangles their ${{ github.* }} / ${VAR}.
+#   3. publish:github — create UA-MIS/<repo>, push, set the default branch + the
+#      branch protection the platform expects (PRs only into main; no direct pushes).
+#   4. catalog:register — register the new component's catalog-info.yaml.
+#   4b. capstone:harbor-onboard — create the team's Harbor project + OIDC mapping so
+#      the first CI build can push.
+#   5a. capstone:render-tenant — render tenants/team-<name>/ from the canonical
+#      tenants/_template/ blueprint (substitutes the literal __TEAM__/__SEMESTER__
+#      tokens the built-in nunjucks fetch:template cannot).
+#   5b. publish:github:pull-request — open a REVIEW-GATED PR to UA-MIS/platform-infra
+#      adding those tenant manifests, with the operator onboarding CHECKLIST PR body.
+#      A reviewer merges to GRANT (D-049): a student opens the request, the merge is
+#      the gate — no student mints cluster RBAC/quota/Harbor robots directly.
+#
+# ⚠ REQUIRES (wired at go-live — see platform-services/backstage/README.md):
+#   - The GitHub integration token (${GITHUB_TOKEN}, the UA-MIS GitHub App) with repo
+#     + admin:org. Used by publish:github (repo create) AND publish:github:pull-request.
+#   - The capstone:render-tenant + capstone:harbor-onboard custom scaffolder actions
+#     registered in the backend (plugins/scaffolder-backend-module-capstone).
+#   - (No external .devops/ source repo — the contract is embedded in ./skeleton.)
+#   - The OIDC sign-in so the acting user (a UA-MIS member) is the repo author.
+apiVersion: scaffolder.backstage.io/v1beta3
+kind: Template
+metadata:
+  name: nextjs-fullstack
+  title: Next.js Full-Stack (TypeScript + Prisma + MySQL)
+  description: >-
+    Create a new UA-MIS capstone app from a real, runnable Next.js (App Router +
+    TypeScript) starter — Prisma ORM wired to MySQL via DATABASE_URL, Tailwind CSS,
+    a sample API route, and a known-good multi-stage Dockerfile — pre-wired to the
+    platform golden path (PR -> preview, merge -> dev, tag -> staging, manual gate ->
+    prod). You edit only `app/` and the four fields in `.devops/app-metadata.yaml`.
+  tags:
+    - capstone
+    - golden-path
+    - recommended
+    - nextjs
+    - typescript
+    - prisma
+    - mysql
+    - fullstack
+spec:
+  owner: group:default/platform
+  type: website
+
+  parameters:
+    - title: Your project
+      required:
+        - appName
+        - team
+        - season
+        - year
+      properties:
+        appName:
+          title: App name
+          type: string
+          description: >-
+            Short slug for your app + repo (lowercase letters, digits, hyphens — no
+            spaces, uppercase, or dots). Becomes the repo name, the Kubernetes
+            workload names, and the ingress host <app-name>.<platform-domain>,
+            so it MUST be a DNS-1123 label.
+          # DNS-1123 label: lowercase alphanumerics + hyphens, must start AND end with
+          # an alphanumeric. Same charset as a repo name, a k8s object name, and a DNS
+          # hostname segment — all three derive from this one value.
+          pattern: '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'
+          maxLength: 30
+          ui:autofocus: true
+          ui:help: 'Lowercase letters, digits, and hyphens only; must start and end with a letter or digit (e.g. my-capstone-app).'
+        team:
+          title: Team slug
+          type: string
+          description: >-
+            Your team's canonical slug — MUST equal your GitHub Team slug and your
+            AppProject name (the platform keys per-team namespaces, RBAC, Harbor
+            project, and OIDC group on this single value, D-026).
+          pattern: '^[a-z]([-a-z0-9]*[a-z0-9])?$'
+          maxLength: 30
+        # Cohort = Season + Year, matching the org's "Capstone {Season} {Year}" naming.
+        # These compose two derived forms downstream:
+        #   - DISPLAY  "Capstone {Season} {Year}"  (e.g. "Capstone Fall 2026") — PR
+        #     title/body, README cohort line, catalog cohort annotation.
+        #   - SLUG     "{year}-{season|lower}"      (e.g. "2026-fall") — the
+        #     platform.capstone/semester LABEL value, the catalog tag, the
+        #     app-metadata.yaml `semester` field, and the value passed to
+        #     capstone:render-tenant (year-first to match its SEMESTER regex).
+        season:
+          title: Season
+          type: string
+          description: The cohort season (part of "Capstone {Season} {Year}").
+          enum:
+            - Spring
+            - Summer
+            - Fall
+          default: Fall
+        year:
+          title: Year
+          type: integer
+          description: The cohort year, e.g. 2026 (part of "Capstone {Season} {Year}").
+          minimum: 2020
+          maximum: 2099
+          default: 2026
+        port:
+          title: Container port
+          type: integer
+          description: >-
+            The port your app listens on (PORT env + Service/Ingress target). The
+            Next.js standalone server reads PORT; leave it 8080 unless you have a
+            reason to change it.
+          default: 8080
+          minimum: 1
+          maximum: 65535
+        description:
+          title: Description
+          type: string
+          description: One-line description of your project (shown in the catalog).
+          default: A UA-MIS capstone Next.js full-stack app.
+
+    # NOTE: there is intentionally NO separate "Repository" page / repoUrl input.
+    # The repo is created at github.com/UA-MIS/<appName> — owner is fixed to UA-MIS and
+    # the repo name IS the app name. The repoUrl is constructed inline at the publish
+    # steps below as `github.com?owner=UA-MIS&repo=${{ parameters.appName }}`.
+
+  steps:
+    # 1) Render the per-team Next.js starter (app/ + the embedded .devops/ contract +
+    #    .github/ CI caller + the 4-field app-metadata.yaml + catalog). The Next.js
+    #    `app/` is templated; the GitHub-Actions caller + .devops/ci/ scripts are
+    #    copyWithoutTemplating (shipped verbatim — they use ${{ github.* }} / ${VAR}).
+    - id: fetch-skeleton
+      name: Render Next.js project skeleton
+      action: fetch:template
+      input:
+        url: ./skeleton
+        values:
+          appName: ${{ parameters.appName }}
+          team: ${{ parameters.team }}
+          # Cohort in two forms: `semester` = the machine SLUG (year-first, e.g.
+          # 2026-fall) for the catalog tag + label; `semesterDisplay` = the readable
+          # org name (e.g. "Capstone Fall 2026").
+          semester: ${{ parameters.year }}-${{ parameters.season | lower }}
+          semesterDisplay: Capstone ${{ parameters.season }} ${{ parameters.year }}
+          port: ${{ parameters.port }}
+          description: ${{ parameters.description }}
+          destination: ${{ ("github.com?owner=UA-MIS&repo=" + parameters.appName) | parseRepoUrl }}
+        # SELF-CONTAINED CONTRACT: the golden-path `.devops/` tree AND the `.github/`
+        # CI caller are EMBEDDED in ./skeleton — NO fetch:plain from an external repo.
+        # appName/team are substituted INTO the contract (registry, namespace, ingress
+        # host, image name, labels) so a fresh scaffold is correct for ITS OWN team/app
+        # on the first build.
+        #
+        # ⚠ INDENTATION IS LOAD-BEARING: copyWithoutTemplating MUST be nested under
+        # `input:` (a sibling of `url:`/`values:`), or fetch:template never receives it
+        # and nunjucks crashes on the workflow's ${{ github.* }} ("expected variable
+        # end"). KEY NAME: `copyWithoutTemplating` (current) and `copyWithoutRender`
+        # (older alias) are both accepted by fetch:template.
+        copyWithoutTemplating:
+          - '.github/**'
+          - '**/.github/**'
+          - '.devops/ci/**'
+          - '**/.devops/ci/**'
+
+    # 3) Create UA-MIS/<repo>, push, protect main (PRs only — matches platform policy).
+    - id: publish
+      name: Publish to GitHub (UA-MIS)
+      action: publish:github
+      input:
+        # Repo = github.com/UA-MIS/<appName> (owner fixed, name = app name; no repoUrl input).
+        repoUrl: github.com?owner=UA-MIS&repo=${{ parameters.appName }}
+        description: ${{ parameters.description }}
+        defaultBranch: main
+        repoVisibility: private
+        # Platform branch policy: PRs into main, no direct pushes.
+        protectDefaultBranch: true
+        requireCodeOwnerReviews: true
+        # Grant repo access by GitHub TEAM (not by creator/individual):
+        #   - the project team gets PUSH (develop + open PRs, NOT admin).
+        #   - labmx (platform staff) gets ADMIN.
+        collaborators:
+          - team: ${{ parameters.team }}
+            access: push
+          - team: labmx
+            access: admin
+        # No `token:` — publish:github authenticates via integrations.github (the
+        # platform GitHub App), the same App used by catalog ingestion + render-tenant.
+
+    # 4) Register the new component so it appears in The Process catalog right away.
+    - id: register
+      name: Register in catalog
+      action: catalog:register
+      input:
+        repoContentsUrl: ${{ steps['publish'].output.repoContentsUrl }}
+        catalogInfoPath: '/catalog-info.yaml'
+
+    # 4b) Create the team's Harbor PROJECT (+ OIDC Developer mapping) NOW, so the
+    #     team's very first CI build can push. Idempotent (already-exists = success).
+    #     Authenticates with a DEDICATED least-privilege Harbor PROVISIONER ROBOT
+    #     (project-create + member-add only — NOT harbor-admin). SCOPE (v1): project +
+    #     OIDC mapping only; the CI PUSH robot + per-env PULL robots stay in the
+    #     operator's post-merge `make harbor-*-robot` steps.
+    - id: harbor-onboard
+      name: Create Harbor project (team registry)
+      action: capstone:harbor-onboard
+      input:
+        team: ${{ parameters.team }}
+
+    # =====================================================================
+    # PLATFORM SIDE — the D-049 review-gated grant path (B1 + B2).
+    # The steps above created the STUDENT's own repo + the team's Harbor project.
+    # The steps below open a *request* (a PR to platform-infra) that a reviewer
+    # *grants* (merge). A student must NEVER silently mint cluster RBAC, quotas, or
+    # namespaces. The merge is the gate.
+    # =====================================================================
+
+    # 5a) Render the tenant manifests from the SINGLE canonical blueprint
+    #     tenants/_template/ (D-M4-2: render, do NOT fork). The _template/ files carry
+    #     literal __TEAM__/__SEMESTER__ tokens, so the built-in fetch:template can't
+    #     render them — hence the custom capstone:render-tenant action.
+    - id: render-tenant
+      name: Render tenant manifests (tenants/team-<name>/)
+      action: capstone:render-tenant
+      input:
+        # Pinned platform-infra ref for the _template/ blueprint (reproducible).
+        templateUrl: https://github.com/UA-MIS/platform-infra/tree/main/tenants/_template
+        team: ${{ parameters.team }}
+        # App repo name — the tenant ApplicationSets/AppProject point repoURL/sourceRepos
+        # at UA-MIS/<appName> (the repo publish:github creates). MUST be appName.
+        appName: ${{ parameters.appName }}
+        # SLUG form (year-first, e.g. 2026-fall) — the platform.capstone/semester LABEL
+        # value, MUST match capstone:render-tenant's SEMESTER regex (year-first).
+        semester: ${{ parameters.year }}-${{ parameters.season | lower }}
+        # Write the rendered tree under this workspace subdir; the PR step picks it up.
+        targetPath: ./tenant-pr
+
+    # 5b) Open the PR to platform-infra adding tenants/team-<name>/. Uses the PLATFORM
+    #     GitHub App token (integrations.github ${GITHUB_TOKEN}), NOT the student's
+    #     USER_OAUTH_TOKEN — so ANY signed-in UA-MIS member can OPEN the request. The
+    #     branch-protection on platform-infra/main is the gate (open != merge). D-049.
+    - id: tenant-pr
+      name: Open platform onboarding PR (platform-infra)
+      action: publish:github:pull-request
+      input:
+        repoUrl: github.com?owner=UA-MIS&repo=platform-infra
+        branchName: onboard-team-${{ parameters.team }}
+        targetBranchName: main
+        title: "onboard tenant: team-${{ parameters.team }} (Capstone ${{ parameters.season }} ${{ parameters.year }})"
+        sourcePath: ./tenant-pr
+        # B2 — the operator onboarding CHECKLIST is the PR body. Every Harbor command
+        # shows TARGET=real-talos explicitly (lesson #1). The non-empty-seal guard
+        # (lesson #6) is baked into each seal command so a duplicate-robot 409 can never
+        # commit an empty SealedSecret.
+        description: |
+          ## Tenant onboarding request — `team-${{ parameters.team }}` (Capstone ${{ parameters.season }} ${{ parameters.year }})
+
+          Scaffolded by **The Process** ("Next.js Full-Stack") for app
+          **${{ parameters.appName }}** (repo: ${{ steps['publish'].output.remoteUrl }}).
+
+          This PR adds `tenants/team-${{ parameters.team }}/` (rendered from the
+          canonical `tenants/_template/` blueprint — namespaces, AppProject, RBAC,
+          quotas, env + preview ApplicationSets). **Merging is the grant**: on merge
+          the `tenants-appset` git generator reconciles the team's namespaces and
+          ApplicationSets. No cluster RBAC/quota is created until a reviewer merges.
+
+          ---
+
+          ### Reviewer checklist
+          - [ ] Manifests render cleanly (`make validate` on `tenants/team-${{ parameters.team }}/`).
+          - [ ] AppProject is team-scoped (empty `clusterResourceWhitelist`; destinations limited to `team-${{ parameters.team }}-*`).
+          - [ ] `__TEAM__`/`__SEMESTER__` fully substituted (no leftover tokens).
+
+          ### Operator steps (run AFTER merge — imperative Harbor robot provisioning)
+          The Harbor **project** + OIDC Developer mapping were already created at
+          scaffold time by The Process (`capstone:harbor-onboard`), so the team's repo
+          can build immediately. These remaining steps mint the **robot tokens**, which
+          are Harbor-generated, one-time, and **cannot** be expressed declaratively.
+          **Run them with `TARGET=real-talos` exactly as shown.**
+
+          ```bash
+          # 0) cluster context (Talos)
+          export KUBECONFIG=clusters/real-talos/talos-kubeconfig
+
+          # 1) (idempotent) Harbor project + OIDC mapping — already done at scaffold time
+          #    by capstone:harbor-onboard; safe re-run (409 = already exists).
+          make harbor-onboard NAME=${{ parameters.team }} \
+            TARGET=real-talos KUBE_CONTEXT=admin@capstone
+
+          # 2) CI PUSH robot -> sealed `harbor-push` into arc-runners (guarded write)
+          make harbor-push-robot NAME=${{ parameters.team }} \
+            TARGET=real-talos KUBE_CONTEXT=admin@capstone \
+            > /tmp/${{ parameters.team }}-push.yaml \
+            && test -s /tmp/${{ parameters.team }}-push.yaml \
+            && grep -q 'kind: SealedSecret' /tmp/${{ parameters.team }}-push.yaml \
+            && mv /tmp/${{ parameters.team }}-push.yaml \
+                  tenants/team-${{ parameters.team }}/harbor-push-sealed.yaml
+
+          # 3) per-env PULL robots -> sealed `harbor-pull` into <team>-<env> (guarded)
+          for ENV in dev staging prod; do
+            make harbor-robot NAME=${{ parameters.team }} ENV=$ENV \
+              TARGET=real-talos KUBE_CONTEXT=admin@capstone \
+              > /tmp/${{ parameters.team }}-pull-$ENV.yaml \
+              && test -s /tmp/${{ parameters.team }}-pull-$ENV.yaml \
+              && grep -q 'kind: SealedSecret' /tmp/${{ parameters.team }}-pull-$ENV.yaml \
+              && mv /tmp/${{ parameters.team }}-pull-$ENV.yaml \
+                    tenants/team-${{ parameters.team }}/harbor-pull-$ENV-sealed.yaml
+          done
+
+          # 4) commit the sealed robot secrets (a follow-up PR; tokens are one-time)
+          git add tenants/team-${{ parameters.team }}/harbor-*-sealed.yaml \
+            && git commit -m "harbor robots: team-${{ parameters.team }}"
+          ```
+
+          ### Set DATABASE_URL (MySQL) for this app
+          This is a Next.js + Prisma app: it reads a MySQL connection string from the
+          `DATABASE_URL` env var. After the app deploys, the team opens the app in The
+          Process, goes to the **Secrets** tab, and sets a `DATABASE_URL` key for each
+          env they use (dev/staging/prod). No DB credential is ever committed to git —
+          it is written to Vault and materialized by ESO into the app's namespace.
+
+          > Robot-mint automation (a merge-triggered devops action) is a planned
+          > fast-follow (D-M4-1); for now these run by an operator who holds the
+          > Harbor-admin/seal-controller trust.
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+  output:
+    links:
+      - title: Repository
+        url: ${{ steps['publish'].output.remoteUrl }}
+      - title: Open in catalog
+        icon: catalog
+        entityRef: ${{ steps['register'].output.entityRef }}
+      - title: Platform onboarding PR (awaiting reviewer merge)
+        icon: github
+        url: ${{ steps['tenant-pr'].output.remoteUrl }}
+    text:
+      - title: Next steps
+        content: |
+          Your Next.js app **${{ parameters.appName }}** is live under UA-MIS. Now:
+          1. Clone it and edit `app/` (your code) — leave `.devops/` alone.
+          2. `cd app && npm install && npm run dev` to run it locally.
+          3. Open a PR -> a **preview** environment is built automatically.
+          4. Merge to `main` -> **dev** auto-deploys.
+          5. Tag `vX.Y.Z` -> **staging** auto-deploys; **prod** waits on the manual gate.
+          Your app will be at `https://${{ parameters.appName }}.capstone.uamishub.com`
+          (dev/staging add a `.dev`/`.staging` segment before the domain).
+
+          **Database:** set `DATABASE_URL` (your MySQL connection string) in the
+          **Secrets** tab on your component — never commit it. Then run
+          `npx prisma migrate deploy` to create your tables.
+
+          **One thing is gated:** a **platform onboarding PR** was opened against
+          `UA-MIS/platform-infra` (link above). A platform reviewer must **merge** it
+          before your app can deploy to dev/staging/prod.

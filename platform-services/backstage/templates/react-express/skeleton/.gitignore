@@ -1,0 +1,15 @@
+# Node
+node_modules/
+dist/
+*.log
+npm-debug.log*
+.npm
+
+# Env files (NEVER commit secrets — use the Secrets tab; see README.md)
+.env
+.env.*
+
+# Editor / OS cruft
+.DS_Store
+.idea/
+.vscode/

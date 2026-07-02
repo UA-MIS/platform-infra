@@ -1,0 +1,10 @@
+# CDI CR kustomization — ships ONLY the local CDI CR (the instance the cdi-operator
+# reconciles). Applied by the platform-cdi-cr Application at sync-wave 1, AFTER
+# platform-cdi-operator (wave 0) has installed the operator + the
+# `cdis.cdi.kubevirt.io` CRD. Own-wave-1 app (rook-ceph operator/cluster precedent)
+# so the CRD exists before the CR — no first-sync "no matches for kind CDI" race.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - cdi-cr.yaml

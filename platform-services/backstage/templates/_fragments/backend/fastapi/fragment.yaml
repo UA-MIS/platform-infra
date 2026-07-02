@@ -1,0 +1,21 @@
+# fragment.yaml — see _fragments/backend/express/fragment.yaml for the BACKEND CONTRACT
+# and ADR-034 for the architecture. Backend fragment: Python / FastAPI on MySQL.
+apiVersion: platform.capstone/fragment.v1
+id: fastapi
+displayName: Python / FastAPI API (SQLAlchemy + MySQL)
+category: backend
+language: python
+framework: fastapi
+slots:
+  - backend
+  - single
+defaultPort: 8080
+ingressPath: /api
+needsDB: true
+buildType: container
+dockerfile: Dockerfile
+healthPath: /healthz
+notes: >-
+  FastAPI + SQLAlchemy 2.x + PyMySQL with sample /items CRUD. Reads DATABASE_URL
+  (mysql+pymysql://...); falls back to in-memory SQLite when unset so it boots zero-config.
+  /healthz is DB-independent. Harvested from the proven python-fastapi-api template.

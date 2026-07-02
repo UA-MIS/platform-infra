@@ -1,0 +1,21 @@
+# ClusterIP Service fronting the VM. With masquerade networking the VM's guest port is
+# reachable on the launcher pod IP; this Service selects that pod by the KubeVirt domain
+# label and forwards :80 -> the guest app port. Traefik routes ingress traffic here.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${{ values.appName }}
+  labels:
+    app.kubernetes.io/name: ${{ values.appName }}
+spec:
+  type: ClusterIP
+  selector:
+    # KubeVirt sets this label on the VMI's virt-launcher pod (from the VM template's
+    # metadata.labels). NOT app.kubernetes.io/name — the launcher pod is selected here.
+    kubevirt.io/domain: ${{ values.appName }}
+  ports:
+    - name: http
+      port: 80
+      # The port your app listens on INSIDE the VM (vm-metadata.yaml `port`).
+      targetPort: ${{ values.port }}
+      protocol: TCP

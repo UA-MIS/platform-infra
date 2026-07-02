@@ -55,15 +55,31 @@ name: backstage-process-build-push
 on:
   push:
     branches: [main]
-    # Only rebuild when the app source (or this workflow) changes — the platform
-    # repo holds far more than Backstage; no point rebuilding the image on a netpol
-    # or ADR edit.
+    # Only rebuild when something that actually lands in the runtime image changes.
+    # SCOPE (D-046):
+    #   - The image is built from `platform-services/backstage/app/**` ONLY — the
+    #     in-repo Backstage monorepo, INCLUDING the in-tree plugins under
+    #     `app/plugins/**` (e.g. scaffolder-backend-module-capstone), which ARE
+    #     compiled into the backend bundle. So plugin-source churn legitimately
+    #     rebuilds the image.
+    #   - SIBLINGS of `app/` are NOT in the image and are already excluded by the
+    #     `app/**` anchor: `platform-services/backstage/{templates,catalog,scripts}/**`
+    #     (scaffolder templates, catalog-location docs, helper scripts). Editing
+    #     those no longer triggers this build.
+    #   - Files under `app/` that the multi-stage Dockerfile strips out — unit tests
+    #     and markdown — are excluded below so a test-only/doc-only change doesn't
+    #     trigger a no-op rebuild+push. (A commit that ALSO touches a real `.ts`
+    #     source file still matches the positive anchor and rebuilds — correct.)
     paths:
       - "platform-services/backstage/app/**"
+      - "!platform-services/backstage/app/**/*.test.ts"
+      - "!platform-services/backstage/app/**/*.md"
       - ".github/workflows/backstage-process-build-push.yaml"
   pull_request:
     paths:
       - "platform-services/backstage/app/**"
+      - "!platform-services/backstage/app/**/*.test.ts"
+      - "!platform-services/backstage/app/**/*.md"
       - ".github/workflows/backstage-process-build-push.yaml"
 
 # Least privilege for the workflow token. `contents: read` is all actions/checkout

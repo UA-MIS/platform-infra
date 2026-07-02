@@ -5,12 +5,26 @@
 # provider + function CRDs to exist first → crossplane-apis-app, wave 1).
 #
 # Directory-source Application (recurse) over platform-services/crossplane, with
-# apis/ and docs excluded. Within the app, sync-waves order:
-#   wave 0: Provider + Function packages (providers/) + RBAC (rbac/) + creds (creds/)
-#   wave 1: ProviderConfigs (config/) — reference the provider CRDs + the creds Secrets,
-#           which only exist once the packages install (wave 0) + are healthy. ArgoCD
-#           retries/self-heals the ProviderConfigs until the CRDs register (same
-#           eventual-consistency pattern as ESO's ClusterSecretStore).
+# apis/ and docs excluded. Within the app, sync-waves order (annotations live on the
+# manifests themselves under platform-services/crossplane/):
+#   wave 0: Provider + Function packages (providers/), the provider-kubernetes
+#           DeploymentRuntimeConfig (its Provider's runtimeConfigRef points at it, so it
+#           MUST exist by the time the provider builds its Deployment or the provider
+#           never goes Healthy and the wave deadlocks), RBAC (rbac/), creds (creds/).
+#   wave 2: ProviderConfigs (config/*) + the SecretStore/PushSecret plumbing
+#           (config/vault-push-secretstore.yaml). The ProviderConfig kinds
+#           (github.upbound.io, harbor.crossplane.io, vault.upbound.io,
+#           kubernetes.crossplane.io) are installed BY the wave-0 provider packages, so
+#           they only apply cleanly once those packages are Installed+Healthy.
+#
+# WHY SkipDryRunOnMissingResource=true (below): ArgoCD dry-run-validates every resource
+# in the sync together. The wave-2 ProviderConfigs reference CRDs that don't exist until
+# the wave-0 providers install, so their dry-run fails and — without this option — aborts
+# the WHOLE sync ("one or more synchronization tasks are not valid"), so the providers
+# themselves never get applied and nothing ever installs. SkipDryRunOnMissingResource
+# lets ArgoCD apply a resource whose CRD isn't registered yet instead of failing; the
+# sync-waves then guarantee the providers install first so the ProviderConfigs land
+# cleanly on the following wave (canonical ArgoCD CRD-bootstrap pattern).
 #
 # ⚠ DO NOT APPLY without the one-time SRE review (ADR-031 constraint #4). THE review
 # focus lives here: rbac/provider-kubernetes-rbac.yaml (the privileged ClusterRole —
@@ -49,6 +63,9 @@ spec:
     syncOptions:
       - CreateNamespace=false    # crossplane-system created by platform-crossplane-core
       - ServerSideApply=true
+      - SkipDryRunOnMissingResource=true   # ProviderConfig CRDs are installed by the
+                                           # wave-0 provider packages; skip dry-run so
+                                           # their absence doesn't abort the whole sync
     retry:
       limit: 10                  # ProviderConfigs wait for provider CRDs to register
       backoff: { duration: 15s, factor: 2, maxDuration: 5m }

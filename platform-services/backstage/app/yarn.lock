@@ -5396,7 +5396,10 @@ __metadata:
     "@backstage/plugin-scaffolder-node-test-utils": "npm:^0.2.0"
     "@octokit/rest": "npm:^19.0.13"
     "@types/fs-extra": "npm:^11.0.4"
+    "@types/nunjucks": "npm:^3.2.6"
     fs-extra: "npm:^11.2.0"
+    nunjucks: "npm:^3.2.4"
+    yaml: "npm:^2.5.0"
   languageName: unknown
   linkType: soft
 
@@ -11453,6 +11456,13 @@ __metadata:
   dependencies:
     undici-types: "npm:~7.18.0"
   checksum: 10c0/d7d48a88a4feb0a6aac3cbfaf9ef3b12752b4b09447f88dd0b4c77c03b281e3d4330fe6982a99aedcd63fc16c7540a0c248b91eb2abb0b3edd884d7fe684e9ea
+  languageName: node
+  linkType: hard
+
+"@types/nunjucks@npm:^3.2.6":
+  version: 3.2.6
+  resolution: "@types/nunjucks@npm:3.2.6"
+  checksum: 10c0/bc62c5c9305c0c63a49a55c3553393fdc84d123b4831668212380077ee6646c3ba52bc49e3c651257addf3a47d775707dcefeaf5e1b76cf7f680096939894142
   languageName: node
   linkType: hard
 
@@ -24354,7 +24364,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"nunjucks@npm:^3.2.3":
+"nunjucks@npm:^3.2.3, nunjucks@npm:^3.2.4":
   version: 3.2.4
   resolution: "nunjucks@npm:3.2.4"
   dependencies:
@@ -31889,7 +31899,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"yaml@npm:^2.0.0, yaml@npm:^2.2.1, yaml@npm:^2.2.2":
+"yaml@npm:^2.0.0, yaml@npm:^2.2.1, yaml@npm:^2.2.2, yaml@npm:^2.5.0":
   version: 2.9.0
   resolution: "yaml@npm:2.9.0"
   bin:

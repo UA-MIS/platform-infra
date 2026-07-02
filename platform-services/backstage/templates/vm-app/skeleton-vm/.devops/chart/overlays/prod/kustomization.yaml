@@ -1,0 +1,18 @@
+# prod overlay — the SINGLE environment for a VM app (ADR-032: a lifted legacy project
+# is one self-contained VM, not a dev/staging/prod pipeline). The platform's VM env
+# ApplicationSet (tenants/_template, security/devops-owned) points its `path` here and
+# its `destination.namespace` at the SAME <team>-vm-prod tier — the two must match.
+# Auto-synced (promotion.yaml gate: auto) so "merge -> it runs".
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# The VM tier namespace (baseline PSA + VM-sized quota + the AppProject VM-kind
+# whitelist), created by the onboarding PR from tenants/_template (ADR-032 §2/§6c).
+namespace: ${{ values.team }}-vm-prod
+resources:
+  - ../../base
+# env-specific selector labels (§3.1). semester is the cohort slug (year-first).
+labels:
+  - pairs:
+      platform.capstone/env: prod
+      platform.capstone/semester: ${{ values.semester }}
+    includeSelectors: false
