@@ -1,0 +1,26 @@
+# fragment.yaml — see _fragments/backend/express/fragment.yaml for the BACKEND CONTRACT
+# and ADR-034 for the architecture. Backend fragment: bare Node.js http server (no framework).
+apiVersion: platform.capstone/fragment.v1
+id: node-bare
+displayName: Node.js (bare http, no framework + MySQL)
+category: backend
+language: javascript
+framework: none            # bare Node `http` server — no web framework
+slots:
+  - backend
+  - single
+defaultPort: 8080
+ingressPath: /api
+needsDB: true
+buildType: container
+dockerfile: Dockerfile
+healthPath: /healthz
+# BACKEND CONTRACT (load-bearing for the fan-out): a backend fragment MUST serve
+#   - GET /healthz  -> 200, DB-INDEPENDENT (the chart probes hit this; stays green with no DB)
+#   - its API under /api/... (so the ingress /api route reaches it in a frontend+backend app)
+# and MUST read its DB connection from the DATABASE_URL env (a standard mysql:// URI),
+# degrading cleanly (clear 503) when it is unset (M4 zero-config). NEVER hardcode creds.
+notes: >-
+  Bare Node.js (no framework) using only the built-in `http` module + mysql2 for a sample
+  /api/items JSON CRUD. A hand-rolled router serves /healthz (DB-independent) and /api/...;
+  reads DATABASE_URL and the data routes return 503 until it is set. No build step (plain JS).

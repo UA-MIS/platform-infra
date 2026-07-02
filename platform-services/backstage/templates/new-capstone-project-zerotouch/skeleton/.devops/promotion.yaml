@@ -1,0 +1,55 @@
+apiVersion: platform.capstone/v1
+# promotion.yaml — THE canonical single source of truth for the trigger→env→tag
+# mapping (architecture §4.1, D-011/ADR-008). This file lives in the app repo and
+# is read by BOTH consumers:
+#   - the local CI seam (.devops/ci/build-and-push.sh + bump-image.sh), and
+#   - the platform ApplicationSets, via an ArgoCD git-files generator pointed here.
+# There is NO duplicate in the platform-infra tenant template — both sides read
+# THIS file, so the schema below is the shared contract.
+#
+# To change "tag→staging" into "merge-to-release-branch→staging", edit one entry
+# here; nothing else changes. Reviewers/operators: look HERE first.
+
+# Image registry — the team's OWN Harbor project on the real cluster (Talos).
+# Form: harbor.<PLATFORM_DOMAIN>/<team-project>; the CI build pushes
+# <registry>/<app>:<tag> = harbor.capstone.uamishub.com/sample/sample:<tag>.
+# (Phase-1 used the k3d built-in registry k3d-registry.localhost:5000 — that host
+# does NOT exist on the real cluster, so a build against it never deploys. The
+# resolver logic is unchanged + unit-tested; only this value moves to Harbor.)
+registry: harbor.capstone.uamishub.com/${{ values.team }}
+app: ${{ values.appName }}
+# Per-environment promotion rules. For each env:
+#   trigger        — the git event that promotes to this env (branch:main | tag:v* | pull_request)
+#   tagConvention  — the image-tag scheme resolve-image.sh computes:
+#                      git-describe -> registry/app:<git describe --tags> e.g.
+#                                      v1.0.0-5-gabc123 (5 commits past tag v1.0.0).
+#                                      Readable + monotonic (Deploy Model A: dev gets a
+#                                      legible tag, NOT a bare SHA). Needs a base tag —
+#                                      the scaffolder seeds v0.0.0 on repo creation; CI
+#                                      checkout MUST fetch tags (fetch-depth: 0) or
+#                                      describe degrades to a bare sha via --always.
+#                      semver       -> registry/app:<X.Y.Z>   (from a vX.Y.Z git tag)
+#                      pull-<sha>   -> registry/app:pull-<short-git-sha>
+#   overlay        — repo-relative path to the kustomize overlay the bump rewrites
+#   gate           — auto | manual ; manual = no ArgoCD automated sync (the prod gate)
+environments:
+  dev:
+    trigger: "branch:main"
+    tagConvention: "git-describe"
+    overlay: ".devops/chart/overlays/dev"
+    gate: auto
+  staging:
+    trigger: "tag:v*"
+    tagConvention: "semver"
+    overlay: ".devops/chart/overlays/staging"
+    gate: auto
+  prod:
+    trigger: "tag:v*"
+    tagConvention: "semver"
+    overlay: ".devops/chart/overlays/prod"
+    gate: manual
+  preview:
+    trigger: "pull_request"
+    tagConvention: "pull-<sha>"
+    overlay: ".devops/chart/overlays/preview"
+    gate: auto

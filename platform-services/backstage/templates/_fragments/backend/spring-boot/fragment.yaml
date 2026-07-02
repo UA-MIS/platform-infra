@@ -1,0 +1,23 @@
+# fragment.yaml — see _fragments/backend/express/fragment.yaml for the BACKEND CONTRACT
+# and ADR-034 for the architecture. Backend fragment: Java / Spring Boot on MySQL.
+apiVersion: platform.capstone/fragment.v1
+id: spring-boot
+displayName: Java / Spring Boot API (Spring Web + JDBC + MySQL)
+category: backend
+language: java
+framework: spring-boot
+slots:
+  - backend
+  - single
+defaultPort: 8080
+ingressPath: /api
+needsDB: true
+buildType: container
+dockerfile: Dockerfile
+healthPath: /healthz
+notes: >-
+  Spring Boot 3 (Spring Web + JDBC, HikariCP) with a sample /api/items CRUD on MySQL.
+  Reads DATABASE_URL (a standard mysql:// URI, converted to jdbc:mysql:// at runtime);
+  the data routes return a clear 503 until it is set, while /healthz is DB-independent
+  and stays green for the chart probes. NEVER hardcodes credentials. Multi-stage build
+  (Maven SDK -> eclipse-temurin JRE), non-root (uid 65532), read-only-root friendly.

@@ -1,0 +1,25 @@
+# fragment.yaml — see _fragments/frontend/react/fragment.yaml for the full contract notes
+# and ADR-034 for the architecture. This is the no-framework, plain HTML/CSS/JS fragment.
+apiVersion: platform.capstone/fragment.v1
+id: bare-html
+displayName: Static HTML/CSS/JS site (no framework)
+category: static             # a standalone site with NO data backend
+language: html
+framework: none             # bare starter — no framework, no build step
+# A static site is a complete project on its own (the only component), so it fills the
+# `single` slot. The `static` slot is declared for descriptive grouping; the wizard's
+# functional slot for a standalone site is `single`.
+slots:
+  - static
+  - single
+defaultPort: 8080
+ingressPath: /              # single static site owns "/"
+needsDB: false              # static sites never use a database
+buildType: static           # static = files served by an nginx container -> Deployment
+dockerfile: Dockerfile
+healthPath: /healthz
+notes: >-
+  Plain multi-page HTML/CSS/JavaScript site — NO framework, NO build step (the source files
+  ARE the deployable). Served by hardened nginx (non-root uid 65532, read-only rootfs
+  friendly, pid/temp under /dev/shm, static multi-page serving with a custom 404). No API,
+  no DB. The simplest possible golden-path starter — edit the HTML and redeploy.

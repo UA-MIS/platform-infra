@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>About &middot; ${{ values.appName }}</title>
+    <link rel="stylesheet" href="/css/styles.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <nav class="nav">
+        <span class="brand">${{ values.appName }}</span>
+        <div class="nav-links">
+          <a href="/">Home</a>
+          <a href="/about.html" class="active">About</a>
+        </div>
+      </nav>
+    </header>
+
+    <main class="container">
+      <h1>About</h1>
+      <p>
+        This starter ships the platform golden path: open a PR for a preview environment,
+        merge to <code>main</code> for dev, tag <code>vX.Y.Z</code> for staging, and approve
+        the manual gate for prod. You only edit the site files.
+      </p>
+      <ul>
+        <li>Markup: plain HTML</li>
+        <li>Styling: plain CSS (no framework)</li>
+        <li>Behaviour: vanilla JavaScript (no build step)</li>
+        <li>Runtime: nginx (static files, non-root)</li>
+      </ul>
+      <p><a href="/">&larr; Back home</a></p>
+    </main>
+
+    <footer class="site-footer">
+      <p>&copy; <span id="year"></span> ${{ values.appName }} &middot; UA-MIS Capstone</p>
+    </footer>
+
+    <script src="/js/main.js" defer></script>
+  </body>
+</html>

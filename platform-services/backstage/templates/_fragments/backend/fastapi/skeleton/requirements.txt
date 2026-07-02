@@ -1,0 +1,9 @@
+# Runtime dependencies (baked into the image — see app/Dockerfile).
+# Pinned for reproducible builds; bump deliberately.
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+SQLAlchemy==2.0.36
+# Pure-Python MySQL driver — no system libs / compiler, so the image stays slim and
+# apt-free. The MySQL DSN is mysql+pymysql://user:pass@host:3306/db (see app/db.py).
+PyMySQL==1.1.1
+pydantic==2.10.4

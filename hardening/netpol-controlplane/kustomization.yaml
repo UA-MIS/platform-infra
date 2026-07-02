@@ -21,6 +21,7 @@ resources:
   - vault-netpol.yaml           # ADR-030 B1: default-deny + ESO-only ingress for the vault ns (was unwired — #107 gap)
   - vault-unsealer-netpol.yaml  # Track-2 DR: default-deny + vault-ns-only ingress for the unsealer ns
   - vault-cnp.yaml              # SEC-B1: Cilium apiserver/cluster egress by entity for vault+unsealer (ipBlock can't — flannel->Cilium gap)
+  - crossplane-db-cnp.yaml      # ADR-033: Cilium egress for provider-sql -> off-cluster DB tier (tailnet:3306) + its apiserver/DNS surface
 
 labels:
   - pairs:

@@ -1,0 +1,24 @@
+# fragment.yaml — see _fragments/backend/express/fragment.yaml (and ADR-034) for the
+# BACKEND CONTRACT. Backend fragment: Python / Django + Django REST Framework on MySQL.
+apiVersion: platform.capstone/fragment.v1
+id: django
+displayName: Python / Django + DRF API (MySQL)
+category: backend
+language: python
+framework: django
+slots:
+  - backend
+  - single
+defaultPort: 8080
+ingressPath: /api
+needsDB: true
+buildType: container
+dockerfile: Dockerfile
+healthPath: /healthz
+notes: >-
+  Django + Django REST Framework with a sample /api/items CRUD resource. DB-independent
+  GET /healthz stays 200 with no database. Reads DATABASE_URL (a mysql:// URI, parsed by
+  dj-database-url) and uses the pure-Python PyMySQL driver (installed as MySQLdb) so the
+  image needs no apt/compiler. When DATABASE_URL is unset the data routes degrade to a
+  clear 503 while /healthz stays green (M4 zero-config). Run `python manage.py migrate`
+  at deploy time (see MIGRATIONS.md). Listens on $PORT via gunicorn; non-root, read-only-fs.

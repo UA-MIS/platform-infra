@@ -1,0 +1,22 @@
+# fragment.yaml — see _fragments/backend/express/fragment.yaml for the BACKEND CONTRACT
+# and ADR-034 for the architecture. Backend fragment: ASP.NET Core (.NET 8) on MySQL.
+apiVersion: platform.capstone/fragment.v1
+id: dotnet-aspnet
+displayName: .NET / ASP.NET Core API (EF Core + MySQL)
+category: backend
+language: csharp
+framework: aspnet
+slots:
+  - backend
+  - single
+defaultPort: 8080
+ingressPath: /api
+needsDB: true
+buildType: container
+dockerfile: Dockerfile
+healthPath: /healthz
+notes: >-
+  ASP.NET Core (.NET 8) Web API + EF Core (Pomelo MySQL) with sample /api/widgets CRUD.
+  Reads DATABASE_URL (then ConnectionStrings__Default); boots with no DB and reports it
+  unconfigured. /healthz is DB-independent. xUnit tests under tests/. Harvested from the
+  proven dotnet-aspnet-api template.

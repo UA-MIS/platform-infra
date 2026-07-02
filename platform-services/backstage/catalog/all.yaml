@@ -14,7 +14,16 @@ metadata:
 spec:
   type: url
   targets:
-    # The "New Capstone Project" Scaffolder template (the headline IDP feature).
+    # The "New Capstone Project (Zero-Touch)" Scaffolder template (ADR-031 §11 Phase 2):
+    # emits ONE CapstoneTenant XR that a Crossplane Composition fans out into the full
+    # tenant — no onboarding PR to merge, no operator steps. The headline IDP feature.
+    # ⚠ Requires the capstone:emit-tenant-claim action in the deployed image (post-#129
+    # rebuild) + a healthy Crossplane install. See templates/new-capstone-project/
+    # CROSSPLANE-CUTOVER.md.
+    - https://github.com/UA-MIS/platform-infra/blob/main/platform-services/backstage/templates/new-capstone-project-zerotouch/template.yaml
+    # The "New Capstone Project" Scaffolder template — the imperative PR-path (a
+    # review-gated onboarding PR + operator Harbor steps). PRESERVED as the fallback
+    # safety net for the zero-touch template above.
     - https://github.com/UA-MIS/platform-infra/blob/main/platform-services/backstage/templates/new-capstone-project/template.yaml
     # The "Python FastAPI API" Scaffolder template (the Python backend family, #137 P4).
     - https://github.com/UA-MIS/platform-infra/blob/main/platform-services/backstage/templates/python-fastapi-api/template.yaml

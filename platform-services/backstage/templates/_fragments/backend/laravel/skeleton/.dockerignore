@@ -1,0 +1,11 @@
+.git
+.gitignore
+*.md
+tests
+phpunit.xml
+vendor
+node_modules
+storage/*.sqlite*
+storage/logs/*
+!storage/logs/.gitignore
+.env*

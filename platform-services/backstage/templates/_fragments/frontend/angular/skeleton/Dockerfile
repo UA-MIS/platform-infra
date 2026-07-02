@@ -1,0 +1,47 @@
+# syntax=docker/dockerfile:1
+#
+# ${{ values.appName }} FRONTEND image (build context: this skeleton root -> app/ or frontend/).
+#
+# Angular + TypeScript SPA built to static files with the Angular CLI, served by nginx.
+# Multi-stage: a Node (Alpine) builder produces the compiled browser bundle, copied into a
+# tiny nginx (Alpine) runtime. Built by the platform CI (Kaniko, rootless) on the
+# self-hosted ARC runners — ONE image per component (see .devops/components.yaml).
+#
+# NO apt/apk at build time (Alpine bases + npm over HTTPS only), so this image sidesteps the
+# platform's :443-only runner egress + missing-ca-certificates pitfalls entirely. (If you
+# switch to a Debian-family base that runs apt, see the apt-over-HTTPS note in docs/index.md —
+# the runner egress is :443-only.)
+#
+# RUNTIME HARDENING: the chart runs this pod as runAsNonRoot (uid 65532) +
+# readOnlyRootFilesystem. nginx/nginx.conf keeps nginx's pid, temp paths, and logs off the
+# read-only rootfs (under /dev/shm + stdout/stderr), so it runs clean with no writable volume.
+
+# ---- build stage ----
+FROM node:22-alpine AS build
+WORKDIR /src
+
+# Install deps first (layer-cached), then copy the source and build. No lockfile is shipped
+# with the starter, so `npm install` resolves the manifests; commit the generated
+# package-lock.json and switch to `npm ci` for reproducible builds once you are set up.
+COPY package.json ./
+RUN npm install
+COPY . .
+# `ng build` (npm run build) emits the browser bundle to dist/app/browser (angular.json).
+RUN npm run build
+
+# ---- runtime stage ----
+FROM nginx:1.27-alpine
+
+# Custom config: listen on the component port, SPA fallback, /healthz, and a fully
+# read-only-rootfs-compatible runtime (pid + temp under /dev/shm, logs to stdout/stderr).
+COPY nginx/nginx.conf /etc/nginx/nginx.conf
+# The built Angular SPA (static files only) — nothing else from the build stage ships.
+COPY --from=build /src/dist/app/browser /usr/share/nginx/html
+
+# Run as a non-root UID (matches the chart securityContext runAsUser: 65532).
+USER 65532:65532
+
+# Documentation only — the real port is the chart containerPort (components.yaml `port`).
+EXPOSE 8080
+# Foreground so the container's PID 1 is nginx.
+CMD ["nginx", "-g", "daemon off;"]

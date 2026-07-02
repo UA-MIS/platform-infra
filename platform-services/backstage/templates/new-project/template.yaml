@@ -1,0 +1,452 @@
+# "New Project" — the UNIFIED capstone scaffolder wizard (ADR-034). ONE template with a
+# branching form that collapses the per-stack templates (react-express, python-fastapi-api,
+# dotnet-aspnet-api, react-static, nextjs-fullstack, ...) into a single entry point. Behind
+# it: COMPOSABLE LANGUAGE FRAGMENTS (../_fragments/<category>/<id>/) assembled at scaffold
+# time by capstone:compose-project, plus ONE shared .devops/.github contract
+# (../_fragments/_contract) — NOT N×M pre-baked combos, and NOT a contract copied per stack.
+#
+# BRANCHING (project type -> layout -> fragment(s) -> database):
+#   web + single             -> pick one app fragment (a backend API, a static site, ...)
+#   web + frontend+backend   -> pick a frontend + a backend (deployed behind one ingress:
+#                               / -> frontend, /api -> backend)
+#   mobile                   -> pick a mobile app fragment (build-artifact .ipa/.apk, NOT a
+#                               k8s workload) + a backend fragment (its API, deployed normally)
+# VM workloads keep their own dedicated "New VM" template (vm-app, #149) — the second
+# top-level button — because a KubeVirt VM is a fundamentally different workload than a
+# container; folding it into the compose engine adds risk with no benefit (ADR-034 §VM).
+#
+# DATABASE: when the chosen stack reads a DB (fragment.yaml needsDB:true), the wizard offers
+# host-mysql (auto-provisioned per ADR-033/#146), host-postgres / bring-your-own (you set
+# DATABASE_URL via the Secrets tab), or none. The compose engine sets the tenant `database`
+# flag + wires the DATABASE_URL ExternalSecret accordingly.
+#
+# DOWNSTREAM (publish/register/harbor-onboard/render-tenant/tenant-pr) is the SAME proven
+# golden path as new-capstone-project — only the skeleton-render step is replaced by compose.
+apiVersion: scaffolder.backstage.io/v1beta3
+kind: Template
+metadata:
+  name: new-project
+  title: New Project
+  description: >-
+    Create a new UA-MIS capstone project. Pick what you're building (web app or mobile app),
+    your frontend/backend language(s), and a database — The Process assembles a repo wired to
+    the platform golden path (PR -> preview, merge -> dev, tag -> staging, manual gate -> prod).
+  tags:
+    - capstone
+    - golden-path
+    - recommended
+    - unified
+spec:
+  owner: group:default/platform
+  type: service
+
+  parameters:
+    - title: Your project
+      required:
+        - appName
+        - team
+        - season
+        - year
+      properties:
+        appName:
+          title: App name
+          type: string
+          description: >-
+            Short slug for your app + repo (lowercase letters, digits, hyphens — no spaces,
+            uppercase, or dots). Becomes the repo name, the Kubernetes workload names, and the
+            ingress host <app-name>.<platform-domain>, so it MUST be a DNS-1123 label.
+          pattern: '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'
+          maxLength: 30
+          ui:autofocus: true
+          ui:help: 'Lowercase letters, digits, and hyphens only; must start and end with a letter or digit (e.g. my-capstone-app).'
+        team:
+          title: Team slug
+          type: string
+          description: >-
+            Your team's canonical slug — MUST equal your GitHub Team slug and your AppProject
+            name (the platform keys per-team namespaces, RBAC, Harbor project, OIDC group on
+            this single value, D-026).
+          pattern: '^[a-z]([-a-z0-9]*[a-z0-9])?$'
+          maxLength: 30
+        season:
+          title: Season
+          type: string
+          description: The cohort season (part of "Capstone {Season} {Year}").
+          enum: [Spring, Summer, Fall]
+          default: Fall
+        year:
+          title: Year
+          type: integer
+          description: The cohort year, e.g. 2026.
+          minimum: 2020
+          maximum: 2099
+          default: 2026
+        port:
+          title: Container port
+          type: integer
+          description: The port your app listens on (PORT env + Service/Ingress target).
+          default: 8080
+          minimum: 1
+          maximum: 65535
+        description:
+          title: Description
+          type: string
+          description: One-line description of your project (shown in the catalog).
+          default: A UA-MIS capstone project.
+
+    # ----------------------------------------------------------------------------------
+    # What are you building? The projectType choice REVEALS the relevant follow-up fields
+    # (JSON-schema dependencies + oneOf — the Backstage conditional-parameter pattern).
+    # ----------------------------------------------------------------------------------
+    - title: What are you building?
+      required:
+        - projectType
+      properties:
+        projectType:
+          title: Project type
+          type: string
+          enum: [web, mobile]
+          enumNames:
+            - 'Web app (deployed to the cluster)'
+            - 'Mobile app (build .ipa/.apk) + a backend API'
+          default: web
+      dependencies:
+        projectType:
+          oneOf:
+            # ===================== WEB =====================
+            - required: [layout]
+              properties:
+                projectType:
+                  enum: [web]
+                layout:
+                  title: App layout
+                  type: string
+                  enum: [single, frontend-backend]
+                  enumNames:
+                    - 'Single component (one app)'
+                    - 'Frontend + backend (two components, one repo)'
+                  default: single
+              dependencies:
+                layout:
+                  oneOf:
+                    # ---- web / single ----
+                    - required: [singleFragment, database]
+                      properties:
+                        layout:
+                          enum: [single]
+                        singleFragment:
+                          title: App stack
+                          type: string
+                          description: >-
+                            The single-component stack to scaffold (a backend API, a
+                            fullstack app, or a static site). Generated from the fragment
+                            library by _tools/gen-wizard-enums.py (single slot).
+                          enum:
+                            - backend/django
+                            - backend/dotnet-aspnet
+                            - backend/express
+                            - backend/fastapi
+                            - backend/flask
+                            - backend/go
+                            - backend/laravel
+                            - backend/nestjs
+                            - backend/node-bare
+                            - backend/rails
+                            - backend/rust-axum
+                            - backend/spring-boot
+                            - frontend/angular
+                            - fullstack/nuxt
+                            - fullstack/sveltekit
+                            - static/bare-html
+                            - static/react-static
+                          enumNames:
+                            - 'Python / Django + DRF API (MySQL)'
+                            - '.NET / ASP.NET Core API (EF Core + MySQL)'
+                            - 'Node / Express API (TypeScript + MySQL)'
+                            - 'Python / FastAPI API (SQLAlchemy + MySQL)'
+                            - 'Python / Flask API (SQLAlchemy + MySQL)'
+                            - 'Go API (Gin + MySQL)'
+                            - 'PHP / Laravel API (MySQL)'
+                            - 'NestJS API (TypeScript + MySQL)'
+                            - 'Node.js (bare http, no framework + MySQL)'
+                            - 'Ruby on Rails API (API-only, MySQL)'
+                            - 'Rust / Axum API (sqlx + MySQL)'
+                            - 'Java / Spring Boot API (Spring Web + JDBC + MySQL)'
+                            - 'Angular (TypeScript + Tailwind) SPA'
+                            - 'Nuxt 3 fullstack (Vue + Nitro API + MySQL)'
+                            - 'SvelteKit fullstack (Svelte + server routes + MySQL)'
+                            - 'Static HTML/CSS/JS site (no framework)'
+                            - 'React static site (Vite + React Router, no backend)'
+                          default: backend/fastapi
+                        database:
+                          title: Database
+                          type: string
+                          description: >-
+                            host-mysql auto-provisions a per-environment MySQL database. Pick
+                            none for a DB-less stack (e.g. the static site). Bring-your-own /
+                            host-postgres: you set DATABASE_URL via the Secrets tab.
+                          enum: [host-mysql, host-postgres, bring-your-own, none]
+                          enumNames:
+                            - 'Auto MySQL (host-mysql) — provisioned for you'
+                            - 'PostgreSQL (bring-your-own connection string)'
+                            - 'Bring your own (set DATABASE_URL in the Secrets tab)'
+                            - 'None'
+                          default: host-mysql
+                    # ---- web / frontend + backend ----
+                    - required: [frontendFragment, backendFragment, database]
+                      properties:
+                        layout:
+                          enum: [frontend-backend]
+                        frontendFragment:
+                          title: Frontend
+                          type: string
+                          description: >-
+                            The SPA served at "/". Generated from the fragment library
+                            (frontend slot). Talks to the backend via relative /api calls.
+                          enum:
+                            - frontend/angular
+                            - frontend/react
+                            - frontend/solid
+                            - frontend/vue
+                          enumNames:
+                            - 'Angular (TypeScript + Tailwind) SPA'
+                            - 'React (Vite + TypeScript + Tailwind) SPA'
+                            - 'SolidJS (Vite + TypeScript + Tailwind) SPA'
+                            - 'Vue 3 (Vite + TypeScript + Tailwind) SPA'
+                          default: frontend/react
+                        backendFragment:
+                          title: Backend
+                          type: string
+                          description: >-
+                            The API served behind "/api" (longest-prefix ingress route, no
+                            prefix strip — the backend serves under /api/...). Generated
+                            from the fragment library (backend slot).
+                          enum:
+                            - backend/django
+                            - backend/dotnet-aspnet
+                            - backend/express
+                            - backend/fastapi
+                            - backend/flask
+                            - backend/go
+                            - backend/laravel
+                            - backend/nestjs
+                            - backend/node-bare
+                            - backend/rails
+                            - backend/rust-axum
+                            - backend/spring-boot
+                          enumNames:
+                            - 'Python / Django + DRF API (MySQL)'
+                            - '.NET / ASP.NET Core API (EF Core + MySQL)'
+                            - 'Node / Express API (TypeScript + MySQL)'
+                            - 'Python / FastAPI API (SQLAlchemy + MySQL)'
+                            - 'Python / Flask API (SQLAlchemy + MySQL)'
+                            - 'Go API (Gin + MySQL)'
+                            - 'PHP / Laravel API (MySQL)'
+                            - 'NestJS API (TypeScript + MySQL)'
+                            - 'Node.js (bare http, no framework + MySQL)'
+                            - 'Ruby on Rails API (API-only, MySQL)'
+                            - 'Rust / Axum API (sqlx + MySQL)'
+                            - 'Java / Spring Boot API (Spring Web + JDBC + MySQL)'
+                          default: backend/express
+                        database:
+                          title: Database
+                          type: string
+                          enum: [host-mysql, host-postgres, bring-your-own, none]
+                          enumNames:
+                            - 'Auto MySQL (host-mysql) — provisioned for you'
+                            - 'PostgreSQL (bring-your-own connection string)'
+                            - 'Bring your own (set DATABASE_URL in the Secrets tab)'
+                            - 'None'
+                          default: host-mysql
+            # ===================== MOBILE =====================
+            - required: [mobileFragment, backendFragment, database]
+              properties:
+                projectType:
+                  enum: [mobile]
+                mobileFragment:
+                  title: Mobile app
+                  type: string
+                  description: >-
+                    The mobile app stack. Builds a signed artifact (.ipa/.apk) via a build
+                    workflow — it is NOT deployed to the cluster.
+                  enum:
+                    - mobile/android-kotlin
+                    - mobile/flutter
+                    - mobile/ios-swift
+                    - mobile/react-native
+                  enumNames:
+                    - 'Android app (Kotlin / Jetpack Compose, .apk)'
+                    - 'Mobile app (Flutter / Dart, cross-platform .apk + .ipa)'
+                    - 'iOS app (Swift / SwiftUI, .ipa)'
+                    - 'Mobile app (React Native / Expo, cross-platform .apk + .ipa)'
+                  default: mobile/flutter
+                backendFragment:
+                  title: Backend (the API your app calls)
+                  type: string
+                  description: >-
+                    The deployed API your mobile app calls. Generated from the fragment
+                    library (backend slot).
+                  enum:
+                    - backend/django
+                    - backend/dotnet-aspnet
+                    - backend/express
+                    - backend/fastapi
+                    - backend/flask
+                    - backend/go
+                    - backend/laravel
+                    - backend/nestjs
+                    - backend/node-bare
+                    - backend/rails
+                    - backend/rust-axum
+                    - backend/spring-boot
+                  enumNames:
+                    - 'Python / Django + DRF API (MySQL)'
+                    - '.NET / ASP.NET Core API (EF Core + MySQL)'
+                    - 'Node / Express API (TypeScript + MySQL)'
+                    - 'Python / FastAPI API (SQLAlchemy + MySQL)'
+                    - 'Python / Flask API (SQLAlchemy + MySQL)'
+                    - 'Go API (Gin + MySQL)'
+                    - 'PHP / Laravel API (MySQL)'
+                    - 'NestJS API (TypeScript + MySQL)'
+                    - 'Node.js (bare http, no framework + MySQL)'
+                    - 'Ruby on Rails API (API-only, MySQL)'
+                    - 'Rust / Axum API (sqlx + MySQL)'
+                    - 'Java / Spring Boot API (Spring Web + JDBC + MySQL)'
+                  default: backend/express
+                database:
+                  title: Database (for the backend)
+                  type: string
+                  enum: [host-mysql, host-postgres, bring-your-own, none]
+                  enumNames:
+                    - 'Auto MySQL (host-mysql) — provisioned for you'
+                    - 'PostgreSQL (bring-your-own connection string)'
+                    - 'Bring your own (set DATABASE_URL in the Secrets tab)'
+                    - 'None'
+                  default: host-mysql
+
+  steps:
+    # 1) COMPOSE — assemble the repo from the chosen fragment(s) + the ONE shared contract.
+    #    This single step replaces the per-stack fetch-skeleton steps. The inactive
+    #    *Fragment parameters are simply absent on the other branches (the action skips
+    #    empty fragment paths). The action reads each fragment.yaml, computes
+    #    .devops/components.yaml, renders the fragment skeleton(s) + the shared contract,
+    #    and sets the tenant `database` flag.
+    - id: compose
+      name: Compose project from fragments
+      action: capstone:compose-project
+      input:
+        # Pinned _fragments tree (reproducible; bump deliberately like any contract pin).
+        fragmentsUrl: https://github.com/UA-MIS/platform-infra/tree/main/platform-services/backstage/templates/_fragments
+        projectType: ${{ parameters.projectType }}
+        layout: ${{ parameters.layout }}
+        singleFragment: ${{ parameters.singleFragment }}
+        frontendFragment: ${{ parameters.frontendFragment }}
+        backendFragment: ${{ parameters.backendFragment }}
+        mobileFragment: ${{ parameters.mobileFragment }}
+        database: ${{ parameters.database }}
+        appName: ${{ parameters.appName }}
+        team: ${{ parameters.team }}
+        semester: ${{ parameters.year }}-${{ parameters.season | lower }}
+        semesterDisplay: Capstone ${{ parameters.season }} ${{ parameters.year }}
+        port: ${{ parameters.port }}
+        description: ${{ parameters.description }}
+
+    # 2) Create UA-MIS/<repo>, push, protect main (PRs only — platform policy).
+    - id: publish
+      name: Publish to GitHub (UA-MIS)
+      action: publish:github
+      input:
+        repoUrl: github.com?owner=UA-MIS&repo=${{ parameters.appName }}
+        description: ${{ parameters.description }}
+        defaultBranch: main
+        repoVisibility: private
+        protectDefaultBranch: true
+        requireCodeOwnerReviews: true
+        collaborators:
+          - team: ${{ parameters.team }}
+            access: push
+          - team: labmx
+            access: admin
+
+    # 3) Register the new component in the catalog.
+    - id: register
+      name: Register in catalog
+      action: catalog:register
+      input:
+        repoContentsUrl: ${{ steps['publish'].output.repoContentsUrl }}
+        catalogInfoPath: '/catalog-info.yaml'
+
+    # 4) Create the team Harbor project (+ OIDC mapping) so the first CI build can push.
+    - id: harbor-onboard
+      name: Create Harbor project (team registry)
+      action: capstone:harbor-onboard
+      input:
+        team: ${{ parameters.team }}
+
+    # 5a) Render tenant manifests from the canonical tenants/_template blueprint.
+    #     (The auto-DB `database` flag is recorded in .devops/app-metadata.yaml by compose;
+    #     wiring it to the CapstoneTenant claim is the integration seam with #146/ADR-033.)
+    - id: render-tenant
+      name: Render tenant manifests (tenants/team-<name>/)
+      action: capstone:render-tenant
+      input:
+        templateUrl: https://github.com/UA-MIS/platform-infra/tree/main/tenants/_template
+        team: ${{ parameters.team }}
+        appName: ${{ parameters.appName }}
+        semester: ${{ parameters.year }}-${{ parameters.season | lower }}
+        targetPath: ./tenant-pr
+
+    # 5b) Open the review-gated onboarding PR to platform-infra (merge = grant; D-049).
+    - id: tenant-pr
+      name: Open platform onboarding PR (platform-infra)
+      action: publish:github:pull-request
+      input:
+        repoUrl: github.com?owner=UA-MIS&repo=platform-infra
+        branchName: onboard-team-${{ parameters.team }}
+        targetBranchName: main
+        title: "onboard tenant: team-${{ parameters.team }} (Capstone ${{ parameters.season }} ${{ parameters.year }})"
+        sourcePath: ./tenant-pr
+        description: |
+          ## Tenant onboarding request — `team-${{ parameters.team }}` (Capstone ${{ parameters.season }} ${{ parameters.year }})
+
+          Scaffolded by **The Process** ("New Project") for app **${{ parameters.appName }}**
+          (repo: ${{ steps['publish'].output.remoteUrl }}).
+
+          This PR adds `tenants/team-${{ parameters.team }}/` (rendered from the canonical
+          `tenants/_template/` blueprint). **Merging is the grant**: on merge the tenant
+          ApplicationSets reconcile the team's namespaces + ApplicationSets. No cluster
+          RBAC/quota is created until a reviewer merges.
+
+          ### Reviewer checklist
+          - [ ] Manifests render cleanly (`make validate` on `tenants/team-${{ parameters.team }}/`).
+          - [ ] AppProject is team-scoped (destinations limited to `team-${{ parameters.team }}-*`).
+          - [ ] `__TEAM__`/`__SEMESTER__` fully substituted (no leftover tokens).
+
+          ### Operator steps (run AFTER merge — Harbor robot provisioning; TARGET=real-talos)
+          The Harbor project + OIDC mapping were created at scaffold time; mint the robot
+          tokens post-merge per the standard onboarding runbook (push robot -> arc-runners;
+          per-env pull robots -> <team>-<env>), all with the non-empty-seal guard.
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+  output:
+    links:
+      - title: Repository
+        url: ${{ steps['publish'].output.remoteUrl }}
+      - title: Open in catalog
+        icon: catalog
+        entityRef: ${{ steps['register'].output.entityRef }}
+      - title: Platform onboarding PR (awaiting reviewer merge)
+        icon: github
+        url: ${{ steps['tenant-pr'].output.remoteUrl }}
+    text:
+      - title: Next steps
+        content: |
+          Your repo **${{ parameters.appName }}** is live under UA-MIS. Now:
+          1. Clone it and edit your code (`app/`, or `frontend/`+`backend/`) — leave `.devops/` alone.
+          2. Open a PR -> a **preview** environment is built automatically.
+          3. Merge to `main` -> **dev** auto-deploys.
+          4. Tag `vX.Y.Z` -> **staging** auto-deploys; **prod** waits on the manual gate.
+          Your app will be at `https://${{ parameters.appName }}.capstone.uamishub.com`.
+
+          A **platform onboarding PR** was opened against `UA-MIS/platform-infra` (link above);
+          a reviewer must merge it before dev/staging/prod can deploy.

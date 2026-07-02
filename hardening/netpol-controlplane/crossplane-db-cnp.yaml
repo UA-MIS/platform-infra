@@ -1,0 +1,94 @@
+# Cilium egress allow — provider-sql -> off-cluster DB tier (CiliumNetworkPolicy)
+#   — ADR-033 automatic per-tenant database provisioning. Companion to the
+#   crossplane runtime stack (platform-services/crossplane/, PR #146).
+#
+# WHY THIS EXISTS:
+# provider-sql (crossplane-system) is the ONLY crossplane component that talks to the
+# off-cluster DB tier `ua-mis-db-1` (MariaDB 11.8). It reaches it on TCP/3306 at the
+# tailnet address in the `db-tier-mysql-admin` ProviderConfig secret (endpoint = a
+# 100.64.0.0/10 Tailscale IP; the Talos nodes are Tailscale-everywhere, Phase-4 build
+# kit). ADR-033's negative-consequences + Phase-0 list both require a crossplane-system
+# egress policy that permits TCP/3306 to the tailnet CIDR once Cilium enforces (SEC-011).
+#
+# WHY IT IS SCOPED TO THE provider-sql POD (endpointSelector), NOT namespace-wide:
+# crossplane-system has NO default-deny today (default-allow egress). In Cilium, the
+# MOMENT any egress rule selects an endpoint that endpoint flips to default-DENY egress
+# (allow-list). A namespace-wide `endpointSelector: {}` here would therefore sever the
+# OTHER providers' egress (provider-harbor -> harbor-core.svc, provider-vault ->
+# vault.svc:8200, provider-github -> api.github.com:443, the package manager ->
+# xpkg.upbound.io:443, provider-kubernetes -> apiserver) — an onboarding-control-plane
+# outage. So this policy selects ONLY the provider-sql controller pod and enumerates
+# its COMPLETE egress (apiserver + DNS + the DB). Every other crossplane-system pod
+# keeps its current default-allow egress untouched. Full default-deny hardening of the
+# whole crossplane-system namespace is a separate, deliberately-scoped follow-up (it
+# must enumerate all five providers' egress; strategic — escalate before doing it).
+#
+# provider-sql's complete egress surface (nothing else):
+#   - kube-apiserver — watch/patch its Database/User/Grant MRs + read ProviderConfig and
+#     the admin connection secret + write the User connection secret. `toEntities:
+#     kube-apiserver` (matches the VIP 10.96.0.1:443 AND the node-IP :6443 path by
+#     UNION — a plain ipBlock CANNOT, per the flannel->Cilium gap documented in
+#     apiserver-cnp.yaml: "CIDR-based selectors do not match in-cluster entities").
+#   - kube-dns :53 — name resolution (standard; kept even though the DB endpoint and
+#     apiserver VIP are reached by IP/identity, so a stray lookup is not denied).
+#   - the DB tier on TCP/3306 over the tailnet. `toCIDR: 100.64.0.0/10`. ua-mis-db-1 is
+#     an EXTERNAL Tailscale PEER (a dedicated off-cluster box, NOT a cluster node), so
+#     Cilium matches it as a CIDR identity and this allow is EFFECTIVE — unlike the
+#     node/own-host tailnet caveats in runner-netpol.yaml / vm-prod.yaml (those concern
+#     a pod reaching its OWN node's host IP, which needs Host Firewall / SEC-019, and
+#     `except`-subtraction of tailnet from a broad allow, which needs
+#     policyCIDRMatchMode:nodes). Neither applies to a remote external peer + a positive
+#     toCIDR allow. Confirm at Phase-0 deny-test.
+#
+# ⚠ Phase-0 verification (DB tier not live — ua-mis-db-1 is draft PR #29):
+#   (a) the provider-sql controller POD LABEL. Crossplane names the provider runtime pod
+#       with `pkg.crossplane.io/provider: <Provider .metadata.name>` = `provider-sql`
+#       (providers/provider-sql.yaml). If the installed provider-sql v0.15.0 labels the
+#       pod differently, this selector matches NOTHING -> the pod keeps default-allow
+#       egress -> provider-sql still reaches the DB (fails OPEN, safe for availability)
+#       but the intended enforcement is inert. `kubectl -n crossplane-system get pod
+#       --show-labels | grep provider-sql` and adjust matchLabels if needed.
+#   (b) that provider-sql -> ua-mis-db-1:3306 is ALLOWED and any other egress from the
+#       provider-sql pod is DENIED (Hubble: `policy-verdict ... EGRESS`), during the
+#       DB-tier deny-test.
+#
+# CNP + k8s NetworkPolicy on the same endpoint/direction are ADDITIVE (OR'd). Namespace
+# pinned to crossplane-system (the appset destination is a neutral kube-system default).
+# Lives in the `platform` AppProject; MANUAL-SYNC via platform-netpol-controlplane
+# (same lockout-protection + SEC-011 live-apply gate as the other control-plane netpols).
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-egress-provider-sql-db
+  namespace: crossplane-system
+  labels:
+    platform.capstone/component: platform
+spec:
+  endpointSelector:
+    matchLabels:
+      # Crossplane provider runtime pod label (value = the Provider's metadata.name).
+      # ⚠ Phase-0: confirm against the live pod (see header note (a)).
+      pkg.crossplane.io/provider: provider-sql
+  egress:
+    # apiserver — MR/ProviderConfig/connection-secret reconcile (identity, not CIDR).
+    - toEntities:
+        - kube-apiserver
+    # DNS.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    # The off-cluster DB tier (ua-mis-db-1, MariaDB 11.8) over the Tailscale overlay.
+    - toCIDR:
+        - 100.64.0.0/10
+      toPorts:
+        - ports:
+            - port: "3306"
+              protocol: TCP

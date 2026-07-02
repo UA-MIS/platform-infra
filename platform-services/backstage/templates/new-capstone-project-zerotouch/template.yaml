@@ -1,0 +1,431 @@
+# "New Capstone Project (Zero-Touch)" — The Process Scaffolder GOLDEN-PATH template,
+# Crossplane ZERO-TOUCH onboarding variant (ADR-031 §11 Phase 2, CROSSPLANE-CUTOVER.md).
+#
+# SAME headline feature as new-capstone-project (a student fills four fields and gets a
+# repo pre-wired to the platform `.devops/` contract), but the PLATFORM SIDE is now
+# fully automated: instead of opening a review-gated onboarding PR that a reviewer
+# merges + an operator's post-merge `make harbor-*` steps, this template emits ONE
+# schema-validated CapstoneTenant XR and commits it to platform-infra
+# `tenants/_claims/<team>-<app>.yaml`. A reviewed-once Crossplane Composition then
+# expands that single XR into the ENTIRE tenant (repo wiring + Harbor project/robots +
+# Vault policy/role + the k8s tenancy fence: AppProject, namespaces, quota/limitrange/
+# netpol/RBAC/PSA, ESO plumbing, env/preview ApplicationSets). NO onboarding PR to
+# merge, NO operator `make` steps.
+#
+# ⚠ new-capstone-project/ (the imperative PR-path) is PRESERVED unchanged as the
+# fallback safety net. If zero-touch provisioning is degraded, use that template.
+#
+# WHAT IT DOES (steps below):
+#   1. fetch:template — render the ENTIRE ./skeleton (app/ starter + .devops/ golden-path
+#      contract [chart base+overlays, promotion.yaml, ci/ scripts] + .github/ CI workflow +
+#      catalog-info.yaml + mkdocs/TechDocs) with the collected values. SELF-CONTAINED: the
+#      contract is EMBEDDED in the skeleton — there is NO fetch:plain from an external repo,
+#      NO sample-app dependency, NO contract tag. appName/team are substituted INTO the
+#      contract so a fresh scaffold is correct for its own team/app on the first build. The
+#      one GitHub-Actions file (.github/workflows/build-and-push.yaml) is listed under
+#      copyWithoutTemplating so nunjucks never mangles its ${{ github.* }} expressions.
+#      (This repo CONTENT stays Backstage-templated — the hybrid, ADR-031 §9a.)
+#   3. publish:github — create UA-MIS/<repo>, push, set the default branch + the
+#      branch protection the platform expects (PRs only into main; no direct pushes).
+#   4. catalog:register — register the new component's catalog-info.yaml so it shows
+#      up in The Process software catalog immediately.
+#   5. capstone:emit-tenant-claim — render the SINGLE CapstoneTenant XR (the zero-touch
+#      seam) into the workspace as tenants/_claims/<team>-<app>.yaml. Replaces the
+#      imperative trio harbor-onboard + render-tenant + the onboarding PR.
+#   6. publish:github:pull-request — land that ONE claim file on platform-infra `main`.
+#      autoMerge is requested so the platform GitHub App (on the branch-protection
+#      BYPASS LIST for tenants/_claims/**, ADR-031 §7 Option A) self-merges it — no
+#      human merge. ArgoCD (platform-crossplane-claims) syncs it; Crossplane reconciles.
+#
+# ⚠ REQUIRES (wired at go-live — see platform-services/backstage/README.md):
+#   - The GitHub integration token (${GITHUB_TOKEN}, the UA-MIS GitHub App) with repo
+#     + admin:org. Used by publish:github (repo create) AND publish:github:pull-request
+#     (the platform-infra claim commit — on the tenants/_claims/** bypass list).
+#   - The capstone:emit-tenant-claim custom scaffolder action registered + COMPILED INTO
+#     THE BACKSTAGE IMAGE (plugins/scaffolder-backend-module-capstone). ⚠ It is NOT in
+#     the currently-deployed image (bdc917b, pre-#129) — enabling this template needs a
+#     Backstage image REBUILD + redeploy first. See CROSSPLANE-CUTOVER.md.
+#   - Crossplane installed + healthy (platform-crossplane-* apps) with the XRD +
+#     Composition Synced and all four ProviderConfigs valid (incl. the vault
+#     ProviderConfig spec.address fix in this PR).
+#   - (No external .devops/ source repo — the contract is embedded in ./skeleton.)
+#   - The OIDC sign-in so the acting user (a UA-MIS member) is the repo author.
+apiVersion: scaffolder.backstage.io/v1beta3
+kind: Template
+metadata:
+  name: new-capstone-project-zerotouch
+  title: New Capstone Project (Zero-Touch)
+  description: >-
+    Create a new UA-MIS capstone team app repo, pre-wired to the platform golden
+    path (PR -> preview, merge -> dev, tag -> staging, manual gate -> prod). Your
+    team's namespaces/RBAC/Harbor/Vault are provisioned AUTOMATICALLY by Crossplane —
+    no onboarding PR to merge, no operator steps. You edit only `app/` and the four
+    fields in `.devops/app-metadata.yaml`.
+  tags:
+    - capstone
+    - golden-path
+    - zero-touch
+    - recommended
+spec:
+  owner: group:default/platform
+  type: service
+
+  parameters:
+    - title: Your project
+      required:
+        - appName
+        - team
+        - season
+        - year
+      properties:
+        appName:
+          title: App name
+          type: string
+          description: >-
+            Short slug for your app + repo (lowercase letters, digits, hyphens — no
+            spaces, uppercase, or dots). Becomes the repo name, the Kubernetes
+            workload names, and the ingress host <app-name>.<platform-domain>,
+            so it MUST be a DNS-1123 label.
+          # DNS-1123 label: lowercase alphanumerics + hyphens, must start AND end with
+          # an alphanumeric (so a hyphen can't be first/last). Same charset as a repo
+          # name, a k8s object name, and a DNS hostname segment — all three derive from
+          # this one value, so enforce the strictest (DNS) form here.
+          pattern: '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'
+          maxLength: 30
+          ui:autofocus: true
+          ui:help: 'Lowercase letters, digits, and hyphens only; must start and end with a letter or digit (e.g. my-capstone-app).'
+        team:
+          title: Team slug
+          type: string
+          description: >-
+            Your team's canonical slug — MUST equal your GitHub Team slug and your
+            AppProject name (the platform keys per-team namespaces, RBAC, Harbor
+            project, and OIDC group on this single value, D-026).
+          pattern: '^[a-z]([-a-z0-9]*[a-z0-9])?$'
+          maxLength: 30
+        # Cohort = Season + Year, matching the org's "Capstone {Season} {Year}" naming
+        # (the parent-team convention used for 6+ years). These two inputs compose two
+        # derived forms downstream (Backstage has no "computed parameter", so each step
+        # builds what it needs inline):
+        #   - DISPLAY  "Capstone {Season} {Year}"  (e.g. "Capstone Fall 2026") — the
+        #     onboarding PR title/body, the README cohort line, and the catalog
+        #     `capstone.uamishub.com/cohort` annotation: human-facing text only.
+        #   - SLUG     "{year}-{season|lower}"      (e.g. "2026-fall") — the
+        #     platform.capstone/semester LABEL value, the catalog tag, the
+        #     app-metadata.yaml `semester` field, and the value passed to
+        #     capstone:render-tenant. k8s label values + catalog tags forbid
+        #     spaces/uppercase, so the machine form MUST be a slug; the display stays
+        #     readable. NOTE: slug is year-first (`2026-fall`) ON PURPOSE — it matches
+        #     render-tenant's existing SEMESTER regex so the Backstage image needs NO
+        #     rebuild for this change. (Post-v1: flip the slug to `fall-2026` together
+        #     with the renderTenant.ts regex on the next planned image rebuild.)
+        season:
+          title: Season
+          type: string
+          description: The cohort season (part of "Capstone {Season} {Year}").
+          enum:
+            - Spring
+            - Summer
+            - Fall
+          default: Fall
+        year:
+          title: Year
+          type: integer
+          description: The cohort year, e.g. 2026 (part of "Capstone {Season} {Year}").
+          minimum: 2020
+          maximum: 2099
+          default: 2026
+        port:
+          title: Container port
+          type: integer
+          description: The port your app listens on (PORT env + Service/Ingress target).
+          default: 8080
+          minimum: 1
+          maximum: 65535
+        description:
+          title: Description
+          type: string
+          description: One-line description of your project (shown in the catalog).
+          default: A UA-MIS capstone project.
+        # App layout: single-component (the DEFAULT golden path — one app/ dir, one
+        # Deployment, e.g. v1check) OR frontend-backend (a webapp with a SEPARATE
+        # frontend + backend in ONE repo — two Dockerfiles, two images, two Deployments,
+        # one Ingress routing "/"->frontend and "/api"->backend, declared in
+        # .devops/components.yaml). Single stays the default; frontend-backend renders the
+        # multi-component skeleton instead. (For >2 components, scaffold frontend-backend
+        # then edit .devops/components.yaml + the chart — see the repo's .devops/README.md.)
+        layout:
+          title: App layout
+          type: string
+          description: >-
+            Single-component (one app) or a frontend + backend webapp in one repo.
+            The Container port above applies to the single-component layout; the
+            frontend-backend layout's per-component ports default to 8080 and are
+            edited in .devops/components.yaml.
+          enum:
+            - single
+            - frontend-backend
+          enumNames:
+            - 'Single component (one app — default)'
+            - 'Frontend + backend (two components, one repo)'
+          default: single
+
+    # NOTE: there is intentionally NO separate "Repository" page / repoUrl input.
+    # The repo is created at github.com/UA-MIS/<appName> — owner is fixed to UA-MIS and
+    # the repo name IS the app name (enter once on the page above; no double-entry). The
+    # repoUrl is constructed inline at the publish steps below as
+    # `github.com?owner=UA-MIS&repo=${{ parameters.appName }}`. We dropped the
+    # RepoUrlPicker entirely (rather than just defaulting it) because it added a redundant
+    # field AND, with `requestUserCredentials`, would start a USER GitHub OAuth flow
+    # (/api/auth/github/start) — but The Process has NO `github` auth provider (D-017:
+    # Dex/OIDC sign-in + the GitHub App for all API calls). Repo creation runs as the
+    # platform GitHub App via integrations.github (see publish:github — no token input).
+
+  steps:
+    # 1) Render the per-team starter (app/ + the 4-field app-metadata.yaml + catalog).
+    #    SINGLE-COMPONENT path (the default). Guarded by layout so the proven golden-path
+    #    render is byte-for-byte unchanged when layout=single (the default); the
+    #    frontend-backend path is the separate fetch-skeleton-multi step below. Exactly
+    #    one of the two fetch steps runs; both write the same workspace, so all downstream
+    #    steps (publish/register/harbor/render-tenant/tenant-pr) are shared + unchanged.
+    - id: fetch-skeleton
+      name: Render project skeleton (single component)
+      if: ${{ parameters.layout === "single" }}
+      action: fetch:template
+      input:
+        url: ./skeleton
+        values:
+          appName: ${{ parameters.appName }}
+          team: ${{ parameters.team }}
+          # Cohort in two forms (see the season/year params above): `semester` = the
+          # machine SLUG (year-first, e.g. 2026-fall) for the catalog tag + label; and
+          # `semesterDisplay` = the readable org name (e.g. "Capstone Fall 2026").
+          semester: ${{ parameters.year }}-${{ parameters.season | lower }}
+          semesterDisplay: Capstone ${{ parameters.season }} ${{ parameters.year }}
+          port: ${{ parameters.port }}
+          description: ${{ parameters.description }}
+          destination: ${{ ("github.com?owner=UA-MIS&repo=" + parameters.appName) | parseRepoUrl }}
+        # SELF-CONTAINED CONTRACT: the golden-path `.devops/` tree (chart base + 4
+        # overlays, promotion.yaml, ci/ scripts) AND the `.github/` CI workflow are
+        # EMBEDDED in ./skeleton — NO `fetch:plain` from an external repo. The scaffolder
+        # itself is the blueprint: deleting/renaming UA-MIS/sample-app has zero effect, no
+        # contract tag to maintain, no GitHub-App access to sample-app needed. The
+        # appName/team values above are substituted INTO the contract (registry, namespace,
+        # ingress host, image name, labels) so a fresh scaffold is correct for ITS OWN
+        # team/app on the first build — fixing the old fetch:plain bug where every tenant
+        # inherited sample's hardcoded `sample-dev`/`harbor.../sample/sample` values.
+        # Protect the GitHub-Actions workflow (`${{ github.* }}`/`${{ secrets.* }}` — the
+        # SAME `${{ }}` nunjucks uses) AND the .devops/ci/ shell scripts from nunjucks.
+        # The workflow is the only file that strictly NEEDS it (it's the only `${{` file,
+        # and it self-derives registry+app from promotion.yaml at runtime — no per-team
+        # templating); the scripts use `${VAR}` (single brace, nunjucks-safe) but are
+        # belt-and-suspenders protected so the whole CI surface is shipped VERBATIM and a
+        # future `${{`-using edit can't silently break.
+        #
+        # ⚠ INDENTATION IS LOAD-BEARING: this key MUST be nested under `input:` (8-space
+        # indent, a sibling of `url:`/`values:`). A prior revision placed it at 6 spaces —
+        # a sibling of `input:` — so fetch:template never received it, nunjucks templated
+        # EVERY file, and the workflow's `${{ github.* }}` crashed the render with
+        # "expected variable end" (a live scaffold failed at step "Render project skeleton",
+        # taking publish/register/render-tenant/tenant-pr down with it). Keep it under input.
+        #
+        # KEY NAME: `copyWithoutTemplating` is the current name; `copyWithoutRender` is the
+        # older alias — BOTH are accepted by fetch:template (v1.20+; deployed
+        # @backstage/plugin-scaffolder-backend is 4.0.1). No rename needed.
+        #
+        # GLOBS: matched by globby (cwd = skeleton root, dot:true) against repo-relative
+        # paths like `.github/workflows/build-and-push.yaml`. Both the root-relative form
+        # (`.github/**`) and the `**/`-prefixed form match a root-level subtree under those
+        # options (globby's `**` matches zero leading segments); both are listed so the
+        # exclusion holds regardless of where the subtree sits and is obvious to a reader.
+        copyWithoutTemplating:
+          - '.github/**'
+          - '**/.github/**'
+          - '.devops/ci/**'
+          - '**/.devops/ci/**'
+
+    # 1-multi) Render the per-team starter — FRONTEND + BACKEND layout. Same downstream
+    #    contract as single, but from ./skeleton-multi: backend/ + frontend/ dirs (each a
+    #    Dockerfile + minimal app), .devops/components.yaml (the component model), and a
+    #    chart that renders N Deployments/Services + a path-routing Ingress. The
+    #    `components` list below is the SINGLE source the skeleton loops over (nunjucks) to
+    #    render both components.yaml AND the chart, so they cannot drift. The CI workflow +
+    #    .devops/ci/ scripts are copyWithoutTemplating (shipped verbatim), same as single.
+    - id: fetch-skeleton-multi
+      name: Render project skeleton (frontend + backend)
+      if: ${{ parameters.layout === "frontend-backend" }}
+      action: fetch:template
+      input:
+        url: ./skeleton-multi
+        values:
+          appName: ${{ parameters.appName }}
+          team: ${{ parameters.team }}
+          semester: ${{ parameters.year }}-${{ parameters.season | lower }}
+          semesterDisplay: Capstone ${{ parameters.season }} ${{ parameters.year }}
+          port: ${{ parameters.port }}
+          description: ${{ parameters.description }}
+          destination: ${{ ("github.com?owner=UA-MIS&repo=" + parameters.appName) | parseRepoUrl }}
+          # The component model (Track 6 contract). Fixed default = frontend + backend.
+          # image repo per component is derived in the skeleton as <appName>-<name>; ports
+          # default to 8080 (edit .devops/components.yaml post-scaffold to change them or
+          # add components). The skeleton renders one Deployment/Service per entry + one
+          # Ingress path per entry (frontend "/" + backend "/api").
+          components:
+            - name: frontend
+              kind: frontend
+              context: frontend
+              dockerfile: Dockerfile
+              port: 8080
+              path: /
+            - name: backend
+              kind: backend
+              context: backend
+              dockerfile: Dockerfile
+              port: 8080
+              path: /api
+        # Same nunjucks-protection as the single path: ship the GitHub-Actions workflow +
+        # the .devops/ci/ shell scripts VERBATIM (they use ${{ github.* }} / ${VAR}).
+        copyWithoutTemplating:
+          - '.github/**'
+          - '**/.github/**'
+          - '.devops/ci/**'
+          - '**/.devops/ci/**'
+
+    # 3) Create UA-MIS/<repo>, push, protect main (PRs only — matches platform policy).
+    - id: publish
+      name: Publish to GitHub (UA-MIS)
+      action: publish:github
+      input:
+        # Repo = github.com/UA-MIS/<appName> (owner fixed, name = app name; no repoUrl input).
+        repoUrl: github.com?owner=UA-MIS&repo=${{ parameters.appName }}
+        description: ${{ parameters.description }}
+        defaultBranch: main
+        repoVisibility: private
+        # Platform branch policy: PRs into main, no direct pushes (mirrors the live
+        # branch-protection the golden path assumes; reviewers/CI gate merges).
+        protectDefaultBranch: true
+        requireCodeOwnerReviews: true
+        # Grant repo access by GitHub TEAM (not by creator/individual) so permissions are
+        # role-based and don't depend on who clicked "create":
+        #   - the project team gets PUSH (read/write — develop + open PRs, NOT admin).
+        #   - labmx (platform staff) gets ADMIN (settings/protection/transfer).
+        # So a normal member never gets admin merely for being the creator. NOTE: each
+        # team must already exist on the UA-MIS org for the grant to apply; if the team
+        # slug is wrong/missing GitHub skips that collaborator (publish:github does not
+        # hard-fail the scaffold on an unknown team — graceful, per design).
+        collaborators:
+          - team: ${{ parameters.team }}
+            access: push
+          - team: labmx
+            access: admin
+        # No `token:` — publish:github authenticates via the configured integrations.github
+        # (the platform GitHub App, sealed in backstage-process-secrets), the same App used
+        # by catalog ingestion + capstone:render-tenant. Repo creation runs as the App, not
+        # a user OAuth token (which we removed from the RepoUrlPicker above). Mirrors the
+        # publish:github:pull-request step (5b), which already uses the App token.
+
+    # 4) Register the new component so it appears in The Process catalog right away.
+    - id: register
+      name: Register in catalog
+      action: catalog:register
+      input:
+        repoContentsUrl: ${{ steps['publish'].output.repoContentsUrl }}
+        catalogInfoPath: '/catalog-info.yaml'
+
+    # =====================================================================
+    # PLATFORM SIDE — ZERO-TOUCH (ADR-031 §7 Option A). The steps above created the
+    # STUDENT's own repo (they own it). The steps below emit ONE CapstoneTenant XR and
+    # land it on platform-infra `main`. A reviewed-once Crossplane Composition then
+    # fans it out into the ENTIRE tenant (Harbor project+robots + Vault policy/role +
+    # the k8s tenancy fence: AppProject, namespaces, quota/limitrange/netpol/RBAC/PSA,
+    # ESO plumbing, env/preview ApplicationSets). There is NO onboarding PR to merge and
+    # NO operator `make` steps — the reviewed XRD + Composition + the four scoped
+    # ProviderConfigs are the security gate (the XR itself is low-trust: every field is
+    # a pattern/max-bounded scalar, and reserved team/app names are rejected at admission
+    # AND re-checked in capstone:emit-tenant-claim). See apis/{xrd,composition}.yaml.
+    # =====================================================================
+
+    # 5) Emit the ONE CapstoneTenant XR (the zero-touch seam). Writes
+    #    tenants/_claims/<team>-<app>.yaml under ./claim (the publish sourcePath below).
+    #    Replaces the imperative trio (capstone:harbor-onboard + capstone:render-tenant +
+    #    the review-gated onboarding PR). Re-validates every slug (fail closed) — the XRD
+    #    validates the same patterns again at admission (defense in depth).
+    - id: emit-claim
+      name: Emit tenant claim (CapstoneTenant XR)
+      action: capstone:emit-tenant-claim
+      input:
+        team: ${{ parameters.team }}
+        appName: ${{ parameters.appName }}
+        # SLUG form (year-first, e.g. 2026-fall) — the platform.capstone/semester
+        # GC/report selector; matches the XRD `semester` pattern + the skeleton values.
+        semester: ${{ parameters.year }}-${{ parameters.season | lower }}
+        port: ${{ parameters.port }}
+        # Write under ./claim so the publish step (sourcePath: ./claim) lands exactly the
+        # one tenants/_claims/<team>-<app>.yaml file.
+        targetPath: ./claim
+
+    # 6) Land the claim on platform-infra `main` — NO human merge (ADR-031 §7 Option A).
+    #    The platform GitHub App is on the branch-protection BYPASS LIST for
+    #    tenants/_claims/**, so with autoMerge it self-merges the moment the PR opens.
+    #    ArgoCD (platform-crossplane-claims) then syncs the XR; Crossplane reconciles the
+    #    whole tenant. This uses the SAME proven publish:github:pull-request mechanism the
+    #    imperative template used (in the deployed image), just carrying the single XR to
+    #    tenants/_claims/ instead of a full tenants/team-<name>/ tree.
+    #
+    #    ⚠ autoMerge is a best-effort input: if the deployed
+    #    scaffolder-backend-module-github version does not honor it, the action still
+    #    OPENS the claim PR (it is not rejected — extra inputs are ignored, not fatal) and
+    #    a reviewer's single click merges it. The clean "no-PR direct commit" realization
+    #    (a capstone:commit-to-main action, ADR-031 §7 Option A(b)) is the documented
+    #    fast-follow; this PR-with-autoMerge is Option A(a).
+    - id: commit-claim
+      name: Land tenant claim on platform-infra (auto-merge)
+      action: publish:github:pull-request
+      input:
+        repoUrl: github.com?owner=UA-MIS&repo=platform-infra
+        branchName: claim-${{ parameters.team }}-${{ parameters.appName }}
+        targetBranchName: main
+        title: "onboard tenant (zero-touch): ${{ parameters.team }}-${{ parameters.appName }} (Capstone ${{ parameters.season }} ${{ parameters.year }})"
+        sourcePath: ./claim
+        # Land the XR on main automatically (App bypasses branch protection on
+        # tenants/_claims/**). If autoMerge is unsupported, the PR still opens (1-click).
+        autoMerge: true
+        description: |
+          ## Zero-touch tenant claim — `${{ parameters.team }}-${{ parameters.appName }}` (Capstone ${{ parameters.season }} ${{ parameters.year }})
+
+          Emitted by **The Process** ("New Capstone Project (Zero-Touch)") for app
+          **${{ parameters.appName }}** (repo: ${{ steps['publish'].output.remoteUrl }}).
+
+          This PR adds ONE `tenants/_claims/${{ parameters.team }}-${{ parameters.appName }}.yaml`
+          (a schema-validated `CapstoneTenant` XR). A reviewed-once Crossplane
+          Composition expands it into the full tenant — Harbor project/robots, Vault
+          policy/role, and the k8s tenancy fence (AppProject, namespaces, quotas,
+          netpol, RBAC, ESO plumbing, env/preview ApplicationSets). **No operator
+          steps.** De-provision = `git rm` this file.
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+  output:
+    links:
+      - title: Repository
+        url: ${{ steps['publish'].output.remoteUrl }}
+      - title: Open in catalog
+        icon: catalog
+        entityRef: ${{ steps['register'].output.entityRef }}
+      - title: Tenant claim (auto-provisioning)
+        icon: github
+        url: ${{ steps['commit-claim'].output.remoteUrl }}
+    text:
+      - title: Next steps
+        content: |
+          Your repo **${{ parameters.appName }}** is live under UA-MIS. Now:
+          1. Clone it and edit `app/` (your code) — leave `.devops/` alone.
+          2. Open a PR -> a **preview** environment is built automatically.
+          3. Merge to `main` -> **dev** auto-deploys.
+          4. Tag `vX.Y.Z` -> **staging** auto-deploys; **prod** waits on the manual gate.
+          Your app will be at `https://${{ parameters.appName }}.capstone.uamishub.com`
+          (dev/staging add a `.dev`/`.staging` segment before the domain).
+
+          **Nothing is gated:** your team's namespaces, RBAC, Harbor project/robots, and
+          Vault policy are being provisioned automatically by Crossplane from a single
+          tenant claim (link above) — give it a minute. No onboarding PR to merge, no
+          operator steps.

@@ -1,0 +1,77 @@
+/*
+ * composePlan.test.cjs — unit tests for the pure compose planner. Runs under plain
+ * `node --test` (no Backstage toolchain needed), so the load-bearing routing logic is
+ * proven offline. The TS action delegates to this same module (no drift).
+ */
+'use strict';
+const test = require('node:test');
+const assert = require('node:assert');
+const { planComposition } = require('./composePlan');
+
+const react = { id: 'react', category: 'frontend', framework: 'react', slots: ['frontend'], defaultPort: 8080, ingressPath: '/', needsDB: false, buildType: 'container', dockerfile: 'Dockerfile' };
+const reactStatic = { id: 'react-static', category: 'static', slots: ['single'], defaultPort: 8080, ingressPath: '/', needsDB: false, buildType: 'static', dockerfile: 'Dockerfile' };
+const express = { id: 'express', category: 'backend', slots: ['backend', 'single'], defaultPort: 8080, ingressPath: '/api', needsDB: true, buildType: 'container', dockerfile: 'Dockerfile' };
+const fastapi = { id: 'fastapi', category: 'backend', slots: ['backend', 'single'], defaultPort: 8080, ingressPath: '/api', needsDB: true, buildType: 'container', dockerfile: 'Dockerfile' };
+const mobile = { id: 'swift-ios', category: 'mobile', slots: ['mobile'], defaultPort: 0, ingressPath: '', needsDB: false, buildType: 'mobile-artifact', dockerfile: '' };
+
+test('single backend (FastAPI) + host-mysql -> 1 component at /, db provisioned', () => {
+  const p = planComposition({ projectType: 'web', layout: 'single', fragments: { single: fastapi }, database: 'host-mysql', port: 8080 });
+  assert.equal(p.components.length, 1);
+  const [c] = p.components;
+  assert.equal(c.name, 'app');
+  assert.equal(c.context, 'app');
+  assert.equal(c.path, '/');
+  assert.equal(c.needsDb, true);
+  assert.equal(c.buildType, 'container');
+  assert.equal(p.database, 'mysql');
+  assert.equal(p.dbWired, true);
+  assert.deepEqual(p.copies.map(x => [x.fragment.id, x.targetDir]), [['fastapi', 'app']]);
+});
+
+test('FE+BE (React + Express) + host-mysql -> frontend / + backend /api', () => {
+  const p = planComposition({ projectType: 'web', layout: 'frontend-backend', fragments: { frontend: react, backend: express }, database: 'host-mysql', port: 8080 });
+  assert.equal(p.components.length, 2);
+  const fe = p.components.find(c => c.name === 'frontend');
+  const be = p.components.find(c => c.name === 'backend');
+  assert.equal(fe.path, '/');
+  assert.equal(fe.needsDb, false);
+  assert.equal(be.path, '/api');
+  assert.equal(be.needsDb, true);
+  assert.equal(p.database, 'mysql');
+  assert.equal(p.dbWired, true);
+  assert.deepEqual(p.copies.map(x => x.targetDir).sort(), ['backend', 'frontend']);
+});
+
+test('static single (react-static) -> no db, single component', () => {
+  const p = planComposition({ projectType: 'web', layout: 'single', fragments: { single: reactStatic }, database: 'none' });
+  assert.equal(p.components.length, 1);
+  assert.equal(p.components[0].needsDb, false);
+  assert.equal(p.database, 'none');
+  assert.equal(p.dbWired, false);
+});
+
+test('bring-your-own wires DATABASE_URL but provisions none', () => {
+  const p = planComposition({ projectType: 'web', layout: 'single', fragments: { single: express }, database: 'bring-your-own' });
+  assert.equal(p.database, 'none');
+  assert.equal(p.dbWired, true);
+});
+
+test('db=none on a DB-capable backend leaves it unwired', () => {
+  const p = planComposition({ projectType: 'web', layout: 'single', fragments: { single: express }, database: 'none' });
+  assert.equal(p.dbWired, false);
+  assert.equal(p.database, 'none');
+});
+
+test('mobile -> deployed backend at / + mobile-artifact component (not deployed)', () => {
+  const p = planComposition({ projectType: 'mobile', fragments: { backend: express, mobile }, database: 'host-mysql', port: 8080 });
+  const be = p.components.find(c => c.name === 'backend');
+  const mob = p.components.find(c => c.name === 'mobile');
+  assert.equal(be.path, '/');
+  assert.equal(be.buildType, 'container');
+  assert.equal(mob.buildType, 'mobile-artifact');
+  assert.equal(p.dbWired, true);
+});
+
+test('slot misuse is rejected (react cannot fill single)', () => {
+  assert.throws(() => planComposition({ projectType: 'web', layout: 'single', fragments: { single: react }, database: 'none' }), /cannot fill the 'single' slot/);
+});

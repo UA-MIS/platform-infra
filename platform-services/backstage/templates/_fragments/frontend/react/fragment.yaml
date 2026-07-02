@@ -1,0 +1,37 @@
+# fragment.yaml — the COMPOSABLE LANGUAGE FRAGMENT contract (platform.capstone/fragment.v1).
+#
+# A fragment is ONE language/framework starter that the unified "New Project" wizard
+# assembles at scaffold time (capstone:compose-project) into a project's component dir
+# (app/ for single, frontend/ or backend/ for frontend+backend). It carries ONLY the
+# app code + Dockerfile under skeleton/ plus this metadata file. It does NOT carry the
+# .devops/ or .github/ contract — that lives ONCE in _fragments/_contract/ and is shared
+# by every fragment (the copy-not-reference fix). See ADR-034.
+#
+# The compose engine reads THIS file to decide: the component kind/path/port, whether the
+# DB question applies (needsDB), and how to build it (buildType). To add a new fragment,
+# drop a sibling dir with a skeleton/ + this file — no wizard or engine code change.
+apiVersion: platform.capstone/fragment.v1
+id: react
+displayName: React (Vite + TypeScript + Tailwind) SPA
+category: frontend            # frontend | backend | static | fullstack | mobile
+language: typescript
+framework: react              # framework name, or "none" for a bare/no-framework starter
+# Wizard slots this fragment can fill. A pure SPA that calls /api only makes sense PAIRED
+# with a backend, so it offers the `frontend` slot only (use the `react-static` fragment
+# for a standalone, backend-less site).
+slots:
+  - frontend
+defaultPort: 8080             # container port (PORT env + Service/Ingress target); wizard default
+ingressPath: /               # path when composed as a non-root component (a frontend owns "/")
+needsDB: false               # frontends never read DATABASE_URL
+buildType: container         # container | static | mobile-artifact (container = Kaniko image -> Deployment)
+dockerfile: Dockerfile       # path to the Dockerfile within skeleton/ (build context = skeleton root)
+healthPath: /healthz         # path the container serves for the chart's readiness/liveness probes
+# Frontend->backend wiring CONVENTION (load-bearing for the fan-out): a frontend fragment
+# ALWAYS calls the backend over the SAME origin under a relative `/api/...` URL (never a
+# hardcoded host). The platform ingress routes "/" -> this frontend and "/api" -> the
+# backend, so the two components compose without any cross-config. See src/App.tsx.
+notes: >-
+  Vite + React + TypeScript + Tailwind SPA served by hardened nginx (non-root, read-only
+  rootfs, pid/temp under /dev/shm). Talks to the backend via relative /api calls. Harvested
+  from the proven react-express template's frontend.

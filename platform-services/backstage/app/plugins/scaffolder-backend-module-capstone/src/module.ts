@@ -20,6 +20,7 @@ import { createSealSecretAction } from './actions/sealSecret';
 import { createRenderTenantAction } from './actions/renderTenant';
 import { createHarborOnboardAction } from './actions/harborOnboard';
 import { createEmitTenantClaimAction } from './actions/emitTenantClaim';
+import { createComposeProjectAction } from './actions/composeProject';
 
 export const capstoneScaffolderModule = createBackendModule({
   pluginId: 'scaffolder',
@@ -68,6 +69,11 @@ export const capstoneScaffolderModule = createBackendModule({
           // (ADR-031 §11 Phase 2) — see CROSSPLANE-CUTOVER.md. Registering it now is
           // inert (no template references it yet) and ships the capability.
           createEmitTenantClaimAction(),
+          // ADR-034 — capstone:compose-project: the unified "New Project" wizard's
+          // composition engine. Reads composable language fragments + the ONE shared
+          // .devops/.github contract and assembles the project repo (replaces the
+          // per-stack fetch-skeleton steps). Reads fragment trees over HTTP (urlReader).
+          createComposeProjectAction({ reader: urlReader }),
         );
       },
     });

@@ -1,0 +1,22 @@
+# fragment.yaml — see _fragments/frontend/react/fragment.yaml for the full contract notes
+# and ADR-034 for the architecture. This is the standalone static-site fragment.
+apiVersion: platform.capstone/fragment.v1
+id: react-static
+displayName: React static site (Vite + React Router, no backend)
+category: static             # a standalone SPA with NO data backend
+language: typescript
+framework: react
+# A static site is a complete project on its own (the only component), so it fills the
+# `single` slot. It is NOT offered as the `frontend` half of a frontend+backend project
+# (use the `react` fragment for that — it has the /api wiring).
+slots:
+  - single
+defaultPort: 8080
+ingressPath: /              # single static site owns "/"
+needsDB: false              # static sites never use a database
+buildType: static           # static = SPA built then served by an nginx container -> Deployment
+dockerfile: Dockerfile
+healthPath: /healthz
+notes: >-
+  Vite + React + React Router static SPA (client-side routing, nginx SPA fallback), served
+  by hardened nginx. No API, no DB. Harvested from the proven react-static template.

@@ -1,0 +1,35 @@
+# fragment.yaml — see _fragments/backend/express/fragment.yaml for the load-bearing
+# DB/healthz contract and ADR-034 for the architecture.
+#
+# Fullstack fragment: Nuxt 3 (Vue) — server-rendered pages + Nitro server API routes in
+# ONE deployable. Composed as a SINGLE component (slot `single`): the engine names it
+# `app` and routes ingress "/" to it (pages AND /api/* are served by the same process).
+apiVersion: platform.capstone/fragment.v1
+id: nuxt
+displayName: Nuxt 3 fullstack (Vue + Nitro API + MySQL)
+category: fullstack
+language: typescript
+framework: nuxt
+# Fullstack = one process serving the UI and its own API, so it only fills `single`.
+slots:
+  - single
+defaultPort: 8080
+# As a single component the engine forces the ingress path to "/"; this fullstack app
+# owns the whole origin (UI at /, its API under /api/*).
+ingressPath: /
+needsDB: true              # reads DATABASE_URL (mysql://...) — the wizard offers the DB question
+buildType: container
+dockerfile: Dockerfile
+healthPath: /healthz
+# FULLSTACK CONTRACT (mirrors the backend contract): the app MUST serve
+#   - GET /healthz  -> 200, DB-INDEPENDENT (the chart probes hit this; stays green with no DB)
+#   - its API under /api/... (server routes), reading the DB from the DATABASE_URL env
+#     (a standard mysql:// URI) and degrading cleanly (clear 503) when it is unset
+#     (M4 zero-config). NEVER hardcode creds. Listens on the PORT env (chart-set; default 8080).
+notes: >-
+  Nuxt 3 + Nitro (node-server) with Vue pages and server API routes. Data layer is Drizzle
+  ORM over mysql2, wired to DATABASE_URL exactly like the nextjs seed wires Prisma: a lazy
+  client that stays null when DATABASE_URL is unset so /healthz and the UI shell stay green
+  on a fresh repo, and the /api/items routes return a clear 503. Sample DB-backed page at
+  /items + GET/POST /api/items. Drizzle (pure JS) builds on node:alpine with no apt/openssl
+  bootstrap. Swap to Prisma/Knex if preferred — see migrations/README.md.

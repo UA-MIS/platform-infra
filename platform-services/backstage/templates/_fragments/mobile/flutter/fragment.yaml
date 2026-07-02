@@ -1,0 +1,39 @@
+# fragment.yaml — MOBILE FRAGMENT: cross-platform app (Flutter / Dart).
+#
+# Mobile is a DISTINCT, BUILD-ARTIFACT category (ADR-034 §D4): this fragment produces an
+# .apk (Android) and an .ipa (iOS) via a BUILD WORKFLOW (skeleton/.mobile-ci/build.yaml),
+# NOT a Kubernetes Deployment. There is NO Dockerfile and NO pod/Service/Ingress. The
+# compose engine, on seeing buildType: mobile-artifact, EXCLUDES this component from the
+# chart and the Kaniko build matrix, records it in components.yaml, and installs the
+# .mobile-ci/ workflow.
+#
+# A mobile project's BACKEND is a NORMAL backend fragment (express/fastapi/dotnet),
+# deployed the usual way; this app talks to it over the backend's PUBLIC ingress host
+# (set via --dart-define=API_BASE_URL=...). Always composed WITH a backend.
+apiVersion: platform.capstone/fragment.v1
+id: flutter
+displayName: Mobile app (Flutter / Dart, cross-platform .apk + .ipa)
+category: mobile
+language: dart
+framework: flutter
+slots:
+  - mobile                         # composed alongside a backend fragment (the API it calls)
+defaultPort: 0                     # N/A — a mobile app has no listening port
+ingressPath: ""                   # N/A — not exposed via ingress
+needsDB: false                    # the app has no DB; its BACKEND fragment may
+buildType: mobile-artifact         # -> NO Deployment; produces .apk/.ipa via skeleton/.mobile-ci/
+dockerfile: ""                     # NONE — mobile has no container; build workflow instead
+buildWorkflow: .mobile-ci/build.yaml   # path within skeleton/ to the artifact build workflow
+artifact: app-debug.apk            # primary produced artifact; iOS .ipa via signing (see notes)
+healthPath: ""                     # N/A
+notes: >-
+  Cross-platform Flutter app (Dart): a single screen that reads the backend API base URL
+  from config (lib/config.dart via String.fromEnvironment('API_BASE_URL'), set with
+  --dart-define) and calls GET {API_BASE_URL}/healthz on its backend fragment. The native
+  android/ + ios/ projects are GENERATED at build time with `flutter create .` (so the
+  fragment ships only lib/ + pubspec.yaml — no native dirs). BUILD PATHS: the Android DEBUG
+  .apk builds on `ubuntu-latest` (no macOS). The iOS path REQUIRES a macOS runner
+  (`macos-14`) — CI does `flutter build ios --no-codesign` for validation; a distributable
+  iOS .ipa needs `flutter build ipa` with Apple signing secrets, and a signed Android
+  release needs a keystore. The app is DISTRIBUTED to devices (TestFlight / Play /
+  internal), NOT hosted in the cluster. Its matching backend is a normal backend fragment.

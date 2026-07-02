@@ -1,0 +1,34 @@
+# components.yaml — declares the deployable components in THIS app repo (the
+# multi-component contract, platform.capstone/v1). This is the file that turns one
+# repo into N deployable apps (backend + frontend, or more) WITHOUT splitting into
+# separate repos.
+#
+# SINGLE source of truth for two consumers:
+#   - the CI build matrix — .devops/ci/resolve-components.sh reads this and emits one
+#     build per component (one image each), consumed by .github/workflows/build-and-push.yaml;
+#   - the kustomize chart — chart/base/{deployments,services,ingress}.yaml render ONE
+#     Deployment + ONE Service per component + ONE Ingress routing each `path` (the
+#     Scaffolder rendered them from this same list at create time).
+#
+# BACK-COMPAT: a SINGLE-component app (the default golden path, e.g. v1check) has NO
+# components.yaml at all — the platform treats its absence as one implicit component
+# { name: app, context: app, image: <appName>, port: <app-metadata port>, path: / },
+# so single-component repos are unchanged. This file exists ONLY in the
+# frontend-backend scaffold variant.
+#
+# EDITING (post-scaffold): adding/removing a component means editing BOTH this list
+# AND the chart (the chart is static rendered YAML — kustomize does not loop over this
+# file at deploy time). For the common backend+frontend case the scaffold already did
+# both. See .devops/README.md "Adding a component".
+apiVersion: platform.capstone/v1
+components:
+{%- for c in values.components %}
+  # ${{ c.kind }} component
+  - name: ${{ c.name }}              # DNS-1123 label: selector (app.kubernetes.io/component) + workload-name suffix
+    kind: ${{ c.kind }}             # frontend | backend (frontend owns the "/" ingress root)
+    context: ${{ c.context }}          # build-context dir (repo-relative)
+    dockerfile: ${{ c.dockerfile }}      # Dockerfile path, relative to `context`
+    image: ${{ values.appName }}-${{ c.name }}   # image REPO in the team Harbor project; full ref = <registry>/<image>:<tag>
+    port: ${{ c.port }}             # container port (PORT env + Service targetPort + Ingress backend port)
+    path: ${{ c.path }}              # Ingress path routed to this component (longest-prefix wins)
+{%- endfor %}

@@ -1,0 +1,85 @@
+# Workload Deployment for the sample app.
+#
+# Image: the `image:` field is the GitOps image-tag SEAM (§4.1). The base pins a
+# placeholder; each overlay sets the registry/tag via a kustomize `images:`
+# override driven by promotion.yaml (dev=main digest, staging=tag, prod=gated tag).
+#
+# Secret: APP_SECRET is sourced from the in-namespace Secret `${{ values.appName }}-secret`,
+# which the External Secrets Operator materializes from Vault via the per-env
+# app-secret ExternalSecret (ADR-030 B1). The app reads it and proves the read on "/".
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${{ values.appName }}
+  labels:
+    app.kubernetes.io/name: ${{ values.appName }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ${{ values.appName }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ${{ values.appName }}
+    spec:
+      serviceAccountName: ${{ values.appName }}
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          # SEAM: overlays override registry + tag via kustomize images:.
+          image: ${{ values.appName }}:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            # Container port — single source is app-metadata.yaml (port: 8080).
+            - name: PORT
+              value: "8080"
+            # Proof-of-secret-path: value injected from the ESO-materialized Secret.
+            # optional: true makes this the SAME base for two cases (M4 zero-config):
+            #   - APP_SECRET set in Vault -> the app-secret ExternalSecret materializes
+            #     ${{ values.appName }}-secret, APP_SECRET loads, the secret path is demonstrated;
+            #   - a freshly-scaffolded repo (nothing in Vault) -> the app-secret
+            #     ExternalSecret (deletionPolicy: Delete) creates no Secret, the env is
+            #     simply unset, the pod still starts (no CreateContainerConfigError), so a
+            #     new app deploys with ZERO manual secret setup. Teams add secrets via The
+            #     Process "Secrets" tab only when they need one.
+            - name: APP_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: ${{ values.appName }}-secret
+                  key: app-secret
+                  optional: true
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL

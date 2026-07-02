@@ -1,0 +1,6 @@
+.git
+.github
+*.log
+.DS_Store
+Dockerfile
+.dockerignore

@@ -1,0 +1,39 @@
+# vault-ca ConfigMap for the `vault-push` SecretStore's caProvider (this same config/
+# dir, vault-push-secretstore.yaml). ESO needs the Vault server CA to build the client
+# that WRITES the per-tenant Harbor-robot creds into Vault; without it the SecretStore
+# reports Ready=False / InvalidProviderConfig ("unable to create client") and the
+# crossplane-runtime app goes Degraded.
+#
+# This mirrors the per-namespace vault-ca pattern the platform already uses elsewhere
+# (backstage ns, and the per-tenant Composition drop): key ca.crt = the PUBLIC Vault CA
+# PEM, read from the `vault-server-tls` secret (ns vault). It is the SAME platform CA
+# committed at arc/platform-ca-configmap.yaml. The CA cert is PUBLIC — NOT secret
+# material — so it is git-safe.
+#
+# ⚠ COMMITTED COPY — if the Vault server CA is rotated (vault-server-tls regenerated)
+#   this goes stale and the SecretStore breaks until re-synced. Backstage/tenant copies
+#   are dropped imperatively via `make vault-onboard`/`vault-ca-manifest`; this static
+#   embed is the declarative equivalent so the SecretStore's CA syncs with the app.
+#   The auto-distributing fix (cert-manager trust-manager Bundle) is the post-demo TODO.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vault-ca
+  namespace: crossplane-system
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"   # lands with the vault-push SecretStore plumbing
+data:
+  ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    MIIBgjCCASigAwIBAgIUAd3DM9aqHXUp1CnmoNALdv4X4mcwCgYIKoZIzj0EAwIw
+    HzEdMBsGA1UEAxMUY2Fwc3RvbmUtcGxhdGZvcm0tY2EwHhcNMjYwNjE4MDMwNTM4
+    WhcNMzYwNjE1MDMwNTM4WjAfMR0wGwYDVQQDExRjYXBzdG9uZS1wbGF0Zm9ybS1j
+    YTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABKkY0iZxKzIGcXu113AEsQwTVWVg
+    oK1KWF6iIg5QpV/1FXgklWR6np7CEqBnF7AQDmF4F2bY6IotsXHYmumxATajQjBA
+    MA4GA1UdDwEB/wQEAwICpDAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQWBBS0asdw
+    cA3QqHVfPkvpXvl9uA9kWjAKBggqhkjOPQQDAgNIADBFAiBagX6h2+w0L4Z7+IYZ
+    i91CA/MNPWHfVR4w3tJ7GoayzwIhAL9aDIRHoM60FGhpF7b9JElBBuaJ93eRhCR2
+    fbbGD1Wk
+    -----END CERTIFICATE-----

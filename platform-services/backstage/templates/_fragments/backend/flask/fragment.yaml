@@ -1,0 +1,26 @@
+# fragment.yaml — see _fragments/backend/express/fragment.yaml for the BACKEND CONTRACT
+# and ADR-034 for the architecture. Backend fragment: Python / Flask on MySQL.
+apiVersion: platform.capstone/fragment.v1
+id: flask
+displayName: Python / Flask API (SQLAlchemy + MySQL)
+category: backend
+language: python
+framework: flask
+slots:
+  - backend
+  - single
+defaultPort: 8080
+ingressPath: /api
+needsDB: true
+buildType: container
+dockerfile: Dockerfile
+healthPath: /healthz
+# BACKEND CONTRACT (load-bearing for the fan-out): a backend fragment MUST serve
+#   - GET /healthz  -> 200, DB-INDEPENDENT (the chart probes hit this; stays green with no DB)
+#   - its API under /api/... (so the ingress /api route reaches it in a frontend+backend app)
+# and MUST read its DB connection from the DATABASE_URL env (a standard mysql:// URI),
+# degrading cleanly (clear 503) when it is unset (M4 zero-config). NEVER hardcode creds.
+notes: >-
+  Flask app-factory + SQLAlchemy 2.x core + PyMySQL JSON API with a sample /api/items CRUD,
+  served by gunicorn. Reads DATABASE_URL (normalizes mysql:// -> mysql+pymysql://); /healthz
+  is DB-independent and the data routes return 503 until DATABASE_URL is set.

@@ -1,0 +1,35 @@
+# catalog-info.yaml — registers this app in The Process software catalog (P5).
+# catalog:register (the Scaffolder's last step) points here; The Process catalog then
+# tracks the component, its owner team, and its TechDocs.
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: ${{ values.appName }}
+  description: ${{ values.description }}
+  annotations:
+    # TechDocs built from the in-repo mkdocs.yml (techdocs-ref: dir = this repo).
+    backstage.io/techdocs-ref: dir:.
+    # Link the catalog entity back to its source for the "View Source" action.
+    github.com/project-slug: UA-MIS/${{ values.appName }}
+    # Readable cohort name (org convention "Capstone {Season} {Year}"). The machine
+    # slug is the tag below; this annotation is the human-facing display.
+    capstone.uamishub.com/cohort: ${{ values.semesterDisplay }}
+  tags:
+    - capstone
+    # Cohort SLUG (lowercase, e.g. 2026-fall) — catalog tags forbid spaces/uppercase,
+    # so this is the slug; the readable name is the cohort annotation above.
+    - ${{ values.semester }}
+  links:
+    # Dev ingress host — MUST match the .devops dev overlay's ingress host
+    # (<app>.dev.capstone.uamishub.com; no team segment — appName is globally
+    # unique). The domain is the live platform domain (capstone.uamishub.com); it is
+    # rendered here so the catalog link is a valid URL (a literal <platform-domain>
+    # placeholder fails catalog:register's URL policy check).
+    - title: App (dev)
+      url: https://${{ values.appName }}.dev.capstone.uamishub.com
+spec:
+  type: service
+  lifecycle: experimental
+  # Owner = the team's GitHub Team / AppProject / OIDC group (the canonical <name>
+  # slug, D-026). Resolves to a Group entity ingested from the UA-MIS org.
+  owner: group:default/${{ values.team }}

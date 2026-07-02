@@ -1,0 +1,40 @@
+# fragment.yaml — MOBILE FRAGMENT: native Android app (Kotlin / Jetpack Compose).
+#
+# Mobile is a DISTINCT, BUILD-ARTIFACT category (ADR-034 §D4): this fragment produces an
+# .apk via a BUILD WORKFLOW (skeleton/.mobile-ci/build.yaml), NOT a Kubernetes Deployment.
+# There is NO Dockerfile and NO pod/Service/Ingress. The compose engine, on seeing
+# buildType: mobile-artifact, EXCLUDES this component from the chart and the Kaniko build
+# matrix, records it in components.yaml, and installs the .mobile-ci/ workflow.
+#
+# A mobile project's BACKEND is a NORMAL backend fragment (express/fastapi/dotnet),
+# deployed the usual way; this app talks to it over the backend's PUBLIC ingress host
+# (set via the apiBaseUrl Gradle property -> BuildConfig.API_BASE_URL). Always composed
+# WITH a backend.
+apiVersion: platform.capstone/fragment.v1
+id: android-kotlin
+displayName: Android app (Kotlin / Jetpack Compose, .apk)
+category: mobile
+language: kotlin
+framework: jetpack-compose
+slots:
+  - mobile                         # composed alongside a backend fragment (the API it calls)
+defaultPort: 0                     # N/A — a mobile app has no listening port
+ingressPath: ""                   # N/A — not exposed via ingress
+needsDB: false                    # the app has no DB; its BACKEND fragment may
+buildType: mobile-artifact         # -> NO Deployment; produces .apk via skeleton/.mobile-ci/
+dockerfile: ""                     # NONE — mobile has no container; build workflow instead
+buildWorkflow: .mobile-ci/build.yaml   # path within skeleton/ to the artifact build workflow
+artifact: app-debug.apk            # the produced artifact (documentation)
+healthPath: ""                     # N/A
+notes: >-
+  Native Android app: Kotlin + Jetpack Compose + Material 3, a single screen that reads
+  the backend API base URL from BuildConfig.API_BASE_URL (set via the `apiBaseUrl` Gradle
+  property, default in app/build.gradle.kts) and calls GET {API_BASE_URL}/healthz on its
+  backend fragment. Built with Gradle on a Linux runner (no macOS needed). RUNNER PREREQ:
+  GitHub-hosted `ubuntu-latest` + a JDK (the workflow installs Temurin 17 and Gradle via
+  gradle/actions/setup-gradle, so NO checked-in Gradle wrapper binary). CI produces a
+  DEBUG .apk (auto-signed with the debug keystore) for build validation; a DISTRIBUTABLE
+  release .apk / .aab needs a release signing keystore wired in as repo secrets, then
+  upload to the Play Console / internal distribution. The app is DISTRIBUTED to devices
+  (Play / internal), NOT hosted in the cluster. Its matching backend is a normal backend
+  fragment.

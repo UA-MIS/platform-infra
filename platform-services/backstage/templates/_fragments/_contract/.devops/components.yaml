@@ -1,0 +1,36 @@
+# components.yaml — declares the deployable components in THIS app repo (the
+# multi-component contract, platform.capstone/v1). This is the file that turns one
+# repo into N deployable apps (backend + frontend, or one single app) WITHOUT splitting
+# into separate repos.
+#
+# Unlike the legacy hand-written skeletons, the UNIFIED "New Project" wizard ALWAYS emits
+# this file — even for a single-component app (a 1-element list, name: app, path: /). The
+# compose engine (capstone:compose-project) renders it from the chosen fragment(s)'
+# fragment.yaml metadata, so it cannot drift from the wizard choices. See ADR-034.
+#
+# SINGLE source of truth for two consumers:
+#   - the CI build matrix — .devops/ci/resolve-components.sh reads this and emits one
+#     build per component (one image each), consumed by .github/workflows/build-and-push.yaml;
+#   - the kustomize chart — chart/base/{deployments,services,ingress}.yaml render ONE
+#     Deployment + ONE Service per component + ONE Ingress routing each `path`.
+#
+# FIELDS per component: name/kind/context/dockerfile/image/port/path/needsDb/buildType.
+#   needsDb   — the component reads DATABASE_URL (the chart envs it, optional; auto-DB
+#               provisions it when the tenant `database: mysql`).
+#   buildType — container | static | mobile-artifact. A `mobile-artifact` component is a
+#               build product (.ipa/.apk), NOT a k8s workload: the chart loops SKIP it
+#               (no Deployment/Service/Ingress); it is built by its own mobile workflow.
+apiVersion: platform.capstone/v1
+components:
+{%- for c in values.components %}
+  # ${{ c.kind }} component (buildType: ${{ c.buildType }})
+  - name: ${{ c.name }}              # DNS-1123 label: selector (app.kubernetes.io/component) + workload-name suffix
+    kind: ${{ c.kind }}             # frontend | backend (descriptive; ingress routing is `path`)
+    context: ${{ c.context }}          # build-context dir (repo-relative)
+    dockerfile: ${{ c.dockerfile }}      # Dockerfile path, relative to `context`
+    image: ${{ values.appName }}-${{ c.name }}   # image REPO in the team Harbor project; full ref = <registry>/<image>:<tag>
+    port: ${{ c.port }}             # container port (PORT env + Service targetPort + Ingress backend port)
+    path: ${{ c.path }}              # Ingress path routed to this component (longest-prefix wins)
+    needsDb: ${{ c.needsDb }}          # reads DATABASE_URL (chart envs it; auto-DB provisions when database: mysql)
+    buildType: ${{ c.buildType }}      # container | static | mobile-artifact (mobile = no k8s workload)
+{%- endfor %}
