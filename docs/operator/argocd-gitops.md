@@ -193,3 +193,97 @@ make set-repo-base GIT_BASE_URL=https://github.com/UA-MIS    # rewrite (idempote
 ```
 
 See `bootstrap/REPO-SEAM.md`. In normal operation you never touch this.
+
+---
+
+## Git webhook — instant sync (skip the ~3-min poll)
+
+By default ArgoCD polls `UA-MIS/platform-infra` every ~3 min
+(`timeout.reconciliation`), so a merged PR can sit un-synced for minutes and you
+end up hammering **Refresh** in the UI. A **Git webhook** makes GitHub POST to
+ArgoCD the instant you push, and ArgoCD refreshes the affected Applications
+immediately. Polling stays on as a backstop — the webhook only *accelerates* it.
+
+**How it's wired:** ArgoCD's webhook receiver lives at `POST /api/webhook` on
+`argocd-server` (unauthenticated by design — it verifies the GitHub HMAC instead
+of a login session, so it is **independent of the Dex/OIDC UI SSO**). The shared
+HMAC secret is the key `webhook.github.secret` inside the install-managed
+`argocd-secret`. We inject it with a **patch** SealedSecret
+(`platform-services/argocd-config/sealedsecret-webhook.yaml`) so only that one key
+is added and ArgoCD's own `tls.crt` / `server.secretkey` / `admin.password` in
+`argocd-secret` are left untouched.
+
+**Reachability (verified read-only, 2026-07-02):** the endpoint is publicly
+POST-able through the Cloudflare Tunnel and is **not** gated by edge auth. The
+tunnel is a single wildcard route `*.capstone.uamishub.com → Traefik:80`, the
+`argocd-server` Ingress serves all paths (`/` Prefix, no path filter), and a live
+probe returned `GET /api/webhook → 400` and `POST` ping `→ 200` **from
+argocd-server itself** (an ArgoCD response, not a Cloudflare Access login page).
+No ingress exception is required.
+> The only thing not visible from git is a possible **Cloudflare Access (Zero
+> Trust)** application on the dashboard in front of the argocd host. The live
+> probe above returning an ArgoCD response (not an Access challenge) confirms none
+> is active today. If one is ever added, add a **bypass/service-token policy for
+> the path `/api/webhook`** or GitHub deliveries will 302 to the Access login.
+
+### Step 1 — reseal the shared secret (operator, fish shell)
+
+The committed `sealedsecret-webhook.yaml` ships a **placeholder** ciphertext; it
+must be resealed to a real random value before merge. This adds one key to
+`argocd-secret` and is non-destructive if it ever fails to decrypt (no key is
+written, ArgoCD just keeps polling).
+
+```fish
+# 1. Generate the shared secret and KEEP it — you paste the same value into GitHub in Step 2.
+set WEBHOOK_SECRET (openssl rand -hex 24)
+echo "GitHub webhook secret (save this): $WEBHOOK_SECRET"
+
+# 2. Seal it. The input secret name MUST equal the SealedSecret CR name
+#    (argocd-webhook-github) for the default strict scope; the TARGET (argocd-secret)
+#    lives in the file's template and is unaffected by this name.
+kubectl create secret generic argocd-webhook-github \
+    --namespace argocd \
+    --from-literal=webhook.github.secret=$WEBHOOK_SECRET \
+    --dry-run=client -o yaml \
+  | kubeseal --controller-namespace kube-system --controller-name sealed-secrets-controller \
+      --format yaml
+
+set -e WEBHOOK_SECRET      # clear the plaintext from the session AFTER Step 2
+```
+
+Copy the emitted `encryptedData."webhook.github.secret"` value and paste it over
+the `PLACEHOLDER_RESEAL_PER_RUNBOOK...` string in
+`platform-services/argocd-config/sealedsecret-webhook.yaml` (replace **only** that
+one value; leave the `sealedsecrets.bitnami.com/patch: "true"` annotation and the
+`argocd-secret` template target as-is). Commit on the branch + PR — never to main.
+
+> Do **not** run `kubeseal --merge-into` on the committed file: it reparses and
+> reformats the YAML, stripping the header comments that explain why `patch` is
+> load-bearing. Replace the single value by hand instead.
+
+### Step 2 — add the webhook in GitHub
+
+On `github.com/UA-MIS/platform-infra` → **Settings → Webhooks → Add webhook**:
+
+| Field | Value |
+|---|---|
+| Payload URL | `https://argocd.capstone.uamishub.com/api/webhook` |
+| Content type | `application/json` |
+| Secret | the `$WEBHOOK_SECRET` value from Step 1 |
+| SSL verification | **Enabled** (Cloudflare Universal SSL is publicly trusted) |
+| Events | **Just the `push` event** |
+| Active | ✔ |
+
+### Step 3 — verify (after the reseal PR merges and syncs)
+
+```fish
+# The key landed in argocd-secret WITHOUT wiping the install-owned keys:
+kubectl -n argocd get secret argocd-secret \
+  -o jsonpath='{.data.webhook\.github\.secret}{"\n"}{.data.server\.secretkey}{"\n"}{.data.tls\.crt}{"\n"}' \
+  | string collect   # all three must be non-empty
+```
+
+Then push a trivial commit and confirm the GitHub webhook's **Recent Deliveries**
+shows a `200`, and the target Application refreshes in ArgoCD within seconds (no
+manual Refresh). A `403`/`401` delivery means the `webhook.github.secret` in the
+cluster ≠ the secret typed into GitHub — reseal and re-enter the same value.

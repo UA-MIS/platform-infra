@@ -31,6 +31,7 @@ kind: Kustomization
 resources:
   - sealedsecret.yaml
   - sealedsecret-repo-creds.yaml   # org-wide private-repo creds (GitHub App) — placeholder ciphertext, reseal per header runbook
+  - sealedsecret-webhook.yaml      # patches webhook.github.secret into argocd-secret (Git webhook) — PLACEHOLDER, reseal per deployment.md
   - argocd-cm.yaml
   - argocd-rbac-cm.yaml
   - ingress.yaml
