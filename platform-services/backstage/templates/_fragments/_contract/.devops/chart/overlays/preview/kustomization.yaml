@@ -24,6 +24,14 @@ resources:
   # base is optional + deletionPolicy Delete so a fresh repo with no Vault value still
   # deploys — M4 zero-config).
   - app-secret.externalsecret.yaml
+{%- if values.database == 'mysql' %}
+  # Auto-DB DATABASE_URL ExternalSecret (ADR-033 / #146). Present ONLY for tenant
+  # database: mysql — assembles the mysql:// DSN from the Crossplane-provisioned parts in
+  # Vault (tenants/${{ values.team }}/<env>/database) into the Secret `${{ values.appName }}-db`,
+  # which the base Deployment envs into DATABASE_URL. A bring-your-own / postgres / none
+  # stack omits this file entirely (the DATABASE_URL, if any, rides app-secret instead).
+  - database.externalsecret.yaml
+{%- endif %}
   # harbor-pull image-pull cred (SA imagePullSecrets:[harbor-pull], #C3) is NOT shipped by
   # this overlay. It is owned SOLELY by the platform operator's tenant directory
   # (platform-infra/tenants/<team>/harbor-pull-<env>-sealed.yaml, synced by the tenant-<team>
