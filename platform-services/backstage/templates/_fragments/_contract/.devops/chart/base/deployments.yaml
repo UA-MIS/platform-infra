@@ -67,18 +67,25 @@ spec:
                   key: app-secret
                   optional: true
 {%- if c.needsDb %}
-            # DATABASE_URL — this component's MySQL connection string. Sourced from the SAME
-            # per-env Secret `<appName>-secret` (one ExternalSecret/Secret per env, Vault
-            # object tenants/<team>/<env>/app) under the key `DATABASE_URL`. Mirrors the
-            # APP_SECRET idiom: optional:true so a fresh repo with nothing in Vault still
-            # starts (the backend degrades to a clear "DATABASE_URL not set" error on the
-            # data routes, /healthz stays green — M4 zero-config). Add the value via The
-            # Process "Secrets" tab (key = DATABASE_URL); NEVER commit creds to git. This
-            # env is rendered ONLY for components that declare needsDb: true.
+            # DATABASE_URL — this component's MySQL connection string. The SOURCE Secret is
+            # chosen ONCE here (base) by the tenant's DB mode (ADR-033):
+            #   - database: mysql (auto-DB)  -> `<appName>-db`, the assembled DSN that the
+            #     per-env database.externalsecret.yaml builds from the Crossplane-provisioned
+            #     parts in Vault (tenants/<team>/<env>/database);
+            #   - bring-your-own / postgres  -> `<appName>-secret` key DATABASE_URL, typed by
+            #     the team via The Process "Secrets" tab (Vault object tenants/<team>/<env>/app).
+            # Either way optional:true so a fresh repo with nothing in Vault still starts (the
+            # backend degrades to a clear "DATABASE_URL not set" error on the data routes,
+            # /healthz stays green — M4 zero-config). NEVER commit creds to git. This env is
+            # rendered ONLY for components that declare needsDb: true.
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: ${{ values.appName }}-secret
+{%- if values.database == 'mysql' %}
+                  name: ${{ values.appName }}-db       # auto-DB: DSN assembled by database.externalsecret.yaml (ADR-033)
+{%- else %}
+                  name: ${{ values.appName }}-secret   # bring-your-own: DATABASE_URL set via the Secrets tab
+{%- endif %}
                   key: DATABASE_URL
                   optional: true
 {%- endif %}
