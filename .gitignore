@@ -1,0 +1,3 @@
+# Python bytecode from the wizard compose harnesses (_fragments/_tools/*.py).
+__pycache__/
+*.pyc

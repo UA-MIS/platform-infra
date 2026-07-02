@@ -1,0 +1,73 @@
+# ============================================================================
+# wizard-green-check.yaml — the GREEN-OUT-OF-BOX gate for the unified "New Project"
+# wizard (ADR-035 §B). Guarantees that EVERY wizard output — every fragment, every
+# layout, blank/BYO — scaffolds a repo whose FIRST CI run is GREEN, so a student never
+# lands on a red-out-of-box project.
+#
+# For every composable fragment under _fragments/, the gate replays a scaffold offline
+# (green-check.py, via compose_lib — the SAME planner + render the live
+# capstone:compose-project action uses, so NO drift) and asserts the composed repo is
+# buildable exactly as the tenant CI (build-and-push.yaml) would build it:
+#   (a) every deployable component ships its build file — <context>/<Dockerfile> for a
+#       container/static component (Kaniko), or <targetDir>/<buildWorkflow> for a mobile
+#       component; and
+#   (b) `kustomize build` succeeds on all four overlays (dev/staging/prod/preview).
+# A fragment that would scaffold RED fails this check and blocks the merge.
+#
+# HERMETIC + SECRETLESS: pure validation (no Harbor push, no cluster, no tokens), so this
+# runs on a GitHub-hosted ubuntu runner (which ships node + kubectl) rather than the
+# secret-bearing self-hosted ARC runners the image/tenant builds use. A fresh fragment is
+# DISCOVERED from disk, so this gate covers new stacks (e.g. blank/bring-your-own) with no
+# workflow edit.
+# ============================================================================
+name: wizard-green-check
+
+on:
+  pull_request:
+    paths:
+      - "platform-services/backstage/templates/_fragments/**"
+      - "platform-services/backstage/app/plugins/scaffolder-backend-module-capstone/src/actions/composePlan.mjs"
+      - ".github/workflows/wizard-green-check.yaml"
+  push:
+    branches: [main]
+    paths:
+      - "platform-services/backstage/templates/_fragments/**"
+      - "platform-services/backstage/app/plugins/scaffolder-backend-module-capstone/src/actions/composePlan.mjs"
+      - ".github/workflows/wizard-green-check.yaml"
+
+# Least privilege: this gate only reads the repo (no push, no packages, no id-token).
+permissions:
+  contents: read
+
+concurrency:
+  group: wizard-green-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  green-check:
+    runs-on: ubuntu-latest
+    env:
+      TOOLS_DIR: platform-services/backstage/templates/_fragments/_tools
+    steps:
+      - name: Checkout (fragments + compose engine + harness)
+        # Digest-pinned (SEC, matches tenant-build.yaml): sha = actions/checkout v4.3.1.
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Tooling versions (node + kubectl/kustomize ship on the runner)
+        run: |
+          node --version
+          kubectl version --client
+
+      - name: Python render deps (pyyaml + jinja2) in an isolated venv
+        # A venv sidesteps PEP-668 (externally-managed system python) with no extra action.
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet pyyaml jinja2
+
+      - name: Harness self-tests (prove the gate itself catches a red scaffold)
+        working-directory: ${{ env.TOOLS_DIR }}
+        run: "$RUNNER_TEMP/venv/bin/python green-check.test.py"
+
+      - name: Green-out-of-box check — every fragment must scaffold GREEN
+        working-directory: ${{ env.TOOLS_DIR }}
+        run: "$RUNNER_TEMP/venv/bin/python green-check.py"
