@@ -6,7 +6,13 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert');
-const { planComposition } = require('./composePlan');
+// composePlan is now native ESM (composePlan.mjs — see its header for why the bundle needs it).
+// A .cjs file cannot `require()` an ESM module, so load it once via dynamic import() in a
+// root before() hook; every test below reads the populated `planComposition`.
+let planComposition;
+test.before(async () => {
+  ({ planComposition } = await import('./composePlan.mjs'));
+});
 
 const react = { id: 'react', category: 'frontend', framework: 'react', slots: ['frontend'], defaultPort: 8080, ingressPath: '/', needsDB: false, buildType: 'container', dockerfile: 'Dockerfile' };
 const reactStatic = { id: 'react-static', category: 'static', slots: ['single'], defaultPort: 8080, ingressPath: '/', needsDB: false, buildType: 'static', dockerfile: 'Dockerfile' };

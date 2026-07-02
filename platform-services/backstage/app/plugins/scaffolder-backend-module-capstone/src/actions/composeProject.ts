@@ -6,7 +6,7 @@
  * WHAT IT DOES (one action replaces the per-stack fetch-skeleton steps):
  *   1. reads each chosen fragment's fragment.yaml metadata (load-bearing — this is what
  *      makes the fan-out work: drop a fragment dir + fragment.yaml and it just composes);
- *   2. asks the PURE planner (composePlan.js — the SAME module the offline dry-render +
+ *   2. asks the PURE planner (composePlan.mjs — the SAME module the offline dry-render +
  *      unit tests use, so there is no drift) for the component model + DB resolution;
  *   3. renders each chosen fragment's skeleton/ into its component dir (app/ for single,
  *      frontend/+backend/ for frontend+backend, backend/+mobile/ for a mobile project);
@@ -29,7 +29,9 @@ import fs from 'fs-extra';
 import nunjucks from 'nunjucks';
 import { parse as parseYaml } from 'yaml';
 // The PURE planner — shared with the dry-render harness + node unit tests (no drift).
-import { planComposition, type FragmentMeta, type ComposePlan } from './composePlan';
+// Imported from the .mjs (native ESM) so it binds into the rollup backend bundle; see the
+// composePlan.mjs header for why a CommonJS planner cannot be bundled here.
+import { planComposition, type FragmentMeta, type ComposePlan } from './composePlan.mjs';
 
 const SLUG = /^[a-z]([-a-z0-9]*[a-z0-9])?$/;
 const APPNAME = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;

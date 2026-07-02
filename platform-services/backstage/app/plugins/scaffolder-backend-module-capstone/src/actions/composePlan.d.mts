@@ -1,4 +1,4 @@
-/* Type declarations for the pure JS planner composePlan.js (shared, no-drift core). */
+/* Type declarations for the pure ESM planner composePlan.mjs (shared, no-drift core). */
 export interface FragmentMeta {
   id: string;
   displayName?: string;
