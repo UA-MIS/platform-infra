@@ -1,0 +1,95 @@
+# Workload Deployments — ONE per component in .devops/components.yaml (this file is a
+# nunjucks loop the Scaffolder expanded at create time; each component yields one
+# Deployment doc separated by `---`).
+#
+# Image: each container's `image:` is the GitOps image-tag SEAM (§4.1). The base pins
+# a per-component placeholder `<appName>-<component>:latest`; each overlay sets the
+# registry/tag via a kustomize `images:` override (one entry per component) driven by
+# promotion.yaml + the CI bump (dev=main git-describe, staging/prod=semver, preview=pull-<sha>).
+#
+# Secret: APP_SECRET is sourced from the in-namespace Secret `<appName>-secret`, which
+# the External Secrets Operator materializes from Vault (ADR-030 B1). ALL components
+# share the one per-env ExternalSecret/Secret (one Vault object tenants/<team>/<env>/app),
+# matching the M3 Secrets-tab contract — the same `optional:true` zero-config behaviour
+# as the single-component chart.
+#
+# Selectors: each Deployment selects ONLY its own pods via app.kubernetes.io/component,
+# so the N Deployments/Services never cross-bind.
+{%- for c in values.components %}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${{ values.appName }}-${{ c.name }}
+  labels:
+    app.kubernetes.io/name: ${{ values.appName }}
+    app.kubernetes.io/component: ${{ c.name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ${{ values.appName }}
+      app.kubernetes.io/component: ${{ c.name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ${{ values.appName }}
+        app.kubernetes.io/component: ${{ c.name }}
+    spec:
+      serviceAccountName: ${{ values.appName }}
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ${{ c.name }}
+          # SEAM: overlays override registry + tag via kustomize images: (entry name
+          # = `<appName>-<component>`, matching .devops/components.yaml `image`).
+          image: ${{ values.appName }}-${{ c.name }}:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: ${{ c.port }}
+          env:
+            # Container port — single source is this component's `port` in components.yaml.
+            - name: PORT
+              value: "${{ c.port }}"
+            # Proof-of-secret-path; optional + deletionPolicy Delete on the ExternalSecret
+            # means a fresh repo with nothing in Vault still starts (M4 zero-config).
+            - name: APP_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: ${{ values.appName }}-secret
+                  key: app-secret
+                  optional: true
+          # Probes hit the pod DIRECTLY (not via the Ingress), so every component
+          # serves /healthz at the container root regardless of its ingress `path`.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+{%- endfor %}

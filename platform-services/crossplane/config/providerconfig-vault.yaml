@@ -22,6 +22,15 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: "2"   # vault.upbound.io CRD is installed by provider-vault (wave 0)
 spec:
+  # REQUIRED (CRD spec.required=[address]): the origin URL of the in-cluster Vault
+  # server — scheme + host + port, no path. Without this the ProviderConfig is
+  # rejected at admission (`spec.address: Required value`) and NEVER lands, so
+  # provider-vault has no usable config and the Composition's Vault Policy +
+  # AuthBackendRole can't reconcile. This routes to the Vault active pod via the
+  # `vault` Service (vault.vault.svc:8200). The token lives in the credentials
+  # Secret below; `address` is a separate top-level field (it is NOT read from the
+  # credentials JSON), which is why it must be set here explicitly.
+  address: https://vault.vault.svc.cluster.local:8200
   credentials:
     source: Secret
     secretRef:

@@ -1,0 +1,8 @@
+# Go build output
+/app/app
+*.test
+
+# Editor / OS cruft
+.DS_Store
+.idea/
+.vscode/
