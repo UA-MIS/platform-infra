@@ -7,18 +7,16 @@
 # server so the very first CI build and deploy are GREEN before the student writes a line;
 # they then swap in their own app (any language) + their own Dockerfile incrementally.
 #
-# CATEGORY NOTE (ADR-035 reconciliation): ADR-035 §D4 names a NEW `blank` category, but the
-# compose engine's VALID_CATEGORIES (composePlan.mjs) does not include `blank`, so a live
-# scaffold would fail validation even though this is meant to be a data-only, no-image-rebuild
-# fragment. This fragment therefore uses the engine-accepted `fullstack` category — the exact
-# structural analog of the other single-slot whole-app fragments (sveltekit, nuxt): fills the
-# `single` slot, owns "/", buildType container. Behaviour is identical to a `blank` category
-# (kind: backend); only the taxonomy label differs. See the PR description for the open
-# reconciliation point (add `blank` to the engine in the D6 image rebuild, or keep this).
+# CATEGORY: `blank` is a real compose-engine category (composePlan.mjs CATEGORY_KIND +
+# VALID_CATEGORIES map blank -> kind backend). ADR-035 §D4 called for it AND said "no engine
+# change" — the latter was a design-doc slip (the engine fail-closes on unknown categories), so
+# the engine addition ships in the SAME already-mandatory Backstage image rebuild as the wizard
+# convergence (ADR-035 §E/D6, with #186 emit-claim `database` + #190/commit-to-main). This
+# fragment is a single-slot, container-built placeholder that owns "/" like a backend.
 apiVersion: platform.capstone/fragment.v1
 id: bring-your-own
 displayName: Blank / bring-your-own-code (green placeholder + Dockerfile)
-category: fullstack
+category: blank
 language: none              # no language assumed — the placeholder is throwaway; bring any
 framework: none            # bring-your-own — no framework
 # A blank project is a complete self-contained app (the only component), so it fills the
