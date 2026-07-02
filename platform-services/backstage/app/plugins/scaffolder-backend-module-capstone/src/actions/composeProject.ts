@@ -16,7 +16,7 @@
  *   5. sets the tenant `database` flag (none|mysql) from the wizard DB choice + needsDB.
  *
  * Rendering matches Backstage fetch:template: nunjucks with the ${{ }} variable syntax and a
- * `values` namespace; the .github/** + .devops/ci/** (+ **/.mobile-ci/**) subtrees are
+ * `values` namespace; the .github, .devops/ci (+ any .mobile-ci) subtrees are
  * shipped VERBATIM (the copyWithoutTemplating contract — they carry ${{ github.* }} / ${VAR}).
  *
  * This action only WRITES the workspace; the downstream publish/register/harbor-onboard/
