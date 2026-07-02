@@ -26,7 +26,6 @@ import { resolveSafeChildPath } from '@backstage/backend-plugin-api';
 import type { UrlReaderService, LoggerService } from '@backstage/backend-plugin-api';
 import { createTemplateAction } from '@backstage/plugin-scaffolder-node';
 import fs from 'fs-extra';
-import path from 'path';
 import nunjucks from 'nunjucks';
 import { parse as parseYaml } from 'yaml';
 // The PURE planner — shared with the dry-render harness + node unit tests (no drift).
