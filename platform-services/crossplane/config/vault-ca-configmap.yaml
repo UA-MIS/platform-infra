@@ -1,8 +1,13 @@
-# vault-ca ConfigMap for the `vault-push` SecretStore's caProvider (this same config/
-# dir, vault-push-secretstore.yaml). ESO needs the Vault server CA to build the client
-# that WRITES the per-tenant Harbor-robot creds into Vault; without it the SecretStore
-# reports Ready=False / InvalidProviderConfig ("unable to create client") and the
-# crossplane-runtime app goes Degraded.
+# vault-ca ConfigMap — the PUBLIC Vault server CA PEM (git-safe). TWO consumers:
+#   1. The `vault-push` SecretStore's caProvider (vault-push-secretstore.yaml, wave 2).
+#      ESO needs it to build the client that WRITES per-tenant Harbor-robot creds into
+#      Vault; without it the SecretStore reports Ready=False / InvalidProviderConfig
+#      ("unable to create client") and the crossplane-runtime app goes Degraded.
+#   2. The provider-vault Pod (providers/provider-vault.yaml DeploymentRuntimeConfig,
+#      wave 0), which mounts this ConfigMap and sets VAULT_CACERT so the provider can run
+#      with skip_tls_verify: false. That mount is NOT optional, so this ConfigMap MUST
+#      exist before the provider builds its Deployment — hence sync-wave "-1" below
+#      (was "2"; the SecretStore at wave 2 is unaffected by the ConfigMap landing earlier).
 #
 # This mirrors the per-namespace vault-ca pattern the platform already uses elsewhere
 # (backstage ns, and the per-tenant Composition drop): key ca.crt = the PUBLIC Vault CA
@@ -23,7 +28,7 @@ metadata:
   labels:
     platform.capstone/component: platform
   annotations:
-    argocd.argoproj.io/sync-wave: "2"   # lands with the vault-push SecretStore plumbing
+    argocd.argoproj.io/sync-wave: "-1"  # must exist before the wave-0 provider-vault Pod mounts it
 data:
   ca.crt: |
     -----BEGIN CERTIFICATE-----

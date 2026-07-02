@@ -21,3 +21,62 @@ metadata:
     argocd.argoproj.io/sync-wave: "0"   # installs the vault.upbound.io CRDs (ProviderConfig lands wave 2)
 spec:
   package: xpkg.upbound.io/upbound/provider-vault:v0.1.0
+  # Bind to the DeploymentRuntimeConfig below so the provider Pod mounts the Vault CA
+  # and gets VAULT_CACERT — the runtime-layer TLS hardening that lets
+  # config/providerconfig-vault.yaml run with skip_tls_verify: false. Without this ref
+  # the package manager would build a default Deployment (no CA, no env).
+  runtimeConfigRef:
+    name: provider-vault
+---
+# DeploymentRuntimeConfig — TLS HARDENING. The v0.1.0 ProviderConfig CRD exposes NO CA
+# field (only skip_tls_verify / tls_server_name), so we trust the self-signed Vault CA
+# at the RUNTIME layer instead: mount the vault-ca ConfigMap (the PUBLIC platform CA
+# PEM — config/vault-ca-configmap.yaml) into the provider Pod and point VAULT_CACERT at
+# it. provider-vault is Upjet over hashicorp/terraform-provider-vault, whose `ca_cert_file`
+# argument DEFAULTS from the VAULT_CACERT env var (schema EnvDefaultFunc), so the Vault
+# API client validates the server cert against this CA — which is what lets us flip
+# providerconfig-vault.yaml to skip_tls_verify: false.
+#
+# MERGE SEMANTICS: the package manager injects the provider container as the FIRST
+# container named `package-runtime`; declaring a container of that same name here merges
+# our env + volumeMounts onto it (rather than adding a sidecar), and the Pod-level volume
+# is added. (Per Crossplane docs: the provided Deployment spec is used as the base.)
+apiVersion: pkg.crossplane.io/v1beta1
+kind: DeploymentRuntimeConfig
+metadata:
+  name: provider-vault
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    # Wave 0 WITH its Provider (provider-vault.spec.runtimeConfigRef points here), so it
+    # exists the moment the provider builds its Deployment. Its CRD ships with Crossplane
+    # core, so it has no missing-CRD problem in wave 0 — same pattern as
+    # providers/provider-kubernetes.yaml.
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  deploymentTemplate:
+    spec:
+      # Overridden by the package manager's generated label selector; present to satisfy
+      # the embedded Deployment spec schema.
+      selector: {}
+      template:
+        spec:
+          containers:
+            - name: package-runtime
+              env:
+                # terraform-provider-vault: `ca_cert_file` DefaultFunc = EnvDefaultFunc("VAULT_CACERT").
+                # Points the Vault API client at the mounted CA PEM below.
+                - name: VAULT_CACERT
+                  value: /etc/vault/tls/ca.crt
+              volumeMounts:
+                - name: vault-ca
+                  mountPath: /etc/vault/tls
+                  readOnly: true
+          volumes:
+            - name: vault-ca
+              configMap:
+                # config/vault-ca-configmap.yaml (crossplane-system). NOT optional:
+                # fail-closed — if the CA is absent the provider Pod must not start rather
+                # than silently fall back to an unverified connection. The ConfigMap is
+                # pinned to sync-wave "-1" so it exists before this Deployment is built.
+                name: vault-ca
