@@ -153,10 +153,25 @@ jobs:
                    "Refusing an unauthenticated push." >&2;
               exit 1;
             fi;
+            # KANIKO MEMORY (OOM fix): the Backstage build stage runs `yarn install`
+            # (~2800 pkgs, +1.09 GiB node_modules + native modules), then Kaniko snapshots
+            # the full filesystem. The Kaniko step-pod (patched by arc/hook-template.yaml)
+            # has NO memory limit, so the default `full` snapshot mode + in-memory
+            # compressed-layer cache grew until the node OOM-killed the pod mid-snapshot
+            # ("Taking snapshot of full filesystem..." -> job/container-hook failure, run
+            # 28622490073). Two correctness-safe reducers (they change HOW snapshots are
+            # computed/cached, not the produced image):
+            #   --snapshot-mode=redo      : hash mtime+size+perms, not file CONTENT (cheaper)
+            #   --compressed-caching=false: don't retain compressed layers in RAM (big saver
+            #                               on the 1 GiB node_modules layer)
+            # --reproducible is retained (deterministic timestamps); its cost is at finalize,
+            # after the peak-snapshot memory is freed.
             COMMON="--context=dir://${GITHUB_WORKSPACE}/platform-services/backstage/app
                     --dockerfile=packages/backend/Dockerfile
                     --destination=${IMAGE}
                     --reproducible
+                    --snapshot-mode=redo
+                    --compressed-caching=false
                     --verbosity=info";
             if [ "${PUSH}" = "true" ]; then
               echo "==> building + pushing ${IMAGE}";
