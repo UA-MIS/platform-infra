@@ -32,11 +32,12 @@
 # *.capstone.uamishub.com). Prometheus + Alertmanager stay ClusterIP (port-forward
 # only) — internal ops surfaces, no need to expose.
 #
-# ⚠ Grafana admin password: the chart default (admin / prom-operator) is shipped here
-# so the stack is operable on day one, but Grafana IS internet-reachable via the
-# Cloudflare tunnel. ROTATE IT — set grafana.adminPassword via a SealedSecret /
-# grafana.admin.existingSecret before/just after go-live. Flagged in
-# platform-services/monitoring/README.md, not blocking the deploy.
+# ⚠ Grafana admin password: rotated OFF the chart default — creds come from the
+# grafana-admin SealedSecret via grafana.admin.existingSecret (below). Grafana IS
+# internet-reachable via the Cloudflare tunnel, so this must be a REAL seal before
+# go-live; the shipped placeholder does not decrypt (Grafana pod stays
+# CreateContainerConfigError until resealed). Reseal runbook + the Alertmanager webhook
+# destination (also a SealedSecret) are in platform-services/monitoring/README.md.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -115,6 +116,15 @@ spec:
 
         alertmanager:
           alertmanagerSpec:
+            # Mount the notification-destination SealedSecret (shipped by
+            # platform-services/monitoring/sealedsecret-alertmanager-webhook.yaml) into
+            # the Alertmanager pods at /etc/alertmanager/secrets/alertmanager-webhook/.
+            # The `platform-oncall` receiver below reads its `url` key via url_file, so
+            # the webhook endpoint is NEVER inlined in these values. ⚠ ships as a
+            # PLACEHOLDER seal — reseal a real URL before relying on notifications
+            # (platform-services/monitoring/README.md).
+            secrets:
+              - alertmanager-webhook
             resources:
               requests: { cpu: 25m, memory: 64Mi }
               limits: { memory: 128Mi }
@@ -126,15 +136,17 @@ spec:
                   resources:
                     requests:
                       storage: 2Gi
-          # ── Alertmanager routing — RECEIVER STUB ──────────────────────────────
+          # ── Alertmanager routing — WEBHOOK RECEIVER ───────────────────────────
           # `null` swallows the always-firing Watchdog heartbeat; everything at
-          # severity critical|warning routes to `platform-oncall`, which is an EMPTY
-          # receiver TODAY (alerts group + dedupe + show in the Alertmanager UI but
-          # are not pushed anywhere). To wire a real channel, add a slack_configs /
-          # webhook_configs / email block under the `platform-oncall` receiver — the
-          # webhook URL / Slack token belongs in a SealedSecret referenced via
-          # alertmanager.alertmanagerSpec, NOT inline here. See
-          # platform-services/monitoring/README.md "Wiring a notification channel".
+          # severity critical|warning routes to `platform-oncall`, a generic-webhook
+          # receiver. The endpoint is read from a mounted SealedSecret via `url_file`
+          # (see alertmanagerSpec.secrets above) so NO URL/token is inlined here. A
+          # generic webhook is the simplest destination that needs no channel/token in
+          # the values — repoint it at a Slack/Discord/PagerDuty relay, an incident
+          # bot, or Alertmanager→Slack bridge. To switch to native slack_configs /
+          # email_configs instead, keep the same pattern: put the URL/token in the
+          # SealedSecret and reference it by *_file. ⚠ url_file resolves a PLACEHOLDER
+          # seal until reseal — alerts stay effectively silent till then (README).
           config:
             global:
               resolve_timeout: 5m
@@ -153,11 +165,26 @@ spec:
                     - severity =~ "critical|warning"
             receivers:
               - name: 'null'
-              - name: 'platform-oncall'   # ← plug a real channel here (README)
+              - name: 'platform-oncall'
+                webhook_configs:
+                  # url_file reads the endpoint from the mounted SealedSecret; the file
+                  # lands at /etc/alertmanager/secrets/<secretName>/<key>.
+                  - url_file: /etc/alertmanager/secrets/alertmanager-webhook/url
+                    send_resolved: true
 
         grafana:
-          # ⚠ ROTATE — chart default; Grafana is reachable via the CF tunnel (header).
-          adminPassword: prom-operator
+          # Admin creds come from the grafana-admin SealedSecret (shipped by
+          # platform-services/monitoring/sealedsecret-grafana-admin.yaml), NOT the
+          # chart default (admin / prom-operator) — Grafana is internet-reachable via
+          # the CF tunnel (header). The Grafana chart reads keys admin-user /
+          # admin-password from the referenced secret. ⚠ ships as a PLACEHOLDER seal —
+          # until resealed, the grafana-admin Secret is absent and the Grafana pod
+          # stays CreateContainerConfigError (README "Rotating the Grafana admin
+          # password"). No password is inlined here.
+          admin:
+            existingSecret: grafana-admin
+            userKey: admin-user
+            passwordKey: admin-password
           persistence:
             enabled: true
             storageClassName: ceph-block
