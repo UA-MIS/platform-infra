@@ -19,7 +19,11 @@ apiVersion: platform.capstone/v1
 registry: harbor.capstone.uamishub.com/${{ values.team }}
 app: ${{ values.appName }}
 # Per-environment promotion rules. For each env:
-#   trigger        — the git event that promotes to this env (branch:main | tag:v* | pull_request)
+#   trigger        — the git event that promotes to this env (branch:main | tag:v* |
+#                      pull_request | manual:promote-to-prod). manual:promote-to-prod
+#                      means NO git event writes this overlay — see the prod entry below
+#                      and .github/workflows/promote-to-prod.yaml (promotion-model
+#                      redesign; artifacts/design/promotion-model.md in platform-infra).
 #   tagConvention  — the image-tag scheme resolve-image.sh computes:
 #                      git-describe -> registry/app:<git describe --tags> e.g.
 #                                      v1.0.0-5-gabc123 (5 commits past tag v1.0.0).
@@ -44,10 +48,20 @@ environments:
     overlay: ".devops/chart/overlays/staging"
     gate: auto
   prod:
-    trigger: "tag:v*"
+    # NOT tag:v* (the old flaw, see the header block above). No git event
+    # auto-promotes prod — the ONLY writer of this overlay is a human running
+    # .github/workflows/promote-to-prod.yaml, which reads staging's LIVE tag and
+    # writes that same tag here. gate:auto because the human gate already
+    # happened at "click Run workflow"; ArgoCD just executes the already-approved
+    # commit, so prod stays Synced/green normally and goes OutOfSync only for the
+    # brief window between that commit and ArgoCD's next reconcile.
+    # NOTE: resolve-image.sh (CI) still resolves ENV=prod on a fresh vX.Y.Z tag
+    # push, but only to read this block's (shared) registry/app/tagConvention for
+    # the image staging pins — it never writes this overlay. See the design doc.
+    trigger: "manual:promote-to-prod"
     tagConvention: "semver"
     overlay: ".devops/chart/overlays/prod"
-    gate: manual
+    gate: auto
   preview:
     trigger: "pull_request"
     tagConvention: "pull-<sha>"

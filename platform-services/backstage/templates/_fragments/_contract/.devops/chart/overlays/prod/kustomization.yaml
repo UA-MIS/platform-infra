@@ -1,7 +1,10 @@
-# prod overlay — the production gate (§2.3, §4). Sync is MANUAL: the env
-# ApplicationSet gives prod NO `automated:` block, so promotion = a human syncing
-# the gated tag. Values are explicit here for clarity even though the gate lives
-# in the ApplicationSet/promotion.yaml. Image seam: prod=gated semver tag.
+# prod overlay — the production gate (§2.3, §4; promotion-model redesign, see
+# artifacts/design/promotion-model.md in platform-infra). The gate is now the
+# promote-to-prod workflow_dispatch (a human click), NOT an ArgoCD manual sync —
+# ArgoCD auto-syncs whatever this overlay's images[].newTag says, and nothing
+# writes that value except that workflow (promotion.yaml: prod trigger =
+# manual:promote-to-prod). Values are explicit here for clarity even though the
+# trigger/gate live in promotion.yaml. Image seam: prod=explicitly-promoted semver tag.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: ${{ values.team }}-prod

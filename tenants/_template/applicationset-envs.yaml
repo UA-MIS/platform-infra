@@ -16,7 +16,13 @@
 #     template root: .registry, .app, .environments (ArgoCD git-files exposes a
 #     parsed file's top-level keys directly — confirmed against current docs).
 #   - templatePatch reads (index .environments .env).gate: "manual" => NO
-#     automated block (the prod gate, §4); "auto" => prune+selfHeal.
+#     automated block; "auto" => prune+selfHeal. This template is data-driven off
+#     promotion.yaml's `gate` — it does NOT hardcode env=>gate. Since the
+#     promotion-model redesign (artifacts/design/promotion-model.md in
+#     platform-infra), prod's gate is `auto`: the human gate moved to the
+#     promote-to-prod workflow_dispatch (the git commit IS the approved state),
+#     so ArgoCD just executes it — prod is Synced/green normally, OutOfSync only
+#     for the brief window between a promotion commit and the next reconcile.
 #
 # Each generated App is pinned to the TEAM AppProject (project: __TEAM__) — the
 # tenancy fence (§2.1) — so a team App can never escape its own project.

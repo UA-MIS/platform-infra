@@ -20,6 +20,7 @@ instead of editing these files.
 | `ci/resolve-components.sh` | Emits the CI **build matrix** from `components.yaml` (one image per component); consumed by `.github/workflows/build-and-push.yaml`. |
 | `ci/build-and-push.sh` | Local loop: build EACH component's context and push; tag computed from `promotion.yaml`. |
 | `ci/bump-image.sh` | Image-bump seam: write the new tag into **every** component's `images[].newTag` in the env overlay and (with `COMMIT=1`) commit it — the GitOps signal. |
+| `ci/promote.sh` | Click-to-promote seam: read the tag CURRENTLY LIVE in `<from>`'s overlay and hand off to `bump-image.sh` to write + commit it into `<to>`'s overlay. Run by `.github/workflows/promote-to-prod.yaml` on `workflow_dispatch` — no fresh build, no new tag, just re-pointing the gate. |
 | `ci/RUNBOOK.md` | The full local loop: edit components → build → push → bump → ArgoCD syncs. |
 
 ## The image-tag seam (§4.1)
