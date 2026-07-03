@@ -68,6 +68,24 @@ test('db=none on a DB-capable backend leaves it unwired', () => {
   assert.equal(p.database, 'none');
 });
 
+test('single backend (FastAPI) + host-postgres -> postgres provisioned (#192 PG parity)', () => {
+  const p = planComposition({ projectType: 'web', layout: 'single', fragments: { single: fastapi }, database: 'host-postgres', port: 8080 });
+  assert.equal(p.database, 'postgres');
+  assert.equal(p.dbWired, true);
+});
+
+test('FE+BE (React + Express) + host-postgres -> postgres provisioned, DATABASE_URL wired', () => {
+  const p = planComposition({ projectType: 'web', layout: 'frontend-backend', fragments: { frontend: react, backend: express }, database: 'host-postgres', port: 8080 });
+  assert.equal(p.database, 'postgres');
+  assert.equal(p.dbWired, true);
+});
+
+test('host-postgres on a DB-less stack (static) provisions no engine', () => {
+  const p = planComposition({ projectType: 'web', layout: 'single', fragments: { single: reactStatic }, database: 'host-postgres' });
+  assert.equal(p.database, 'none');
+  assert.equal(p.dbWired, false);
+});
+
 test('mobile -> deployed backend at / + mobile-artifact component (not deployed)', () => {
   const p = planComposition({ projectType: 'mobile', fragments: { backend: express, mobile }, database: 'host-mysql', port: 8080 });
   const be = p.components.find(c => c.name === 'backend');

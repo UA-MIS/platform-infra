@@ -20,8 +20,11 @@
 # DATABASE_URL via the Secrets tab), or none. The compose engine sets the tenant `database`
 # flag + wires the DATABASE_URL ExternalSecret accordingly.
 #
-# DOWNSTREAM (publish/register/harbor-onboard/render-tenant/tenant-pr) is the SAME proven
-# golden path as new-capstone-project — only the skeleton-render step is replaced by compose.
+# DOWNSTREAM: compose assembles the repo, publish/register ship it, then the ZERO-TOUCH seam
+# (capstone:emit-tenant-claim -> a 1-click claim PR) provisions the tenant. The wizard's
+# RESOLVED database choice (compose output none|mysql) flows into the CapstoneTenant XR's
+# spec.database here — ADR-035 §C/§D1 — replacing the imperative harbor-onboard/render-tenant/
+# onboarding-PR trio with the same proven claim seam the zero-touch template already uses.
 apiVersion: scaffolder.backstage.io/v1beta3
 kind: Template
 metadata:
@@ -376,56 +379,62 @@ spec:
         repoContentsUrl: ${{ steps['publish'].output.repoContentsUrl }}
         catalogInfoPath: '/catalog-info.yaml'
 
-    # 4) Create the team Harbor project (+ OIDC mapping) so the first CI build can push.
-    - id: harbor-onboard
-      name: Create Harbor project (team registry)
-      action: capstone:harbor-onboard
+    # 4) EMIT THE TENANT CLAIM — ONE CapstoneTenant XR carrying the wizard's RESOLVED
+    #    database choice. THIS IS THE §C SEAM: capstone:compose-project already collapsed the
+    #    4-way wizard `database` (host-mysql | host-postgres | bring-your-own | none) into the
+    #    XRD's 2-value enum — `mysql` only for host-mysql AND a DB-using component, else `none`
+    #    (ADR-035 §D3) — and exposed it as steps.compose.output.database. Feeding that resolved
+    #    value into spec.database is what carries the DB choice through to the CapstoneTenant XR
+    #    (and thus ADR-033's auto-MySQL). Writes tenants/_claims/<team>-<app>.yaml under ./claim.
+    #    Replaces the imperative trio (harbor-onboard + render-tenant + review-gated onboarding
+    #    PR) with the same proven claim seam the zero-touch template uses.
+    - id: emit-claim
+      name: Emit tenant claim (CapstoneTenant XR)
+      action: capstone:emit-tenant-claim
       input:
-        team: ${{ parameters.team }}
-
-    # 5a) Render tenant manifests from the canonical tenants/_template blueprint.
-    #     (The auto-DB `database` flag is recorded in .devops/app-metadata.yaml by compose;
-    #     wiring it to the CapstoneTenant claim is the integration seam with #146/ADR-033.)
-    - id: render-tenant
-      name: Render tenant manifests (tenants/team-<name>/)
-      action: capstone:render-tenant
-      input:
-        templateUrl: https://github.com/UA-MIS/platform-infra/tree/main/tenants/_template
         team: ${{ parameters.team }}
         appName: ${{ parameters.appName }}
+        # SLUG form (year-first, e.g. 2026-fall) — matches the XRD `semester` pattern.
         semester: ${{ parameters.year }}-${{ parameters.season | lower }}
-        targetPath: ./tenant-pr
+        port: ${{ parameters.port }}
+        # THE SEAM (ADR-035 §C): the wizard's RESOLVED DB mode (none|mysql) from compose ->
+        # spec.database on the XR -> the Composition's auto-MySQL (ADR-033). NOT
+        # parameters.database (the raw 4-way choice) — compose resolves the enum mapping.
+        # Requires the `database` input on capstone:emit-tenant-claim (PR #186 — must land
+        # together; on the current image the input is a no-op until #186 is in the bundle).
+        database: ${{ steps['compose'].output.database }}
+        # Write under ./claim so the publish step (sourcePath: ./claim) lands exactly the
+        # one tenants/_claims/<team>-<app>.yaml file.
+        targetPath: ./claim
 
-    # 5b) Open the review-gated onboarding PR to platform-infra (merge = grant; D-049).
-    - id: tenant-pr
-      name: Open platform onboarding PR (platform-infra)
+    # 5) Open a PR landing the claim on platform-infra `main`. A reviewer merges it with ONE
+    #    click; ArgoCD (platform-crossplane-claims) then syncs the XR and Crossplane reconciles
+    #    the whole tenant — Harbor, Vault, the k8s tenancy fence, and (when spec.database=mysql)
+    #    a per-env MariaDB. Same proven publish:github:pull-request mechanism. TRUE zero-touch
+    #    (no merge) swaps this ONE step for capstone:commit-to-main (ADR-035 §D7 / PR #190) once
+    #    that action is in the image — designed as a single-step change.
+    - id: commit-claim
+      name: Land tenant claim on platform-infra (1-click merge)
       action: publish:github:pull-request
       input:
         repoUrl: github.com?owner=UA-MIS&repo=platform-infra
-        branchName: onboard-team-${{ parameters.team }}
+        branchName: claim-${{ parameters.team }}-${{ parameters.appName }}
         targetBranchName: main
-        title: "onboard tenant: team-${{ parameters.team }} (Capstone ${{ parameters.season }} ${{ parameters.year }})"
-        sourcePath: ./tenant-pr
+        title: "onboard tenant (zero-touch): ${{ parameters.team }}-${{ parameters.appName }} (Capstone ${{ parameters.season }} ${{ parameters.year }})"
+        sourcePath: ./claim
         description: |
-          ## Tenant onboarding request — `team-${{ parameters.team }}` (Capstone ${{ parameters.season }} ${{ parameters.year }})
+          ## Zero-touch tenant claim — `${{ parameters.team }}-${{ parameters.appName }}` (Capstone ${{ parameters.season }} ${{ parameters.year }})
 
-          Scaffolded by **The Process** ("New Project") for app **${{ parameters.appName }}**
+          Emitted by **The Process** ("New Project") for app **${{ parameters.appName }}**
           (repo: ${{ steps['publish'].output.remoteUrl }}).
 
-          This PR adds `tenants/team-${{ parameters.team }}/` (rendered from the canonical
-          `tenants/_template/` blueprint). **Merging is the grant**: on merge the tenant
-          ApplicationSets reconcile the team's namespaces + ApplicationSets. No cluster
-          RBAC/quota is created until a reviewer merges.
-
-          ### Reviewer checklist
-          - [ ] Manifests render cleanly (`make validate` on `tenants/team-${{ parameters.team }}/`).
-          - [ ] AppProject is team-scoped (destinations limited to `team-${{ parameters.team }}-*`).
-          - [ ] `__TEAM__`/`__SEMESTER__` fully substituted (no leftover tokens).
-
-          ### Operator steps (run AFTER merge — Harbor robot provisioning; TARGET=real-talos)
-          The Harbor project + OIDC mapping were created at scaffold time; mint the robot
-          tokens post-merge per the standard onboarding runbook (push robot -> arc-runners;
-          per-env pull robots -> <team>-<env>), all with the non-empty-seal guard.
+          This PR adds ONE `tenants/_claims/${{ parameters.team }}-${{ parameters.appName }}.yaml`
+          (a schema-validated `CapstoneTenant` XR). A reviewed-once Crossplane Composition
+          expands it into the full tenant — Harbor project/robots, Vault policy/role, the k8s
+          tenancy fence (AppProject, namespaces, quotas, netpol, RBAC, ESO plumbing,
+          env/preview ApplicationSets), and — when `spec.database: mysql` — a per-env MariaDB
+          schema + user + Vault creds (ADR-033). **No operator steps.** De-provision = `git rm`
+          this file.
         token: ${{ secrets.GITHUB_TOKEN }}
 
   output:
@@ -435,9 +444,9 @@ spec:
       - title: Open in catalog
         icon: catalog
         entityRef: ${{ steps['register'].output.entityRef }}
-      - title: Platform onboarding PR (awaiting reviewer merge)
+      - title: Tenant claim (auto-provisioning)
         icon: github
-        url: ${{ steps['tenant-pr'].output.remoteUrl }}
+        url: ${{ steps['commit-claim'].output.remoteUrl }}
     text:
       - title: Next steps
         content: |
@@ -448,5 +457,7 @@ spec:
           4. Tag `vX.Y.Z` -> **staging** auto-deploys; **prod** waits on the manual gate.
           Your app will be at `https://${{ parameters.appName }}.capstone.uamishub.com`.
 
-          A **platform onboarding PR** was opened against `UA-MIS/platform-infra` (link above);
-          a reviewer must merge it before dev/staging/prod can deploy.
+          A **tenant claim PR** was opened against `UA-MIS/platform-infra` (link above). One
+          reviewer merge provisions everything automatically — your team's namespaces, RBAC,
+          Harbor project/robots, Vault policy, and (if you picked Auto MySQL) a per-env MySQL —
+          via Crossplane from that single claim. No operator steps.
