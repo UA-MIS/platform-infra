@@ -22,6 +22,7 @@ import { createHarborOnboardAction } from './actions/harborOnboard';
 import { createEmitTenantClaimAction } from './actions/emitTenantClaim';
 import { createCommitToMainAction } from './actions/commitToMain';
 import { createComposeProjectAction } from './actions/composeProject';
+import { createPreflightAction } from './actions/preflight';
 
 export const capstoneScaffolderModule = createBackendModule({
   pluginId: 'scaffolder',
@@ -83,6 +84,11 @@ export const capstoneScaffolderModule = createBackendModule({
           // .devops/.github contract and assembles the project repo (replaces the
           // per-stack fetch-skeleton steps). Reads fragment trees over HTTP (urlReader).
           createComposeProjectAction({ reader: urlReader }),
+          // capstone:preflight — step 1 of new-project/vm-app: fail fast + clean on a
+          // name collision (repo/catalog/tenant-claim) BEFORE compose/publish/register
+          // run, so a re-used name never leaves an orphaned repo + rendered code behind
+          // (the swamiapp 409-at-register lesson). Read-only.
+          createPreflightAction({ config, catalog, auth }),
         );
       },
     });
