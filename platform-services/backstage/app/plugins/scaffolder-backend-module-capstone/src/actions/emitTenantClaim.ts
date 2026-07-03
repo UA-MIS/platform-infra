@@ -35,11 +35,12 @@ const APP_SLUG = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
 const SEMESTER = /^[0-9]{4}-(spring|summer|fall)$/;
 
 /**
- * Allowed `database` values (mirrors the XRD `spec.database` enum, apis/xrd.yaml).
- * `mysql` tells the Composition to provision a per-(team,env) MariaDB schema + scoped
- * user + grant and push the creds into Vault; `none` (default) provisions no database.
+ * Allowed `database` values (mirrors the XRD `spec.database` enum, apis/xrd.yaml —
+ * #192). The Composition provisions a per-(team,env) schema + scoped user + grant and
+ * pushes the creds into Vault: `mysql` via the MariaDB path, `postgres` via the
+ * provider-sql PG path (#192). `none` (default) provisions no database.
  */
-const DATABASE = new Set(['none', 'mysql']);
+const DATABASE = new Set(['none', 'mysql', 'postgres']);
 
 /**
  * Reserved-name denylist (CXP-1 — privilege escalation / tenant isolation). The XR
@@ -170,7 +171,8 @@ export function createEmitTenantClaimAction() {
             .string({
               description:
                 "Automatic database provisioning: 'mysql' (per-env MariaDB schema + " +
-                "user + Vault creds) or 'none' (default; DB-less apps). XRD enum.",
+                "user + Vault creds), 'postgres' (per-env PostgreSQL via provider-sql, " +
+                "#192), or 'none' (default; DB-less apps). Mirrors the XRD enum.",
             })
             .optional(),
         targetPath: z =>

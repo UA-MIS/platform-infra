@@ -154,29 +154,32 @@ describe('capstone:emit-tenant-claim', () => {
     ).rejects.toThrow(/invalid semester/);
   });
 
-  it('emits spec.database when database=mysql is passed', async () => {
-    const action = createEmitTenantClaimAction();
-    const workspacePath = mockDir.resolve('wsdb');
-    await fs.ensureDir(workspacePath);
+  it.each(['mysql', 'postgres'])(
+    'emits spec.database when database=%s is passed',
+    async database => {
+      const action = createEmitTenantClaimAction();
+      const workspacePath = mockDir.resolve(`wsdb-${database}`);
+      await fs.ensureDir(workspacePath);
 
-    await action.handler(
-      createMockActionContext({
-        input: {
-          team: 'acme',
-          appName: 'acme-app',
-          semester: '2026-fall',
-          database: 'mysql',
-        },
-        workspacePath,
-      }),
-    );
+      await action.handler(
+        createMockActionContext({
+          input: {
+            team: 'acme',
+            appName: 'acme-app',
+            semester: '2026-fall',
+            database,
+          },
+          workspacePath,
+        }),
+      );
 
-    const content = await fs.readFile(
-      path.join(workspacePath, 'tenants', '_claims', 'acme-acme-app.yaml'),
-      'utf8',
-    );
-    expect(content).toContain('database: "mysql"');
-  });
+      const content = await fs.readFile(
+        path.join(workspacePath, 'tenants', '_claims', 'acme-acme-app.yaml'),
+        'utf8',
+      );
+      expect(content).toContain(`database: "${database}"`);
+    },
+  );
 
   it('fails closed on an invalid database value', async () => {
     const action = createEmitTenantClaimAction();
@@ -187,7 +190,7 @@ describe('capstone:emit-tenant-claim', () => {
             team: 'acme',
             appName: 'acme-app',
             semester: '2026-fall',
-            database: 'postgres',
+            database: 'mongodb',
           },
           workspacePath: mockDir.resolve('wsbaddb'),
         }),
