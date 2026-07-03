@@ -1,0 +1,162 @@
+# Admin dashboard 1/4 (Observability admin dashboards). Cluster-wide node + pod
+# health across the 3 Talos boxes. Sourced entirely from node-exporter + kube-state-
+# metrics, both of which ship with kube-prometheus-stack and are scraped day-one — no
+# follow-up wiring needed for this one.
+#
+# Auto-provisioned by the Grafana sidecar (grafana.sidecar.dashboards, chart default
+# ON) via the `grafana_dashboard: "1"` label — see kube-prometheus-stack-app.yaml.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-cluster-overview
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    grafana_dashboard: "1"
+data:
+  cluster-overview.json: |
+    {
+      "uid": "platform-cluster-overview",
+      "title": "Platform / Cluster Overview",
+      "tags": ["platform", "admin"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "time": { "from": "now-6h", "to": "now" },
+      "refresh": "1m",
+      "templating": {
+        "list": [
+          {
+            "name": "datasource",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": {},
+            "hide": 0
+          }
+        ]
+      },
+      "panels": [
+        { "id": 1, "type": "row", "title": "Nodes (Talos)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 } },
+        {
+          "id": 2, "type": "timeseries", "title": "Node CPU Usage %",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100 }, "overrides": [] },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m])))",
+              "legendFormat": "{{instance}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 3, "type": "timeseries", "title": "Node Memory Usage %",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100 }, "overrides": [] },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "100 * (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes))",
+              "legendFormat": "{{instance}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 4, "type": "timeseries", "title": "Node Root Filesystem Usage %",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100 }, "overrides": [] },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "100 * (1 - (node_filesystem_avail_bytes{mountpoint=\"/\",fstype!~\"tmpfs|overlay\"} / node_filesystem_size_bytes{mountpoint=\"/\",fstype!~\"tmpfs|overlay\"}))",
+              "legendFormat": "{{instance}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 5, "type": "timeseries", "title": "Node Load Average",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 9 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "node_load1", "legendFormat": "{{instance}} 1m", "refId": "A" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "node_load5", "legendFormat": "{{instance}} 5m", "refId": "B" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "node_load15", "legendFormat": "{{instance}} 15m", "refId": "C" }
+          ]
+        },
+        { "id": 6, "type": "row", "title": "Pressure (PSI) — best-effort, depends on kernel PSI support", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 17 } },
+        {
+          "id": 7, "type": "timeseries", "title": "CPU Pressure (waiting, 5m rate)",
+          "gridPos": { "h": 7, "w": 8, "x": 0, "y": 18 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "rate(node_pressure_cpu_waiting_seconds_total[5m])", "legendFormat": "{{instance}}", "refId": "A" }
+          ]
+        },
+        {
+          "id": 8, "type": "timeseries", "title": "Memory Pressure (waiting, 5m rate)",
+          "gridPos": { "h": 7, "w": 8, "x": 8, "y": 18 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "rate(node_pressure_memory_waiting_seconds_total[5m])", "legendFormat": "{{instance}}", "refId": "A" }
+          ]
+        },
+        {
+          "id": 9, "type": "timeseries", "title": "IO Pressure (waiting, 5m rate)",
+          "gridPos": { "h": 7, "w": 8, "x": 16, "y": 18 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "rate(node_pressure_io_waiting_seconds_total[5m])", "legendFormat": "{{instance}}", "refId": "A" }
+          ]
+        },
+        { "id": 10, "type": "row", "title": "Pods", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 25 } },
+        {
+          "id": 11, "type": "stat", "title": "Total Pods (cluster)",
+          "gridPos": { "h": 5, "w": 6, "x": 0, "y": 26 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(kube_pod_info)", "instant": true, "refId": "A" }
+          ]
+        },
+        {
+          "id": 12, "type": "stat", "title": "Pod Capacity (allocatable, sum of nodes)",
+          "gridPos": { "h": 5, "w": 6, "x": 6, "y": 26 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(kube_node_status_allocatable{resource=\"pods\"})", "instant": true, "refId": "A" }
+          ]
+        },
+        {
+          "id": 13, "type": "bargauge", "title": "Pods by Phase",
+          "gridPos": { "h": 10, "w": 12, "x": 12, "y": 26 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "options": { "orientation": "horizontal" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(kube_pod_status_phase) by (phase)", "legendFormat": "{{phase}}", "instant": true, "refId": "A" }
+          ]
+        },
+        {
+          "id": 14, "type": "bargauge", "title": "Pods by Namespace (top 15)",
+          "gridPos": { "h": 10, "w": 12, "x": 0, "y": 31 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "options": { "orientation": "horizontal" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "topk(15, count(kube_pod_info) by (namespace))", "legendFormat": "{{namespace}}", "instant": true, "refId": "A" }
+          ]
+        }
+      ]
+    }

@@ -31,6 +31,16 @@ resources:
   # resealed before go-live (see README).
   - sealedsecret-alertmanager-webhook.yaml
   - sealedsecret-grafana-admin.yaml
+  # Admin observability dashboards (dashboards-as-code). Each ConfigMap carries
+  # `grafana_dashboard: "1"`; the Grafana chart's default k8s-sidecar watches for that
+  # label and auto-provisions the JSON payload — no manual Grafana import step, no
+  # dependency on the datasource's generated UID (each dashboard's `datasource`
+  # template variable resolves it at load time). See README "Admin dashboards" for
+  # what each one covers and the metrics-not-yet-scraped follow-ups.
+  - dashboard-cluster-overview.yaml
+  - dashboard-tenant-quota.yaml
+  - dashboard-platform-health.yaml
+  - dashboard-tenant-cicd.yaml
 
 labels:
   - pairs:

@@ -1,0 +1,98 @@
+# Admin dashboard 4/4 (Observability admin dashboards). Tenant CI/CD activity.
+# MOSTLY GAP-FLAGGED: none of Harbor, the ARC gha-runner-scale-set-controller/
+# listener, or the ephemeral Kaniko build pods expose a scraped /metrics today, and
+# ARC runner pods carry no allow-listed label to break activity down per team (the
+# per-team scale-set is only distinguishable by its `<team>-kaniko` releaseName /
+# pod-name prefix, not a Prometheus label). What IS shown below is real signal from
+# kube-state-metrics (arc-runners pod counts/phases) + ArgoCD (tenant app sync/deploy
+# status) — everything else is a documented follow-up, not a fabricated metric.
+#
+# Auto-provisioned by the Grafana sidecar via the `grafana_dashboard: "1"` label.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-tenant-cicd
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    grafana_dashboard: "1"
+data:
+  tenant-cicd.json: |
+    {
+      "uid": "platform-tenant-cicd",
+      "title": "Platform / Tenant CI-CD",
+      "tags": ["platform", "admin", "tenants"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "time": { "from": "now-24h", "to": "now" },
+      "refresh": "1m",
+      "templating": {
+        "list": [
+          {
+            "name": "datasource",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": {},
+            "hide": 0
+          }
+        ]
+      },
+      "panels": [
+        { "id": 1, "type": "row", "title": "CI Build Activity (arc-runners namespace — kube-state-metrics proxy, all teams combined)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 } },
+        {
+          "id": 2, "type": "timeseries", "title": "Runner + Build Pods Running",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "count(kube_pod_status_phase{namespace=\"arc-runners\", phase=\"Running\"} == 1)", "legendFormat": "running", "refId": "A" } ]
+        },
+        {
+          "id": 3, "type": "timeseries", "title": "Build Pods Pending (queue-depth proxy)",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "count(kube_pod_status_phase{namespace=\"arc-runners\", phase=\"Pending\"} == 1)", "legendFormat": "pending", "refId": "A" } ]
+        },
+        {
+          "id": 4, "type": "timeseries", "title": "Build Pod Container Restarts (5m rate — crash/retry proxy)",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(rate(kube_pod_container_status_restarts_total{namespace=\"arc-runners\"}[5m]))", "legendFormat": "restarts/s", "refId": "A" } ]
+        },
+        {
+          "id": 5, "type": "timeseries", "title": "Build Pods Failed/Error (phase)",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 9 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "count(kube_pod_status_phase{namespace=\"arc-runners\", phase=\"Failed\"} == 1)", "legendFormat": "failed", "refId": "A" } ]
+        },
+        { "id": 6, "type": "row", "title": "Tenant Deploys (ArgoCD — real metrics, tenant apps = project != platform)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 17 } },
+        {
+          "id": 7, "type": "table", "title": "Tenant App Sync/Health Status",
+          "gridPos": { "h": 10, "w": 24, "x": 0, "y": 18 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "argocd_app_info{project!=\"platform\"}",
+              "format": "table",
+              "instant": true,
+              "refId": "A"
+            }
+          ]
+        },
+        { "id": 8, "type": "row", "title": "Gaps — no fabricated metrics below this line", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 28 } },
+        {
+          "id": 9, "type": "text",
+          "gridPos": { "h": 7, "w": 24, "x": 0, "y": 29 },
+          "options": {
+            "mode": "markdown",
+            "content": "**Not shown — no scraped metric exists yet:**\n\n- **Image pushes per team / Harbor registry activity** — needs a Harbor ServiceMonitor (Harbor core has a `/metrics` endpoint when `metric.enabled` is set in the Helm values; nothing scrapes it today).\n- **Per-team runner/build volume, queue wait time, job success/failure counts** — needs the `gha-runner-scale-set-controller` + listener metrics endpoints scraped (ARC ships these; no ServiceMonitor exists for `arc-system` today).\n- **Per-team breakdown of the arc-runners panels above** — runner/build pods carry no Prometheus label for their owning team (`actions.github.com/scale-set-name` is a pod label, and kube-state-metrics only exposes namespace-level `kube_pod_info` labels unless `--metric-labels-allowlist` is set to include it — a config change with a cluster-wide cardinality tradeoff, not just a scrape addition)."
+          }
+        }
+      ]
+    }
