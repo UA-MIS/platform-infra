@@ -166,6 +166,20 @@ spec:
     # platform GitHub App via integrations.github (see publish:github — no token input).
 
   steps:
+    # 0) PREFLIGHT — fail fast + clean if this project's name is already taken, BEFORE
+    #    anything is created (the swami stale-catalog-collision lesson: a partially-existing
+    #    name got PAST publish and only failed mid-run at register, leaving an orphaned repo
+    #    + a broken onboarding). Read-only; throws one clear "pick a different name" message
+    #    naming EVERY place that collides — the GitHub repo UA-MIS/<appName>, a catalog
+    #    entry, the team's namespaces (tenants/team-<team>/ -> <team>-dev/staging/prod), or a
+    #    zero-touch tenant claim. Runs first so a collision creates nothing at all.
+    - id: preflight
+      name: Check for a name collision
+      action: capstone:preflight
+      input:
+        team: ${{ parameters.team }}
+        appName: ${{ parameters.appName }}
+
     # 1) Render the per-team starter (app/ + the 4-field app-metadata.yaml + catalog).
     #    SINGLE-COMPONENT path (the default). Guarded by layout so the proven golden-path
     #    render is byte-for-byte unchanged when layout=single (the default); the
