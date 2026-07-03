@@ -101,6 +101,35 @@ Then `\q` to exit the MariaDB shell and `exit` the SSH session.
 > least-privilege grant. (If an audit accepts the broad grant as a temporary bridge, it is
 > `GRANT ALL PRIVILEGES ON *.* ... WITH GRANT OPTION`, but understand it is near-root.)
 
+### 3a. Fix: existing provisioner missing `GRANT OPTION` (idempotent re-run)
+
+If `crossplane_provisioner` was already created on this box and tenant `Grant` MRs
+(provider-sql's `Grant` resource, which delegates schema privileges to the per-tenant app
+user) are failing with `Access denied for user 'crossplane_provisioner'@'...' to database
+'<team>_<env>'`, the login is missing `WITH GRANT OPTION`. MySQL's privilege model requires
+the grantor to hold `GRANT OPTION` on a privilege before it can hand that privilege to
+someone else — without it, `provider-sql` can create the tenant `Database`/`User` fine but
+cannot `GRANT` anything on it, since the provisioner would be handing out privileges it does
+not itself hold the right to delegate.
+
+`GRANT` is additive and re-running it is safe (it does not revoke privileges already held,
+and re-asserting a privilege the user already has is a no-op) — so this is a safe, idempotent
+patch on top of §3, not a replacement for it. Run on db1 as admin:
+
+```sql
+GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, INDEX, REFERENCES,
+      CREATE TEMPORARY TABLES, LOCK TABLES, EXECUTE, CREATE VIEW, SHOW VIEW,
+      CREATE ROUTINE, ALTER ROUTINE, EVENT, TRIGGER
+  ON *.* TO 'crossplane_provisioner'@'100.64.0.0/255.192.0.0' WITH GRANT OPTION;
+FLUSH PRIVILEGES;
+```
+
+Verify with `SHOW GRANTS FOR 'crossplane_provisioner'@'100.64.0.0/255.192.0.0';` — the line
+should now end `WITH GRANT OPTION`. Still no `SUPER`/`FILE`/`PROCESS`/`RELOAD`/`SHUTDOWN` —
+this does not change the "not root" posture, it only lets the provisioner delegate the
+schema-level privileges it already holds down to tenant app users, which is the whole point
+of an auto-provisioning login.
+
 ---
 
 ## 4. Seal `db-tier-mysql-admin` (LOCAL shell — **fish**)
