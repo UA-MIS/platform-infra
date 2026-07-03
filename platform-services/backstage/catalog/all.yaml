@@ -14,28 +14,14 @@ metadata:
 spec:
   type: url
   targets:
-    # The "New Capstone Project (Zero-Touch)" Scaffolder template (ADR-031 §11 Phase 2):
-    # emits ONE CapstoneTenant XR that a Crossplane Composition fans out into the full
-    # tenant — no onboarding PR to merge, no operator steps. The headline IDP feature.
-    # ⚠ Requires the capstone:emit-tenant-claim action in the deployed image (post-#129
-    # rebuild) + a healthy Crossplane install. See templates/new-capstone-project/
-    # CROSSPLANE-CUTOVER.md.
-    - https://github.com/UA-MIS/platform-infra/blob/main/platform-services/backstage/templates/new-capstone-project-zerotouch/template.yaml
-    -   https://github.com/UA-MIS/platform-infra/blob/main/platform-services/backstage/templates/new-project/template.yaml
-    # The "New Capstone Project" Scaffolder template — the imperative PR-path (a
-    # review-gated onboarding PR + operator Harbor steps). PRESERVED as the fallback
-    # safety net for the zero-touch template above.
-    - https://github.com/UA-MIS/platform-infra/blob/main/platform-services/backstage/templates/new-capstone-project/template.yaml
-    # The "Python FastAPI API" Scaffolder template (the Python backend family, #137 P4).
-    - https://github.com/UA-MIS/platform-infra/blob/main/platform-services/backstage/templates/python-fastapi-api/template.yaml
-    # The "Next.js Full-stack" Scaffolder template (TypeScript + Prisma + MySQL, #143).
-    - https://github.com/UA-MIS/platform-infra/blob/main/platform-services/backstage/templates/nextjs-fullstack/template.yaml
-    # The "React + Express" Scaffolder template (Vite SPA + Node/Express multi-component, #144).
-    - https://github.com/UA-MIS/platform-infra/blob/main/platform-services/backstage/templates/react-express/template.yaml
-    # The "C# ASP.NET Core API" Scaffolder template (.NET 8 + EF Core + MySQL, #140).
-    - https://github.com/UA-MIS/platform-infra/blob/main/platform-services/backstage/templates/dotnet-aspnet-api/template.yaml
-    # The "React Static SPA" Scaffolder template (Vite, no-DB, #142).
-    - https://github.com/UA-MIS/platform-infra/blob/main/platform-services/backstage/templates/react-static/template.yaml
+    # The "2 buttons" end-state (ADR-035 §H): the portal registers exactly two
+    # scaffolder templates. The 7 legacy per-stack templates were retired here; their
+    # directories remain on disk as a fallback until the per-fragment build-matrix
+    # confirms every fragment builds (dir deletion is a separate follow-up PR).
+    #
+    # The unified "New Project" wizard — one entry point that composes the harvested
+    # stack fragments (ADR-034/§G). The primary golden path.
+    - https://github.com/UA-MIS/platform-infra/blob/main/platform-services/backstage/templates/new-project/template.yaml
     # The "New Capstone VM" Scaffolder template (layout: vm — a real KubeVirt VM as an
     # app, for teams that can't/won't containerize; ADR-032).
     - https://github.com/UA-MIS/platform-infra/blob/main/platform-services/backstage/templates/vm-app/template.yaml
