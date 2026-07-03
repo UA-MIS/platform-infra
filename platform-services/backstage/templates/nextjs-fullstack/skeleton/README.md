@@ -55,7 +55,7 @@ cd app
 npm install
 # point Prisma at a local MySQL (this file is git-ignored — never commit it):
 echo 'DATABASE_URL="mysql://user:password@127.0.0.1:3306/appdb"' > .env
-npx prisma migrate dev --name init   # create the table from schema.prisma
+npx prisma migrate dev               # apply the shipped migration (add --name <x> for a new one)
 npm run dev                          # http://localhost:${{ values.port }}
 npm test                             # run the unit tests
 ```
@@ -72,8 +72,11 @@ External Secrets Operator from Vault:
    opens a PR adding the pointer to `.devops/chart/overlays/<env>/app-secret.externalsecret.yaml`.
 3. Merge that PR — ArgoCD applies it, ESO materializes the Secret, and the
    `.devops` Deployment already wires `DATABASE_URL` into the pod from it.
-4. Apply your schema to the database once: `npx prisma migrate deploy` (run it against
-   the env's database). Until a DB is set, the app still deploys — the notes pages just
+4. That's it — you do **not** run migrations by hand. Every deploy runs a `migrate` init
+   container that applies your Prisma migrations (`prisma migrate deploy`) before the app
+   starts, so your schema (the shipped initial migration, plus any you add with
+   `prisma migrate dev`) is created automatically once `DATABASE_URL` is set. Until a DB
+   is set, the init container skips and the app still deploys — the notes pages just
    report "database not reachable".
 
 See `.devops/secrets/README.md` for the full secrets pattern (it is write-only by

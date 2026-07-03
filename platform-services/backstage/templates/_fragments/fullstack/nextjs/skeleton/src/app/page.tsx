@@ -34,8 +34,8 @@ export default function HomePage() {
       </ul>
 
       <p className="mt-8 text-sm text-gray-500">
-        Set <code>DATABASE_URL</code> in the Secrets tab, then run{' '}
-        <code>npx prisma migrate deploy</code> to create your tables.
+        Set <code>DATABASE_URL</code> in the Secrets tab — your migrations run
+        automatically on the next deploy and create your tables.
       </p>
     </main>
   );

@@ -360,8 +360,9 @@ spec:
           (dev/staging add a `.dev`/`.staging` segment before the domain).
 
           **Database:** set `DATABASE_URL` (your MySQL connection string) in the
-          **Secrets** tab on your component — never commit it. Then run
-          `npx prisma migrate deploy` to create your tables.
+          **Secrets** tab on your component — never commit it. Migrations run
+          automatically: each deploy applies your Prisma migrations before the app starts,
+          so your tables (the shipped initial migration + any you add) are created for you.
 
           **One thing is gated:** a **platform onboarding PR** was opened against
           `UA-MIS/platform-infra` (link above). A platform reviewer must **merge** it

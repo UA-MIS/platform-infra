@@ -11,7 +11,8 @@ A Next.js (App Router, TypeScript) + Prisma (MySQL) + Tailwind app, scaffolded b
 2. `cd app && npm install`.
 3. Point Prisma at a local MySQL in `app/.env` (git-ignored):
    `DATABASE_URL="mysql://user:password@127.0.0.1:3306/appdb"`, then
-   `npx prisma migrate dev --name init`.
+   `npx prisma migrate dev` (applies the shipped initial migration; run
+   `npx prisma migrate dev --name <change>` to create a new one after editing the schema).
 4. `npm run dev` (serves on `http://localhost:${{ values.port }}`); `npm test` runs the
    unit tests.
 5. Open a pull request — a **preview** environment is built automatically.
@@ -40,8 +41,11 @@ team's Vault path and opens a PR adding the pointer to the per-env
 `app-secret.externalsecret.yaml`. Merge it and ArgoCD applies it; ESO reads the value
 from Vault and materializes the Kubernetes Secret, which the `.devops` Deployment wires
 into the pod as `DATABASE_URL`. Secrets are **write-only** (to change one, set it
-again). After the DB is set, apply your schema with `npx prisma migrate deploy`. See
-`.devops/secrets/README.md` for the full pattern.
+again). You do **not** run migrations by hand: every deploy runs a `migrate` init
+container that applies your Prisma migrations (`prisma migrate deploy`) before the app
+starts — so once `DATABASE_URL` is set, your schema (the shipped initial migration, plus
+any you add) is applied automatically. See `.devops/secrets/README.md` for the full
+pattern.
 
 ## Switching base images / adding apt packages — read before you do
 
