@@ -24,6 +24,13 @@ resources:
   - namespace.yaml
   - alerts.yaml
   - servicemonitors.yaml
+  # SealedSecrets consumed by the kube-prometheus-stack Helm app (separate
+  # Application) — they live here because this app owns the `monitoring` ns and its
+  # non-chart CRs. alertmanager-webhook → the notification destination; grafana-admin
+  # → the rotated Grafana admin creds. Both ship as PLACEHOLDER ciphertext and MUST be
+  # resealed before go-live (see README).
+  - sealedsecret-alertmanager-webhook.yaml
+  - sealedsecret-grafana-admin.yaml
 
 labels:
   - pairs:
