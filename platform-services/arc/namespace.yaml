@@ -13,6 +13,10 @@ metadata:
   name: arc-system
   labels:
     platform.capstone/component: platform
+    # arc-system runs the ARC controller (stable Deployment) — recommend-only VPAs.
+    # NOTE: arc-runners is intentionally NOT labelled — its runner pods are ephemeral
+    # per-job (no stable workload for VPA to recommend against).
+    goldilocks.fairwinds.com/enabled: "true"   # Goldilocks recommend-only VPAs (Off mode; no eviction)
 ---
 apiVersion: v1
 kind: Namespace

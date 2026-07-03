@@ -20,6 +20,9 @@ metadata:
   name: rook-ceph
   labels:
     platform.capstone/component: platform
+    # Recommend-only (Off) — Ceph mon/OSD are stateful and NEVER go in the Auto policy;
+    # the label only surfaces sizing suggestions in Goldilocks, no eviction.
+    goldilocks.fairwinds.com/enabled: "true"
     # Talos + Rook need privileged: OSD/mon/mgr/CSI pods are privileged + hostPath.
     pod-security.kubernetes.io/enforce: privileged
     pod-security.kubernetes.io/warn: privileged

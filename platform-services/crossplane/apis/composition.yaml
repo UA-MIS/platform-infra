@@ -57,9 +57,9 @@ spec:
             {{- $infraUrl := "https://github.com/UA-MIS/platform-infra" }}
             {{- /* env quota tiers — dev/staging modest, prod higher (mirrors tenants/_template/namespaces/*) */}}
             {{- $envs := list
-                  (dict "name" "dev"     "cpuReq" "2" "memReq" "2Gi" "cpuLim" "4" "memLim" "4Gi"  "pods" "10")
-                  (dict "name" "staging" "cpuReq" "2" "memReq" "2Gi" "cpuLim" "4" "memLim" "4Gi"  "pods" "10")
-                  (dict "name" "prod"    "cpuReq" "4" "memReq" "4Gi" "cpuLim" "8" "memLim" "8Gi"  "pods" "20") }}
+                  (dict "name" "dev"     "cpuReq" "2" "memReq" "2Gi" "cpuLim" "4" "memLim" "4Gi"  "pods" "10" "storageReq" "5Gi"  "pvcs" "4")
+                  (dict "name" "staging" "cpuReq" "2" "memReq" "2Gi" "cpuLim" "4" "memLim" "4Gi"  "pods" "10" "storageReq" "5Gi"  "pvcs" "4")
+                  (dict "name" "prod"    "cpuReq" "4" "memReq" "4Gi" "cpuLim" "8" "memLim" "8Gi"  "pods" "20" "storageReq" "20Gi" "pvcs" "6") }}
 
             {{- /* =====================================================================
                    GITHUB — repo + branch protection + team access + CI caller.
@@ -401,6 +401,9 @@ spec:
                       platform.capstone/env: {{ $e.name | quote }}
                       pod-security.kubernetes.io/enforce: restricted
                       pod-security.kubernetes.io/enforce-version: v1.31
+                      # Goldilocks recommend-only (Off mode): tenant workloads get sizing
+                      # suggestions in the dashboard, never an eviction (mirrors _template).
+                      goldilocks.fairwinds.com/enabled: "true"
             ---
             apiVersion: kubernetes.crossplane.io/v1alpha1
             kind: Object
@@ -429,6 +432,10 @@ spec:
                       limits.memory: {{ $e.memLim | quote }}
                       pods: {{ $e.pods | quote }}
                       services: "5"
+                      # Storage cap — the starvation vector CPU/MEM quotas don't fence.
+                      # On replica-3 Ceph every 1Gi PVC costs 3Gi raw (mirrors _template).
+                      requests.storage: {{ $e.storageReq | quote }}
+                      persistentvolumeclaims: {{ $e.pvcs | quote }}
             ---
             apiVersion: kubernetes.crossplane.io/v1alpha1
             kind: Object

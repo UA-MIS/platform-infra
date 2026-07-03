@@ -11,6 +11,9 @@ metadata:
   name: __TEAM__-dev
   labels:
     app.kubernetes.io/managed-by: argocd
+    # Goldilocks recommend-only (Off mode): tenant workloads get sizing SUGGESTIONS in
+    # the dashboard but are NEVER auto-evicted — a demo pod is never surprise-restarted.
+    goldilocks.fairwinds.com/enabled: "true"
     platform.capstone/team: __TEAM__
     platform.capstone/semester: __SEMESTER__
     platform.capstone/env: dev
@@ -37,6 +40,11 @@ spec:
     limits.memory: 4Gi
     pods: "10"
     services: "5"
+    # Storage cap — the one starvation vector CPU/MEM quotas don't fence. On the
+    # replica-3 Ceph 3-box cluster every 1Gi PVC costs 3Gi raw, so an unbounded PVC
+    # loop from one team could exhaust the pool. Generous default; tune per team.
+    requests.storage: 5Gi
+    persistentvolumeclaims: "4"
 ---
 # LimitRange — per-container defaults + ceiling (§3.2). Ensures every pod gets
 # requests/limits even if the workload omits them, so the quota is enforceable.

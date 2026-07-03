@@ -12,5 +12,6 @@ metadata:
   name: dex
   labels:
     platform.capstone/component: platform
+    goldilocks.fairwinds.com/enabled: "true"   # Goldilocks recommend-only VPAs (Off mode; no eviction)
   annotations:
     argocd.argoproj.io/sync-wave: "-1"   # namespace before everything in it

@@ -11,6 +11,8 @@ metadata:
   name: __TEAM__-staging
   labels:
     app.kubernetes.io/managed-by: argocd
+    # Goldilocks recommend-only (Off mode) — sizing suggestions, never an eviction.
+    goldilocks.fairwinds.com/enabled: "true"
     platform.capstone/team: __TEAM__
     platform.capstone/semester: __SEMESTER__
     platform.capstone/env: staging
@@ -37,6 +39,9 @@ spec:
     limits.memory: 4Gi
     pods: "10"
     services: "5"
+    # Storage cap (replica-3 Ceph starvation fence). Generous default; tune per team.
+    requests.storage: 5Gi
+    persistentvolumeclaims: "4"
 ---
 # LimitRange — per-container defaults + ceiling (§3.2). Ensures every pod gets
 # requests/limits even if the workload omits them, so the quota is enforceable.

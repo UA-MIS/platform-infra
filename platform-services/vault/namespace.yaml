@@ -10,3 +10,6 @@ metadata:
   name: vault
   labels:
     platform.capstone/component: platform
+    # Recommend-only (Off) — Vault is a single-node manual-unseal singleton and NEVER
+    # goes in the Auto policy (an eviction would seal it). Label = sizing visibility only.
+    goldilocks.fairwinds.com/enabled: "true"
