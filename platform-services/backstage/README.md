@@ -154,18 +154,27 @@ Do these **in order**, after the cluster heal + the Phase-3 domain cutover:
 
    **M4 (VM onboarding) — seal the Harbor provisioner robot.** The `capstone:harbor-onboard`
    scaffolder action (PR #114) creates a team's Harbor project + OIDC Developer mapping at
-   scaffold time. It authenticates with a DEDICATED LEAST-PRIVILEGE robot — **NOT**
-   `harbor-admin` — scoped to `project:create` + (per-project) `member:create` only. Mint it
-   in Harbor (Administration → Robot Accounts → New Robot, **system level**, permissions
-   `Project: Create` + `Project Member: Create`) and seal its credentials into
-   `backstage-process-secrets` alongside the existing keys:
-   - **`HARBOR_PROVISIONER_USERNAME`** — the robot's full name, e.g. `robot$provisioner`.
-   - **`HARBOR_PROVISIONER_SECRET`** — the one-time token Harbor prints on creation.
+   scaffold time. It authenticates with a DEDICATED, least-privilege provisioner robot —
+   **NOT** `harbor-admin`. **REUSE the existing `robot$provisioner`** — the SAME system-level
+   robot the Crossplane `provider-harbor` already uses (its token is live in
+   `crossplane-system/harbor-provider-creds`, sealed at
+   `platform-services/crossplane/creds/harbor-provisioner-creds-sealed.yaml`). Do NOT mint a
+   second robot: `robot$provisioner` already holds project-create + member-create (a superset
+   of what this action needs), so one system provisioner robot serves both the container
+   (Crossplane) and VM (Backstage) paths. Seal its two keys into `backstage-process-secrets`
+   alongside the existing keys:
+   - **`HARBOR_PROVISIONER_USERNAME`** — the robot's full name, `robot$provisioner`.
+   - **`HARBOR_PROVISIONER_SECRET`** — the same token stored in `harbor-provider-creds`.
 
    Both are read by `applicationsets/backstage-process-app.yaml`'s `appConfig.capstone.harbor`
    block (the chart loads ONLY that overlay ConfigMap, same seam as auth/catalog/integrations
-   above — do not rely on `app-config.production.yaml` alone). Until sealed, the wizard's
-   `capstone:harbor-onboard` step fails closed with "missing config section `capstone.harbor`".
+   above — do not rely on `app-config.production.yaml` alone; PR #222 added the overlay
+   mirror). Until sealed, the wizard's `capstone:harbor-onboard` step fails closed with
+   `capstone.harbor.username and capstone.harbor.secret are required` (an unset env var
+   interpolates to empty, and the action refuses to call Harbor unauthenticated).
+
+   **Exact reseal + apply commands and the full `new-capstone-vm` runthrough are in
+   [`docs/operator/vm-path-harbor-provisioner.md`](../../docs/operator/vm-path-harbor-provisioner.md).**
 
 4. **Build + push the custom image** (above) and bump the tag in the Application. Create
    the Harbor `harbor-pull` robot imagePullSecret in the `backstage` namespace (same
