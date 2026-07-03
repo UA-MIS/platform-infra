@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """dry-render.py — OFFLINE proof of the unified "New Project" compose engine (ADR-034).
 
-Without a running Backstage, this replays a scaffold: it parses the chosen fragment.yaml
-metadata, asks the REAL Node planner (composePlan.mjs — the same module the live
-capstone:compose-project action uses, so NO drift) for the component plan, then renders the
-shared _contract/ + the chosen fragment skeleton(s) into an output tree exactly as the
-action would (jinja2 with Backstage's ${{ }} / {% %} delimiters; .github/** and
-.devops/ci/** shipped verbatim = copyWithoutTemplating).
+Without a running Backstage, this replays a scaffold for ONE chosen selection and prints the
+assembled tree + the rendered components.yaml + the DB wiring, then (if kustomize/kubectl is
+available) validates every overlay renders. This is the acceptance proof for "dry-render a
+single-component AND a FE+BE project -> coherent output".
 
-It then prints the assembled tree + the rendered components.yaml + the DB wiring, and (if
-kustomize/kubectl is available) validates every overlay renders. This is the acceptance
-proof for "dry-render a single-component AND a FE+BE project -> coherent output".
+The compose/plan/render logic lives ONCE in compose_lib.py (shared with the green-out-of-box
+CI gate green-check.py — copy-not-reference is the bug generator); this file is the thin
+interactive CLI + human-readable report over it.
 
 Usage:
   dry-render.py --scenario single-fastapi-mysql   --out /tmp/out1
@@ -18,92 +16,19 @@ Usage:
   dry-render.py --project-type web --layout frontend-backend \
                 --frontend react --backend express --database host-mysql --out /tmp/out
 """
-import argparse, json, os, shutil, subprocess, sys, fnmatch
-from pathlib import Path
+import argparse
+import sys
 
 import yaml
-from jinja2 import Environment, StrictUndefined
 
-HERE = Path(__file__).resolve().parent
-FRAGMENTS = HERE.parent                      # .../templates/_fragments
-CONTRACT = FRAGMENTS / "_contract"
-PLANNER = (
-    FRAGMENTS.parent.parent                  # .../backstage
-    / "app/plugins/scaffolder-backend-module-capstone/src/actions/composePlan.mjs"
-)
-
-# Files shipped VERBATIM (never templated) — the copyWithoutTemplating contract.
-NO_TEMPLATE = ["**/.github/**", ".github/**", "**/.devops/ci/**", ".devops/ci/**"]
-
-# Backstage's scaffolder nunjucks uses ${{ }} for variables; blocks stay {% %}.
-JENV = Environment(
-    variable_start_string="${{", variable_end_string="}}",
-    block_start_string="{%", block_end_string="%}",
-    comment_start_string="{#", comment_end_string="#}",
-    undefined=StrictUndefined, keep_trailing_newline=True,
-    trim_blocks=False, lstrip_blocks=False,
-)
+import compose_lib
+from compose_lib import ComposeError, compose, kustomize_overlays, kustomize_tool
 
 SCENARIOS = {
     "single-fastapi-mysql": dict(projectType="web", layout="single", single="backend/fastapi", database="host-mysql"),
     "febe-react-express-mysql": dict(projectType="web", layout="frontend-backend", frontend="frontend/react", backend="backend/express", database="host-mysql"),
     "single-static": dict(projectType="web", layout="single", single="static/react-static", database="none"),
 }
-
-
-def load_meta(rel):
-    p = FRAGMENTS / rel / "fragment.yaml"
-    if not p.exists():
-        sys.exit(f"fragment not found: {p}")
-    return yaml.safe_load(p.read_text()), (FRAGMENTS / rel)
-
-
-def run_planner(plan_input):
-    # composePlan is native ESM (composePlan.mjs), so load it with dynamic import() rather than
-    # require(). import() needs a file:// URL for an absolute path, hence pathToFileURL.
-    js = (
-        "import('node:url').then(({pathToFileURL})=>"
-        "import(pathToFileURL(process.argv[1]).href)).then(({planComposition})=>"
-        "{let s='';process.stdin.on('data',d=>s+=d).on('end',()=>"
-        "{try{process.stdout.write(JSON.stringify(planComposition(JSON.parse(s))))}"
-        "catch(e){console.error(e.message);process.exit(2)}});})"
-        ".catch(e=>{console.error(e.message);process.exit(2)});"
-    )
-    r = subprocess.run(["node", "-e", js, str(PLANNER)], input=json.dumps(plan_input),
-                       capture_output=True, text=True)
-    if r.returncode != 0:
-        sys.exit(f"planner failed: {r.stderr.strip()}")
-    return json.loads(r.stdout)
-
-
-def is_verbatim(relpath):
-    return any(fnmatch.fnmatch(relpath, pat) for pat in NO_TEMPLATE)
-
-
-def render_tree(src_root, dst_root, values, subdir_filter=None):
-    # Backstage fetch:template exposes the step's `values:` under a `values` namespace,
-    # so skeleton files reference ${{ values.appName }}. Render with that single namespace.
-    for path in sorted(src_root.rglob("*")):
-        if not path.is_file():
-            continue
-        rel = path.relative_to(src_root).as_posix()
-        if subdir_filter and not rel.startswith(subdir_filter):
-            continue
-        out = dst_root / rel
-        out.parent.mkdir(parents=True, exist_ok=True)
-        raw = path.read_bytes()
-        if is_verbatim(rel):
-            out.write_bytes(raw)
-            continue
-        try:
-            text = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            out.write_bytes(raw)
-            continue
-        try:
-            out.write_text(JENV.from_string(text).render(values=values))
-        except Exception as e:  # noqa: BLE001
-            sys.exit(f"TEMPLATE ERROR in {rel}: {e}")
 
 
 def main():
@@ -125,46 +50,28 @@ def main():
         if getattr(a, k, None):
             sel[k] = getattr(a, k)
 
-    # Parse the chosen fragments -> metas + their source dirs (for copying skeleton/).
-    metas, srcdirs = {}, {}
+    # Allow bare fragment ids on the CLI (--frontend react) by resolving to a rel path.
     for slot in ("single", "frontend", "backend", "mobile"):
-        if sel.get(slot):
-            metas[slot], srcdirs[slot] = load_meta(sel[slot])
+        v = sel.get(slot)
+        if v and "/" not in v:
+            match = [f for f in compose_lib.discover_fragments() if f.split("/")[-1] == v]
+            if len(match) == 1:
+                sel[slot] = match[0]
 
-    plan = run_planner({
-        "projectType": sel["projectType"], "layout": sel.get("layout"),
-        "fragments": metas, "database": sel.get("database", "none"), "port": a.port,
-    })
+    try:
+        c = compose(sel, a.out, app_name=a.appName, team=a.team, port=a.port)
+    except ComposeError as e:
+        sys.exit(str(e))
 
-    values = dict(
-        appName=a.appName, team=a.team, semester="2026-fall",
-        semesterDisplay="Capstone Fall 2026", port=a.port,
-        description="A UA-MIS capstone project (dry-render).",
-        destination={"owner": "UA-MIS", "repo": a.appName},
-        components=plan["components"], database=plan["database"],
-        dbWired=plan["dbWired"], single=plan["single"],
-    )
-
-    out = Path(a.out)
-    if out.exists():
-        shutil.rmtree(out)
-    out.mkdir(parents=True)
-
-    # 1) the shared contract (rendered once).
-    render_tree(CONTRACT, out, values)
-    # 2) each fragment's skeleton/ -> its target dir.
-    for c in plan["copies"]:
-        # find the slot whose meta.id matches this copy's fragment id
-        slot = next(s for s, m in metas.items() if m["id"] == c["fragment"]["id"])
-        render_tree(srcdirs[slot] / "skeleton", out / c["targetDir"], values)
+    plan, out = c.plan, c.out
 
     # ---- report ---------------------------------------------------------------
     print(f"\n=== DRY-RENDER: {sel} -> {out} ===")
     print(f"plan.database={plan['database']}  dbWired={plan['dbWired']}  single={plan['single']}")
     print("components:")
-    for c in plan["components"]:
-        print(f"  - {c['name']:8} kind={c['kind']:8} path={c['path'] or '(none)':5} "
-              f"port={c['port']} needsDb={c['needsDb']} buildType={c['buildType']} context={c['context']}")
+    for comp in plan["components"]:
+        print(f"  - {comp['name']:8} kind={comp['kind']:8} path={comp['path'] or '(none)':5} "
+              f"port={comp['port']} needsDb={comp['needsDb']} buildType={comp['buildType']} context={comp['context']}")
     print("\nassembled top-level dirs:",
           sorted(p.name for p in out.iterdir()))
     print("\n--- rendered .devops/components.yaml ---")
@@ -174,24 +81,19 @@ def main():
     es = (out / ".devops/chart/overlays/dev/app-secret.externalsecret.yaml").read_text()
     print("DATABASE_URL wired into dev app-secret:", "DATABASE_URL" in es)
 
-    # validate rendered YAML parses (components + app-metadata + chart base)
+    # validate rendered YAML parses (components + app-metadata)
     for f in [".devops/components.yaml", ".devops/app-metadata.yaml"]:
         list(yaml.safe_load_all((out / f).read_text()))
     print("rendered components.yaml + app-metadata.yaml parse OK")
 
-    # 3) real kustomize validation if available.
-    kz = shutil.which("kustomize") or shutil.which("kubectl")
-    if kz:
-        for env in ("dev", "staging", "prod", "preview"):
-            cmd = ([kz, "build"] if "kustomize" in kz else [kz, "kustomize"]) + \
-                  [str(out / ".devops/chart/overlays" / env)]
-            r = subprocess.run(cmd, capture_output=True, text=True)
-            status = "OK" if r.returncode == 0 else f"FAIL\n{r.stderr.strip()[:800]}"
-            print(f"kustomize {env}: {status}")
-            if r.returncode != 0:
-                sys.exit(1)
-    else:
+    # real kustomize validation if available.
+    if kustomize_tool() is None:
         print("kustomize/kubectl not found — skipped chart build validation")
+    else:
+        for env, ok, err in kustomize_overlays(out):
+            print(f"kustomize {env}: {'OK' if ok else 'FAIL' + chr(10) + err[:800]}")
+            if not ok:
+                sys.exit(1)
     print("=== DRY-RENDER OK ===\n")
 
 
