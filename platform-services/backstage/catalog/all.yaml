@@ -21,6 +21,7 @@ spec:
     # rebuild) + a healthy Crossplane install. See templates/new-capstone-project/
     # CROSSPLANE-CUTOVER.md.
     - https://github.com/UA-MIS/platform-infra/blob/main/platform-services/backstage/templates/new-capstone-project-zerotouch/template.yaml
+    -   https://github.com/UA-MIS/platform-infra/blob/main/platform-services/backstage/templates/new-project/template.yaml
     # The "New Capstone Project" Scaffolder template — the imperative PR-path (a
     # review-gated onboarding PR + operator Harbor steps). PRESERVED as the fallback
     # safety net for the zero-touch template above.
