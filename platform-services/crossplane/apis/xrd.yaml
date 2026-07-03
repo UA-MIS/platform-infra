@@ -116,11 +116,16 @@ spec:
                     provisions a MariaDB schema + scoped user + grant per environment on
                     the off-cluster DB tier (provider-sql), pushes the credentials into
                     Vault at tenants/<team>/<env>/database, and the app's DATABASE_URL
-                    ExternalSecret reads them. `none` provisions no database (the default;
-                    DB-less stacks like the React static SPA leave it unset). The DB
-                    scaffolder templates (Next.js/Prisma, .NET/EF, Python/FastAPI) set
-                    `mysql`; react-static leaves `none`.
-                  enum: [none, mysql]
+                    ExternalSecret reads them. `postgres` does the same on the PG17
+                    engine of the same DB tier (provider-sql postgresql.sql.crossplane.io:
+                    Database + login Role + Grant), writing the SAME four Vault parts
+                    (username/password/host/port) so the consumer contract is engine-
+                    agnostic — only the DATABASE_URL scheme differs (postgresql://).
+                    `none` provisions no database (the default; DB-less stacks like the
+                    React static SPA leave it unset). The DB scaffolder templates set
+                    `mysql` or `postgres` per the chosen engine; react-static leaves
+                    `none`.
+                  enum: [none, mysql, postgres]
                   default: none
             status:
               type: object

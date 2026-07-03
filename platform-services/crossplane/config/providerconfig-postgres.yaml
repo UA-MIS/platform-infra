@@ -1,0 +1,50 @@
+# ProviderConfig for provider-sql — POSTGRES tier (ADR-033). Sibling of
+# providerconfig-sql.yaml (MariaDB/MySQL). provider-sql is ONE provider that speaks
+# mysql + postgresql; this second ProviderConfig lets a CapstoneTenant pick
+# `database: postgres` and be provisioned on the SAME off-cluster DB tier box
+# (ua-mis-db-1) which runs PG17 alongside MariaDB 11.8.
+#
+# Connects using a SCOPED admin credential — NOT the Postgres `postgres` superuser.
+# The provisioner role only needs CREATEDB + CREATEROLE (create/drop tenant databases
+# and login roles, and — because CREATEROLE makes it a member of the roles it creates —
+# assign per-tenant database ownership + delegate schema privileges). It is NOT a
+# superuser (no SUPERUSER/REPLICATION/BYPASSRLS). See docs/operator/
+# db-tier-provisioner-setup.md §6 for the exact `CREATE ROLE ... CREATEDB CREATEROLE`
+# and the pg_hba.conf/listen_addresses tailnet binding that mints this login.
+#
+# The referenced Secret `db-tier-postgres-admin` is materialized from the PLACEHOLDER
+# SealedSecret in creds/postgres-admin-creds-sealed.yaml. provider-sql's
+# `PostgreSQLConnectionSecret` source reads four FIXED keys from it —
+# endpoint/port/username/password — exactly what the placeholder SealedSecret carries
+# (see creds/README.md; the SRE audits those keys there).
+#
+# ⚠ NOTE (v0.15.0 schema): as with the mysql ProviderConfig, we do NOT declare
+# `spec.credentials.secretKeyMapping` — on the installed provider-sql v0.15.0 the four
+# secret key names are hardcoded to endpoint/port/username/password (secretKeyMapping is
+# a later/unreleased addition; verified against the live CRD + Context7
+# crossplane-contrib/provider-sql). So no mapping is declared here.
+#
+# defaultDatabase: Postgres (unlike MySQL) ALWAYS connects TO a database. provider-sql
+# opens its admin session against `defaultDatabase` to run CREATE DATABASE/ROLE; the
+# maintenance DB `postgres` always exists on PG17, so we point there.
+#
+# sslMode: `disable` — PG17 on ua-mis-db-1 is reached over the trusted Tailscale overlay
+# (the SAME transport-security boundary as the MariaDB path; the tailnet IS the boundary,
+# DB-tier runbook §2/§6) and is NOT fronted by TLS. provider-sql's postgres default is
+# `verify-full`, which would FAIL against a non-TLS listener — so we set `disable`
+# explicitly. ⚠ If TLS is later enabled on db1's Postgres, switch to `verify-full` and
+# supply the CA via the provider's runtime config (mirror the MariaDB TLS note).
+apiVersion: postgresql.sql.crossplane.io/v1alpha1
+kind: ProviderConfig
+metadata:
+  name: db-tier-postgres
+  labels:
+    platform.capstone/component: platform
+spec:
+  credentials:
+    source: PostgreSQLConnectionSecret
+    connectionSecretRef:
+      namespace: crossplane-system
+      name: db-tier-postgres-admin
+  defaultDatabase: postgres
+  sslMode: disable

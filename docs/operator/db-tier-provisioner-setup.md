@@ -163,9 +163,108 @@ If `ProviderConfig` never goes Ready: check the egress path. provider-sql's
 
 ---
 
+## 6. Postgres tier (ADR-033 parity) — provisioner role on the SAME box
+
+`ua-mis-db-1` also runs **PG17** alongside MariaDB. A tenant that picks `database: postgres`
+is provisioned by the **same** provider-sql controller through a **second** ProviderConfig
+(`db-tier-postgres`, `config/providerconfig-postgres.yaml`) reading a **separate** sealed
+secret `db-tier-postgres-admin`. This section mints the scoped Postgres provisioner role
+and seals it. **Do this only after §1–5** (the box must be live on the tailnet).
+
+| | |
+| --- | --- |
+| Postgres role | `crossplane_provisioner` — attributes **`LOGIN CREATEDB CREATEROLE`**, **NOT** `SUPERUSER` |
+| Why those two | `CREATEDB` = create/drop tenant databases; `CREATEROLE` = create/drop tenant login roles AND (CREATEROLE auto-grants membership in roles it creates) assign each tenant DB's ownership to its role + delegate privileges. Excludes SUPERUSER/REPLICATION/BYPASSRLS |
+| Listener | `listen_addresses` includes the db1 **tailnet IP** (`<TSIP>`); never the public/LAN NIC |
+| Host auth | one `pg_hba.conf` line scoping the role to the tailnet CIDR `100.64.0.0/10` |
+| Sealed secret | `db-tier-postgres-admin` (ns `crossplane-system`), 4 keys `endpoint`/`port`(**5432**)/`username`/`password` → `platform-services/crossplane/creds/postgres-admin-creds-sealed.yaml` |
+
+The `endpoint`/`port`/`username`/`password` key names are exactly what provider-sql's
+`PostgreSQLConnectionSecret` source reads (`config/providerconfig-postgres.yaml`, which also
+sets `defaultDatabase: postgres` + `sslMode: disable` — the tailnet is the transport
+boundary, same as MariaDB).
+
+### 6a. Bind PG17 to the tailnet + allow the tailnet CIDR (on db1)
+
+```bash
+# listen on localhost + the tailnet IP only (adjust the conf path for your PG17 install)
+sudo sed -i "s/^#\?listen_addresses.*/listen_addresses = 'localhost,<TSIP>'/" \
+  /etc/postgresql/17/main/postgresql.conf
+sudo grep -n '^listen_addresses' /etc/postgresql/17/main/postgresql.conf   # confirm
+
+# host-auth: the provisioner role, any db, only from the tailnet CIDR, scram password.
+echo "host  all  crossplane_provisioner  100.64.0.0/10  scram-sha-256" \
+  | sudo tee -a /etc/postgresql/17/main/pg_hba.conf
+sudo systemctl restart postgresql
+ss -ltnp | grep 5432                                                       # LISTEN on <TSIP>:5432
+```
+
+### 6b. Create the scoped provisioner role (on db1)
+
+```bash
+sudo -u postgres psql
+```
+
+```sql
+-- Pick a strong token; you will re-type it in §6c.
+-- LOGIN + CREATEDB + CREATEROLE only. NOT SUPERUSER (which would ignore pg_hba host
+-- restriction AND every privilege check — that is root-equivalent and defeats "NOT root").
+CREATE ROLE crossplane_provisioner LOGIN CREATEDB CREATEROLE PASSWORD '<STRONG_TOKEN>';
+
+-- eyeball: rolsuper = f, rolcreatedb = t, rolcreaterole = t
+\du crossplane_provisioner
+\q
+```
+
+> **Why not `SUPERUSER`?** A superuser bypasses `pg_hba.conf` host scoping and all
+> privilege checks — effectively root. `CREATEDB CREATEROLE` is the correct least-privilege
+> grant for a provisioner that only mints per-tenant `Database` + `Role` + `Grant`.
+
+### 6c. Seal `db-tier-postgres-admin` (LOCAL shell — **fish**)
+
+Same controller coordinates as §4 (`--controller-namespace kube-system --controller-name
+sealed-secrets-controller`). Note **port 5432**.
+
+```fish
+set TSIP (ssh ops@ua-mis-db-1 'tailscale ip -4 | head -1')
+read -s -P "crossplane_provisioner (postgres) password: " PG_PROV_PASS
+
+kubectl create secret generic db-tier-postgres-admin \
+    --namespace crossplane-system \
+    --from-literal=endpoint=$TSIP \
+    --from-literal=port=5432 \
+    --from-literal=username=crossplane_provisioner \
+    --from-literal=password=$PG_PROV_PASS \
+    --dry-run=client -o yaml \
+  | kubeseal --controller-namespace kube-system --controller-name sealed-secrets-controller \
+      --format yaml > platform-services/crossplane/creds/postgres-admin-creds-sealed.yaml
+
+set -e PG_PROV_PASS
+```
+
+This **overwrites** the placeholder `postgres-admin-creds-sealed.yaml` with a real,
+cluster-decryptable seal. Commit on a branch + PR (never straight to main).
+
+### 6d. Verify (after ArgoCD syncs the real seal)
+
+```bash
+kubectl -n crossplane-system get secret db-tier-postgres-admin -o jsonpath='{.data}' | tr ',' '\n'
+kubectl get providerconfig.postgresql.sql.crossplane.io db-tier-postgres
+# end-to-end: a CapstoneTenant with `database: postgres` -> Database/Role/Grant MRs Ready +
+# PushSecrets landing in Vault at tenants/<team>/<env>/database (SAME leaf as mysql).
+kubectl get database.postgresql.sql.crossplane.io,role.postgresql.sql.crossplane.io -A
+```
+
+Egress: the SAME `crossplane-db-cnp.yaml` policy governs it (one provider-sql pod); it now
+allows **TCP/5432** in addition to 3306. Confirm with `hubble observe --namespace
+crossplane-system --port 5432` during the DB-tier deny-test.
+
+---
+
 ## Cross-refs
 
 - ADR: `artifacts/design/decisions/adr-033-auto-database-provisioning.md`
-- Provider + ProviderConfig + placeholder cred: `platform-services/crossplane/{providers/provider-sql.yaml,config/providerconfig-sql.yaml,creds/mysql-admin-creds-sealed.yaml}`
-- Egress netpol: `hardening/netpol-controlplane/crossplane-db-cnp.yaml`
-- Consumer contract (DB templates read `tenants/<team>/<env>/database`): ADR-033 §"Vault path contract"
+- MySQL provider + ProviderConfig + placeholder cred: `platform-services/crossplane/{providers/provider-sql.yaml,config/providerconfig-sql.yaml,creds/mysql-admin-creds-sealed.yaml}`
+- Postgres ProviderConfig + placeholder cred: `platform-services/crossplane/{config/providerconfig-postgres.yaml,creds/postgres-admin-creds-sealed.yaml}`
+- Egress netpol (3306 + 5432): `hardening/netpol-controlplane/crossplane-db-cnp.yaml`
+- Consumer contract (DB templates read `tenants/<team>/<env>/database`, scheme by engine): ADR-033 §"Vault path contract"

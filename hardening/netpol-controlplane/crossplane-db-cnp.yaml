@@ -4,8 +4,9 @@
 #
 # WHY THIS EXISTS:
 # provider-sql (crossplane-system) is the ONLY crossplane component that talks to the
-# off-cluster DB tier `ua-mis-db-1` (MariaDB 11.8). It reaches it on TCP/3306 at the
-# tailnet address in the `db-tier-mysql-admin` ProviderConfig secret (endpoint = a
+# off-cluster DB tier `ua-mis-db-1` (MariaDB 11.8 + PG17). It reaches it on TCP/3306
+# (MySQL) and TCP/5432 (Postgres, ADR-033 parity) at the tailnet address in the
+# `db-tier-mysql-admin` / `db-tier-postgres-admin` ProviderConfig secret (endpoint = a
 # 100.64.0.0/10 Tailscale IP; the Talos nodes are Tailscale-everywhere, Phase-4 build
 # kit). ADR-033's negative-consequences + Phase-0 list both require a crossplane-system
 # egress policy that permits TCP/3306 to the tailnet CIDR once Cilium enforces (SEC-011).
@@ -85,10 +86,14 @@ spec:
               protocol: UDP
             - port: "53"
               protocol: TCP
-    # The off-cluster DB tier (ua-mis-db-1, MariaDB 11.8) over the Tailscale overlay.
+    # The off-cluster DB tier (ua-mis-db-1) over the Tailscale overlay — MariaDB 11.8 on
+    # TCP/3306 AND PG17 on TCP/5432 (ADR-033 postgres parity; same provider-sql pod, same
+    # box, so both ports are enumerated on this one endpoint's egress allow-list).
     - toCIDR:
         - 100.64.0.0/10
       toPorts:
         - ports:
             - port: "3306"
+              protocol: TCP
+            - port: "5432"
               protocol: TCP
