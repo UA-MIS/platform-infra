@@ -49,6 +49,29 @@ stack, so they work day-one. The ESO/ArgoCD/cert-manager alerts need those compo
 PodMonitor for the ESO controller pod). kube-prometheus-stack's own `defaultRules` add
 broad k8s/node/kubelet/etcd/apiserver coverage on top of these.
 
+## Scrape coverage gaps (admin dashboards, PR #208)
+
+The `Platform / Health` admin dashboard has panels for Vault, Harbor, Crossplane, and
+ARC. Only **Crossplane** is wired to real component metrics (a PodMonitor in
+`servicemonitors.yaml`, confirmed live 2026-07-02 via
+`kubectl -n crossplane-system port-forward deploy/crossplane 8080:8080` + `curl
+:8080/metrics`) — Vault/Harbor/ARC panels still read kube-state-metrics pod/deployment
+status, not each component's own `/metrics`, because none of them serve Prometheus
+metrics today without a config change first (see the header comment in
+`servicemonitors.yaml` for exact values/config needed for each):
+
+- **Vault** — no `telemetry` stanza in `vault-config`; enabling it needs a restart of
+  the single-node, manual-unseal `vault-0` pod, so it's not bundled here (Vault-DR
+  roadmap item, not a drive-by).
+- **Harbor** — goharbor chart ships `metrics.enabled: false`; turning it on also
+  deploys a new `harbor-exporter` component, so it's a `harbor-app.yaml` values change
+  for its own PR.
+- **ARC** (gha-runner-scale-set-controller) — running with `--metrics-addr=0` (metrics
+  explicitly off); fix is a `metrics:` block in `arc-controller-app.yaml` helm values +
+  a PodMonitor on the resulting named `metrics` port. Low-risk (stateless,
+  single-replica controller) but left as a follow-up since there's nothing to scrape
+  until that values change lands.
+
 ## Notification channel (the `platform-oncall` webhook receiver)
 
 Alerts at `severity =~ critical|warning` route to the **`platform-oncall`** receiver,
