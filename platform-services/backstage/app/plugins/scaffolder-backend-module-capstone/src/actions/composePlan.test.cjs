@@ -19,6 +19,8 @@ const reactStatic = { id: 'react-static', category: 'static', slots: ['single'],
 const express = { id: 'express', category: 'backend', slots: ['backend', 'single'], defaultPort: 8080, ingressPath: '/api', needsDB: true, buildType: 'container', dockerfile: 'Dockerfile' };
 const fastapi = { id: 'fastapi', category: 'backend', slots: ['backend', 'single'], defaultPort: 8080, ingressPath: '/api', needsDB: true, buildType: 'container', dockerfile: 'Dockerfile' };
 const mobile = { id: 'swift-ios', category: 'mobile', slots: ['mobile'], defaultPort: 0, ingressPath: '', needsDB: false, buildType: 'mobile-artifact', dockerfile: '' };
+// blank / bring-your-own-code (ADR-035 §D4): single-slot container placeholder, kind backend.
+const blank = { id: 'bring-your-own', category: 'blank', slots: ['single'], defaultPort: 8080, ingressPath: '/', needsDB: true, buildType: 'container', dockerfile: 'Dockerfile' };
 
 test('single backend (FastAPI) + host-mysql -> 1 component at /, db provisioned', () => {
   const p = planComposition({ projectType: 'web', layout: 'single', fragments: { single: fastapi }, database: 'host-mysql', port: 8080 });
@@ -68,6 +70,24 @@ test('db=none on a DB-capable backend leaves it unwired', () => {
   assert.equal(p.database, 'none');
 });
 
+test('single backend (FastAPI) + host-postgres -> postgres provisioned (#192 PG parity)', () => {
+  const p = planComposition({ projectType: 'web', layout: 'single', fragments: { single: fastapi }, database: 'host-postgres', port: 8080 });
+  assert.equal(p.database, 'postgres');
+  assert.equal(p.dbWired, true);
+});
+
+test('FE+BE (React + Express) + host-postgres -> postgres provisioned, DATABASE_URL wired', () => {
+  const p = planComposition({ projectType: 'web', layout: 'frontend-backend', fragments: { frontend: react, backend: express }, database: 'host-postgres', port: 8080 });
+  assert.equal(p.database, 'postgres');
+  assert.equal(p.dbWired, true);
+});
+
+test('host-postgres on a DB-less stack (static) provisions no engine', () => {
+  const p = planComposition({ projectType: 'web', layout: 'single', fragments: { single: reactStatic }, database: 'host-postgres' });
+  assert.equal(p.database, 'none');
+  assert.equal(p.dbWired, false);
+});
+
 test('mobile -> deployed backend at / + mobile-artifact component (not deployed)', () => {
   const p = planComposition({ projectType: 'mobile', fragments: { backend: express, mobile }, database: 'host-mysql', port: 8080 });
   const be = p.components.find(c => c.name === 'backend');
@@ -75,6 +95,25 @@ test('mobile -> deployed backend at / + mobile-artifact component (not deployed)
   assert.equal(be.path, '/');
   assert.equal(be.buildType, 'container');
   assert.equal(mob.buildType, 'mobile-artifact');
+  assert.equal(p.dbWired, true);
+});
+
+test('blank/BYO single + none -> 1 component at /, kind backend, no db', () => {
+  const p = planComposition({ projectType: 'web', layout: 'single', fragments: { single: blank }, database: 'none' });
+  assert.equal(p.components.length, 1);
+  const [c] = p.components;
+  assert.equal(c.name, 'app');
+  assert.equal(c.kind, 'backend'); // blank category maps to kind backend
+  assert.equal(c.path, '/');
+  assert.equal(c.buildType, 'container');
+  assert.equal(p.database, 'none');
+  assert.equal(p.dbWired, false);
+  assert.deepEqual(p.copies.map(x => [x.fragment.id, x.targetDir]), [['bring-your-own', 'app']]);
+});
+
+test('blank/BYO single + host-mysql -> db provisioned + wired (wizard DB question is effective)', () => {
+  const p = planComposition({ projectType: 'web', layout: 'single', fragments: { single: blank }, database: 'host-mysql', port: 8080 });
+  assert.equal(p.database, 'mysql');
   assert.equal(p.dbWired, true);
 });
 

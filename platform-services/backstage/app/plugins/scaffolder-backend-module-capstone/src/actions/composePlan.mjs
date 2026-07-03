@@ -5,7 +5,7 @@
  *   - components[]  : the .devops/components.yaml model (1 entry for single, 2 for FE+BE,
  *                     backend+mobile-artifact for a mobile project)
  *   - copies[]      : which fragment skeleton dir is rendered into which target dir
- *   - database      : the resolved tenant DB mode (none|mysql) for the CapstoneTenant claim
+ *   - database      : the resolved tenant DB mode (none|mysql|postgres) for the CapstoneTenant claim
  *   - dbWired       : whether any component will receive a DATABASE_URL (drives the chart)
  *
  * It is PURE (no fs, no network, no Backstage deps) so the SAME logic runs in three places
@@ -31,6 +31,9 @@ const CATEGORY_KIND = {
   backend: 'backend',
   fullstack: 'backend',
   mobile: 'backend',
+  // blank / bring-your-own-code (ADR-035 §D4): a single-slot, container-built placeholder the
+  // student replaces. It serves an HTTP app on "/" like a backend, so it maps to kind backend.
+  blank: 'backend',
 };
 
 const VALID_CATEGORIES = Object.keys(CATEGORY_KIND);
@@ -161,14 +164,21 @@ function planComposition(input) {
   }
 
   // DB resolution. dbWired = a component reads DATABASE_URL AND the user did not pick "none".
-  // Provisioned `database` is mysql ONLY for host-mysql (the XRD/ADR-033 enum is none|mysql;
-  // host-postgres + bring-your-own are user-supplied -> provision none, but still wire the
-  // DATABASE_URL ExternalSecret so the team can set the value via the Secrets tab).
+  // Provisioned `database` maps the wizard choice onto the XRD/ADR-033 enum (none|mysql|
+  // postgres): host-mysql -> mysql and host-postgres -> postgres both auto-provision a
+  // per-(team,env) engine + Vault creds (#192 added the PG parity path); bring-your-own is
+  // user-supplied -> provision none, but still wire the DATABASE_URL ExternalSecret so the
+  // team can set the value via the Secrets tab.
   const anyNeedsDb = components.some(c => c.needsDb);
   const dbWired = anyNeedsDb && dbChoice !== 'none';
-  // Provision mysql ONLY when host-mysql is chosen AND a component actually uses a DB —
+  // Provision an engine ONLY when a hosted DB is chosen AND a component actually uses a DB —
   // never stand up an unused database for a DB-less stack (defensive against a mis-pick).
-  const database = dbChoice === 'host-mysql' && anyNeedsDb ? 'mysql' : 'none';
+  const database =
+    anyNeedsDb && dbChoice === 'host-mysql'
+      ? 'mysql'
+      : anyNeedsDb && dbChoice === 'host-postgres'
+        ? 'postgres'
+        : 'none';
 
   return {
     components,

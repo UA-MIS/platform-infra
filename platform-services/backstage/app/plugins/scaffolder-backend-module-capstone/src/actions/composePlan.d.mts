@@ -2,7 +2,7 @@
 export interface FragmentMeta {
   id: string;
   displayName?: string;
-  category: 'frontend' | 'backend' | 'static' | 'fullstack' | 'mobile';
+  category: 'frontend' | 'backend' | 'static' | 'fullstack' | 'mobile' | 'blank';
   language?: string;
   framework?: string;
   slots: Array<'single' | 'frontend' | 'backend' | 'mobile'>;
@@ -35,7 +35,7 @@ export interface PlanCopy {
 export interface ComposePlan {
   components: PlanComponent[];
   copies: PlanCopy[];
-  database: 'none' | 'mysql';
+  database: 'none' | 'mysql' | 'postgres';
   dbWired: boolean;
   single: boolean;
 }
