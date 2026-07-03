@@ -52,7 +52,18 @@ spec:
       recurse: true
       # apis/ (XRD+Composition) is its own app (needs provider+function CRDs first);
       # docs are not manifests.
-      exclude: '{apis/**,README.md,creds/README.md}'
+      #
+      # GATED until postgres db1 setup — reseal db-tier-postgres-admin with real creds
+      # (see docs/operator/db-tier-provisioner-setup.md postgres variant) then remove the
+      # two config/providerconfig-postgres.yaml + creds/postgres-admin-creds-sealed.yaml
+      # entries below to re-enable. The postgres placeholder SealedSecret carries
+      # illegal-base64 ciphertext the sealed-secrets controller can't decode → its
+      # SealedSecret goes Degraded → this whole app is Degraded. Excluding the placeholder
+      # cred (and its dependent ProviderConfig, which would sit unauthenticated without it)
+      # keeps the files on disk but out of the sync until real db1 postgres creds exist.
+      # The XRD `postgres` enum + composition postgres block stay (additive + inert
+      # without this ProviderConfig).
+      exclude: '{apis/**,README.md,creds/README.md,config/providerconfig-postgres.yaml,creds/postgres-admin-creds-sealed.yaml}'
   destination:
     server: https://kubernetes.default.svc
     namespace: crossplane-system
