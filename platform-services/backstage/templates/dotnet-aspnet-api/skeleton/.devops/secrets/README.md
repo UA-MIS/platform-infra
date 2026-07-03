@@ -60,7 +60,7 @@ value never blocks startup:
 - **`DATABASE_URL`** (key `DATABASE_URL`) — the MySQL connection string for EF Core.
   Empty by default; the app reports the database as unconfigured and the `/api/widgets`
   CRUD returns `503` until you set it. **This is the one most teams set.**
-- **`APP_SECRET`** (key `app-secret`) — a generic demo secret env, kept for parity with
+- **`APP_SECRET`** (key `APP_SECRET`) — a generic demo secret env, kept for parity with
   the platform's other starters. Ignore it unless your code reads `APP_SECRET`.
 
 The per-env `app-secret.externalsecret.yaml` already maps the Vault keys under

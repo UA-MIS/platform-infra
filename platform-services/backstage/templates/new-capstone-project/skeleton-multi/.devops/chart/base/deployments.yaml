@@ -63,7 +63,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: ${{ values.appName }}-secret
-                  key: app-secret
+                  key: APP_SECRET
                   optional: true
           # Probes hit the pod DIRECTLY (not via the Ingress), so every component
           # serves /healthz at the container root regardless of its ingress `path`.
