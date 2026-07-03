@@ -6,6 +6,11 @@
 #
 # Auth: a Vault token whose policy (`tenant-provisioner`) may write policy +
 # auth/kubernetes/role under tenants/* ONLY — config/providerconfig-vault.yaml.
+# Also needs `auth/token/create` (create+update): Upjet/terraform-provider-vault
+# mints a short-lived CHILD token per API call rather than using the static token
+# directly, so the policy must be able to create children of itself. A child token
+# can only carry a SUBSET of the parent's policies, so this doesn't widen scope
+# beyond tenant-* — see creds/README.md.
 #
 # ⚠ Provider maturity (ADR-031 Consequences + open-question 4): provider-vault is
 # v0.1.0 — EARLY. Pinned here; the SRE confirms the exact MR API groups
