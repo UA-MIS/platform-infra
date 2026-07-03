@@ -27,6 +27,10 @@
 #   workload kind and the CI build differ.
 #
 # WHAT IT DOES (steps below):
+#   0. capstone:preflight — fail fast + clean if `appName` collides with an existing
+#      GitHub repo, catalog entry, or tenant claim, BEFORE anything below is created
+#      (the swamiapp lesson: a reused name once got PAST publish and only failed at
+#      register, leaving an orphaned repo behind). Read-only.
 #   1. fetch:template — render ./skeleton-vm (the VM chart: VirtualMachine +
 #      DataVolume(template) on ceph-block + cloud-init + Service/Ingress, a VM-aware
 #      promotion.yaml [single env, no build], a validation-only CI workflow, the
@@ -203,6 +207,17 @@ spec:
     # App via integrations.github (no user OAuth, no token input — D-017).
 
   steps:
+    # 0) PREFLIGHT — fail fast + clean if `appName` collides with an existing GitHub repo,
+    #    catalog entry, or tenant claim, BEFORE anything is created (the swamiapp lesson: a
+    #    reused name once got PAST publish and only failed at register, leaving an orphaned
+    #    repo behind). Read-only; throws with a clear message on collision.
+    - id: preflight
+      name: Check for a name collision
+      action: capstone:preflight
+      input:
+        team: ${{ parameters.team }}
+        appName: ${{ parameters.appName }}
+
     # 1) Render the VM starter (chart + cloud-init + VM-aware promotion.yaml + catalog +
     #    validation-only CI). Single fetch (this template is VM-only — no layout branch).
     - id: fetch-skeleton-vm

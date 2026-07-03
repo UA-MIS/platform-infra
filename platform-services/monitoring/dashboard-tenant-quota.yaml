@@ -1,0 +1,292 @@
+# Admin dashboard 2/4 (Observability admin dashboards). Per-tenant CPU/memory/pod
+# usage vs the ResourceQuota each team's namespace ships with (tenants/_template/
+# namespaces/*.yaml — §3.2, ties to the #199 resource-governance work). Sourced from
+# kube-state-metrics `kube_resourcequota` (ships day-one, no follow-up wiring). The
+# `namespace` template variable is populated FROM kube_resourcequota itself, so it
+# naturally lists only tenant namespaces (only they carry a ResourceQuota) — no
+# dependency on custom namespace labels being allow-listed by kube-state-metrics.
+#
+# Storage: there is currently NO storage ResourceQuota (only compute-quota: cpu/mem/
+# pods/services — see tenants/_template/namespaces/dev.yaml) — the storage row shows
+# PVC usage only, no hard line. Adding a storage quota is tracked in the resource-
+# governance backlog; until then this row is usage-visibility-only.
+#
+# Auto-provisioned by the Grafana sidecar via the `grafana_dashboard: "1"` label.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-tenant-quota
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    grafana_dashboard: "1"
+data:
+  tenant-quota.json: |
+    {
+      "uid": "platform-tenant-quota",
+      "title": "Platform / Per-Tenant Usage vs Quota",
+      "tags": ["platform", "admin", "tenants"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "time": { "from": "now-6h", "to": "now" },
+      "refresh": "1m",
+      "templating": {
+        "list": [
+          {
+            "name": "datasource",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": {},
+            "hide": 0
+          },
+          {
+            "name": "namespace",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "${datasource}" },
+            "query": { "query": "label_values(kube_resourcequota{resource=\"requests.cpu\"}, namespace)", "refId": "namespace" },
+            "refresh": 2,
+            "multi": true,
+            "includeAll": true,
+            "current": { "text": "All", "value": ["$__all"] },
+            "sort": 1
+          }
+        ]
+      },
+      "panels": [
+        { "id": 1, "type": "row", "title": "CPU — used/hard (%)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 } },
+        {
+          "id": 2, "type": "bargauge", "title": "CPU Requests Utilization %",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "options": { "orientation": "horizontal" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent", "min": 0, "max": 100,
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "orange", "value": 75 },
+                { "color": "red", "value": 90 }
+              ] }
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "100 * kube_resourcequota{namespace=~\"$namespace\", type=\"used\", resource=\"requests.cpu\"} / on(namespace) kube_resourcequota{namespace=~\"$namespace\", type=\"hard\", resource=\"requests.cpu\"}",
+              "legendFormat": "{{namespace}}",
+              "instant": true,
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 3, "type": "bargauge", "title": "CPU Limits Utilization %",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "options": { "orientation": "horizontal" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent", "min": 0, "max": 100,
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "orange", "value": 75 },
+                { "color": "red", "value": 90 }
+              ] }
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "100 * kube_resourcequota{namespace=~\"$namespace\", type=\"used\", resource=\"limits.cpu\"} / on(namespace) kube_resourcequota{namespace=~\"$namespace\", type=\"hard\", resource=\"limits.cpu\"}",
+              "legendFormat": "{{namespace}}",
+              "instant": true,
+              "refId": "A"
+            }
+          ]
+        },
+        { "id": 4, "type": "row", "title": "Memory — used/hard (%)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 } },
+        {
+          "id": 5, "type": "bargauge", "title": "Memory Requests Utilization %",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 10 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "options": { "orientation": "horizontal" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent", "min": 0, "max": 100,
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "orange", "value": 75 },
+                { "color": "red", "value": 90 }
+              ] }
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "100 * kube_resourcequota{namespace=~\"$namespace\", type=\"used\", resource=\"requests.memory\"} / on(namespace) kube_resourcequota{namespace=~\"$namespace\", type=\"hard\", resource=\"requests.memory\"}",
+              "legendFormat": "{{namespace}}",
+              "instant": true,
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 6, "type": "bargauge", "title": "Memory Limits Utilization %",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 10 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "options": { "orientation": "horizontal" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent", "min": 0, "max": 100,
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "orange", "value": 75 },
+                { "color": "red", "value": 90 }
+              ] }
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "100 * kube_resourcequota{namespace=~\"$namespace\", type=\"used\", resource=\"limits.memory\"} / on(namespace) kube_resourcequota{namespace=~\"$namespace\", type=\"hard\", resource=\"limits.memory\"}",
+              "legendFormat": "{{namespace}}",
+              "instant": true,
+              "refId": "A"
+            }
+          ]
+        },
+        { "id": 7, "type": "row", "title": "Pods & Services — used/hard (%)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 } },
+        {
+          "id": 8, "type": "bargauge", "title": "Pods Utilization %",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 19 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "options": { "orientation": "horizontal" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent", "min": 0, "max": 100,
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "orange", "value": 75 },
+                { "color": "red", "value": 90 }
+              ] }
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "100 * kube_resourcequota{namespace=~\"$namespace\", type=\"used\", resource=\"pods\"} / on(namespace) kube_resourcequota{namespace=~\"$namespace\", type=\"hard\", resource=\"pods\"}",
+              "legendFormat": "{{namespace}}",
+              "instant": true,
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 9, "type": "bargauge", "title": "Services Utilization %",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 19 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "options": { "orientation": "horizontal" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent", "min": 0, "max": 100,
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "orange", "value": 75 },
+                { "color": "red", "value": 90 }
+              ] }
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "100 * kube_resourcequota{namespace=~\"$namespace\", type=\"used\", resource=\"services\"} / on(namespace) kube_resourcequota{namespace=~\"$namespace\", type=\"hard\", resource=\"services\"}",
+              "legendFormat": "{{namespace}}",
+              "instant": true,
+              "refId": "A"
+            }
+          ]
+        },
+        { "id": 10, "type": "row", "title": "Raw usage over time", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 27 } },
+        {
+          "id": 11, "type": "timeseries", "title": "CPU Requested (cores) by tenant",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 28 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "kube_resourcequota{namespace=~\"$namespace\", type=\"used\", resource=\"requests.cpu\"}",
+              "legendFormat": "{{namespace}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 12, "type": "timeseries", "title": "Memory Requested (bytes) by tenant",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 28 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "kube_resourcequota{namespace=~\"$namespace\", type=\"used\", resource=\"requests.memory\"}",
+              "legendFormat": "{{namespace}}",
+              "refId": "A"
+            }
+          ]
+        },
+        { "id": 13, "type": "row", "title": "Storage — usage only (NO ResourceQuota yet, see follow-ups)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 36 } },
+        {
+          "id": 14, "type": "timeseries", "title": "PVC Storage Used by tenant",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 37 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "sum(kubelet_volume_stats_used_bytes{namespace=~\"$namespace\"}) by (namespace)",
+              "legendFormat": "{{namespace}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 15, "type": "timeseries", "title": "PVC Storage Capacity by tenant",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 37 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "sum(kubelet_volume_stats_capacity_bytes{namespace=~\"$namespace\"}) by (namespace)",
+              "legendFormat": "{{namespace}}",
+              "refId": "A"
+            }
+          ]
+        },
+        { "id": 16, "type": "row", "title": "Detail", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 45 } },
+        {
+          "id": 17, "type": "table", "title": "ResourceQuota Detail (used/hard, all resources, all tenants)",
+          "gridPos": { "h": 10, "w": 24, "x": 0, "y": 46 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "kube_resourcequota{namespace=~\"$namespace\"}",
+              "format": "table",
+              "instant": true,
+              "refId": "A"
+            }
+          ]
+        }
+      ]
+    }

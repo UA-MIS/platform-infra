@@ -49,28 +49,74 @@ stack, so they work day-one. The ESO/ArgoCD/cert-manager alerts need those compo
 PodMonitor for the ESO controller pod). kube-prometheus-stack's own `defaultRules` add
 broad k8s/node/kubelet/etcd/apiserver coverage on top of these.
 
-## Scrape coverage gaps (admin dashboards, PR #208)
+## Admin dashboards (dashboards-as-code)
 
-The `Platform / Health` admin dashboard has panels for Vault, Harbor, Crossplane, and
-ARC. Only **Crossplane** is wired to real component metrics (a PodMonitor in
-`servicemonitors.yaml`, confirmed live 2026-07-02 via
+Four operator-facing Grafana dashboards, each shipped as a `ConfigMap` labeled
+`grafana_dashboard: "1"` — the Grafana chart's default k8s-sidecar (`sidecar.dashboards`,
+chart default ON) watches for that label and auto-provisions the JSON, no manual
+Grafana import. Every panel's datasource is a `${datasource}` template variable
+(type `datasource`, query `prometheus`) rather than a hardcoded UID, so provisioning
+doesn't depend on the exact UID the chart generates for the built-in Prometheus
+datasource.
+
+| Dashboard | File | Covers | Signal source |
+| --- | --- | --- | --- |
+| **Cluster Overview** | `dashboard-cluster-overview.yaml` | Node CPU/mem/disk/load/PSI pressure (3 Talos boxes), pod counts by phase/namespace | node-exporter + kube-state-metrics — real metrics, day-one |
+| **Per-Tenant Usage vs Quota** | `dashboard-tenant-quota.yaml` | CPU/memory/pods/services used vs `ResourceQuota` hard limits per tenant namespace, PVC storage usage | `kube_resourcequota` (kube-state-metrics) — real metrics, day-one. The `namespace` variable is populated FROM `kube_resourcequota` itself, so it lists tenant namespaces without needing custom labels allow-listed |
+| **Platform Health** | `dashboard-platform-health.yaml` | ArgoCD Synced/Healthy counts + apps needing attention (real); Vault/Harbor/ARC (**proxies** — pod/deployment/statefulset status via kube-state-metrics, not each component's own `/metrics`); Crossplane has a real `/metrics` PodMonitor as of this PR but the panel still reads the proxy (rewiring the panel is a follow-up) | ArgoCD + Crossplane ServiceMonitor/PodMonitor (real) + kube-state-metrics (proxy for Vault/Harbor/ARC) |
+| **Tenant CI/CD** | `dashboard-tenant-cicd.yaml` | `arc-runners` pod activity (all teams combined — real, but no per-team breakdown), tenant ArgoCD app deploy status (real); image pushes / per-team runner usage — **not shown**, see follow-ups panel in-dashboard | kube-state-metrics + ArgoCD |
+
+**Done in this PR:** Crossplane's controller-runtime `/metrics` is now scraped (a
+`PodMonitor` in `servicemonitors.yaml`, confirmed live 2026-07-02 via
 `kubectl -n crossplane-system port-forward deploy/crossplane 8080:8080` + `curl
-:8080/metrics`) — Vault/Harbor/ARC panels still read kube-state-metrics pod/deployment
-status, not each component's own `/metrics`, because none of them serve Prometheus
-metrics today without a config change first (see the header comment in
-`servicemonitors.yaml` for exact values/config needed for each):
+:8080/metrics` — `controller_runtime_*`/`circuit_breaker_events_total`/`workqueue_*`
+present). The port isn't declared on the pod spec, so the monitor anchors discovery
+on the declared `readyz` port and relabels `__address__` onto `:8080`. The Platform
+Health dashboard panel itself hasn't been rewired to the real metrics yet (still
+reads the kube-state-metrics proxy) — that's a follow-up, not this PR.
 
-- **Vault** — no `telemetry` stanza in `vault-config`; enabling it needs a restart of
-  the single-node, manual-unseal `vault-0` pod, so it's not bundled here (Vault-DR
-  roadmap item, not a drive-by).
-- **Harbor** — goharbor chart ships `metrics.enabled: false`; turning it on also
-  deploys a new `harbor-exporter` component, so it's a `harbor-app.yaml` values change
-  for its own PR.
-- **ARC** (gha-runner-scale-set-controller) — running with `--metrics-addr=0` (metrics
-  explicitly off); fix is a `metrics:` block in `arc-controller-app.yaml` helm values +
-  a PodMonitor on the resulting named `metrics` port. Low-risk (stateless,
-  single-replica controller) but left as a follow-up since there's nothing to scrape
-  until that values change lands.
+**Follow-ups — metrics that aren't scraped today** (none of these were invented; the
+dashboards above show only what a real Prometheus query returns):
+
+- **Vault true seal status** — `VaultSealedOrDown` and the Platform Health panel both
+  use `kube_statefulset_status_replicas_ready` as a proxy (0 ready ⇒ sealed/crash-
+  looping/down). The real signal (`vault_core_unsealed` etc.) needs Vault's
+  `telemetry` stanza enabled — confirmed not present in `vault-config` today.
+  Enabling it needs an HCL config change + a restart of the single-node,
+  manual-unseal `vault-0` pod, so it's deliberately not a drive-by fix (Vault-DR
+  roadmap item).
+- **Harbor** — no ServiceMonitor exists; confirmed via `helm show values
+  goharbor/harbor --version 1.19.1` that `metrics.enabled: false` (core/registry/
+  jobservice all default off, and the chart's own `metrics.serviceMonitor.enabled`
+  toggle is off too). Turning it on also deploys a new `harbor-exporter` component,
+  so it's a `harbor-app.yaml` values change for its own PR. The Platform Health
+  dashboard proxies with `kube_deployment_status_replicas_ready`/`_spec_replicas` in
+  the `harbor` ns.
+- **ARC runner scale-set activity (queued/running/per-team)** — the
+  `gha-runner-scale-set-controller` + listener expose their own metrics, but the live
+  controller pod is confirmed running with `--metrics-addr=0`/`--listener-metrics-addr=0`
+  (metrics explicitly OFF — matches the chart's own `values.yaml` comment: "If
+  metrics: object is not provided ... This will disable metrics"). Fix is a
+  `metrics: {controllerManagerAddr: ":8080", listenerAddr: ":8080", listenerEndpoint:
+  "/metrics"}` block in `arc-controller-app.yaml` helm values (declares a named
+  `metrics` containerPort — the chart creates no Service, so a PodMonitor would
+  target it) + a PodMonitor. Low-risk (stateless, single-replica controller) but
+  nothing to scrape until that values change lands, so left as a follow-up rather
+  than shipped unverified. Runner/build pods also carry no Prometheus-visible label
+  for their owning team (`actions.github.com/scale-set-name` would need
+  `kube-state-metrics --metric-labels-allowlist=pods=[...]`, a cardinality tradeoff
+  to weigh, not just a scrape addition). Tenant CI/CD proxies with all-teams-combined
+  `arc-runners` pod counts by phase.
+- **Image push counts per team** — same Harbor gap as above; would come from Harbor's
+  registry/webhook metrics once scraped.
+- **Tenant storage ResourceQuota** — the per-tenant dashboard's storage row is
+  usage-only (`kubelet_volume_stats_*`); there is no storage `ResourceQuota` on
+  tenant namespaces yet (tracked in the resource-governance backlog, ties to #199).
+
+Adding any of the above is: ship a `ServiceMonitor`/`PodMonitor` in this dir (same
+pattern as `servicemonitors.yaml`) pointed at the component's metrics port, confirm
+Prometheus picks it up (`kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090`,
+check Status → Targets), then extend the relevant dashboard panel.
 
 ## Notification channel (the `platform-oncall` webhook receiver)
 

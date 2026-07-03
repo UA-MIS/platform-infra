@@ -1,0 +1,143 @@
+# Admin dashboard 3/4 (Observability admin dashboards). Platform component health:
+# ArgoCD (real /metrics, scraped via servicemonitors.yaml), Vault/Harbor/Crossplane/
+# ARC (kube-state-metrics PROXIES — pod/deployment/statefulset status, not each
+# component's own /metrics, since none of those four are currently scraped). See
+# the panel descriptions + the PR follow-ups for what a real ServiceMonitor per
+# component would add.
+#
+# Auto-provisioned by the Grafana sidecar via the `grafana_dashboard: "1"` label.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-platform-health
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    grafana_dashboard: "1"
+data:
+  platform-health.json: |
+    {
+      "uid": "platform-health",
+      "title": "Platform / Health",
+      "tags": ["platform", "admin"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "time": { "from": "now-6h", "to": "now" },
+      "refresh": "1m",
+      "templating": {
+        "list": [
+          {
+            "name": "datasource",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": {},
+            "hide": 0
+          }
+        ]
+      },
+      "panels": [
+        { "id": 1, "type": "row", "title": "ArgoCD (real metrics — argocd-application-controller ServiceMonitor)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 } },
+        {
+          "id": 2, "type": "stat", "title": "Apps Synced",
+          "gridPos": { "h": 5, "w": 6, "x": 0, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "count(argocd_app_info{sync_status=\"Synced\"})", "instant": true, "refId": "A" } ]
+        },
+        {
+          "id": 3, "type": "stat", "title": "Apps OutOfSync (excl. SEC-011 gated netpol)",
+          "gridPos": { "h": 5, "w": 6, "x": 6, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] } }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "count(argocd_app_info{sync_status=\"OutOfSync\", name!~\"platform-netpol-controlplane.*\"})", "instant": true, "refId": "A" } ]
+        },
+        {
+          "id": 4, "type": "stat", "title": "Apps Healthy",
+          "gridPos": { "h": 5, "w": 6, "x": 12, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "count(argocd_app_info{health_status=\"Healthy\"})", "instant": true, "refId": "A" } ]
+        },
+        {
+          "id": 5, "type": "stat", "title": "Apps Degraded",
+          "gridPos": { "h": 5, "w": 6, "x": 18, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] } }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "count(argocd_app_info{health_status=\"Degraded\"})", "instant": true, "refId": "A" } ]
+        },
+        {
+          "id": 6, "type": "table", "title": "Apps Needing Attention (not Synced or not Healthy)",
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 6 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "(argocd_app_info{sync_status!=\"Synced\", name!~\"platform-netpol-controlplane.*\"} or argocd_app_info{health_status!=\"Healthy\"})",
+              "format": "table",
+              "instant": true,
+              "refId": "A"
+            }
+          ]
+        },
+        { "id": 7, "type": "row", "title": "Vault (namespace=vault — proxy via kube-state-metrics; NOT true seal status, see follow-ups)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 } },
+        {
+          "id": 8, "type": "stat", "title": "Vault Ready Replicas (0 = sealed/crash-looping/down)",
+          "gridPos": { "h": 6, "w": 12, "x": 0, "y": 15 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] } }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "kube_statefulset_status_replicas_ready{namespace=\"vault\", statefulset=\"vault\"}", "instant": true, "refId": "A" } ]
+        },
+        {
+          "id": 9, "type": "stat", "title": "Vault Desired Replicas",
+          "gridPos": { "h": 6, "w": 12, "x": 12, "y": 15 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "kube_statefulset_status_replicas{namespace=\"vault\", statefulset=\"vault\"}", "instant": true, "refId": "A" } ]
+        },
+        { "id": 10, "type": "row", "title": "Harbor (namespace=harbor — proxy via kube-state-metrics; no Harbor /metrics scraped, see follow-ups)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 21 } },
+        {
+          "id": 11, "type": "table", "title": "Harbor Component Deployments — Ready vs Desired",
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 22 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "transformations": [ { "id": "merge", "options": {} } ],
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "kube_deployment_status_replicas_ready{namespace=\"harbor\"}", "legendFormat": "ready", "format": "table", "instant": true, "refId": "A" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "kube_deployment_spec_replicas{namespace=\"harbor\"}", "legendFormat": "desired", "format": "table", "instant": true, "refId": "B" }
+          ]
+        },
+        { "id": 12, "type": "row", "title": "Crossplane (namespace=crossplane-system — proxy via kube-state-metrics; provider/composition health NOT scraped, see follow-ups)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 30 } },
+        {
+          "id": 13, "type": "stat", "title": "Crossplane Pods Running",
+          "gridPos": { "h": 6, "w": 12, "x": 0, "y": 31 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "count(kube_pod_status_phase{namespace=\"crossplane-system\", phase=\"Running\"} == 1)", "instant": true, "refId": "A" } ]
+        },
+        {
+          "id": 14, "type": "stat", "title": "Crossplane Pod Restarts (1h)",
+          "gridPos": { "h": 6, "w": 12, "x": 12, "y": 31 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 1 }] } }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(increase(kube_pod_container_status_restarts_total{namespace=\"crossplane-system\"}[1h]))", "instant": true, "refId": "A" } ]
+        },
+        { "id": 15, "type": "row", "title": "ARC Runner Scale-Set (namespace=arc-system/arc-runners — proxy; per-team scale-set breakdown NOT available, see follow-ups)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 37 } },
+        {
+          "id": 16, "type": "stat", "title": "ARC Controller Pods Running (arc-system)",
+          "gridPos": { "h": 6, "w": 8, "x": 0, "y": 38 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "count(kube_pod_status_phase{namespace=\"arc-system\", phase=\"Running\"} == 1)", "instant": true, "refId": "A" } ]
+        },
+        {
+          "id": 17, "type": "timeseries", "title": "Runner + Build Pods (arc-runners, all teams combined)",
+          "gridPos": { "h": 6, "w": 16, "x": 8, "y": 38 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "count(kube_pod_info{namespace=\"arc-runners\"})", "legendFormat": "pods", "refId": "A" } ]
+        }
+      ]
+    }

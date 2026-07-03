@@ -36,7 +36,7 @@ spec:
         apiVersion: gotemplating.fn.crossplane.io/v1beta1
         kind: GoTemplate
         source: Inline
-        goTemplateOptions: ["missingkey=error"]
+        options: ["missingkey=error"]
         inline:
           template: |
             {{- $spec := .observed.composite.resource.spec }}
@@ -182,11 +182,12 @@ spec:
                    VAULT — per-tenant scoped policy + k8s-auth role (provider-vault).
                    Bug #7 (vault-onboard never run): Policy + AuthBackendRole MRs created
                    WITH the tenant, reconciled forever. Replaces `make vault-onboard`.
-                   ⚠ Verify groups vs provider-vault v0.1.0 (policy.vault.upbound.io /
-                   kubernetes.vault.upbound.io) at Phase-0.
+                   Groups CRD-verified vs provider-vault v0.1.0: ACL Policy is
+                   vault.vault.upbound.io (NOT policy.vault.upbound.io); k8s-auth role
+                   is kubernetes.vault.upbound.io.
                    ===================================================================== */}}
             ---
-            apiVersion: policy.vault.upbound.io/v1alpha1
+            apiVersion: vault.vault.upbound.io/v1alpha1
             kind: Policy
             metadata:
               annotations:

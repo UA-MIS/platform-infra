@@ -17,12 +17,16 @@
     <AssemblyName>App</AssemblyName>
     <!-- Smaller, faster container start; the API is invariant-culture. -->
     <InvariantGlobalization>true</InvariantGlobalization>
-    <!-- Tests live in ../tests (a separate project), so the Web SDK never globs them.
-         This Remove is belt-and-suspenders in case a test file is ever added here. -->
+    <!-- Tests live in the tests/ subfolder (a separate project). Because App.csproj sits
+         at the skeleton ROOT, the Web SDK's default **/*.cs glob would otherwise pull the
+         test sources into the API assembly (they reference Xunit, which App.csproj does
+         not) and break `dotnet publish`. This Remove keeps them out. -->
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Remove="../tests/**/*.cs" />
+    <Compile Remove="tests/**/*.cs" />
+    <Content Remove="tests/**/*" />
+    <None Remove="tests/**/*" />
   </ItemGroup>
 
   <ItemGroup>
