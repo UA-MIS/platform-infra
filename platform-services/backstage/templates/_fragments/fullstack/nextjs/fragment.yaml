@@ -1,0 +1,39 @@
+# fragment.yaml — see _fragments/backend/express/fragment.yaml for the load-bearing
+# DB/healthz contract and ADR-034 for the architecture.
+#
+# Fullstack fragment: Next.js 15 (App Router) — React server components/pages + Route
+# Handlers (app/api) in ONE deployable, built with `output: 'standalone'`. Composed as a
+# SINGLE component (slot `single`): the engine names it `app` and routes ingress "/" to it
+# (pages AND /api/* are served by the same standalone server).
+apiVersion: platform.capstone/fragment.v1
+id: nextjs
+displayName: Next.js Full-Stack (TypeScript + Prisma + MySQL)
+category: fullstack
+language: typescript
+framework: nextjs
+# Fullstack = one process serving the UI and its own API, so it only fills `single`.
+slots:
+  - single
+# Next.js standalone server defaults to 3000; the wizard's port (if set) still wins in the
+# planner (portFor). The Dockerfile + package.json read ${{ values.port }}, and the server
+# honours the PORT env the chart injects, so any chosen port works.
+defaultPort: 3000
+# As a single component the engine forces the ingress path to "/"; this fullstack app
+# owns the whole origin (UI at /, its API under /api/*).
+ingressPath: /
+needsDB: true              # reads DATABASE_URL (mysql://...) — the wizard offers the DB question
+buildType: container
+dockerfile: Dockerfile
+healthPath: /healthz
+# FULLSTACK CONTRACT (mirrors the backend contract): the app MUST serve
+#   - GET /healthz  -> 200, DB-INDEPENDENT (the chart probes hit this; stays green with no DB)
+#   - its API under /api/... (Route Handlers), reading the DB from the DATABASE_URL env
+#     (a standard mysql:// URI) and degrading cleanly (clear 503) when it is unset
+#     (M4 zero-config). NEVER hardcode creds. Listens on the PORT env (chart-set; default 3000).
+notes: >-
+  Next.js 15 App Router (React 19, TypeScript, Tailwind) in `output: 'standalone'` mode with
+  a Prisma + mysql2 data layer, wired to DATABASE_URL: a lazy PrismaClient that opens no
+  connection until first query, so /healthz and the UI shell stay green on a fresh repo with
+  no DB, and the /api/notes routes return a clear 503/empty-with-hint. Sample DB-backed page
+  at /notes + GET/POST /api/notes. `next build` needs no DATABASE_URL (DB pages are
+  force-dynamic). Swap Prisma for another ORM if preferred — see prisma/schema.prisma.
