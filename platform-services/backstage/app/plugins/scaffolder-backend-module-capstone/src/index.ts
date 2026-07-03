@@ -15,6 +15,15 @@ export {
   renderCapstoneTenant,
 } from './actions/emitTenantClaim';
 export {
+  createCommitToMainAction,
+  commitFileToBranch,
+} from './actions/commitToMain';
+export type {
+  CommitToMainActionDeps,
+  OctokitLike,
+  OctokitFactory,
+} from './actions/commitToMain';
+export {
   createHarborOnboardAction,
   ensureHarborProject,
   readHarborConfig,
