@@ -6,21 +6,33 @@
 # crossplane-system SecretStore `vault-push` (config/vault-push-secretstore.yaml),
 # which authenticates as SA `eso-vault-push` through the k8s-auth role created here.
 #
-# Committed (was prose-only) so the SRE can review the EXACT grant: WRITE
-# (create/update) on secret/data/tenants/* ONLY — NO read of app secrets, NO
-# metadata, NO other paths. A compromise of this identity can overwrite tenant
-# robot creds but cannot READ any tenant/platform secret.
+# Committed (was prose-only) so the SRE can review the EXACT grant: create/read/
+# update on secret/data/tenants/* AND secret/metadata/tenants/* — NO delete, NO
+# other paths. `read` is NOT optional here even though this is a "writer" identity:
+# ESO's Vault PushSecret provider is documented as requiring create+read+update on
+# BOTH the data and metadata subpaths (https://external-secrets.io/latest/provider/
+# hashicorp-vault) — it GETs the existing KV v2 secret first (data) and its version
+# (metadata) to read-modify-write/CAS the merged value, since Vault's HTTP API has
+# no partial-field PUT. Confirmed root cause of a live 403: "could not write remote
+# ref ... GET .../v1/secret/data/tenants/<team>/<env>/<leaf> Code: 403". A
+# compromise of this identity CAN now read tenant secrets under tenants/* (it
+# could not before) — that's the necessary trade-off for KV v2 PushSecret, not a
+# scope leak: it is still confined to tenants/* only, same as before.
 #
 # Run inside the Vault pod (already `vault login`'d as root), e.g.:
 #   kubectl -n vault exec -i vault-0 -- sh < crossplane-push-role.sh
 set -euo pipefail
 
-# --- Policy: WRITE-ONLY on the KV v2 DATA under tenants/*. create = first POST to a
-#     fresh path; update = overwrite existing. NO read (the writer never reads values
-#     back), NO metadata, NO delete, NO other engine paths. Least privilege.
+# --- Policy: create/read/update on the KV v2 DATA + METADATA under tenants/*.
+#     create = first POST to a fresh path; update = overwrite existing; read = the
+#     read-modify-write / CAS-version lookup PushSecret does before every write.
+#     NO delete, NO other engine paths. Least privilege short of what ESO requires.
 vault policy write crossplane-push - <<'POLICY'
 path "secret/data/tenants/*" {
-  capabilities = ["create", "update"]
+  capabilities = ["create", "read", "update"]
+}
+path "secret/metadata/tenants/*" {
+  capabilities = ["create", "read", "update"]
 }
 POLICY
 
