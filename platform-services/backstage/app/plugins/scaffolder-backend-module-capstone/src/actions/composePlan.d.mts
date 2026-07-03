@@ -2,7 +2,7 @@
 export interface FragmentMeta {
   id: string;
   displayName?: string;
-  category: 'frontend' | 'backend' | 'static' | 'fullstack' | 'mobile';
+  category: 'frontend' | 'backend' | 'static' | 'fullstack' | 'mobile' | 'blank';
   language?: string;
   framework?: string;
   slots: Array<'single' | 'frontend' | 'backend' | 'mobile'>;

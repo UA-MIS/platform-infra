@@ -31,6 +31,9 @@ const CATEGORY_KIND = {
   backend: 'backend',
   fullstack: 'backend',
   mobile: 'backend',
+  // blank / bring-your-own-code (ADR-035 §D4): a single-slot, container-built placeholder the
+  // student replaces. It serves an HTTP app on "/" like a backend, so it maps to kind backend.
+  blank: 'backend',
 };
 
 const VALID_CATEGORIES = Object.keys(CATEGORY_KIND);

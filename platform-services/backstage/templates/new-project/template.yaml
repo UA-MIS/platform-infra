@@ -157,6 +157,7 @@ spec:
                             - backend/rails
                             - backend/rust-axum
                             - backend/spring-boot
+                            - blank/bring-your-own
                             - frontend/angular
                             - fullstack/nuxt
                             - fullstack/sveltekit
@@ -175,6 +176,7 @@ spec:
                             - 'Ruby on Rails API (API-only, MySQL)'
                             - 'Rust / Axum API (sqlx + MySQL)'
                             - 'Java / Spring Boot API (Spring Web + JDBC + MySQL)'
+                            - 'Blank / bring-your-own-code (green placeholder + Dockerfile)'
                             - 'Angular (TypeScript + Tailwind) SPA'
                             - 'Nuxt 3 fullstack (Vue + Nitro API + MySQL)'
                             - 'SvelteKit fullstack (Svelte + server routes + MySQL)'
