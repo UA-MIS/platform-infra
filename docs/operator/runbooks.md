@@ -84,7 +84,7 @@ safely unauthenticated until the creds are real.
 #    -- write /tmp/gh.json with your editor or printf, then:
 kubectl create secret generic github-provider-creds \
   --namespace crossplane-system --from-file=credentials=/tmp/gh.json --dry-run=client -o yaml \
-| kubeseal --controller-namespace sealed-secrets --controller-name sealed-secrets --format yaml \
+| kubeseal --controller-namespace kube-system --controller-name sealed-secrets-controller --format yaml \
   > platform-services/crossplane/creds/github-app-creds-sealed.yaml
 rm -f /tmp/gh.json
 #    (commit the resealed creds on a branch + PR; they decrypt only in-cluster.)
