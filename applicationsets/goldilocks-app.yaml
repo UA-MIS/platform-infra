@@ -1,0 +1,88 @@
+# Goldilocks Application — RAM-governance / right-sizing dashboard
+# (chore/ram-governance). Fairwinds Goldilocks watches every namespace LABELLED
+# `goldilocks.fairwinds.com/enabled=true`, creates a VerticalPodAutoscaler (in
+# updateMode:"Off" — recommend-only) for each workload in it, and serves a dashboard
+# that renders VPA's recommended requests/limits next to what each pod asks for
+# today. This is the human-facing half of the right-sizing effort; VPA
+# (applicationsets/vpa-app.yaml) is the engine that computes the numbers.
+#
+# ⚠ RECOMMENDATION MODE ONLY: Goldilocks creates its VPA objects with
+# updateMode:"Off" by DEFAULT (it only switches a namespace to actuation if that ns
+# carries `goldilocks.fairwinds.com/vpa-update-mode: "auto"`, which we set NOWHERE).
+# Combined with the VPA updater + admission-controller being disabled
+# (vpa-app.yaml), nothing here can evict or mutate a running pod. Pure observation.
+#
+# Which namespaces are watched: we opt namespaces in explicitly by adding the
+# `goldilocks.fairwinds.com/enabled: "true"` label to their Namespace manifest
+# (this PR labels `monitoring` and `backstage`). We deliberately do NOT set the
+# controller `on-by-default: true` flag — opt-in keeps VPA object churn scoped to
+# namespaces we actually want to right-size, and off the operator-managed system
+# namespaces. Add the label to more namespaces over time to widen coverage.
+#
+# Deploy method A (D-022/D-028): Helm-source Application, chart repo pinned +
+# allowlisted in the `platform` AppProject sourceRepos (bootstrap/platform-appproject
+# .yaml — INSTALL-OWNED, re-apply via `make bootstrap-reapply` after merge, or
+# platform-goldilocks InvalidSpecError's "repo not permitted"). Root-app recurses
+# applicationsets/, so this Application is registered.
+#
+# Prereq: the VPA CRDs + recommender (platform-vpa). Goldilocks reads VPA's
+# .status.recommendation, so without a running recommender the dashboard is empty.
+#
+# Chart: fairwinds-stable/goldilocks 10.4.1 (appVersion v4.14.1), pinned. Bump deliberately.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-goldilocks
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://charts.fairwinds.com/stable   # PINNED chart repo (sourceRepos allowlist)
+    chart: goldilocks
+    targetRevision: 10.4.1                          # pinned chart version (appVersion v4.14.1); no ^/~/latest
+    helm:
+      releaseName: goldilocks
+      values: |
+        # Install VPA SEPARATELY (platform-vpa) — do NOT let Goldilocks pull in its
+        # bundled VPA subchart (would double-install the recommender + the CRDs).
+        vpa:
+          enabled: false
+        # metrics-server is already installed cluster-wide (platform-metrics-server).
+        metrics-server:
+          enabled: false
+
+        controller:
+          enabled: true
+          # Opt-in only: watch ONLY namespaces carrying the
+          # goldilocks.fairwinds.com/enabled label (flags left empty → NOT
+          # on-by-default). Keeps VPA-object churn scoped to what we chose.
+          flags: {}
+          resources:
+            requests: { cpu: 25m, memory: 128Mi }
+            limits: { memory: 256Mi }
+
+        # The read-only recommendations dashboard (ClusterIP; reach via
+        # `kubectl -n goldilocks port-forward svc/goldilocks-dashboard 8080:80`).
+        # Not exposed through the ingress — internal ops surface, like Prometheus.
+        dashboard:
+          enabled: true
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { memory: 128Mi }
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: goldilocks
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true       # dedicated `goldilocks` ns (pods run non-root, read-only → satisfy baseline PSA)
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

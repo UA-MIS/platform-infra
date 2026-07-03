@@ -31,3 +31,10 @@ metadata:
     pod-security.kubernetes.io/enforce: privileged
     pod-security.kubernetes.io/warn: privileged
     pod-security.kubernetes.io/audit: privileged
+    # RAM-governance (chore/ram-governance): opt this namespace into Goldilocks
+    # right-sizing. The Goldilocks controller (platform-goldilocks) creates a
+    # recommend-only (updateMode:"Off") VPA per workload; the dashboard then shows
+    # suggested requests/limits for Prometheus/Grafana/Loki — i.e. it validates the
+    # hand-tuned numbers set in kube-prometheus-stack-app.yaml / loki-app.yaml.
+    # Purely observational (no eviction/mutation) — remove this label to opt out.
+    goldilocks.fairwinds.com/enabled: "true"

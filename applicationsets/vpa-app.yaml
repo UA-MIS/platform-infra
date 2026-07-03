@@ -1,0 +1,83 @@
+# Vertical Pod Autoscaler (VPA) Application — RAM-governance / right-sizing
+# (chore/ram-governance). The cluster ran under RAM pressure with hand-guessed
+# requests/limits; VPA + Goldilocks (goldilocks-app.yaml) give data-driven
+# right-sizing RECOMMENDATIONS so future request/limit changes are measured, not
+# guessed.
+#
+# ⚠ RECOMMENDATION MODE ONLY — this install is deliberately NON-DISRUPTIVE:
+#   • recommender.enabled: true   → computes target requests from live usage +
+#                                    history and writes them to the VPA object's
+#                                    .status.recommendation (read by Goldilocks).
+#   • updater.enabled: false      → NOTHING evicts pods to apply new requests.
+#   • admissionController.enabled: false → NOTHING mutates pod requests on create.
+# With the actuation components off, VPA can only OBSERVE and REPORT. Goldilocks
+# additionally creates its VPA objects in updateMode:"Off" (goldilocks-app.yaml),
+# so there is no path by which this disrupts a running pod. Turning on Auto /
+# RequestsOnly actuation is a SEPARATE, deliberate follow-up (flip updater.enabled
+# + set the VPA updateMode) once the recommendations have been reviewed.
+#
+# Deploy method A (D-022/D-028), same as metrics-server/Harbor/Rook: a Helm-source
+# Application with the chart repo pinned + allowlisted in the `platform` AppProject
+# sourceRepos (bootstrap/platform-appproject.yaml — INSTALL-OWNED, re-apply via
+# `make bootstrap-reapply` after merge, or platform-vpa InvalidSpecError's "repo not
+# permitted"). Root-app recurses applicationsets/, so this Application is registered.
+#
+# Prereq: metrics-server (applicationsets/metrics-server-app.yaml) — already present;
+# the recommender reads live usage from the metrics API to seed recommendations.
+#
+# CRDs: the chart ships the VerticalPodAutoscaler + VerticalPodAutoscalerCheckpoint
+# CRDs in its crds/ dir; ArgoCD applies them by default (--include-crds) with
+# ServerSideApply=true below. Goldilocks consumes these CRDs.
+#
+# Chart: fairwinds-stable/vpa 4.12.3 (appVersion VPA 1.6.0), pinned. Bump deliberately.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-vpa
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://charts.fairwinds.com/stable   # PINNED chart repo (sourceRepos allowlist)
+    chart: vpa
+    targetRevision: 4.12.3                          # pinned chart version (appVersion VPA 1.6.0); no ^/~/latest
+    helm:
+      releaseName: vpa
+      values: |
+        # ── Recommendation-only posture (see header) ─────────────────────────
+        recommender:
+          enabled: true
+          # The recommender's own footprint. Its RSS scales with the number of
+          # tracked pods; on this 3-node platform a small budget is plenty. The
+          # chart default request is 500Mi — far too fat for our size, so trim it.
+          resources:
+            requests: { cpu: 20m, memory: 150Mi }
+            limits: { memory: 300Mi }
+        # OFF: no actuation. The updater evicts pods to apply new requests; the
+        # admission controller mutates pod requests at creation. Both stay off so
+        # this install cannot disrupt any running workload (recommend-only).
+        updater:
+          enabled: false
+        admissionController:
+          enabled: false
+        # metrics-server is already installed cluster-wide (platform-metrics-server);
+        # do NOT let this chart's optional subchart install a second one.
+        metrics-server:
+          enabled: false
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: vpa
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true       # dedicated `vpa` ns (recommender runs non-root, read-only → satisfies baseline PSA)
+      - ServerSideApply=true       # VPA CRDs are applied server-side
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

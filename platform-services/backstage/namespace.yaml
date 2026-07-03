@@ -14,3 +14,9 @@ metadata:
   name: backstage
   labels:
     platform.capstone/component: platform
+    # RAM-governance (chore/ram-governance): opt this namespace into Goldilocks
+    # right-sizing. The Goldilocks controller (platform-goldilocks) creates a
+    # recommend-only (updateMode:"Off") VPA per workload here; the dashboard then
+    # shows suggested requests/limits for Backstage + its bundled Postgres. Purely
+    # observational — remove this label to opt back out.
+    goldilocks.fairwinds.com/enabled: "true"
