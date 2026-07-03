@@ -69,6 +69,22 @@ spec:
     - from:
         - ipBlock:
             cidr: 10.237.168.0/22
+    # provider-harbor (Crossplane, crossplane-system) mints tenant projects + robot
+    # accounts (ADR-031) by calling the harbor-core API DIRECTLY at
+    # http://harbor-core.harbor.svc:80 (pod port 8080). This control-plane path does
+    # NOT transit harbor.${PLATFORM_DOMAIN} -> Traefik, so the kube-system rule above
+    # does not cover it — default-deny drops it and every RobotAccount/Project MR
+    # times out `Ready=False (Creating)` with an empty connection secret, starving the
+    # whole tenant CI push chain. Scope to the core API pod port (8080) for least
+    # privilege. (Root cause of the swamiapp CI push blocker; see PR #221 for the
+    # sibling provider-URL fix.)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: crossplane-system
+      ports:
+        - protocol: TCP
+          port: 8080
 ---
 # --- EGRESS: DNS, intra-cluster (pods+services — reaches Dex/Traefik ClusterIPs,
 #     and Harbor's own bundled postgres/redis), apiserver (node IPs), and external
