@@ -529,9 +529,14 @@ spec:
             ---
             # vault-ca ConfigMap (bug #7): the in-ns CA the namespaced SecretStore's
             # caProvider reads — replaces `make vault-onboard` materializing it.
-            # ⚠ The ca.crt VALUE is the PUBLIC Vault CA (git-safe); injected at apply
-            # from vault-server-tls. Left as a placeholder marker here — the operator/
-            # ESO contract (track-4) supplies the real CA. NOT secret material.
+            # ⚠ The ca.crt VALUE is the PUBLIC Vault server CA PEM (git-safe, NOT secret
+            # material). Static embed — the SAME platform CA committed at
+            # config/vault-ca-configmap.yaml (crossplane-system/vault-ca) and
+            # arc/platform-ca-configmap.yaml; keep all three in lockstep. If the Vault
+            # server CA is rotated (vault-server-tls regenerated) these go stale until
+            # re-synced. Rotation-proof auto-distribution (cert-manager trust-manager
+            # Bundle, or provider-kubernetes patchesFrom crossplane-system/vault-ca) is
+            # the documented post-demo TODO.
             apiVersion: kubernetes.crossplane.io/v1alpha1
             kind: Object
             metadata:
@@ -550,7 +555,18 @@ spec:
                     labels:
                       platform.capstone/component: tenant
                   data:
-                    ca.crt: "__VAULT_CA_PEM__"   # public CA, injected at apply (track-4/ESO contract)
+                    ca.crt: |
+                      -----BEGIN CERTIFICATE-----
+                      MIIBgjCCASigAwIBAgIUAd3DM9aqHXUp1CnmoNALdv4X4mcwCgYIKoZIzj0EAwIw
+                      HzEdMBsGA1UEAxMUY2Fwc3RvbmUtcGxhdGZvcm0tY2EwHhcNMjYwNjE4MDMwNTM4
+                      WhcNMzYwNjE1MDMwNTM4WjAfMR0wGwYDVQQDExRjYXBzdG9uZS1wbGF0Zm9ybS1j
+                      YTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABKkY0iZxKzIGcXu113AEsQwTVWVg
+                      oK1KWF6iIg5QpV/1FXgklWR6np7CEqBnF7AQDmF4F2bY6IotsXHYmumxATajQjBA
+                      MA4GA1UdDwEB/wQEAwICpDAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQWBBS0asdw
+                      cA3QqHVfPkvpXvl9uA9kWjAKBggqhkjOPQQDAgNIADBFAiBagX6h2+w0L4Z7+IYZ
+                      i91CA/MNPWHfVR4w3tJ7GoayzwIhAL9aDIRHoM60FGhpF7b9JElBBuaJ93eRhCR2
+                      fbbGD1Wk
+                      -----END CERTIFICATE-----
             ---
             # Per-tenant namespaced SecretStore (ADR-030 isolation): tenant SA →
             # Vault role tenant-<team> scoped to secret/data/tenants/<team>/*.
