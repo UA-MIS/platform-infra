@@ -35,7 +35,7 @@ export interface PlanCopy {
 export interface ComposePlan {
   components: PlanComponent[];
   copies: PlanCopy[];
-  database: 'none' | 'mysql';
+  database: 'none' | 'mysql' | 'postgres';
   dbWired: boolean;
   single: boolean;
 }
