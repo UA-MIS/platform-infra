@@ -41,6 +41,25 @@ const SEMESTER = /^[0-9]{4}-(spring|summer|fall)$/;
 const VERBATIM = [/(^|\/)\.github\//, /(^|\/)\.devops\/ci\//, /(^|\/)\.mobile-ci\//];
 const isVerbatim = (rel: string) => VERBATIM.some(re => re.test(rel));
 
+/**
+ * Normalise a UrlReader file's content() result to a Buffer.
+ *
+ * WHY THIS EXISTS (the renderContract Array crash): GithubUrlReader.readTree builds each
+ * file's content with `concat-stream` (TarArchiveResponse), and concat-stream returns `[]`
+ * — a plain EMPTY Array, not an empty Buffer — for a ZERO-BYTE file (concat-stream
+ * getBody(): `if (!this.encoding && this.body.length === 0) return []`). The shared
+ * contract ships an empty `.github/workflows/.gitkeep`, which is a VERBATIM path, so
+ * `fs.outputFile(dest, raw)` got an Array and threw
+ * `ERR_INVALID_ARG_TYPE ... Received an instance of Array` on the first live wizard run.
+ * `content()` is typed `Promise<Buffer>`, so the empty-file case is a runtime-only quirk
+ * the type system hides; coercing here makes both render paths robust to it (a non-empty
+ * file is already a Buffer and passes through untouched; `Buffer.from([])` === empty Buffer).
+ */
+function toBuffer(content: unknown): Buffer {
+  if (Buffer.isBuffer(content)) return content;
+  return Buffer.from(content as ArrayLike<number>);
+}
+
 /** A nunjucks env configured exactly like Backstage's scaffolder (${{ }} variables). */
 function makeNunjucks(): nunjucks.Environment {
   return new nunjucks.Environment(undefined, {
@@ -95,7 +114,7 @@ async function renderSkeleton(
     const rel = file.path.slice('skeleton/'.length);
     if (!rel) continue;
     const dest = resolveSafeChildPath(outDir, rel);
-    const raw = await file.content();
+    const raw = toBuffer(await file.content());
     if (isVerbatim(rel)) {
       await fs.outputFile(dest, raw);
     } else {
@@ -122,7 +141,7 @@ async function renderContract(
   for (const file of files) {
     const rel = file.path;
     const dest = resolveSafeChildPath(outRoot, rel);
-    const raw = await file.content();
+    const raw = toBuffer(await file.content());
     if (isVerbatim(rel)) {
       await fs.outputFile(dest, raw);
     } else {
