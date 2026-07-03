@@ -49,6 +49,73 @@ function mockReader(trees: Record<string, File[]>): UrlReaderService {
   } as unknown as UrlReaderService;
 }
 
+/** An in-memory tree entry with the same shape a UrlReader ReadTreeResponseFile has. */
+type Entry = { path: string; content: () => Promise<Buffer | number[]> };
+
+/**
+ * A reader whose readTree returns pre-built entries (with their own content() accessor)
+ * chosen by URL suffix — the counterpart to mockReader() for trees whose content() must
+ * reproduce a real reader quirk (an empty file resolving to [] rather than a Buffer).
+ */
+function treeReader(trees: Record<string, Entry[]>): UrlReaderService {
+  const pick = (url: string): Entry[] => {
+    const key = Object.keys(trees)
+      .filter(k => url.endsWith(k))
+      .sort((a, b) => b.length - a.length)[0];
+    return key ? trees[key] : [];
+  };
+  return {
+    readUrl: jest.fn(),
+    read: jest.fn(),
+    search: jest.fn(),
+    readTree: jest.fn().mockImplementation(async (url: string) => ({
+      files: async () => pick(url),
+      dir: jest.fn(),
+      archive: jest.fn(),
+      etag: 'mock-etag',
+    })),
+  } as unknown as UrlReaderService;
+}
+
+/** Convert the static File[] fragment fixtures to Entry[] (always a Buffer, like a normal file). */
+const asEntries = (files: File[]): Entry[] =>
+  files.map(f => ({ path: f.path, content: async () => Buffer.from(f.content, 'utf8') }));
+
+/** The REAL shared contract tree on disk (…/templates/_fragments/_contract). */
+const CONTRACT_DIR = path.resolve(
+  __dirname,
+  '../../../../../templates/_fragments/_contract',
+);
+
+/** Recursively list files (posix-relative paths, dotfiles included) under a dir. */
+async function walkDisk(root: string, dir: string = root): Promise<string[]> {
+  const out: string[] = [];
+  for (const ent of await fs.readdir(dir, { withFileTypes: true })) {
+    const abs = path.join(dir, ent.name);
+    if (ent.isDirectory()) out.push(...(await walkDisk(root, abs)));
+    else if (ent.isFile()) out.push(path.relative(root, abs).split(path.sep).join('/'));
+  }
+  return out.sort();
+}
+
+/**
+ * Read the real contract tree into Entry[] whose content() FAITHFULLY reproduces the
+ * GithubUrlReader/concat-stream behaviour that caused the crash: a zero-byte file resolves
+ * to [] (an empty Array), every other file to a Buffer (concat-stream getBody:
+ * `if (!this.encoding && this.body.length === 0) return []`). This is the only way to
+ * exercise the bug offline — mockReader() above always returns a Buffer and so never hit it.
+ */
+async function readContractWithReaderQuirk(root: string): Promise<Entry[]> {
+  const rels = await walkDisk(root);
+  return rels.map(rel => ({
+    path: rel,
+    content: async () => {
+      const buf = await fs.readFile(path.join(root, rel));
+      return buf.length === 0 ? [] : buf;
+    },
+  }));
+}
+
 const FRAGMENTS_URL =
   'https://github.com/UA-MIS/platform-infra/tree/main/platform-services/backstage/templates/_fragments';
 
@@ -155,6 +222,57 @@ describe('capstone:compose-project', () => {
     expect(comps).toContain('name: backend');
     expect(comps).toContain('path: /api');
     expect(ctx.output).toHaveBeenCalledWith('single', false);
+  });
+
+  it('renders the REAL shared _contract tree (incl. the empty .github/workflows/.gitkeep) without the Array-content crash', async () => {
+    // Faithfully reproduces the live failure: the real contract ships a zero-byte
+    // .gitkeep, which GithubUrlReader (concat-stream) resolves to [] (an Array), and the
+    // VERBATIM branch then did fs.outputFile(dest, []) -> ERR_INVALID_ARG_TYPE. This
+    // render path (composeProject's TS) had ZERO coverage — dry-render.py only tests the
+    // pure composePlan.mjs — which is how it shipped.
+    const contract = await readContractWithReaderQuirk(CONTRACT_DIR);
+
+    // Guard: the regression is only exercised if the tree genuinely contains an empty
+    // file whose content() is a non-Buffer Array. If the contract stops shipping one,
+    // this test must be updated deliberately rather than silently passing on nothing.
+    const emptyPaths: string[] = [];
+    for (const e of contract) {
+      if (!Buffer.isBuffer(await e.content())) emptyPaths.push(e.path);
+    }
+    expect(emptyPaths).toContain('.github/workflows/.gitkeep');
+
+    const reader = treeReader({
+      '/_contract': contract,
+      '/backend/fastapi': asEntries(FASTAPI),
+    });
+    const action = createComposeProjectAction({ reader });
+    const ws = mockDir.resolve('wsreal');
+    await fs.ensureDir(ws);
+    const ctx = createMockActionContext({
+      input: {
+        ...common,
+        projectType: 'web' as const,
+        layout: 'single' as const,
+        singleFragment: 'backend/fastapi',
+        database: 'none' as const,
+      },
+      workspacePath: ws,
+    });
+
+    // Pre-fix this REJECTS with "Received an instance of Array"; post-fix it resolves.
+    await expect(action.handler(ctx)).resolves.toBeUndefined();
+
+    // Every empty verbatim entry is written as a real (zero-byte) file — not dropped.
+    for (const rel of emptyPaths) {
+      expect(await fs.pathExists(path.join(ws, rel))).toBe(true);
+      expect((await fs.readFile(path.join(ws, rel))).length).toBe(0);
+    }
+    // And a normal templated contract file still rendered with ${{ }} substitution.
+    const meta = await fs.readFile(path.join(ws, '.devops/app-metadata.yaml'), 'utf8');
+    expect(meta).toContain('app-name: notes-api');
+    expect(meta).not.toContain('${{');
+    // fileCount covers every contract file plus the fragment skeleton (nothing skipped).
+    expect(ctx.output).toHaveBeenCalledWith('fileCount', contract.length + FASTAPI.length - 1);
   });
 
   it('fails closed on a bad appName', async () => {
