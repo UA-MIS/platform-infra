@@ -8,8 +8,10 @@
 # In-cluster Vault over TLS. VERIFIED against the v0.1.0 ProviderConfig CRD
 # (package/crds/vault.upbound.io_providerconfigs.yaml @ v0.1.0): the spec exposes
 # `address` (required), `skip_tls_verify`, and `tls_server_name` — but NO
-# ca_cert_file / ca_cert_dir / caBundle field, so there is no in-CR way to trust the
-# self-signed Vault CA. We set skip_tls_verify: true (see spec below for the tradeoff).
+# ca_cert_file / ca_cert_dir / caBundle field, so the CA cannot be trusted on the CR
+# itself. HARDENED (this PR): the self-signed Vault CA is trusted at the RUNTIME layer
+# instead — providers/provider-vault.yaml carries a DeploymentRuntimeConfig that mounts
+# the vault-ca ConfigMap and sets VAULT_CACERT, so we now run skip_tls_verify: false.
 #
 # ⚠ provider-vault is v0.1.0 (early). Verify the ProviderConfig apiVersion
 # (vault.upbound.io/v1beta1) + credentials keys against the installed CRDs at Phase-0.
@@ -28,15 +30,14 @@ spec:
   # absence caused `spec.address: Required value`. Per the CRD: a URL with scheme +
   # host + port and NO path.
   address: "https://vault.vault.svc.cluster.local:8200"
-  # The in-cluster Vault serves a self-signed-CA cert. The v0.1.0 ProviderConfig CRD
-  # exposes NO CA field (only skip_tls_verify / tls_server_name), so trusting the CA
-  # cleanly is not possible on the ProviderConfig itself. Pragmatic in-cluster choice:
-  # skip_tls_verify. TRADEOFF: the provider does NOT verify the Vault server cert
-  # (MITM exposure) — acceptable only because this traffic never leaves the cluster
-  # (ClusterIP vault.vault.svc). HARDENING (follow-up, NOT this PR): add a
-  # DeploymentRuntimeConfig that mounts the vault-ca ConfigMap into the provider Pod
-  # and sets VAULT_CACERT, then flip this to skip_tls_verify: false.
-  skip_tls_verify: true
+  # The in-cluster Vault serves a self-signed-CA cert. The provider now VERIFIES it:
+  # the DeploymentRuntimeConfig in providers/provider-vault.yaml mounts the vault-ca
+  # ConfigMap into the provider Pod and sets VAULT_CACERT, which the Upjet vault
+  # provider's Vault API client (terraform-provider-vault `ca_cert_file` <- VAULT_CACERT)
+  # uses to validate the server cert. So skip_tls_verify is false — the provider will
+  # REFUSE a cert it cannot chain to that CA (no MITM window). Requires the vault-ca
+  # ConfigMap present in crossplane-system (it is) and a provider Pod restart on apply.
+  skip_tls_verify: false
   credentials:
     source: Secret
     secretRef:
