@@ -65,6 +65,13 @@ backend.add(import('./modules/permissionPolicy'));
 // Must come AFTER the permission plugin (it calls the permission framework).
 backend.add(import('@internal/backstage-plugin-capstone-secrets-backend'));
 
+// Admin: the capstone-tenants backend route (GET /tenants, POST /teardown) the Tenant Teardown
+// page calls. A thin HTTP front for the shared teardownCore (in the scaffolder module). Deleting
+// a tenant = opening a PR that removes its CapstoneTenant claim from platform-infra -> Crossplane
+// cascade-prunes the whole tenant. ADMIN-ONLY (capstone.tenant.teardown). Must come AFTER the
+// permission plugin (it calls the permission framework).
+backend.add(import('@internal/backstage-plugin-capstone-tenants-backend'));
+
 // search plugin
 backend.add(import('@backstage/plugin-search-backend'));
 

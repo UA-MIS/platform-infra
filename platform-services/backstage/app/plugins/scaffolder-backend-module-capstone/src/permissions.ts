@@ -22,5 +22,26 @@ export const sealSecretPermission = createPermission({
   attributes: { action: 'create' },
 });
 
+/**
+ * Authorize TEARING DOWN a tenant — the destructive admin teardown page
+ * (delete the CapstoneTenant XR claim → Crossplane cascade-prunes the whole tenant).
+ *
+ * Unlike `capstone.secret.seal` (owner-scoped: a team manages its OWN secrets), teardown is
+ * ADMIN-ONLY. It removes another team's entire footprint (namespaces, Harbor project, Vault
+ * paths, DB, ArgoCD apps), so it is NOT delegated to owning teams. The DECISION lives in the
+ * same spine (packages/backend/src/modules/permissionPolicy.ts): admins (`labmx`, D-027)
+ * ALLOW via the top-of-ladder override; everyone else is explicitly DENIED for this
+ * permission (it must NOT fall through to the default-ALLOW tail). The handler
+ * (teardownCore) re-derives the actor's admin membership as belt-and-suspenders (fail
+ * closed) so it holds even if the policy is misconfigured. attributes.action = 'delete'.
+ */
+export const tenantTeardownPermission = createPermission({
+  name: 'capstone.tenant.teardown',
+  attributes: { action: 'delete' },
+});
+
 /** All capstone secrets permissions (exported for the permission registry / tests). */
 export const capstoneSecretsPermissions = [sealSecretPermission];
+
+/** All capstone tenant-admin permissions (exported for the permission registry / tests). */
+export const capstoneTenantsPermissions = [tenantTeardownPermission];

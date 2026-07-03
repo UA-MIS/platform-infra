@@ -168,3 +168,16 @@ capstone:
     username: ${HARBOR_PROVISIONER_USERNAME}
     secret: ${HARBOR_PROVISIONER_SECRET}
     oidcGroupPrefix: UA-MIS
+  # ── Admin Tenant Teardown page (capstone-tenants) ─────────────────────────────────────
+  # De-provision a finished tenant: the backend opens a PR against the onboarding ledger repo
+  # (platform-infra) removing tenants/_claims/<team>-<app>.yaml; on merge, ArgoCD prunes the
+  # CapstoneTenant XR and Crossplane cascade-deletes the whole tenant (ADR-031 De-provision).
+  # NO new deploy dependency: it reuses the SAME GitHub App (integrations.github) the onboarding
+  # scaffolder already uses to write claims to platform-infra — that App has write to the ledger
+  # repo. ADMIN-ONLY at the app layer (capstone.tenant.teardown -> the labmx admin group).
+  teardown:
+    infraRepoOwner: UA-MIS
+    infraRepoName: platform-infra
+    claimsDir: tenants/_claims
+    appRepoOwner: UA-MIS
+    branchPrefix: teardown/

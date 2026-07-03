@@ -36,7 +36,9 @@ export type {
 } from './actions/harborOnboard';
 export {
   sealSecretPermission,
+  tenantTeardownPermission,
   capstoneSecretsPermissions,
+  capstoneTenantsPermissions,
 } from './permissions';
 // The SHARED seal core (also used by the capstone-secrets backend route, so the action and
 // the route enforce ONE authz + seal implementation — team-lead's Option A requirement).
@@ -56,3 +58,17 @@ export type {
   ProjectSummary,
   DeleteRequest,
 } from './sealCore';
+// The SHARED admin tenant-teardown core (used by the capstone-tenants backend route). Delete
+// the CapstoneTenant claim → Crossplane cascade-prunes the whole tenant (ADR-031 De-provision).
+export {
+  listTenants,
+  teardownTenant,
+  requireAdmin,
+} from './teardownCore';
+export type {
+  CapstoneTenantsDeps,
+  TenantSummary,
+  ListTenantsRequest,
+  TeardownRequest,
+  TeardownResult,
+} from './teardownCore';

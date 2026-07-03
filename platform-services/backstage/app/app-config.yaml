@@ -167,3 +167,13 @@ capstone:
       # Projected SA token with audience=vault (deploy mounts it; NOT the default token).
       saTokenPath: /var/run/secrets/vault/vault-token
       caPath: /etc/backstage/vault-ca/ca.crt
+  # ── Admin Tenant Teardown page (capstone-tenants) ─────────────────────────────────────
+  # Where the onboarding ledger lives — teardown opens a PR against this repo removing the
+  # tenant's tenants/_claims/<team>-<app>.yaml (ADR-031 De-provision). Defaults shown; the
+  # GitHub App used for onboarding commits already has write to platform-infra (no extra creds).
+  teardown:
+    infraRepoOwner: UA-MIS
+    infraRepoName: platform-infra
+    claimsDir: tenants/_claims
+    appRepoOwner: UA-MIS
+    branchPrefix: teardown/

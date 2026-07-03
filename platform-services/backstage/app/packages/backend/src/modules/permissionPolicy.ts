@@ -107,6 +107,17 @@ export class CapstoneTeamPermissionPolicy implements PermissionPolicy {
       };
     }
 
+    // 4b. ADMIN — `capstone.tenant.teardown` (the destructive Tenant Teardown page). Tearing
+    //     down a tenant deletes ANOTHER team's entire footprint (namespaces, Harbor, Vault, DB,
+    //     ArgoCD apps via the Crossplane cascade), so it is ADMIN-ONLY — NOT owner-delegated
+    //     like secrets. Admins (labmx) already short-circuited to ALLOW in branch 1, so reaching
+    //     here means a NON-admin: DENY explicitly (it must NOT fall through to the default-ALLOW
+    //     tail). The handler (teardownCore.requireAdmin) re-checks admin membership as
+    //     belt-and-suspenders, so this fails closed even if this branch were removed.
+    if (request.permission.name === 'capstone.tenant.teardown') {
+      return { result: AuthorizeResult.DENY };
+    }
+
     // 5. DEFAULT — ALLOW everything not explicitly scoped above (search, techdocs,
     //    scaffolder execute, etc.). We do not lock down read-only platform features
     //    (ADR-029 §6.2); the boundary that matters is catalog visibility + (later) the
