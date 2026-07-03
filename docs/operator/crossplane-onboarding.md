@@ -120,9 +120,11 @@ The Composition needs two Vault identities beyond the per-tenant read role:
 - **`tenant-provisioner`** (provider-vault) — manages tenant policy + k8s roles,
   plus `auth/token/create` so the provider can mint its own per-call child token.
   Scope (HCL) is in `creds/README.md`.
-- **`crossplane-push`** (the writer) — WRITE (`create`,`update`) on
-  `secret/data/tenants/*` **only**, no read. Committed for review and run as the
-  script below; it backs the `crossplane-system` SecretStore `vault-push`
+- **`crossplane-push`** (the writer) — `create`,`read`,`update` on both
+  `secret/data/tenants/*` and `secret/metadata/tenants/*` (ESO's Vault PushSecret
+  provider requires `read` too — it does a read-modify-write against KV v2 before
+  every push). Committed for review and run as the script below; it backs the
+  `crossplane-system` SecretStore `vault-push`
   (`config/vault-push-secretstore.yaml`, SA `eso-vault-push`):
 
 ```bash
