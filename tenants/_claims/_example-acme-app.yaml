@@ -6,8 +6,7 @@
 apiVersion: platform.capstone.uamishub.com/v1alpha1
 kind: CapstoneTenant
 metadata:
-  name: acme-acme-app          # <team>-<app>
-  namespace: capstone-tenants  # the XR namespace (apis/namespace.yaml)
+  name: acme-acme-app          # <team>-<app>  (cluster-scoped XR — no namespace)
   labels:
     platform.capstone/team: acme
     platform.capstone/semester: 2026-fall

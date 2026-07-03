@@ -31,7 +31,8 @@ describe('renderCapstoneTenant', () => {
     });
     expect(out).toContain('kind: CapstoneTenant');
     expect(out).toContain('name: acme-acme-app');
-    expect(out).toContain('namespace: capstone-tenants');
+    // cluster-scoped XR — the emitted claim must NOT set metadata.namespace
+    expect(out).not.toContain('namespace: capstone-tenants');
     expect(out).toContain('team: "acme"');
     expect(out).toContain('appName: "acme-app"');
     expect(out).toContain('semester: "2026-fall"');

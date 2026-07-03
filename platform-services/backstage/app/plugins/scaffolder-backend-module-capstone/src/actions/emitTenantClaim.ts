@@ -102,8 +102,10 @@ export function renderCapstoneTenant(input: {
     'apiVersion: platform.capstone.uamishub.com/v1alpha1',
     'kind: CapstoneTenant',
     'metadata:',
+    // CapstoneTenant is a CLUSTER-scoped XR (xrd.yaml scope: Cluster) — it must NOT
+    // carry metadata.namespace (a namespaced composite cannot own the cluster-scoped
+    // provider MRs the Composition fans out).
     `  name: ${input.team}-${input.appName}`,
-    '  namespace: capstone-tenants',
     '  labels:',
     `    platform.capstone/team: ${yamlStr(input.team)}`,
     `    platform.capstone/semester: ${yamlStr(input.semester)}`,
