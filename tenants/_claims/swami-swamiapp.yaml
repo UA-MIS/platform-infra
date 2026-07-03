@@ -6,7 +6,6 @@ apiVersion: platform.capstone.uamishub.com/v1alpha1
 kind: CapstoneTenant
 metadata:
   name: swami-swamiapp
-  namespace: capstone-tenants
   labels:
     platform.capstone/team: "swami"
     platform.capstone/semester: "2026-summer"
