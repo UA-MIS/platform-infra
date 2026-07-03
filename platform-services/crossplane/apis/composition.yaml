@@ -36,9 +36,8 @@ spec:
         apiVersion: gotemplating.fn.crossplane.io/v1beta1
         kind: GoTemplate
         source: Inline
+        goTemplateOptions: ["missingkey=error"]
         inline:
-          options:
-            - missingkey=error
           template: |
             {{- $spec := .observed.composite.resource.spec }}
             {{- $team := $spec.team }}
