@@ -821,13 +821,14 @@ spec:
                    Rendered via provider-kubernetes Object so they land in crossplane-system
                    (next to the connection secrets a PushSecret must read from) and use the
                    `vault-push` writer SecretStore (config/vault-push-secretstore.yaml).
-                   ⚠ Verify the connection-secret SOURCE keys against provider-harbor
-                   v0.1.1 at Phase-0: Upjet exposes the robot token + full name as
-                   connection details — likely keys `attribute.secret` and
-                   `attribute.full_name` (the Harbor `<project>+<robot>` username). If
-                   full_name isn't surfaced, the username is deterministic
-                   (`<team>+<team>-{push,pull}`) and track-4's template can hardcode it.
-                   ===================================================================== */}}
+                   CONNECTION-SECRET KEYS (CRD-verified vs provider-harbor v0.1.1): upjet
+                   publishes only the SENSITIVE robot token as `attribute.secret`.
+                   `full_name` is NON-sensitive — it lives in status.atProvider.fullName,
+                   NOT the connection secret — so a PushSecret referencing
+                   `attribute.full_name` fails ("secret key attribute.full_name does not
+                   exist"). The robot USERNAME is deterministic (`<project>+<robot>` =
+                   `<team>+<team>-{push,pull}`), so it is NOT pushed here; track-4's
+                   consumer derives it (it already has $team). We push only the token. */}}
             ---
             apiVersion: kubernetes.crossplane.io/v1alpha1
             kind: Object
@@ -856,11 +857,9 @@ spec:
                       secret:
                         name: {{ printf "%s-harbor-push" $team | quote }}   # the RobotAccount connection secret
                     data:
-                      - match:
-                          secretKey: "attribute.full_name"
-                          remoteRef:
-                            remoteKey: {{ printf "tenants/%s/ci/harbor-push" $team | quote }}
-                            property: name
+                      # Only the SENSITIVE robot token is a connection-secret key
+                      # (attribute.secret). Username is deterministic (<team>+<team>-push),
+                      # derived by the consumer — see block header.
                       - match:
                           secretKey: "attribute.secret"
                           remoteRef:
@@ -897,11 +896,8 @@ spec:
                     # each env path track-4 reads (tenants/<team>/<env>/harbor-pull).
                     data:
                       {{- range $e := $envs }}
-                      - match:
-                          secretKey: "attribute.full_name"
-                          remoteRef:
-                            remoteKey: {{ printf "tenants/%s/%s/harbor-pull" $team $e.name | quote }}
-                            property: name
+                      # Only attribute.secret exists (the token); username is deterministic
+                      # (<team>+<team>-pull), derived by the consumer — see block header.
                       - match:
                           secretKey: "attribute.secret"
                           remoteRef:
