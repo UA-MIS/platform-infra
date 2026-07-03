@@ -1,9 +1,11 @@
 # Control-plane NetworkPolicies — vault namespace (ADR-030 B1, SEC-ESO-1).
 #
 # Vault is the secrets store; it must be reachable ONLY by ESO (the
-# external-secrets namespace) + the node (kubelet probes) + itself (raft peers, if
-# scaled to 3-node HA). Everything else is denied. This brings Vault under the same
-# default-deny + scoped-allow posture as argocd/dex/harbor.
+# external-secrets namespace) + provider-vault (the crossplane-system namespace,
+# for tenant Vault Policy/AuthBackendRole MRs during onboarding, Track-5/ADR-031)
+# + the node (kubelet probes) + itself (raft peers, if scaled to 3-node HA).
+# Everything else is denied. This brings Vault under the same default-deny +
+# scoped-allow posture as argocd/dex/harbor.
 #
 # Lives in hardening/netpol-controlplane/ so it inherits the MANUAL-SYNC Application
 # (platform-netpol-controlplane) — default-deny is applied to the vault namespace
@@ -33,12 +35,12 @@ spec:
     - Ingress
     - Egress
 ---
-# --- INGRESS: from ESO (the only client), intra-namespace (raft peers when 3-node),
-#     and kubelet probes from the node. ---
+# --- INGRESS: from ESO + provider-vault (the two application clients),
+#     intra-namespace (raft peers when 3-node), and kubelet probes from the node. ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-ingress-eso-and-raft
+  name: allow-ingress-eso-crossplane-and-raft
   namespace: vault
   labels:
     platform.capstone/component: platform
@@ -47,13 +49,23 @@ spec:
   policyTypes:
     - Ingress
   ingress:
-    # ESO controller (external-secrets ns) -> vault API :8200. This is the ONLY
-    # application client of Vault (the ExternalSecret pull path). The human reaches
-    # the UI/API via `kubectl port-forward` (apiserver path), not a netpol-gated route.
+    # ESO controller (external-secrets ns) -> vault API :8200. The ExternalSecret
+    # pull path. The human reaches the UI/API via `kubectl port-forward` (apiserver
+    # path), not a netpol-gated route.
     - from:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: external-secrets
+      ports:
+        - protocol: TCP
+          port: 8200
+    # provider-vault (crossplane-system ns) -> vault API :8200. Writes tenant Vault
+    # Policy + AuthBackendRole MRs during tenant onboarding (Track-5/ADR-031). Scoped
+    # to :8200 only — no other port, no other namespace.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: crossplane-system
       ports:
         - protocol: TCP
           port: 8200
