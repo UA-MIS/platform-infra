@@ -6,8 +6,42 @@
 #
 # The kube-prometheus-stack components (Prometheus, Alertmanager, Grafana, node-
 # exporter, kube-state-metrics) and Loki ship their OWN ServiceMonitors via their
-# charts — only the three below need to be added by us (their charts don't create a
+# charts — only the four below need to be added by us (their charts don't create a
 # ServiceMonitor by default in this install).
+#
+# Admin dashboards follow-up (dashboard-platform-health.yaml, PR #208): its
+# Vault/Harbor/ARC panels still read kube-state-metrics PROXIES, not real
+# component /metrics — those three are NOT wired here because none of them serve
+# Prometheus metrics today without a config change first (verified live,
+# 2026-07-02, all against admin@capstone):
+#   - Vault: no `telemetry` stanza in the vault-config ConfigMap, so
+#     /v1/sys/metrics?format=prometheus is unavailable even with a valid token
+#     ("Prometheus is not enabled"). Fixing it means editing vault-config HCL +
+#     restarting the single vault-0 pod — on a single-node, manual-unseal Vault
+#     (see artifacts/design/vault-dr-runbook.md) that is NOT a low-risk change to
+#     make inside this PR; needs its own reviewed change + someone at the keyboard
+#     for the reseal, matching Vault-DR roadmap priority.
+#   - Harbor: the goharbor chart ships `metrics.enabled: false` (confirmed via
+#     `helm show values goharbor/harbor --version 1.19.1`) — core/registry/
+#     jobservice all default their /metrics off, and the chart's own
+#     `metrics.serviceMonitor.enabled` toggle is off too. Turning it on also spins
+#     up the `harbor-exporter` component (not deployed today) — a real new
+#     workload, not a pure ServiceMonitor add, so it's a `harbor-app.yaml` values
+#     change for its own PR, not bundled here.
+#   - ARC (gha-runner-scale-set-controller): the controller pod is running with
+#     `--metrics-addr=0` / `--listener-metrics-addr=0` (metrics OFF) — confirmed via
+#     the live pod args AND the chart's `values.yaml` comment ("If metrics: object
+#     is not provided ... This will disable metrics"). Fix is
+#     `applicationsets/arc-controller-app.yaml` helm.values:
+#       metrics:
+#         controllerManagerAddr: ":8080"
+#         listenerAddr: ":8080"
+#         listenerEndpoint: "/metrics"
+#     which declares a named `metrics` containerPort — then a PodMonitor (the chart
+#     creates no Service) selecting it. Low-risk (single-replica, stateless
+#     controller, a plain rolling restart), but since the port isn't declared today
+#     there is nothing to confirm scraping against until that values change lands —
+#     left as a follow-up rather than shipped unverified.
 ---
 # ArgoCD application-controller metrics — source of argocd_app_info{health_status,
 # sync_status} for the ArgoCDAppDegraded / ArgoCDAppStuckOutOfSync alerts. The
@@ -97,3 +131,48 @@ spec:
   podMetricsEndpoints:
     - port: metrics
       interval: 30s
+---
+# Crossplane control-plane metrics (Track-5/ADR-031 zero-touch onboarding) — source
+# of controller_runtime_*/circuit_breaker_events_total/workqueue_* for future
+# reconcile-health panels/alerts. Confirmed live (2026-07-02):
+# `kubectl -n crossplane-system port-forward deploy/crossplane 8080:8080` then
+# `curl :8080/metrics` returns real Prometheus text, even though the chart's
+# `metrics.enabled` values flag (crossplane-core-app.yaml) is left at its default
+# `false` — v2.3.2 appears to always start the metrics server on :8080, the flag
+# just formally declares the containerPort + adds scrape annotations.
+#
+# Because the port is UNDECLARED on the Pod spec, PodMonitor's normal `port`/
+# `portNumber` selectors refuse to scrape it ("cannot be used to enable scraping of
+# an undeclared port" — see `kubectl explain podmonitor.spec.podMetricsEndpoints.
+# portNumber`). Workaround per that same doc: anchor pod discovery on `readyz`
+# (8081, which IS declared) then relabel __address__ onto 8080. Selector is
+# `app: crossplane` specifically (not app.kubernetes.io/name=crossplane, which
+# crossplane-rbac-manager shares) so only the core controller pod is scraped.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: crossplane
+  namespace: monitoring
+  annotations:
+    # Sync-deadlock fix (#127) — PodMonitor is also a kube-prometheus-stack CRD; see
+    # argocd-application-controller above.
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    platform.capstone/component: platform
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames: ["crossplane-system"]
+  selector:
+    matchLabels:
+      app: crossplane
+  podMetricsEndpoints:
+    - port: readyz
+      interval: 30s
+      relabelings:
+        - sourceLabels: [__address__]
+          action: replace
+          regex: '(.+):\d+'
+          replacement: '$1:8080'
+          targetLabel: __address__
