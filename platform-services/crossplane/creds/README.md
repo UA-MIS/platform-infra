@@ -22,7 +22,7 @@ credentials in the whole onboarding stack and they live **only** in
 | --- | --- | --- |
 | `github-app-creds-sealed.yaml` | `github-provider-creds` | the EXISTING `ua-mis-backstage` GitHub App (App ID 4097147, install 141394298). JSON: `{"app_auth":[{"id":"4097147","installation_id":"141394298","pem_file":"<PEM \n-escaped>"}],"owner":"UA-MIS"}` |
 | `harbor-provisioner-creds-sealed.yaml` | `harbor-provider-creds` | a Harbor PROVISIONER ROBOT — project + robot + member admin ONLY (derive from harbor-admin; do NOT use harbor-admin itself). JSON: `{"url":"https://harbor-core.harbor.svc","username":"robot$provisioner","password":"<token>"}` |
-| `vault-provisioner-creds-sealed.yaml` | `vault-provider-creds` | a Vault token with a `tenant-provisioner` policy: write `sys/policies/acl/tenant-*` + `auth/kubernetes/role/tenant-*` ONLY. JSON: `{"token":"<token>","address":"https://vault.vault.svc.cluster.local:8200"}` |
+| `vault-provisioner-creds-sealed.yaml` | `vault-provider-creds` | a Vault token with a `tenant-provisioner` policy: write `sys/policies/acl/tenant-*` + `auth/kubernetes/role/tenant-*`, plus `auth/token/create` (provider-vault mints a short-lived child token per call — see below). JSON: `{"token":"<token>","address":"https://vault.vault.svc.cluster.local:8200"}` |
 | `mysql-admin-creds-sealed.yaml` (ADR-033) | `db-tier-mysql-admin` | a DB-tier MariaDB PROVISIONER LOGIN — **NOT** `root`. CREATE/DROP DATABASE + CREATE/DROP USER + GRANT OPTION on `<team>_<env>` ONLY. **Four keys** (NOT a JSON blob): `endpoint`=`<ua-mis-db-1 tailnet addr>:`, `port`=`3306`, `username`=`crossplane_provisioner`, `password`=`<token>`. provider-sql reads these via `MySQLConnectionSecret` (config/providerconfig-sql.yaml). |
 | `postgres-admin-creds-sealed.yaml` (ADR-033) | `db-tier-postgres-admin` | a DB-tier **PG17** PROVISIONER ROLE — **NOT** `postgres` superuser. `LOGIN CREATEDB CREATEROLE` ONLY (no `SUPERUSER`/`REPLICATION`/`BYPASSRLS`). **Four keys**: `endpoint`=`<ua-mis-db-1 tailnet addr>`, `port`=`5432`, `username`=`crossplane_provisioner`, `password`=`<token>`. provider-sql reads these via `PostgreSQLConnectionSecret` (config/providerconfig-postgres.yaml). Reseal: `docs/operator/db-tier-provisioner-setup.md` §6. |
 
@@ -50,6 +50,14 @@ in `platform-services/external-secrets/vault-policies/`):
 # secret/data/tenants/* is read by ESO; the PROVISIONER only manages policy + k8s roles.
 path "sys/policies/acl/tenant-*"        { capabilities = ["create","update","read","delete"] }
 path "auth/kubernetes/role/tenant-*"    { capabilities = ["create","update","read","delete"] }
+# provider-vault is Upjet over hashicorp/terraform-provider-vault: given a static
+# token, that provider mints a short-lived CHILD token per API call (skip_child_token
+# would avoid this but the upstream docs discourage it — it keeps the long-lived
+# primary token in play on every request instead). Without this the provider's
+# `observe` fails: "failed to create limited child token". A Vault child token can
+# only ever be minted with a SUBSET of its parent's policies, so granting this here
+# does not widen the token's blast radius beyond tenant-*.
+path "auth/token/create" { capabilities = ["create","update"] }
 ```
 
 ## DB-tier MariaDB provisioner login (ADR-033, operator at go-live)

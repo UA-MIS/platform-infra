@@ -98,7 +98,7 @@ real **least-privilege** credential against the live sealed-secrets controller:
 | --- | --- |
 | `github-provider-creds` | the existing `ua-mis-backstage` GitHub App (App ID 4097147, install 141394298) |
 | `harbor-provider-creds` | a Harbor **provisioner robot** — project + robot + member admin ONLY (derive from harbor-admin; do **not** use harbor-admin itself) |
-| `vault-provider-creds` | a Vault token with the `tenant-provisioner` policy (write `sys/policies/acl/tenant-*` + `auth/kubernetes/role/tenant-*` ONLY) |
+| `vault-provider-creds` | a Vault token with the `tenant-provisioner` policy (write `sys/policies/acl/tenant-*` + `auth/kubernetes/role/tenant-*`, plus `auth/token/create` for provider-vault's per-call child token) |
 
 Reseal pattern (from `creds/README.md`, fish-safe — build the JSON in a file, no
 heredoc in the outer shell):
@@ -117,8 +117,9 @@ rm -f /tmp/gh.json
 
 The Composition needs two Vault identities beyond the per-tenant read role:
 
-- **`tenant-provisioner`** (provider-vault) — manages tenant policy + k8s roles
-  only. Scope (HCL) is in `creds/README.md`.
+- **`tenant-provisioner`** (provider-vault) — manages tenant policy + k8s roles,
+  plus `auth/token/create` so the provider can mint its own per-call child token.
+  Scope (HCL) is in `creds/README.md`.
 - **`crossplane-push`** (the writer) — WRITE (`create`,`update`) on
   `secret/data/tenants/*` **only**, no read. Committed for review and run as the
   script below; it backs the `crossplane-system` SecretStore `vault-push`
