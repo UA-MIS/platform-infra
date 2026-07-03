@@ -56,3 +56,13 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["get", "list", "watch"]
+  # KubeVirt console/ssh/vnc into own-namespace VMs (virtctl console/ssh/vnc),
+  # same scoping model as pods/exec above — namespaced RoleBinding, not cluster-wide.
+  - apiGroups: ["subresources.kubevirt.io"]
+    resources: ["virtualmachineinstances/console", "virtualmachineinstances/vnc", "virtualmachineinstances/ssh", "virtualmachineinstances/portforward"]
+    verbs: ["get", "update", "create"]
+  # KubeVirt VM read + start/stop (the developer's day-to-day for VM workloads,
+  # mirroring the Deployments/ReplicaSets grant above).
+  - apiGroups: ["kubevirt.io"]
+    resources: ["virtualmachines", "virtualmachines/start", "virtualmachines/stop", "virtualmachineinstances"]
+    verbs: ["get", "list", "watch", "update"]
