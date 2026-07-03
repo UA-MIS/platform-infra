@@ -35,6 +35,14 @@ const APP_SLUG = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
 const SEMESTER = /^[0-9]{4}-(spring|summer|fall)$/;
 
 /**
+ * Allowed `database` values (mirrors the XRD `spec.database` enum, apis/xrd.yaml —
+ * #192). The Composition provisions a per-(team,env) schema + scoped user + grant and
+ * pushes the creds into Vault: `mysql` via the MariaDB path, `postgres` via the
+ * provider-sql PG path (#192). `none` (default) provisions no database.
+ */
+const DATABASE = new Set(['none', 'mysql', 'postgres']);
+
+/**
  * Reserved-name denylist (CXP-1 — privilege escalation / tenant isolation). The XR
  * auto-commits to main via the GitHub App with NO human merge, so `team`/`appName`
  * are low-trust inputs used directly with org-admin + cluster-wide creds. DNS-1123
@@ -79,11 +87,13 @@ export function renderCapstoneTenant(input: {
   port?: number;
   previewEnabled?: boolean;
   domain?: string;
+  database?: string;
 }): string {
   const githubTeam = input.githubTeam ?? input.team;
   const port = input.port ?? 8080;
   const previewEnabled = input.previewEnabled ?? false;
   const domain = input.domain ?? 'capstone.uamishub.com';
+  const database = input.database ?? 'none';
   return [
     '# Emitted by The Process scaffolder (capstone:emit-tenant-claim, ADR-031).',
     '# ONE CapstoneTenant XR — a reviewed-once Crossplane Composition expands it into',
@@ -106,6 +116,7 @@ export function renderCapstoneTenant(input: {
     `  port: ${port}`,
     `  previewEnabled: ${previewEnabled}`,
     `  domain: ${yamlStr(domain)}`,
+    `  database: ${yamlStr(database)}`,
     '',
   ].join('\n');
 }
@@ -154,6 +165,15 @@ export function createEmitTenantClaimAction() {
         domain: z =>
           z
             .string({ description: 'Public base domain. Defaults to capstone.uamishub.com.' })
+            .optional(),
+        database: z =>
+          z
+            .string({
+              description:
+                "Automatic database provisioning: 'mysql' (per-env MariaDB schema + " +
+                "user + Vault creds), 'postgres' (per-env PostgreSQL via provider-sql, " +
+                "#192), or 'none' (default; DB-less apps). Mirrors the XRD enum.",
+            })
             .optional(),
         targetPath: z =>
           z
@@ -214,6 +234,14 @@ export function createEmitTenantClaimAction() {
           `capstone:emit-tenant-claim: invalid githubTeam '${ctx.input.githubTeam}'.`,
         );
       }
+      // Database choice must be one of the XRD enum values (fail closed) — it drives
+      // whether the Composition provisions a per-tenant MariaDB + Vault creds.
+      if (ctx.input.database && !DATABASE.has(ctx.input.database)) {
+        throw new Error(
+          `capstone:emit-tenant-claim: invalid database '${ctx.input.database}' — must ` +
+            `be one of ${[...DATABASE].join(', ')}.`,
+        );
+      }
 
       const claimPath = `tenants/_claims/${team}-${appName}.yaml`;
       const dest = resolveSafeChildPath(
@@ -229,6 +257,7 @@ export function createEmitTenantClaimAction() {
         port: ctx.input.port,
         previewEnabled: ctx.input.previewEnabled,
         domain: ctx.input.domain,
+        database: ctx.input.database,
       });
 
       await fs.outputFile(dest, xr);
