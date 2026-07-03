@@ -263,6 +263,24 @@ spec:
                       privateKey: ${GITHUB_APP_PRIVATE_KEY}
                       allowedInstallationOwners: ['UA-MIS']
 
+            # ── Harbor provisioning (capstone:harbor-onboard, #114) ────────────────
+            # MIRROR of app-config.production.yaml's capstone.harbor block (same
+            # "chart loads ONLY this overlay" seam as auth/catalog/integrations above —
+            # PR #114 added this to the baked image config but missed this overlay, so
+            # the scaffolder step failed closed: "missing config section `capstone.harbor`
+            # (need baseUrl + provisioner username/secret)"). Authenticates with a
+            # DEDICATED LEAST-PRIVILEGE PROVISIONER ROBOT (project-create + member-add
+            # only — NOT harbor-admin). DEPLOY DEPENDENCY (devops): seal
+            # HARBOR_PROVISIONER_USERNAME / HARBOR_PROVISIONER_SECRET into
+            # backstage-process-secrets (see platform-services/backstage/README.md) —
+            # the action refuses to call Harbor unauthenticated until both are set.
+            capstone:
+              harbor:
+                baseUrl: http://harbor-core.harbor.svc:80
+                username: ${HARBOR_PROVISIONER_USERNAME}
+                secret: ${HARBOR_PROVISIONER_SECRET}
+                oidcGroupPrefix: UA-MIS
+
         # ── ServiceAccount for the Vault WRITE path (#108) ───────────────────────
         # Dedicated SA the secrets-UX backend authenticates to Vault as (k8s-auth role
         # `backstage-writer` binds THIS SA — NOT `default`, which would grant write-any-

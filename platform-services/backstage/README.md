@@ -152,6 +152,21 @@ Do these **in order**, after the cluster heal + the Phase-3 domain cutover:
      '.items[] | select(.metadata.annotations["platform.capstone/placeholder"]=="true") | .metadata.name'
    ```
 
+   **M4 (VM onboarding) — seal the Harbor provisioner robot.** The `capstone:harbor-onboard`
+   scaffolder action (PR #114) creates a team's Harbor project + OIDC Developer mapping at
+   scaffold time. It authenticates with a DEDICATED LEAST-PRIVILEGE robot — **NOT**
+   `harbor-admin` — scoped to `project:create` + (per-project) `member:create` only. Mint it
+   in Harbor (Administration → Robot Accounts → New Robot, **system level**, permissions
+   `Project: Create` + `Project Member: Create`) and seal its credentials into
+   `backstage-process-secrets` alongside the existing keys:
+   - **`HARBOR_PROVISIONER_USERNAME`** — the robot's full name, e.g. `robot$provisioner`.
+   - **`HARBOR_PROVISIONER_SECRET`** — the one-time token Harbor prints on creation.
+
+   Both are read by `applicationsets/backstage-process-app.yaml`'s `appConfig.capstone.harbor`
+   block (the chart loads ONLY that overlay ConfigMap, same seam as auth/catalog/integrations
+   above — do not rely on `app-config.production.yaml` alone). Until sealed, the wizard's
+   `capstone:harbor-onboard` step fails closed with "missing config section `capstone.harbor`".
+
 4. **Build + push the custom image** (above) and bump the tag in the Application. Create
    the Harbor `harbor-pull` robot imagePullSecret in the `backstage` namespace (same
    robot pattern as team workloads — see `platform-services/harbor/README.md`).
