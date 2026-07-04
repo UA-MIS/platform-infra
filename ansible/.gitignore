@@ -1,0 +1,5 @@
+# Real inventory + secrets — never commit.
+inventory/hosts.ini
+inventory/group_vars/secrets.yml
+*.retry
+.vault-pass

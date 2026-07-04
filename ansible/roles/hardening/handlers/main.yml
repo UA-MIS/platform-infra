@@ -1,0 +1,10 @@
+---
+- name: restart sshd
+  ansible.builtin.service:
+    name: ssh
+    state: restarted
+
+- name: reload nftables
+  ansible.builtin.systemd:
+    name: nftables
+    state: reloaded

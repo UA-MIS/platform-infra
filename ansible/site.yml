@@ -1,0 +1,66 @@
+---
+# =============================================================================
+# Turn a fresh Debian 13 (trixie, kernel 6.12) Mac Mini into a Ready Kubernetes
+# worker in the existing Talos-bootstrapped cluster.
+#
+#   ansible-playbook site.yml --ask-vault-pass --limit mac-debian-01
+#
+# Roles run in dependency order:
+#   common       base packages, kernel modules, sysctl, swap off, time sync
+#   hardening    key-only SSH, unattended-upgrades, disable services, (opt) nft
+#   containerd   CRI runtime, SystemdCgroup, pause image, CNI dirs
+#   tailscale    join the tailnet -> stable 100.x node IP
+#   kubelet_join TLS-bootstrap the kubelet against the Talos apiserver
+#
+# Prerequisites the OPERATOR completes BEFORE this run (cluster writes — the
+# playbook never touches the cluster): mint the bootstrap-token Secret + confirm
+# the reusable Tailscale auth key. See docs/operator/debian-worker-onboarding.md.
+# =============================================================================
+- name: Onboard Debian Mac-Mini worker(s)
+  hosts: mac_workers
+  become: true
+  gather_facts: true
+
+  pre_tasks:
+    - name: Fail fast if the bootstrap token was not provided
+      ansible.builtin.assert:
+        that:
+          - kubelet_bootstrap_token is defined
+          - kubelet_bootstrap_token | length > 8
+          - "'.' in kubelet_bootstrap_token"
+          - not kubelet_bootstrap_token.startswith('REPLACE')
+        fail_msg: >-
+          kubelet_bootstrap_token is missing/placeholder. Mint the bootstrap-token
+          Secret in kube-system and set it in secrets.yml (see the runbook).
+      run_once: false
+      tags: [always]
+
+    - name: Fail fast if the Tailscale auth key was not provided
+      ansible.builtin.assert:
+        that:
+          - tailscale_authkey is defined
+          - tailscale_authkey | length > 8
+          - not tailscale_authkey.startswith('REPLACE')
+        fail_msg: >-
+          tailscale_authkey is missing/placeholder. Create a reusable, pre-approved
+          key in the tailnet admin console and set it in secrets.yml (see the runbook).
+      tags: [always]
+
+    - name: Confirm this is Debian
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['os_family'] == 'Debian'
+        fail_msg: "This play targets Debian only (got {{ ansible_facts['distribution'] }})."
+      tags: [always]
+
+  roles:
+    - role: common
+      tags: [common]
+    - role: hardening
+      tags: [hardening]
+    - role: containerd
+      tags: [containerd]
+    - role: tailscale
+      tags: [tailscale]
+    - role: kubelet_join
+      tags: [kubelet, join]

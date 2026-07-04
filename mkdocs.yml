@@ -27,6 +27,7 @@ nav:
       - Harbor registry: operator/harbor.md
       - Secrets (ESO): operator/secrets-eso.md
       - Crossplane onboarding: operator/crossplane-onboarding.md
+      - Debian Mac-Mini workers: operator/debian-worker-onboarding.md
       - Observability: operator/observability.md
       - Runbooks: operator/runbooks.md
       - Gotchas & lessons: operator/gotchas-and-lessons.md

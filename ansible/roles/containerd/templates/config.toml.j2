@@ -1,0 +1,22 @@
+# Managed by Ansible (capstone). containerd 1.7.x CRI config (schema version 2).
+# Key requirements for this cluster:
+#   * SystemdCgroup = true         -> matches kubelet cgroupDriver: systemd
+#   * sandbox_image = pause:3.10   -> matches kubeadm/k8s 1.31 default
+#   * CNI bin/conf dirs            -> where Cilium installs its plugin + conflist
+version = 2
+
+[plugins."io.containerd.grpc.v1.cri"]
+  sandbox_image = "{{ pause_image }}"
+
+  [plugins."io.containerd.grpc.v1.cri".cni]
+    bin_dir  = "/opt/cni/bin"
+    conf_dir = "/etc/cni/net.d"
+
+  [plugins."io.containerd.grpc.v1.cri".containerd]
+    default_runtime_name = "runc"
+
+    [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+      runtime_type = "io.containerd.runc.v2"
+
+      [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+        SystemdCgroup = true

@@ -1,0 +1,69 @@
+---
+# Join the box to the tailnet (taile5d412.ts.net). The resulting stable 100.x
+# address becomes the kubelet --node-ip, so the node registration survives the
+# Mac being relocated to a new DHCP LAN.
+
+- name: Add Tailscale apt GPG key
+  ansible.builtin.get_url:
+    url: "https://pkgs.tailscale.com/stable/debian/{{ ansible_distribution_release }}.noarmor.gpg"
+    dest: /etc/apt/keyrings/tailscale-archive-keyring.gpg
+    mode: "0644"
+
+- name: Add Tailscale apt repository
+  ansible.builtin.get_url:
+    url: "https://pkgs.tailscale.com/stable/debian/{{ ansible_distribution_release }}.tailscale-keyring.list"
+    dest: /etc/apt/sources.list.d/tailscale.list
+    mode: "0644"
+
+- name: Install tailscale
+  ansible.builtin.apt:
+    name: tailscale
+    state: present
+    update_cache: true
+
+- name: Enable and start tailscaled
+  ansible.builtin.systemd:
+    name: tailscaled
+    enabled: true
+    state: started
+
+- name: Check current Tailscale backend state
+  ansible.builtin.command: tailscale status --json
+  register: ts_status
+  changed_when: false
+  failed_when: false
+
+- name: Parse Tailscale backend state
+  ansible.builtin.set_fact:
+    ts_backend_state: "{{ (ts_status.stdout | from_json).BackendState | default('NoState') }}"
+  when: ts_status.rc == 0 and ts_status.stdout | length > 0
+
+- name: Bring the node onto the tailnet (idempotent)
+  ansible.builtin.command:
+    argv:
+      - tailscale
+      - up
+      - "--authkey={{ tailscale_authkey }}"
+      - "--hostname={{ inventory_hostname }}"
+      - "--accept-dns={{ 'true' if tailscale_accept_dns else 'false' }}"
+      - "--ssh={{ 'true' if tailscale_ssh else 'false' }}"
+  register: ts_up
+  changed_when: "'Success' not in ts_up.stderr | default('')"
+  when: ts_backend_state | default('NoState') != 'Running'
+  no_log: true      # keep the auth key out of logs
+
+- name: Wait for a Tailscale IPv4 to be assigned
+  ansible.builtin.command: tailscale ip -4
+  register: ts_ip
+  changed_when: false
+  retries: 10
+  delay: 3
+  until: ts_ip.rc == 0 and ts_ip.stdout | trim | length > 0
+
+- name: Record the Tailscale 100.x IP as the kubelet node-ip
+  ansible.builtin.set_fact:
+    tailscale_node_ip: "{{ ts_ip.stdout_lines[0] | trim }}"
+
+- name: Show the assigned node-ip
+  ansible.builtin.debug:
+    msg: "{{ inventory_hostname }} will register with node-ip {{ tailscale_node_ip }}"
