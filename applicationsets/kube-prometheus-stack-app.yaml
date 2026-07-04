@@ -117,13 +117,17 @@ spec:
             probeSelectorNilUsesHelmValues: false
             ruleSelectorNilUsesHelmValues: false
             # Tighter than the old 512Mi/2Gi: request 400Mi frees scheduling
-            # headroom; limit 1500Mi lowers the OOM ceiling to match the reduced
-            # RSS after the 60s scrape + 7d retention above. If Prometheus ever
-            # OOMKills (watch for restarts / the KubePodCrashLooping alert), raise
-            # the limit back toward 2Gi — the limit is the safe knob to loosen.
+            # headroom; limit 1800Mi is STAGED just above current live RSS (~1826Mi
+            # is the pre-trim reading; note this limit auto-applies on merge via
+            # selfHeal BEFORE the 60s-scrape/7d-retention RSS drop takes full effect,
+            # so 1800Mi must sit above today's usage or the pod OOMKills on first
+            # reconcile). Once the operator confirms RSS has settled lower over ~24h,
+            # step this ceiling down further (toward 1500Mi). If Prometheus ever
+            # OOMKills (watch restarts / the KubePodCrashLooping alert), raise it back
+            # toward 2Gi — the limit is the safe knob to loosen.
             resources:
               requests: { cpu: 200m, memory: 400Mi }
-              limits: { memory: 1500Mi }
+              limits: { memory: 1800Mi }
             # TSDB on a Ceph RBD PVC (replica-3, survives node loss; same SC as
             # Harbor/Vault). 20Gi holds ~15d of platform-scale metrics comfortably.
             storageSpec:
