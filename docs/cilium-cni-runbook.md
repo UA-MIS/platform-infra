@@ -1,17 +1,21 @@
-# Cilium CNI swap — maintenance-window runbook (Talos, NetworkPolicy enforcement)
+# Cilium CNI swap — runbook (Talos, NetworkPolicy enforcement)
 
-**Status: PREP / DRAFT. DO NOT RUN until the human approves the Cilium-vs-Canal decision
-(architect ADR) and schedules a maintenance window.** This is the design + exact sequence,
-staged so it's ready; it is not yet a go.
+**Status: ✅ COMPLETE / HISTORICAL (verified live 2026-07-04).** Cilium **v1.17.4** is
+the live CNI on all nodes — VXLAN tunnel mode, `kubeProxyReplacement=true`,
+`ipam=kubernetes`, `bpf.hostLegacyRouting=true`; **kube-proxy is absent** and
+`cniConfig.name: none` is set in `talconfig.yaml`. NetworkPolicies are enforced. Keep
+this runbook as the **reference** for how the swap was done and the design constraints
+(re-run only if rebuilding the cluster or bumping Cilium). The "why" below is the
+original motivation.
 
-## Why
+## Why (original motivation — flannel had no policy backend)
 
 Talos ships **flannel**, which has **no NetworkPolicy backend** — every NetworkPolicy in
-this repo is accepted by the API but **NOT enforced** (tenant isolation, the SEC-011
-control-plane denies, the SEC-014 runner egress lockdown all currently provide ZERO real
-protection). Going public via the Cloudflare Tunnel with inert netpols is the risk
-security flagged. Replacing flannel with a **policy-enforcing CNI** is the prerequisite
-for a safe public cutover.
+this repo was accepted by the API but **NOT enforced** (tenant isolation, the SEC-011
+control-plane denies, the SEC-014 runner egress lockdown all provided ZERO real
+protection). Going public via the Cloudflare Tunnel with inert netpols was the risk
+security flagged. Replacing flannel with a **policy-enforcing CNI** was the prerequisite
+for a safe public cutover — now done.
 
 **Decision (devops recommendation — human/architect to confirm):** **Cilium**, replacing
 flannel, in `kubeProxyReplacement` mode.
