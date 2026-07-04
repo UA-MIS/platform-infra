@@ -213,15 +213,33 @@ jobs:
   # syncPolicy.automated) syncs the new image into the live portal — hands-free.
   # This KILLS the manual go-live tag flip (the recurring 12-vs-7-char toil).
   #
-  # SAME-REPO ADVANTAGE (why no PAT): the Backstage deploy manifest
-  # (applicationsets/backstage-process-app.yaml) lives in THIS repo, so the write
-  # uses the job's own GITHUB_TOKEN — no cross-repo credential, no composite-action
-  # PAT trap. (Tenants write their own repos via the same GITHUB_TOKEN model.)
+  # WHY A GITHUB APP TOKEN (not GITHUB_TOKEN): platform-infra `main` has CLASSIC
+  # branch protection with "require a pull request before merging". A protected
+  # branch can only be pushed directly by an identity on the branch's
+  # bypass-pull-request-allowances list. The ephemeral `github-actions[bot]`
+  # (the identity behind the job's GITHUB_TOKEN) CANNOT be added to that list —
+  # GitHub's classic-protection bypass picker offers only "Organization and
+  # repository administrators" plus GitHub Apps; the bot user is not selectable
+  # (verified: empty API bypass list, no bot option in the dropdown). GitHub APPS
+  # ARE selectable there, so this job authenticates the push with a short-lived
+  # GitHub App INSTALLATION TOKEN minted by actions/create-github-app-token. The
+  # App (see PR body / operator runbook) is added to main's bypass list by name,
+  # which is what actually lets the direct push land on the protected branch.
+  #
+  # (Tenant repos' bump-dev pushes with plain GITHUB_TOKEN only because those
+  # repos are private-on-free-plan with NO branch protection at all — there is no
+  # bypass list to satisfy. platform-infra is protected, so it needs the App.)
   #
   # SECURITY (least privilege — SEPARATE job):
   #   - `if:` restricts to a real push to main with PUSH == true. NEVER runs on
-  #     pull_request, so UNTRUSTED PR code can't reach the write token.
-  #   - job-scoped `permissions: contents: write` (build-and-push keeps read).
+  #     pull_request, so UNTRUSTED PR code can never mint or reach the App token.
+  #   - the App is a DEDICATED least-privilege CI App: `contents: write` on
+  #     platform-infra ONLY (recommended over reusing the auth-critical Backstage
+  #     SSO App — see PR body). The installation token is auto-scoped to THIS repo
+  #     and auto-revoked by the action's post step.
+  #   - the job's own GITHUB_TOKEN is dropped to `contents: read` — the write
+  #     authority now comes ENTIRELY from the App installation token, not the
+  #     workflow token. build-and-push also keeps read.
   #   - loop guard: the commit message carries `[skip ci]`. (Belt-and-suspenders:
   #     the bump touches only applicationsets/**, which is OUTSIDE this workflow's
   #     `paths:` app/** filter, so it would not re-trigger the build anyway.)
@@ -231,10 +249,11 @@ jobs:
   # PROD BOUNDARY: this is main/dev-equivalent ONLY. The portal has a single live
   # env tracking main; there is no prod promotion here (that is #209's domain).
   #
-  # ⚠ BRANCH-PROTECTION PREREQ (operator step — see PR body): main in platform-infra
-  # requires PRs. `github-actions[bot]` MUST be in main's
-  # bypass-pull-request-allowances (identical to how tenant repos allow bump-dev),
-  # or `git push origin HEAD:main` FAILS LOUD (set -e) — never a silent no-deploy.
+  # ⚠ OPERATOR PREREQ (one-time, GitHub-side — see PR body / runbook): create the
+  # dedicated CI App, install it on platform-infra, add repo secrets APP_ID +
+  # APP_PRIVATE_KEY, and add the App to main's bypass-pull-request-allowances by
+  # NAME. Until all four are done, the app-token step or `git push origin HEAD:main`
+  # FAILS LOUD (set -e) — never a silent no-deploy.
   # ============================================================================
   bump-portal:
     needs: build-and-push
@@ -245,9 +264,25 @@ jobs:
     # yq. -slim ships neither git nor curl.
     container:
       image: node:24-trixie
+    # The job's own GITHUB_TOKEN needs NO write scope: the push is authenticated by
+    # the App installation token (below), not GITHUB_TOKEN. Kept explicit + read-only
+    # so the workflow token can never be the thing that writes to main.
     permissions:
-      contents: write
+      contents: read
     steps:
+      # Mint a short-lived GitHub App installation token. The App is in main's
+      # branch-protection bypass list (operator step), so a push authenticated with
+      # THIS token lands on the protected branch — unlike github-actions[bot], which
+      # GitHub will not let you add to that list. Pinned to a commit SHA (supply-chain
+      # hardening); the action auto-scopes the token to this repo and auto-revokes it
+      # in its post step. APP_ID + APP_PRIVATE_KEY are repo secrets (operator step).
+      - name: Generate GitHub App installation token
+        id: app-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
       - name: Install yq (pinned + checksum-verified)
         env:
           YQ_VERSION: v4.44.3
@@ -265,6 +300,10 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+          # Persist the APP INSTALLATION TOKEN as the git credential so the later
+          # `git push origin HEAD:main` authenticates as the App (which IS in main's
+          # bypass list) rather than github-actions[bot] (which cannot be).
+          token: ${{ steps.app-token.outputs.token }}
           persist-credentials: true
 
       - name: Bump portal image.tag -> built 12-char sha + commit + push
@@ -295,6 +334,8 @@ jobs:
           git commit -m "chore(backstage): bump portal image to ${TAG} [skip ci]" \
             && echo "committed. ArgoCD (platform-backstage-process, automated) will sync the portal." \
             || { echo "nothing to commit (tag unchanged) — skipping push."; exit 0; }
-          # Push to main via THIS job's GITHUB_TOKEN (same repo — no PAT). Requires
-          # github-actions[bot] in main's bypass allowlist, else this FAILS LOUD.
+          # Push to main using the persisted App installation token. The App must be
+          # in main's bypass-pull-request-allowances (operator step), else the
+          # protected branch rejects this push and it FAILS LOUD (set -e) — never a
+          # silent no-deploy.
           git push origin HEAD:main
