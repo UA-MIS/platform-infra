@@ -3,10 +3,13 @@
 # address becomes the kubelet --node-ip, so the node registration survives the
 # Mac being relocated to a new DHCP LAN.
 
-- name: Add Tailscale apt GPG key
+- name: Install Tailscale signing key
+  # The Tailscale-provided sources .list hardcodes
+  # signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg, so the key MUST
+  # land there or apt errors "No such file or directory ... repository is not signed".
   ansible.builtin.get_url:
     url: "https://pkgs.tailscale.com/stable/debian/{{ ansible_distribution_release }}.noarmor.gpg"
-    dest: /etc/apt/keyrings/tailscale-archive-keyring.gpg
+    dest: /usr/share/keyrings/tailscale-archive-keyring.gpg
     mode: "0644"
 
 - name: Add Tailscale apt repository
