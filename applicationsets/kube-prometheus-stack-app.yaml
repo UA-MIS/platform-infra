@@ -92,17 +92,42 @@ spec:
             requests: { cpu: 50m, memory: 128Mi }
             limits: { memory: 256Mi }
 
+        # ── RAM-governance trim (chore/ram-governance) ─────────────────────────
+        # Cluster was under RAM pressure (nodes ~77% used, requests 70-76%).
+        # Raise the GLOBAL scrape + rule-eval interval 30s → 60s: this halves the
+        # sample-ingest rate and the chunk/WAL churn, which is the REAL Prometheus
+        # RSS reducer (retention/limits alone barely move resident memory). No alert
+        # impact — every rule in monitoring/alerts.yaml has a `for:` window of ≥ 5m,
+        # far larger than a 60s scrape. To ROLL BACK, drop this defaults block.
         prometheus:
           prometheusSpec:
-            retention: 15d
+            scrapeInterval: 60s
+            evaluationInterval: 60s
+            # retention 15d → 7d (+ retentionSize cap): bounds the TSDB on the Ceph
+            # RBD PVC and trims the memory-mapped block set the head keeps
+            # referenced. 7d is ample for a homelab/student platform; alerts (all
+            # `for:` ≥ 5m) and the shipped dashboards read only recent data.
+            # retentionSize: 5GB is a hard size cap so compaction evicts oldest
+            # blocks well before the 20Gi PVC fills (size GC belt to the 7d belt).
+            retention: 7d
+            retentionSize: 5GB
             # ── Discover ALL monitors/rules cluster-wide (see header) ──
             serviceMonitorSelectorNilUsesHelmValues: false
             podMonitorSelectorNilUsesHelmValues: false
             probeSelectorNilUsesHelmValues: false
             ruleSelectorNilUsesHelmValues: false
+            # Tighter than the old 512Mi/2Gi: request 400Mi frees scheduling
+            # headroom; limit 1800Mi is STAGED just above current live RSS (~1826Mi
+            # is the pre-trim reading; note this limit auto-applies on merge via
+            # selfHeal BEFORE the 60s-scrape/7d-retention RSS drop takes full effect,
+            # so 1800Mi must sit above today's usage or the pod OOMKills on first
+            # reconcile). Once the operator confirms RSS has settled lower over ~24h,
+            # step this ceiling down further (toward 1500Mi). If Prometheus ever
+            # OOMKills (watch restarts / the KubePodCrashLooping alert), raise it back
+            # toward 2Gi — the limit is the safe knob to loosen.
             resources:
-              requests: { cpu: 200m, memory: 512Mi }
-              limits: { memory: 2Gi }
+              requests: { cpu: 200m, memory: 400Mi }
+              limits: { memory: 1800Mi }
             # TSDB on a Ceph RBD PVC (replica-3, survives node loss; same SC as
             # Harbor/Vault). 20Gi holds ~15d of platform-scale metrics comfortably.
             storageSpec:

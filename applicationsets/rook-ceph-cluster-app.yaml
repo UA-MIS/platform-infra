@@ -59,6 +59,37 @@ spec:
           cephVersion:
             image: quay.io/ceph/ceph:v20.2.1
           dataDirHostPath: /var/lib/rook   # Talos /var is writable + persistent
+
+          # ── RAM-governance trim (chore/ram-governance) ───────────────────────
+          # Cluster was under RAM pressure (nodes ~15Gi each, ~77% used). The Ceph
+          # OSD/mgr/mon set was ~6Gi. `osd_memory_target` is the BlueStore per-OSD
+          # memory budget (cache + working set); its Ceph default is 4Gi (4294967296)
+          # per OSD, so 3 OSDs target up to 12Gi cluster-wide. We lower it to 2Gi
+          # (2147483648) per OSD — Ceph's recommended safe floor — reclaiming up to
+          # ~(4-2)Gi × 3 = 6Gi of headroom (actual reclaim depends on how much cache
+          # each OSD had grown into; expect ~1-2Gi live reclaim under this workload).
+          #
+          # spec.cephConfig writes to the Ceph MON config-store (central config DB)
+          # AFTER the mons reach quorum; osd_memory_target is runtime-injectable so
+          # OSDs pick the new budget up without a restart. All values MUST be quoted
+          # strings (Rook does not validate them). This is the Rook-native path and
+          # does not touch the rook-config-override ConfigMap.
+          #
+          # PERF TRADEOFF: a smaller BlueStore cache lowers the RBD read cache-hit
+          # rate → slightly higher read latency / more disk reads under sustained
+          # load. Acceptable here (low-IOPS block PVCs for Prometheus/Harbor/Vault/
+          # Loki, not a hot DB tier). If storage latency becomes a problem, raise
+          # this back toward 3Gi (3221225472) or the 4Gi default — it is a single,
+          # reversible knob and takes effect within a reconcile.
+          #
+          # NOTE: we set NO `resources.osd` limits, so Rook does not auto-derive
+          # osd_memory_target from a cgroup limit — this cephConfig value is the sole
+          # source of truth. If OSD resource limits are ever added, they would
+          # override this (limit × osd_memory_target_cgroup_limit_ratio); keep that
+          # in mind before adding OSD limits.
+          cephConfig:
+            global:
+              osd_memory_target: "2147483648"   # 2 GiB per OSD (Ceph default is 4 GiB)
           mon:
             count: 3                    # one mon per node = quorum survives 1 node loss
             allowMultiplePerNode: false
