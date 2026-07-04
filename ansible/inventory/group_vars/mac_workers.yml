@@ -13,7 +13,7 @@ k8s_version: "1.31.5"
 k8s_minor: "v1.31"                       # pkgs.k8s.io repo stream
 k8s_apt_version: "1.31.5-1.1"            # exact deb version to pin kubelet/crictl
 kubelet_apt_version: "{{ k8s_apt_version }}"
-crictl_apt_version: "{{ k8s_apt_version }}"
+crictl_apt_version: "1.31.1-1.1"      # cri-tools does NOT track kubelet patch versions; 1.31.1 is the latest in the v1.31 repo (no 1.31.5)
 
 # ---- Control-plane / API endpoint ------------------------------------------
 # Live: `kubectl cluster-info` -> https://100.117.55.70:6443 (capstone-n3 Tailscale IP).
