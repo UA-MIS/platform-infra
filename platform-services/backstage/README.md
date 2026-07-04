@@ -152,20 +152,41 @@ Do these **in order**, after the cluster heal + the Phase-3 domain cutover:
      '.items[] | select(.metadata.annotations["platform.capstone/placeholder"]=="true") | .metadata.name'
    ```
 
-   **M4 (VM onboarding) — seal the Harbor provisioner robot.** The `capstone:harbor-onboard`
-   scaffolder action (PR #114) creates a team's Harbor project + OIDC Developer mapping at
-   scaffold time. It authenticates with a DEDICATED LEAST-PRIVILEGE robot — **NOT**
-   `harbor-admin` — scoped to `project:create` + (per-project) `member:create` only. Mint it
-   in Harbor (Administration → Robot Accounts → New Robot, **system level**, permissions
-   `Project: Create` + `Project Member: Create`) and seal its credentials into
+   **M4 (VM onboarding) — mint a DEDICATED, scoped Backstage Harbor robot (D-M4-3).** The
+   `capstone:harbor-onboard` scaffolder action (PR #114) creates a team's Harbor project +
+   OIDC Developer mapping at scaffold time. It authenticates with a DEDICATED, least-privilege
+   robot — **NOT** `harbor-admin`, and **NOT** the Crossplane `robot$provisioner`.
+
+   > **Why a separate robot, not a reuse (ADR-031 compliance).** ADR-031's Decision fixes the
+   > provider admin creds "**only** in `crossplane-system` … **never in Backstage**". Copying
+   > `crossplane-system/harbor-provider-creds` (the `robot$provisioner` token) into the
+   > `backstage` namespace would violate that isolation — and that secret is a committed
+   > *placeholder* until Crossplane go-live (#129, unapplied), so it wouldn't decrypt anyway.
+   > Instead mint a **Backstage-owned** robot whose cred lives ONLY in
+   > `backstage/backstage-process-secrets`. It carries the exact minimum the action needs and
+   > nothing else, verified against `harborOnboard.ts`:
+   > - `POST /api/v2.0/projects` → **system** scope `project:create`
+   > - `POST /api/v2.0/projects/<team>/members` → **project** scope `member:create` (all projects)
+   >
+   > This keeps Crossplane's provisioner isolated in `crossplane-system` and gives the
+   > web-facing Backstage backend its own, tightly-scoped identity (smaller blast radius than
+   > `robot$provisioner`, which also holds robot-admin).
+
+   Mint it (unified Harbor v2.15 robots API, system level) and seal its two keys into
    `backstage-process-secrets` alongside the existing keys:
-   - **`HARBOR_PROVISIONER_USERNAME`** — the robot's full name, e.g. `robot$provisioner`.
-   - **`HARBOR_PROVISIONER_SECRET`** — the one-time token Harbor prints on creation.
+   - **`HARBOR_PROVISIONER_USERNAME`** — the robot's full returned name, e.g.
+     `robot$backstage-provisioner` (use the `name` from the API response verbatim).
+   - **`HARBOR_PROVISIONER_SECRET`** — the one-time token the API returns on creation.
 
    Both are read by `applicationsets/backstage-process-app.yaml`'s `appConfig.capstone.harbor`
    block (the chart loads ONLY that overlay ConfigMap, same seam as auth/catalog/integrations
-   above — do not rely on `app-config.production.yaml` alone). Until sealed, the wizard's
-   `capstone:harbor-onboard` step fails closed with "missing config section `capstone.harbor`".
+   above — do not rely on `app-config.production.yaml` alone; PR #222 added the overlay
+   mirror). Until sealed, the wizard's `capstone:harbor-onboard` step fails closed with
+   `capstone.harbor.username and capstone.harbor.secret are required` (an unset env var
+   interpolates to empty, and the action refuses to call Harbor unauthenticated).
+
+   **Exact mint + seal + apply commands and the full `new-capstone-vm` runthrough are in
+   [`docs/operator/vm-path-harbor-provisioner.md`](../../docs/operator/vm-path-harbor-provisioner.md).**
 
 4. **Build + push the custom image** (above) and bump the tag in the Application. Create
    the Harbor `harbor-pull` robot imagePullSecret in the `backstage` namespace (same
