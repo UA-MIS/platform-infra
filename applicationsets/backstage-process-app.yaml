@@ -46,7 +46,15 @@ spec:
     targetRevision: 2.8.2                       # pinned chart version (no ^/~/latest)
     helm:
       releaseName: backstage
-      values: |
+      # STRUCTURED Helm values (ArgoCD `valuesObject`), NOT an inline `values: |`
+      # string block. This is deliberate: the Backstage image tag below
+      # (path .spec.source.helm.valuesObject.backstage.image.tag) is now a real,
+      # yq-addressable YAML node, so CI's `bump-portal` job in
+      # .github/workflows/backstage-process-build-push.yaml can rewrite it in place
+      # after each main build — no more hand-typed 12-char sha at go-live. ArgoCD
+      # renders `valuesObject` identically to the previous inline `values` string,
+      # so the produced manifests are unchanged.
+      valuesObject:
         # ── The portal pod ────────────────────────────────────────────────────
         backstage:
           replicas: 1                           # single replica for the 3-box cluster
