@@ -13,6 +13,10 @@ import { signInModule } from './modules/signIn';
 // Component entities (seal a secret -> PR to the team app repo). See
 // plugins/capstone-secrets.
 import capstoneSecretsPlugin from '@internal/backstage-plugin-capstone-secrets';
+// Admin: the Tenant Teardown page — list provisioned tenants and de-provision one (delete its
+// CapstoneTenant claim -> Crossplane cascade). Adds an "/admin/tenants" page + sidebar item.
+// See plugins/capstone-tenants.
+import capstoneTenantsPlugin from '@internal/backstage-plugin-capstone-tenants';
 
 export default createApp({
   features: [
@@ -21,5 +25,6 @@ export default createApp({
     navModule,
     signInModule,
     capstoneSecretsPlugin,
+    capstoneTenantsPlugin,
   ],
 });

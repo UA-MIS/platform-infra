@@ -154,4 +154,46 @@ describe('CapstoneTeamPermissionPolicy', () => {
       expect(decision.result).toBe(AuthorizeResult.DENY);
     });
   });
+
+  // ── Admin: capstone.tenant.teardown — ADMIN-ONLY (destructive cross-tenant de-provision).
+  //    Only labmx admins may tear a tenant down; every non-admin (even a normal team member)
+  //    is DENIED, and it must NOT leak through the default-ALLOW tail.
+  describe('capstone.tenant.teardown (admin teardown gate)', () => {
+    const teardownPermission = createPermission({
+      name: 'capstone.tenant.teardown',
+      attributes: { action: 'delete' },
+    });
+
+    it('ALLOWs an admin (labmx) via the override (branch 1)', async () => {
+      const decision = await policy.handle(
+        { permission: teardownPermission },
+        userWith(['user:default/erin', ADMIN_GROUP_REF]),
+      );
+      expect(decision.result).toBe(AuthorizeResult.ALLOW);
+    });
+
+    it('DENIES a normal team member (not an admin) — fails closed', async () => {
+      const decision = await policy.handle(
+        { permission: teardownPermission },
+        userWith(['user:default/dave', 'group:default/team-a']),
+      );
+      expect(decision.result).toBe(AuthorizeResult.DENY);
+    });
+
+    it('DENIES a user with no groups', async () => {
+      const decision = await policy.handle(
+        { permission: teardownPermission },
+        userWith(['user:default/frank']),
+      );
+      expect(decision.result).toBe(AuthorizeResult.DENY);
+    });
+
+    it('DENIES when there is no identity at all', async () => {
+      const decision = await policy.handle(
+        { permission: teardownPermission },
+        undefined,
+      );
+      expect(decision.result).toBe(AuthorizeResult.DENY);
+    });
+  });
 });
