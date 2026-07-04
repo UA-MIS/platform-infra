@@ -7,18 +7,73 @@ with cluster admin, and access to the Tailscale admin console for tailnet
 `taile5d412.ts.net`.
 
 Automation: [`ansible/`](../../ansible/) (playbook `site.yml`, roles
-`common` → `hardening` → `containerd` → `tailscale` → `kubelet_join`).
+`common` → `hardening` → `containerd` → `tailscale` → `kubeprism_proxy` →
+`kubelet_join`).
+
+> **Before you start — read [§0 Debian-host prerequisites](#0-debian-host-prerequisites-do-these-on-the-box-first)
+> and [§2c the KubePrism requirement](#2c-critical-the-kubeprism-stand-in-cilium-hardcodes-1270017445).**
+> These two are the parts that bit the first real onboarding (`clay-mac1`): a Debian
+> box installed with a root password ships without `sudo`, and Cilium refuses to start
+> on a Debian worker until a local proxy answers on `127.0.0.1:7445`.
+
+---
+
+## 0. Debian-host prerequisites (do these on the box first)
+
+The Ansible play connects over SSH as `admin` and escalates with `sudo`. A stock
+Debian 13 install where you **set a root password** (the common path) does **not**
+install `sudo` and does **not** add your login user to the `sudo` group — so the
+play cannot escalate, and it also cannot SSH in until your key is present. These
+were the manual steps the first real onboarding (`clay-mac1`) needed and the
+runbook originally understated. Do them **once per box**, at the physical console
+or over your first password SSH session:
+
+1. **Install `sudo` and grant the login user (as `root`):**
+   ```bash
+   su -                      # become root (you set this password at install)
+   apt-get update && apt-get install -y sudo
+   usermod -aG sudo admin    # 'admin' = the ansible_user in inventory
+   # log the admin user out/in (or reboot) so the new group membership applies
+   ```
+   Without this, the play fails at the first `become: true` task
+   (`sudo: command not found` / `admin is not in the sudoers file`). The play does
+   **not** and **cannot** do this itself — installing `sudo` requires `sudo`.
+
+2. **Copy your operator SSH key to the box** — the controller is **publickey-only**.
+   `ansible.cfg` sets `PreferredAuthentications=publickey`, so Ansible will **not**
+   fall back to a password. Push your key before the first run:
+   ```bash
+   ssh-copy-id -i ~/.ssh/id_ed25519.pub admin@<box-ip>
+   ssh admin@<box-ip> true        # confirm key-only login works
+   ```
+   (The public keys in `admin_ssh_keys` that the `hardening` role installs are a
+   *second* copy for the long term; you still need this first key to let the play in.)
+
+3. **Give `admin` sudo without an interactive password prompt for the run**, either
+   by running the play with `--ask-become-pass` (`make run … VAULT='--ask-vault-pass
+   --ask-become-pass'`) **or** by granting NOPASSWD sudo on the box:
+   ```bash
+   echo 'admin ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/90-admin
+   ```
+   The `make run` target does not pass `--ask-become-pass`, so pick one of these or
+   the play stalls waiting for a become password.
+
+Base image assumptions otherwise: Debian 13 installed, network up, Python 3 present
+(Debian ships it).
 
 ---
 
 ## 1. Why this exists
 
 There are ~20 **Late-2014 Mac Minis (`Macmini7,1`)** to add as workers. They
-**cannot boot Talos v1.13.4** — a Talos-build-specific boot hang on this hardware.
-Debian 13 (trixie) boots fine on the same 6.12-series kernel and the on-board
-**Broadcom BCM57766** NIC works with the in-tree `tg3` driver. So these boxes run
-**Debian** and join the existing Talos-bootstrapped cluster as ordinary kubelet
-workers.
+**cannot boot Talos v1.13.4** — a Talos-build-specific early boot hang on this
+hardware. This is **not** a hardware/driver problem: **Debian 13 (trixie, kernel
+6.12) boots fine on the identical box** and the on-board **Broadcom BCM57766** NIC
+works with the in-tree `tg3` driver. (The Talos v1.13.4 image ships a newer ~6.18
+kernel — verified live: the Talos control-plane nodes report `6.18.x-talos` — so it
+is the Talos build, not the kernel line, that hangs on this hardware.) So these
+boxes run **Debian** and join the existing Talos-bootstrapped cluster as ordinary
+kubelet workers.
 
 The control plane is 3 Talos nodes; **all workloads already run on the (untainted)
 control plane**, so the Macs simply add capacity.
@@ -72,7 +127,8 @@ We use the **native Kubernetes TLS bootstrap** that kubeadm itself is built on:
    **You do NOT need to create these bindings** — only the token.
 4. The kubelet writes its issued credential to `/etc/kubernetes/kubelet.conf` and
    registers the `Node`. It stays `NotReady` until the **Cilium** agent schedules a
-   pod on it and installs the CNI, then goes `Ready`.
+   pod on it and installs the CNI, then goes `Ready`. **Cilium will not start
+   cleanly on a Debian worker without the KubePrism stand-in — see [§2c](#2c-critical-the-kubeprism-stand-in-cilium-hardcodes-1270017445).**
 
 We deliberately **do not** enable `serverTLSBootstrap`, so the kubelet self-signs
 its *serving* cert and **no kubelet-serving CSR needs manual approval** (this
@@ -112,6 +168,51 @@ Satisfy the prerequisite one of two ways:
 The playbook does not assume L2 adjacency for the *SSH* transport (it reaches the box
 by Tailscale name/IP), but the *Cilium data plane* needs the route above. Validation
 step 8 checks it explicitly.
+
+### 2c. ⚠️ CRITICAL: the KubePrism stand-in (Cilium hardcodes `127.0.0.1:7445`)
+
+**Symptom:** the node registers but stays `NotReady` forever; the Cilium agent pod on
+it **CrashLoopBackOff**s with `dial tcp 127.0.0.1:7445: connect: connection refused`
+in its `config` / init container. (This is exactly what left the first `mac-debian-01`
+join `NotReady`.)
+
+**Why:** Cilium in this cluster is configured to reach the Kubernetes API at
+**`127.0.0.1:7445`** — that address is **Talos KubePrism**, a loopback API load-balancer
+that Talos runs on *every Talos node*. A Debian box is **not** a Talos node, so nothing
+listens on `127.0.0.1:7445`, and Cilium's startup (which talks to the API before the
+CNI is up, so it cannot use the in-cluster `kubernetes` Service) fails immediately.
+
+**Fix — the `kubeprism_proxy` role.** It installs a tiny **HAProxy TCP load-balancer**
+that listens on `127.0.0.1:7445` and forwards to the real control-plane API endpoints,
+giving the Debian box its own local KubePrism equivalent. It runs **before**
+`kubelet_join` (so the proxy is up before the kubelet/Cilium ever look for `:7445`).
+
+**Operational dependency you MUST maintain — `controlplane_api_endpoints`.** The
+HAProxy backends are **static**, listed in `controlplane_api_endpoints` in
+[`ansible/inventory/group_vars/mac_workers.yml`](../../ansible/inventory/group_vars/mac_workers.yml).
+It defaults to the three control-plane **Tailscale** IPs:
+
+| Node | Backend (Tailscale IP:port) |
+|---|---|
+| `capstone-n1` | `100.120.67.119:6443` |
+| `capstone-n2` | `100.89.87.126:6443` |
+| `capstone-n3` | `100.117.55.70:6443` |
+
+Because these are hardcoded backends, keep them in sync with reality:
+
+- **If a control-plane node's Tailscale IP changes, or a CP node is added/removed,**
+  update `controlplane_api_endpoints` and **re-run the play** (`--tags kubeprism` is
+  enough) on every Debian worker. Stale backends = the local proxy points at a dead API
+  = the node degrades.
+- **Tailscale must be up first.** The backends are `100.x` tailnet addresses, so the
+  `tailscale` role must have joined the box to the tailnet before HAProxy can reach them
+  (role order already guarantees this: `tailscale` → `kubeprism_proxy`).
+- **If you later enable the host firewall (§7),** make sure loopback traffic to
+  `127.0.0.1:7445` is **not** blocked — Cilium's health depends on it. The shipped
+  `nftables.conf.j2` accepts loopback, but verify if you customize it.
+
+Re-verify the live backend set any time with `make -C ansible show-cluster-facts` (it
+prints the current control-plane node IPs).
 
 ---
 
@@ -225,8 +326,23 @@ ansible-vault encrypt inventory/group_vars/secrets.yml
 $EDITOR inventory/group_vars/mac_workers.yml # set admin_ssh_keys: [...]
 ```
 
-Base image assumptions for each Mac before the play runs: Debian 13 installed,
-network up, an `admin` sudo user reachable over SSH (password or key), Python 3
+> **⚠️ `secrets.yml` does NOT auto-load — you must pass it explicitly.** Ansible
+> auto-loads `group_vars/<group>.yml` for a group **a host belongs to**. The file is
+> named `group_vars/secrets.yml`, which maps to a group literally called `secrets` —
+> and no host is in that group — so its vars are **never applied**. The play's
+> `pre_tasks` then fail fast with *"kubelet_bootstrap_token is missing/placeholder."*
+> Until this is fixed in the repo, load it explicitly on every run with
+> **`-e @inventory/group_vars/secrets.yml`** (shown in §6).
+>
+> **Proper fix (pick one):** rename the file to `group_vars/all.yml` (auto-loads for
+> all hosts) or `group_vars/mac_workers/secrets.yml` (directory form — auto-loads for
+> the `mac_workers` group), or add a `vars_files:` entry to `site.yml`. Any of these
+> removes the need for the `-e @…` flag.
+
+Base image assumptions for each Mac before the play runs: **the [§0 host
+prerequisites](#0-debian-host-prerequisites-do-these-on-the-box-first) are done**
+(`sudo` installed, `admin` in the `sudo` group, your SSH **public key** copied to the
+box — the controller is publickey-only), Debian 13 installed, network up, Python 3
 present (Debian ships it).
 
 Validate before touching a box:
@@ -240,19 +356,25 @@ make check LIMIT=mac-debian-01     # dry run (--check --diff)
 
 ## 6. Run the play
 
+Because `secrets.yml` does not auto-load (§5), pass it with `-e @…`. The `make`
+targets take extra flags via `EXTRA`:
+
 ```bash
 # One box (recommended for the first of a batch):
-make run LIMIT=mac-debian-01 --ask-vault-pass
-#   == ansible-playbook site.yml --limit mac-debian-01 --ask-vault-pass
+ansible-playbook site.yml --limit mac-debian-01 \
+  --ask-vault-pass -e @inventory/group_vars/secrets.yml
+# (add --ask-become-pass unless admin has NOPASSWD sudo — see §0.3)
 
 # Whole fleet, once validated:
-make run-all --ask-vault-pass
+ansible-playbook site.yml --ask-vault-pass -e @inventory/group_vars/secrets.yml
 ```
 
 What it does per host: base prep + hardening → install & configure containerd →
-`tailscale up` (records the 100.x IP) → install pinned kubelet, drop the CA +
-bootstrap kubeconfig + kubelet config + systemd flags → start kubelet → **wait for
-`/etc/kubernetes/kubelet.conf`** (proves the TLS bootstrap succeeded).
+`tailscale up` (records the 100.x IP) → **start the `kubeprism_proxy` HAProxy on
+`127.0.0.1:7445`** (the local KubePrism stand-in Cilium needs, §2c) → install pinned
+kubelet, drop the CA + bootstrap kubeconfig + kubelet config + systemd flags → start
+kubelet → **wait for `/etc/kubernetes/kubelet.conf`** (proves the TLS bootstrap
+succeeded).
 
 ### 6.1 Post-join operator step — label the node (cluster write)
 
@@ -309,9 +431,14 @@ kubectl get node mac-debian-01 -o jsonpath='{.status.addresses}{"\n"}'
 # 2) No stuck CSRs (client CSR should be auto-Approved,Issued):
 kubectl get csr | grep -i mac-debian-01 || echo "none pending"
 
-# 3) Cilium scheduled a pod on it and it's Running:
+# 3) Cilium scheduled a pod on it and it's Running (NOT CrashLoopBackOff):
 kubectl -n kube-system get pod -o wide | grep mac-debian-01
 kubectl -n kube-system exec ds/cilium -- cilium-dbg status --brief   # any cilium pod
+#    If the Cilium pod on the Mac is crashlooping with
+#    `dial tcp 127.0.0.1:7445: connect: connection refused`, the KubePrism stand-in
+#    (§2c) is not up. On the Mac: `sudo ss -ltnp | grep 7445` must show haproxy
+#    listening; `systemctl status kubeprism-proxy` (or the haproxy unit) must be
+#    active; re-run the play with `--tags kubeprism` if not.
 
 # 4) Cilium sees the node healthy (VXLAN underlay reachability — the §2b crux):
 kubectl -n kube-system exec ds/cilium -- cilium-dbg status | grep -A3 Controllers
@@ -372,3 +499,20 @@ To re-onboard, mint a fresh token (§4.1) and re-run the play.
 - Playbook & roles: [`ansible/`](../../ansible/) — see [`ansible/README.md`](../../ansible/README.md)
 - Cilium-on-Talos design & the Tailscale-overlay hazard:
   [`docs/cilium-cni-runbook.md`](../cilium-cni-runbook.md)
+
+### 10a. Gotchas the role already handles (you do NOT do these by hand)
+
+The first real onboarding (`clay-mac1`) surfaced a batch of Debian-13/Talos-specific
+breakages. They are now **fixed inside the roles** — this list is for a successor who
+is debugging, so you know what is being taken care of and where:
+
+| Gotcha | Why it breaks on Debian 13 + Talos | Where it's fixed |
+|---|---|---|
+| **KubePrism stand-in** | Cilium hardcodes the API at `127.0.0.1:7445` (Talos KubePrism); nothing listens there on Debian → Cilium crashloops → node `NotReady` | `kubeprism_proxy` role (HAProxy on `:7445` → `controlplane_api_endpoints`); see §2c |
+| **Tailscale apt keyring path** | Tailscale's `.list` hardcodes `signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg`; key must land there or apt errors "repository is not signed" | `tailscale` role installs the key to that exact path before adding the repo |
+| **trixie `sqv` rejects k8s repo sig** | Debian 13 ships `sqv` as the apt verifier, which rejects `pkgs.k8s.io`'s SHA1/v3 signature (upstream k8s #133098) → "repository is not signed" | `common` role writes `/etc/apt/apt.conf.d/90gpgv` to force the legacy `gpgv` verifier **before** any third-party repo |
+| **`crictl` version pin** | `cri-tools` does not track kubelet patch versions — there is no `1.31.5` in the v1.31 repo | `crictl_apt_version: 1.31.1-1.1` (latest in the v1.31 stream) in `group_vars/mac_workers.yml` |
+| **kubelet systemd drop-in dir missing** | We install `kubelet` **without** `kubeadm`, so nothing creates `/etc/systemd/system/kubelet.service.d` → the drop-in template task fails | `kubelet_join` role creates the dir before templating the drop-in |
+| **`sudo` absent / user not a sudoer** | A Debian install with a root password ships no `sudo` and no `sudo`-group membership → the play cannot `become` | **Manual prereq — §0.1** (cannot be automated: installing `sudo` needs `sudo`) |
+| **publickey-only SSH** | `ansible.cfg` sets `PreferredAuthentications=publickey`; no password fallback | **Manual prereq — §0.2** (`ssh-copy-id` first) |
+| **`secrets.yml` never auto-loads** | It maps to a nonexistent group `secrets`, so its vars are never applied | **Workaround — pass `-e @inventory/group_vars/secrets.yml`** (§5/§6); proper fix noted in §5 |

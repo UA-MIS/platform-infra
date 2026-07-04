@@ -4,10 +4,14 @@
 > inherits this platform. Moderate Kubernetes knowledge assumed; **no prior context on this
 > build** assumed. This is the single document you should be able to operate the platform from.
 >
-> **Status of this doc:** written 2026-06-18 against the live 3-node Talos cluster. Where the
-> platform is mid-transition (the Cilium CNI swap, the public-domain cutover), this manual says
-> so plainly and points at the open PRs. Treat memory-derived "gotchas" as hard-won lessons, but
-> verify a command against the live cluster before trusting it blindly.
+> **Status of this doc:** originally written 2026-06-18; **§2.2, §3.4 and §6 refreshed
+> 2026-07-04** against the live cluster. Since the original writing, the work that was
+> then "mid-transition" has **landed**: the Cilium CNI swap is complete, the public
+> domain is cut over (`*.capstone.uamishub.com` live), and **Vault+ESO, Crossplane,
+> Backstage, observability, and KubeVirt are all deployed**. A newer, task-oriented
+> **[Operator Guide](operator/README.md)** is now the recommended starting point; this
+> manual remains the deep reference (access, continuance, gotchas). Verify a command
+> against the live cluster before trusting it blindly.
 >
 > **The one thing that must not be lost:** the *org-owned credentials* in §5. If those are tied
 > to a graduating student's personal accounts, the platform dies at graduation. Read §5 first.
@@ -82,7 +86,7 @@ is what makes the whole thing reproducible and recoverable.
    ├ team-<name>-app  ────┼──► ARC runners ──► Kaniko build ──► Harbor (registry)   │
    └ OAuth app (SSO) ─────┼──► Dex (OIDC broker) ◄── ArgoCD / Harbor / Backstage    │
                           │                                                          │
-   (Phase-3, planned)     │   ┌──────────────── 3× OptiPlex 7080 (Talos) ────────┐  │
+   (LIVE)                 │   ┌──────────────── 3× OptiPlex 7080 (Talos) ────────┐  │
    Cloudflare Tunnel ─────┼──►│  capstone-n1   capstone-n2   capstone-n3         │  │
    capstone.uamishub.com  │   │  CP+etcd       CP+etcd       CP+etcd (bootstrap)  │  │
                           │   │  Cilium eBPF CNI (kube-proxy replacement)        │  │
@@ -99,18 +103,23 @@ is what makes the whole thing reproducible and recoverable.
 | Layer | Component | Version (live) | Responsibility | Decision |
 | --- | --- | --- | --- | --- |
 | Node OS / k8s | **Talos Linux** | v1.13.4 / k8s **v1.31.5** | Immutable, API-only node OS (no SSH); 3-node converged HA control plane + etcd quorum | D-024/ADR-017, D-035, **D-040** |
-| CNI | **Cilium** (swapping in) | 1.17.4 | eBPF dataplane, `kubeProxyReplacement`, **NetworkPolicy enforcement** | D-036 (swap), PR #42 |
-| Storage | **Rook-Ceph** | chart **v1.19.7** (Ceph v20.2.1) | replica-3 block storage; `ceph-block` default StorageClass | D-037 |
-| GitOps | **ArgoCD** | upstream install | Reconciles the whole platform from `platform-infra` (app-of-apps) | T3, D-012 |
-| Registry | **Harbor** | chart v1.19.x | Per-team OCI image registry, Trivy scan-on-push, OIDC login | D-028 |
-| SSO broker | **Dex** | v2.45.1 | One OIDC broker → GitHub-org (UA-MIS) membership/team gating; all tools federate to it | D-017 |
-| CI | **ARC** (Actions Runner Controller) | gha-runner-scale-set v0.14.x | Self-hosted GitHub Actions runners; **rootless Kaniko** builds (no docker socket) | D-022/D-032 |
+| Worker (Mac tier) | **Debian 13** (Mac Minis) | kernel 6.12 | Late-2014 Mac Minis that **can't boot Talos** → join as kubelet workers (`mac-debian-01` live). See `operator/debian-worker-onboarding.md` | — |
+| CNI | **Cilium** (LIVE) | v1.17.4 | eBPF dataplane, `kubeProxyReplacement` (kube-proxy absent), VXLAN tunnel, **NetworkPolicy enforced** | D-036 |
+| Storage | **Rook-Ceph** | operator **v1.19.7** (Ceph v20.2.1) | replica-3 block storage; `ceph-block` default StorageClass | D-037 |
+| GitOps | **ArgoCD** | v3.4.3 | Reconciles the whole platform from `platform-infra` (app-of-apps) | T3, D-012 |
+| Registry | **Harbor** | v2.15.1 | Per-team OCI image registry, Trivy scan-on-push, OIDC login | D-028 |
+| SSO broker | **Dex** | v2.45.0 | One OIDC broker → GitHub-org (UA-MIS) membership/team gating; all tools federate to it | D-017 |
+| CI | **ARC** (Actions Runner Controller) | gha-runner-scale-set | Self-hosted GitHub Actions runners; **rootless Kaniko** builds (no docker socket) | D-022/D-032 |
 | Overlay | **Tailscale** | system extension | The network fabric: stable `100.x` addressing across apartment/campus; DERP relay fallback | D-035 |
 | Ingress | **Traefik** | bundled | Host-header routing to apps/services | D-010 |
-| Certs | **cert-manager** | — | TLS; Phase-3 → Let's Encrypt DNS-01 (DigitalOcean) for `*.capstone.uamishub.com` | D-036 |
+| Certs | **cert-manager** | — | TLS; wildcard for `*.capstone.uamishub.com` (Cloudflare edge terminates public TLS) | D-036 |
 | Secrets (bootstrap) | **Sealed Secrets** | bitnami | Encrypts secrets safe to commit to git; the sealing key is a **root secret** | D-006 |
-| Secrets (runtime, planned) | **Vault + ESO** | not deployed | Keyless per-team dynamic secrets via ServiceAccount → Vault → ExternalSecret | D-018/D-019 |
-| Public access (planned) | **Cloudflare Tunnel** (`cloudflared`) | app present, Degraded | Outbound-only public reachability for `capstone.uamishub.com`; no inbound ports | D-023/D-036 |
+| Secrets (runtime) | **Vault + ESO** (LIVE) | Vault 1.21.2 / ESO v2.6.0 | Keyless per-team secrets: names in git, values in Vault, ESO syncs → k8s Secret | D-018/D-019 |
+| Onboarding | **Crossplane** (LIVE) | v2.3.2 | Zero-touch tenant provisioning (`CapstoneTenant` XR → Composition); providers harbor/github/kubernetes/sql/vault | ADR-031 |
+| Portal | **Backstage** ("The Process", LIVE) | in-tree image | Developer portal + scaffolder (self-service new project) + TechDocs | — |
+| VMs | **KubeVirt + CDI** (LIVE) | v1.8.4 / v1.65.0 | On-demand VM workloads for tenants | — |
+| Observability | **kube-prometheus-stack + Loki** (LIVE) | Prom v3.12.0 / Loki 3.6.7 | Metrics, logs, Grafana (`grafana.capstone.uamishub.com`), alerts | — |
+| Public access | **Cloudflare Tunnel** (`cloudflared`, LIVE) | — | Outbound-only public reachability for `*.capstone.uamishub.com`; no inbound ports | D-023/D-036 |
 | Data tier | **PostgreSQL 17 + MariaDB 11.8** on `ua-mis-db-1` | Debian | Off-cluster, shared multi-tenant relational DB (one DB+role per team); Patroni HA after db-2 | D-029 |
 
 ### 2.3 How they fit (the request flows)
@@ -227,27 +236,24 @@ talosctl -e 10.237.171.5 -n 10.237.171.5 version
 
 ### 3.4 Reaching the platform services
 
-**Today (interim):** services are addressed in-cluster and over the overlay; the public domain is
-not yet cut over. ArgoCD has an Ingress; reach it via the cluster's ingress host (Traefik) over the
-tailnet, or `kubectl -n argocd port-forward svc/argocd-server 8080:443` for a quick local view.
+**The public domain is LIVE (cut over, D-036).** Every service has a real public URL
+under `capstone.uamishub.com`, published by a **Cloudflare Tunnel** (`cloudflared`,
+outbound-only) to in-cluster **Traefik**; Cloudflare's edge terminates public TLS. You
+can still reach anything over the tailnet / `kubectl port-forward` for a private view.
 
-**After the Phase-3 cutover (planned, D-036):** every service gets a real public URL under
-`capstone.uamishub.com`:
-
-| Service | Public URL (planned) |
+| Service | Public URL (live) |
 | --- | --- |
 | ArgoCD | `argocd.capstone.uamishub.com` |
 | Harbor | `harbor.capstone.uamishub.com` |
 | Dex (issuer) | `id.capstone.uamishub.com` |
-| Backstage | `backstage.capstone.uamishub.com` (not yet deployed) |
-| Grafana | `grafana.capstone.uamishub.com` (not yet deployed) |
-| Vault | `vault.capstone.uamishub.com` (not yet deployed) |
+| Backstage ("The Process") | `process.capstone.uamishub.com` |
+| Grafana | `grafana.capstone.uamishub.com` |
 | **Tenant app (prod)** | `<appname>.capstone.uamishub.com` |
-| **Tenant app (non-prod)** | `<env>.<appname>.capstone.uamishub.com` (`dv.`, `qa.`, `<branch>.`) |
+| **Tenant app (non-prod)** | `<appname>.<env>.capstone.uamishub.com` (e.g. `swamiapp.dev.…`) |
 
-A single `*.capstone.uamishub.com` wildcard cert + Traefik Host-routing serves all of it. **Reserved
-names** (`argocd`, `harbor`, `id`, `backstage`, `grafana`, `vault`) must be rejected as team slugs at
-onboarding so a team can't shadow a platform host (D-036).
+A single `*.capstone.uamishub.com` wildcard + Traefik Host-routing serves all of it.
+**Reserved names** (`argocd`, `harbor`, `id`, `process`, `grafana`, `vault`) must be
+rejected as team slugs at onboarding so a team can't shadow a platform host (D-036).
 
 ---
 
@@ -337,7 +343,7 @@ object carries a `platform.capstone/semester` label.
 | Platform/bootstrap secrets (Dex, Harbor OIDC, ARC GitHub App, …) | **Sealed Secrets** — encrypted in git, decrypted in-cluster | **the sealing key** (a k8s secret in `kube-system`, label `sealedsecrets.bitnami.com/sealed-secrets-key=active`) — a **root secret**, must be in the handoff vault |
 | Talos cluster secrets (CA keys, bootstrap token) | `talsecret.sops.yaml`, **sops/age-encrypted** | **age private key** at `~/.config/sops/age/keys.txt` — handoff vault |
 | Tailscale node auth key | `talenv.sops.yaml`, sops/age-encrypted | same age key |
-| Runtime app secrets (planned) | **Vault + External Secrets Operator** — nothing in git, only a reference | Vault (not yet deployed; D-018/D-019) |
+| Runtime app secrets (LIVE) | **Vault + External Secrets Operator** — nothing in git, only a reference | Vault (v1.21.2) + ESO (v2.6.0); path `tenants/<team>/<env>/app`; D-018/D-019. See `operator/secrets-eso.md` |
 
 **To seal a new secret for git:**
 ```bash
@@ -367,11 +373,13 @@ branches and PRs but **not** push to `main` directly (server-side protection + c
 
 | Runbook | Covers |
 | --- | --- |
-| `docs/phase-4-runbook.md` | Talos image build, per-node install, etcd bootstrap, Rook-Ceph bring-up, pre-apply gate |
-| `docs/cilium-cni-runbook.md` | The flannel→Cilium swap on Talos+Tailscale (the in-progress work) |
+| **`docs/operator/README.md`** | **The task-oriented Operator Guide — start here** (component map + common ops) |
+| `docs/operator/talos-node-onboarding.md` | Add/replace a Talos node (talhelper); the Mac-Mini-can't-boot-Talos finding |
+| `docs/operator/debian-worker-onboarding.md` | Onboard a Debian (Mac Mini) worker: TLS bootstrap + KubePrism stand-in |
+| `docs/phase-4-runbook.md` | First-time 3-node Talos install, etcd bootstrap, Rook-Ceph bring-up, pre-apply gate |
+| `docs/cilium-cni-runbook.md` | The flannel→Cilium swap on Talos+Tailscale (COMPLETE — reference for a rebuild) |
 | `docs/db-tier-runbook.md` | Postgres 17 + MariaDB 11.8 on `ua-mis-db-1`, pgBackRest, nftables, SSH key-only |
 | `docs/phase-1-golden-path.md` | The original k3d golden-path proof (historical reference for the full app loop) |
-| `docs/custom-domain.md` | How a team points its own domain at its project (registrar 301; D-034) |
 
 ---
 
@@ -403,6 +411,10 @@ something is still personal, **migrate it to an org-owned account before the bui
 A single secured store (password manager / sealed offline medium) containing:
 
 - [ ] The **age private key** (`~/.config/sops/age/keys.txt`) — decrypts Talos secrets.
+- [ ] **`talsecret.sops.yaml` + `talenv.sops.yaml`** (from `clusters/real-talos/`) — the
+  encrypted Talos **PKI + Tailscale key**. ⚠ These are **gitignored (workstation-only, NOT
+  in the repo)**; the age key only *decrypts* them — without the files themselves you cannot
+  regenerate node configs for the existing cluster (regenerating mints a new CA).
 - [ ] The **Sealed Secrets sealing key** (export: `kubectl -n kube-system get secret -l sealedsecrets.bitnami.com/sealed-secrets-key=active -o yaml`) — decrypts every committed SealedSecret.
 - [ ] The **kubeconfig** (`clusterconfig/talos-kubeconfig`) and **talosconfig**.
 - [ ] **Tailscale** admin access (via the `ualaims` Google account) + how to mint a `tag:talos-node` reusable auth key.
@@ -462,62 +474,61 @@ summarizes, it does not replace it. See §8 for an index of the load-bearing one
 
 ## 6. Current state & pending work
 
-> Snapshot taken **2026-06-18** from the live cluster (`admin@capstone`). Honest, not aspirational.
+> Snapshot **refreshed 2026-07-04** from the live cluster (`admin@capstone`). Honest, not aspirational.
 
 ### 6.1 What is LIVE and working
 
-- **3-node Talos cluster**, all Ready, HA (3-member etcd quorum), k8s v1.31.5 / Talos v1.13.4.
-- **Rook-Ceph replica-3**, `HEALTH_OK`, `ceph-block` is the default StorageClass, PVCs bind.
-- **ArgoCD** app-of-apps reconciling the platform; most apps `Synced/Healthy`.
-- **Sealed Secrets** with the migrated sealing key (Dex/Harbor/ARC secrets decrypt).
-- **Dex** SSO broker, **cert-manager**, **ARC** controller + runner scale-set, **metrics-server**,
-  **CoreDNS custom**, **sealed-secrets** — all `Synced/Healthy`.
-- **Cilium 1.17.4** active on all 3 nodes (functional; cross-node pod-to-pod proven; apiserver
-  reachable over both LAN and Tailscale).
+- **3-node Talos cluster** (all Ready, HA 3-member etcd, k8s v1.31.5 / Talos v1.13.4) **+ a Debian
+  worker** (`mac-debian-01`; the Mac-Mini tier that can't boot Talos — `operator/debian-worker-onboarding.md`).
+- **Cilium v1.17.4** is the live CNI (kube-proxy absent, `cni:none`, NetworkPolicy **enforced**).
+- **Rook-Ceph replica-3**, `HEALTH_OK`, `ceph-block` default StorageClass, PVCs bind.
+- **ArgoCD v3.4.3** app-of-apps reconciling the platform; the large majority of apps `Synced/Healthy`.
+- **Public domain cut over** — `*.capstone.uamishub.com` served via `cloudflared` → Traefik.
+- **Vault (1.21.2) + ESO (v2.6.0)** live (runtime secrets); **Crossplane v2.3.2** live (zero-touch
+  onboarding — real tenants provisioned, e.g. `swami`); **Backstage** ("The Process") live;
+  **observability** (kube-prometheus-stack + Loki + Grafana) live; **KubeVirt + CDI** live.
+- **Dex** SSO, **cert-manager**, **ARC** runners, **Sealed Secrets** (migrated sealing key) — all live.
 
-### 6.2 What is degraded / in-progress (live ArgoCD status)
+### 6.2 What is not-green right now (live ArgoCD status, 2026-07-04)
 
-| App | Status | Reason / note |
+| App | Status | Note |
 | --- | --- | --- |
-| `platform-harbor` / `platform-svc-harbor` | **Degraded** | Harbor is up but not fully green — pending `PLATFORM_DOMAIN` (still `REPLACE_ME` → not browser-reachable + OIDC redirects break) and the `harbor-configure-oidc` job re-run |
-| `platform-svc-cloudflared` | **Degraded** | Cloudflare Tunnel app present but the public cutover is gated on the domain decision + deny-test |
-| `platform-netpol-controlplane` | **OutOfSync** (Healthy) | Manual-sync by design (SEC-011 gate); **inert until Cilium swap is clean** |
-| `platform-netpol-runners` | **OutOfSync / Missing** | Same — netpol enforcement pending the CNI swap |
-| `platform-svc-traefik` | **OutOfSync / Missing** | Mid-reconcile during the CNI/ingress work |
-| `sample-dev` / `sample-staging` / `sample-pr-1` | **Degraded** | Sample app images still reference the old `k3d-registry.localhost`; needs a Harbor-targeted CI push (developer fix in the external `sample-app` repo) |
-| `sample-prod` | **OutOfSync / Missing** | Pinned to a prod tag not yet cut |
+| `platform-vpa` / `platform-vpa-policies` / `platform-svc-vpa-policies` / `platform-goldilocks` | **Unknown / OutOfSync / Missing** | Resource-governance (VPA + Goldilocks) landed recently (PR #199/#227) and is still settling — verify against current state |
+| `platform-crossplane-runtime` | **OutOfSync** (Healthy) | Provider/runtime drift — healthy but OutOfSync; reconcile-review |
+| `platform-rook-ceph-cluster` | **Synced / Progressing** | Ceph `HEALTH_OK`; the app shows Progressing during OSD/mgr churn |
+| `swami-staging` | **Degraded** | Live **tenant** app (not platform) — the team's own workload state |
+| `swami-prod` | **OutOfSync** (Healthy) | Prod is pinned to an immutable tag by design; moves only on the PM approval gate |
 
-### 6.3 The two open PRs (know these)
+> This list is a point-in-time read — re-run `kubectl -n argocd get applications` for the current
+> truth. "Synced/Healthy" is not proof it works (ADV-002): assert the actual pods reach `Running`.
 
-- **PR #42** — `feat(p4): talconfig cni:none + disable kube-proxy for Cilium` (`p4/cilium-talconfig-patch`).
-  The talconfig change that makes the Cilium swap *clean* (sets `cni: none` so Talos stops managing
-  flannel/kube-proxy). Cilium already works by CNI-config precedence, but flannel + kube-proxy
-  DaemonSets linger until this lands + nodes are re-applied/rebooted. **Do not merge until** `cni:none`
-  is confirmed live on all 3 nodes (the prior apply was from the wrong branch — see §7).
-- **PR #37** — `feat(p3): flip PLATFORM_DOMAIN to capstone.uamishub.com [HOLD MERGE]`
-  (`p3/platform-domain-flip`, DRAFT). The batch one-variable domain flip. **Held** until the hardware
-  cluster + CNI are settled and the deny-test passes.
+### 6.3 What has landed since the original writing
 
-### 6.4 Sequenced pending work (the critical path)
+The Cilium swap (old PR #42) and the domain cutover (old PR #37) are **done** — Cilium
+is the live CNI (kube-proxy absent), the deny-test passed (netpols proven-enforced), and
+`*.capstone.uamishub.com` is public via `cloudflared`. Vault+ESO, Crossplane (zero-touch
+onboarding), Backstage, observability, and KubeVirt have all been deployed and are live.
 
-1. **Finish the Cilium swap cleanly** (PR #42): checkout the branch, `talhelper genconfig`, confirm
-   both `cni: none` and `proxy.disabled: true` render, re-apply all 3 nodes + reboot one-at-a-time
-   (wait Ready between — Ceph is replica-3), confirm flannel/kube-proxy DaemonSets auto-clear, merge #42.
-2. **Deny-test** (security gate): from an `arc-runners` pod, the apiserver via node-IP **and** via
-   Tailscale `100.x` MUST fail; DNS / kube-service / Harbor MUST succeed. This flips all NetworkPolicies
-   from "inert" to "proven-enforced" (see §7 — flannel never enforced them).
-3. **Domain cutover** (PR #37 + D-036): set `PLATFORM_DOMAIN=capstone.uamishub.com`, delegate the
-   `capstone.` subtree from DigitalOcean to Cloudflare (one NS record), stand up cert-manager DNS-01
-   wildcard + `cloudflared` tunnel, then delete the Phase-2 hacks (skip-verify, `oidc_verify_cert:false`,
-   the CoreDNS split-horizon rewrite — all become unnecessary with real public certs).
-4. **Re-run `harbor-configure-oidc`** once the domain is live, get Harbor fully green.
-5. **Not yet deployed (backlog):** **Backstage** (developer portal), **Vault + ESO** (runtime
-   secrets, D-018/D-019), **Grafana/observability**, the **db-2 + Patroni** HA pair (D-029), and
-   **resource governance** (Goldilocks + VPA RequestsOnly + per-tenant LimitRange/Quota, D-041).
-6. **Branch-protection hardening:** create `@UA-MIS/platform-team`, turn on `require_code_owner_reviews`
-   and `enforce_admins` (needs the GitHub Education/Team work — §5.4).
-7. **Low-priority:** git-history scrub of the (now-dead) leaked Phase-4 secrets (force-push is
-   settings-denied; a human lifts it). The leaked creds are all revoked/re-keyed — this is hygiene.
+### 6.4 Remaining open work / risks (the successor's list)
+
+1. **Vault DR (highest priority).** Vault is **single-node** (`vault-0`, Raft) and the
+   **Raft-snapshot CronJob is currently failing** (snapshot pods in `Error`). Fix the
+   snapshot job and **prove a restore** before relying on it — Vault holds every tenant
+   runtime secret. See `operator/vault-and-dr.md`.
+2. **Alerting is a stub.** Prometheus alerts fire but the Alertmanager `platform-oncall`
+   receiver is empty — wire real paging before depending on it (`operator/observability.md`).
+3. **Single apiserver endpoint** (pinned to n3's Tailscale IP). Multi-endpoint HA is a
+   later add; cert SANs already cover all 3 nodes so widening needs no cert re-issue.
+4. **Resource governance settling.** VPA + Goldilocks (D-041) landed recently and some of
+   their apps are still `Unknown`/`OutOfSync` — verify they reach green.
+5. **DB HA (backlog):** the **db-2 + Patroni** pair (D-029) for the off-cluster data tier.
+6. **Branch-protection hardening:** create `@UA-MIS/platform-team`, turn on
+   `require_code_owner_reviews` and `enforce_admins` (needs the GitHub Education/Team
+   work — a **faculty/institution** action, §5.4).
+7. **Continuance (do not skip):** confirm the handoff vault holds the age key, the Sealed
+   Secrets sealing key, **`talsecret.sops.yaml` + `talenv.sops.yaml`** (gitignored —
+   workstation-only), kubeconfig/talosconfig, and that Tailscale/Cloudflare/GitHub/DO are
+   institutionally owned (§5).
 
 ---
 
@@ -593,12 +604,12 @@ These are hard-won, each cost real time. Skim the headings; read the one that bi
   the platform **cannot go internet-facing** until the CNI swap + deny-test are done: the
   compensating control for the OIDC skip-verify hacks ("in-cluster MITM is fenced by default-deny")
   did not actually exist under flannel.
-- **The Cilium swap is functional but not yet clean.** Cilium 1.17.4 is active and working (the
-  load-bearing flag is **`bpf.hostLegacyRouting=true`**, which cleared the risk of eBPF breaking the
-  Tailscale overlay). But `cni: none` did not apply in the live machine config (the apply ran from the
-  wrong branch), so the Talos-managed `kube-flannel` + `kube-proxy` DaemonSets still exist with
-  `managedFields=talos` — **do not `kubectl delete` them until `cni:none` is confirmed live**, or
-  Talos will recreate them. Finish via PR #42 (§6.4).
+- **The Cilium swap is COMPLETE (2026-07-04).** Cilium v1.17.4 is the live CNI; the
+  load-bearing flag is **`bpf.hostLegacyRouting=true`** (cleared the risk of eBPF breaking
+  the Tailscale overlay). `cni: none` is set in `talconfig.yaml`, **kube-proxy is absent**,
+  and the old Talos-managed `kube-flannel` / `kube-proxy` DaemonSets are gone. The deny-test
+  passed, so NetworkPolicies are **enforced** (no longer inert). If you ever rebuild the
+  cluster, follow `docs/cilium-cni-runbook.md`.
 - **NetworkPolicy CIDRs were hardcoded to k3d ranges.** k3d used pods `10.42/16`, svc `10.43/16`,
   nodes `10.89.0.0/24`; Talos uses pods `10.244/16`, svc `10.96/12`, real node IPs. The re-param to
   Talos ranges (plus a Tailscale CGNAT `100.64.0.0/10` block on runner egress — the apiserver is also

@@ -12,11 +12,14 @@ per-team ARC CI stack. **Zero human steps after submit.**
 - Source of truth: `platform-services/crossplane/README.md` and
   `platform-services/crossplane/creds/README.md`.
 
-> ⚠ **This stack is NOT live yet.** It is **branch + PR only** until the one-time
-> SRE review + the gated **Phase-0** below. Until the provider creds are resealed
-> with real values, the providers sit **unauthenticated (not reconciling)** — the
-> safe failure mode. The Phase-0 keyboard sequence is also in
-> [Runbooks → (B)](runbooks.md).
+> ✅ **This stack is LIVE (verified 2026-07-04).** `crossplane-system` runs Crossplane
+> **v2.3.2** with all providers installed (harbor v0.1.1, github v0.19.1, kubernetes
+> v0.18.0, sql v0.15.0, vault v0.1.0), the `CapstoneTenant` XRD + Composition are
+> established, and real claims in [`tenants/_claims/`](../../tenants/_claims/) have
+> provisioned tenants (e.g. `swami`). The Phase-0 SRE review + cred reseal below is
+> **historical** — keep it as the rebuild-from-scratch procedure. (Original state:
+> before Phase-0 the providers sat unauthenticated / not reconciling — the safe failure
+> mode. The Phase-0 keyboard sequence is also in [Runbooks → (B)](runbooks.md).)
 
 ---
 

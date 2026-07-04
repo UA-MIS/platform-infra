@@ -1,15 +1,26 @@
-# platform-infra — Capstone IDP (Phase 1)
+# platform-infra — Capstone IDP
 
 Single source of truth for the cluster. ArgoCD watches this repo and reconciles
 everything in it. This is the **platform-engineer-owned** half of the platform
-(students own their `team-*-app` repos). See
-[`artifacts/design/phase-1-architecture.md`](../artifacts/design/phase-1-architecture.md).
+(students own their app repos).
+
+> **➡️ Operators / successors: start with the [Operator Guide](docs/operator/README.md)**
+> and the [Operations & Handoff manual](docs/OPERATIONS-AND-HANDOFF.md).
+>
+> **Production runs on a real 3-node Talos cluster (`admin@capstone` context) — live:**
+> Talos v1.13.4 / k8s v1.31.5, Cilium CNI, Tailscale overlay, Rook-Ceph, ArgoCD, Harbor,
+> Vault+ESO, Crossplane, Backstage, monitoring, plus Debian (Mac-Mini) workers. It is
+> managed out-of-band via talhelper (`clusters/real-talos/`) — see
+> [talos-node-onboarding](docs/operator/talos-node-onboarding.md) /
+> [phase-4-runbook](docs/phase-4-runbook.md). **The `k3d` targets in this README are the
+> LOCAL developer inner-loop cluster only — NOT production.**
 
 > **Generalize-then-instantiate.** Every primitive is written for *N* teams and
-> parameterized by three variables. Porting to the real Talos cluster (Phase 4,
-> D-024/ADR-017 — upstream k8s) is "fill `clusters/real-talos/values.env` + re-point
-> ArgoCD", not a rewrite (§6). (The cluster substrate is Talos, not k3s — only the
-> node OS/control-plane differs; tenants/AppProjects/ApplicationSets/netpols port unchanged.)
+> parameterized by three variables (`PLATFORM_DOMAIN`, `REGISTRY`, `GITHUB_ORG`), so the
+> **same** tenants / AppProjects / ApplicationSets / netpols run unchanged on both the
+> local k3d cluster and the production Talos cluster — only the node OS/control-plane
+> differs (§6). The Talos port (D-024/ADR-017) is **done**; this repo reconciles the
+> live Talos cluster today.
 
 ## Layout
 
@@ -29,7 +40,13 @@ platform-infra/
 └── applicationsets/              # app-of-apps children — T3
 ```
 
-## Prerequisites
+## Local dev cluster (k3d) — prerequisites
+
+> The rest of this README covers the **local k3d inner-loop cluster** for developing
+> platform changes on your workstation. For the **production Talos cluster**, see the
+> [Operator Guide](docs/operator/README.md) — you do not run `make cluster-up` there
+> (Talos is provisioned out-of-band; ArgoCD is pointed at it via
+> `make bootstrap TARGET=real-talos KUBE_CONTEXT=admin@capstone`).
 
 | Tool | Why | Install |
 | --- | --- | --- |
@@ -167,11 +184,15 @@ echo '127.0.0.1 k3d-registry.localhost' | sudo tee -a /etc/hosts
 Switch targets with `TARGET=`:
 
 ```bash
-make cluster-up TARGET=local-k3d     # Phase 1 (default)
-# real-k3s is provisioned out-of-band; ArgoCD is re-pointed at it (no cluster-up)
+make cluster-up TARGET=local-k3d     # local dev cluster (default)
+# real-talos is provisioned out-of-band (talhelper); ArgoCD is pointed at it — no
+# cluster-up. Land the platform with:
+#   make bootstrap TARGET=real-talos KUBE_CONTEXT=admin@capstone
 ```
 
 Only three variables differ between targets — `PLATFORM_DOMAIN`, `REGISTRY`,
 `GITHUB_ORG` — all in `clusters/<target>/values.env`. Everything else (tenants,
 AppProjects, ApplicationSets, quotas, RBAC, NetworkPolicies) is identical across
-targets because it is written against those variables, not hardcoded.
+targets because it is written against those variables, not hardcoded. The live
+production target is **`real-talos`** (`clusters/real-talos/`); `real-k3s` is a
+superseded stub that redirects to it.
