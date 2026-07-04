@@ -105,6 +105,11 @@ env:
 jobs:
   build-and-push:
     runs-on: ua-mis-kaniko
+    # Surfaced to the downstream bump-portal job: the push decision and the exact
+    # 12-char tag that was just built+pushed (so bump-portal writes THAT tag).
+    outputs:
+      PUSH: ${{ steps.resolve.outputs.PUSH }}
+      SHORT_SHA: ${{ steps.resolve.outputs.SHORT_SHA }}
     # REQUIRED by containerMode:kubernetes (see header). Small node image: node for
     # actions/checkout + a shell for the resolve step. The Kaniko build runs in its
     # OWN pod via the `uses: docker://` step, so this image does NOT need Kaniko/git.
@@ -131,6 +136,11 @@ jobs:
           {
             echo "IMAGE=${IMAGE}"
             echo "PUSH=${PUSH}"
+            # SHORT_SHA is surfaced as a job output too — the bump-portal job REUSES
+            # this exact 12-char tag (never recomputes it) to write the deploy manifest,
+            # so the built tag and the deployed tag can never drift (the #110 7-vs-12
+            # class of bug is structurally impossible).
+            echo "SHORT_SHA=${SHORT_SHA}"
           } | tee -a "$GITHUB_OUTPUT"
 
       # --- Kaniko build as a container-action STEP (its own pod; shared _work) ---
@@ -194,3 +204,97 @@ jobs:
           IMAGE: ${{ steps.resolve.outputs.IMAGE }}
           PUSH: ${{ steps.resolve.outputs.PUSH }}
           DOCKER_CONFIG_DIR: ${{ env.DOCKER_CONFIG_DIR }}
+
+  # ============================================================================
+  # bump-portal — the GitOps deploy-bump for The Process portal (mirrors the
+  # tenant `bump-dev` job in tenant-build.yaml). After build-and-push pushes the
+  # portal image, rewrite the Application's Helm image.tag to the just-built
+  # 12-char sha and commit it to main; ArgoCD (platform-backstage-process has
+  # syncPolicy.automated) syncs the new image into the live portal — hands-free.
+  # This KILLS the manual go-live tag flip (the recurring 12-vs-7-char toil).
+  #
+  # SAME-REPO ADVANTAGE (why no PAT): the Backstage deploy manifest
+  # (applicationsets/backstage-process-app.yaml) lives in THIS repo, so the write
+  # uses the job's own GITHUB_TOKEN — no cross-repo credential, no composite-action
+  # PAT trap. (Tenants write their own repos via the same GITHUB_TOKEN model.)
+  #
+  # SECURITY (least privilege — SEPARATE job):
+  #   - `if:` restricts to a real push to main with PUSH == true. NEVER runs on
+  #     pull_request, so UNTRUSTED PR code can't reach the write token.
+  #   - job-scoped `permissions: contents: write` (build-and-push keeps read).
+  #   - loop guard: the commit message carries `[skip ci]`. (Belt-and-suspenders:
+  #     the bump touches only applicationsets/**, which is OUTSIDE this workflow's
+  #     `paths:` app/** filter, so it would not re-trigger the build anyway.)
+  #   - reuses the EXACT 12-char SHORT_SHA from build-and-push (never recomputed) —
+  #     the built tag and the deployed tag are the same value by construction.
+  #
+  # PROD BOUNDARY: this is main/dev-equivalent ONLY. The portal has a single live
+  # env tracking main; there is no prod promotion here (that is #209's domain).
+  #
+  # ⚠ BRANCH-PROTECTION PREREQ (operator step — see PR body): main in platform-infra
+  # requires PRs. `github-actions[bot]` MUST be in main's
+  # bypass-pull-request-allowances (identical to how tenant repos allow bump-dev),
+  # or `git push origin HEAD:main` FAILS LOUD (set -e) — never a silent no-deploy.
+  # ============================================================================
+  bump-portal:
+    needs: build-and-push
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.build-and-push.outputs.PUSH == 'true' }}
+    runs-on: ua-mis-kaniko
+    # FULL node image (NOT -slim): this job git-commits + `git push`es to main, and
+    # actions/checkout needs git for a real .git + persist-credentials; we also curl
+    # yq. -slim ships neither git nor curl.
+    container:
+      image: node:24-trixie
+    permissions:
+      contents: write
+    steps:
+      - name: Install yq (pinned + checksum-verified)
+        env:
+          YQ_VERSION: v4.44.3
+          YQ_SHA256: a2c097180dd884a8d50c956ee16a9cec070f30a7947cf4ebf87d5f36213e9ed7
+        run: |
+          set -eu
+          curl -fsSL -o /usr/local/bin/yq \
+            "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+          echo "${YQ_SHA256}  /usr/local/bin/yq" | sha256sum -c -
+          chmod +x /usr/local/bin/yq
+          yq --version
+
+      - name: Checkout main (writable; full history for a clean commit base)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Bump portal image.tag -> built 12-char sha + commit + push
+        env:
+          # CONSUME the exact tag build-and-push just pushed (no recompute).
+          TAG: ${{ needs.build-and-push.outputs.SHORT_SHA }}
+          MANIFEST: applicationsets/backstage-process-app.yaml
+          GIT_AUTHOR_NAME: ua-mis-ci
+          GIT_AUTHOR_EMAIL: ci@capstone.uamishub.com
+          GIT_COMMITTER_NAME: ua-mis-ci
+          GIT_COMMITTER_EMAIL: ci@capstone.uamishub.com
+        run: |
+          set -eu
+          # CI checks out as a different uid than the container root → mark the
+          # workspace safe so git will operate on it (dubious-ownership guard).
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          # valuesObject makes .backstage.image.tag a REAL yq node. strenv keeps the
+          # value a string (yq quotes an all-numeric sha), so the tag is never
+          # coerced to an int. This is the whole point of the values->valuesObject
+          # refactor: the tag is now addressable in place.
+          TAG="${TAG}" yq -i \
+            '.spec.source.helm.valuesObject.backstage.image.tag = strenv(TAG)' \
+            "${MANIFEST}"
+          echo "==> portal Application now pins tag: ${TAG}"
+          git diff --unified=0 "${MANIFEST}" || true
+          git add "${MANIFEST}"
+          # `[skip ci]` so this deploy commit does NOT re-trigger the build (belt).
+          git commit -m "chore(backstage): bump portal image to ${TAG} [skip ci]" \
+            && echo "committed. ArgoCD (platform-backstage-process, automated) will sync the portal." \
+            || { echo "nothing to commit (tag unchanged) — skipping push."; exit 0; }
+          # Push to main via THIS job's GITHUB_TOKEN (same repo — no PAT). Requires
+          # github-actions[bot] in main's bypass allowlist, else this FAILS LOUD.
+          git push origin HEAD:main
