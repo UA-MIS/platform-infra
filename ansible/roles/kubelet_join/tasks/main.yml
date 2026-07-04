@@ -80,6 +80,15 @@
     mode: "0644"
   notify: restart kubelet
 
+- name: Ensure kubelet systemd drop-in directory exists
+  # We install kubelet WITHOUT kubeadm, so nothing creates this dir (kubeadm's
+  # deb normally does). Without it the drop-in template task fails
+  # "Destination directory ... does not exist".
+  ansible.builtin.file:
+    path: /etc/systemd/system/kubelet.service.d
+    state: directory
+    mode: "0755"
+
 - name: Write the kubelet systemd drop-in (flags incl. --node-ip=<tailscale>)
   ansible.builtin.template:
     src: kubelet-dropin.conf.j2
