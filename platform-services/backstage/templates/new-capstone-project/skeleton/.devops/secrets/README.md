@@ -55,7 +55,7 @@ nothing in Vault at all (the app-secret `ExternalSecret` uses `deletionPolicy: D
 so a missing Vault value is **not** an error — it simply creates no `Secret`). The Go
 starter does, however, *optionally* read one env var, `APP_SECRET`, which
 `.devops/chart/base/deployment.yaml` wires from a Kubernetes Secret named
-**`sample-secret`**, key **`app-secret`** (with `optional: true`, so a missing secret
+**`sample-secret`**, key **`APP_SECRET`** (with `optional: true`, so a missing secret
 never blocks startup — the app just reports `secret loaded: false`).
 
 The per-env `app-secret.externalsecret.yaml` already points `APP_SECRET` at Vault key

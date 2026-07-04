@@ -55,9 +55,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # PER-TEAM RUNNER (finish-eso A2 — per-team scale set + harbor-push robot, PR #128):
+  # the repo Actions variable RUNNER_SCALE_SET picks THIS team's scale set on every
+  # job below; unset -> the shared ua-mis-kaniko (A1). Parity with the thin-caller
+  # skeleton's `runner:` input (see the single-component build-and-push.yaml).
   # ---- 1) resolve: ONE tag + the per-component build matrix --------------------
   resolve:
-    runs-on: ua-mis-kaniko
+    runs-on: ${{ vars.RUNNER_SCALE_SET || 'ua-mis-kaniko' }}
     container:
       image: node:24-trixie-slim
     outputs:
@@ -93,7 +97,7 @@ jobs:
   # ---- 2) build-and-push: one Kaniko build per component (matrix) --------------
   build-and-push:
     needs: resolve
-    runs-on: ua-mis-kaniko
+    runs-on: ${{ vars.RUNNER_SCALE_SET || 'ua-mis-kaniko' }}
     strategy:
       # Don't cancel sibling components if one fails — surface every component's result.
       fail-fast: false
@@ -176,9 +180,13 @@ jobs:
   bump-dev:
     needs: [resolve, build-and-push]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.resolve.outputs.PUSH == 'true' }}
-    runs-on: ua-mis-kaniko
+    runs-on: ${{ vars.RUNNER_SCALE_SET || 'ua-mis-kaniko' }}
+    # FULL node image (NOT -slim): bump-image.sh git-commits the overlay and this
+    # job `git push`es it to main — -slim ships no git (git: not found, exit 127).
+    # Parity with tenant-build.yaml's bump-dev job, which uses the same full image
+    # for the same reason.
     container:
-      image: node:24-trixie-slim
+      image: node:24-trixie
     permissions:
       contents: write
     steps:

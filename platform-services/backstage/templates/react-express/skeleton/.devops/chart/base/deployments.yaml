@@ -63,7 +63,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: ${{ values.appName }}-secret
-                  key: app-secret
+                  key: APP_SECRET
                   optional: true
 {%- if c.kind == "backend" %}
             # DATABASE_URL — the backend's MySQL connection string. Sourced from the SAME

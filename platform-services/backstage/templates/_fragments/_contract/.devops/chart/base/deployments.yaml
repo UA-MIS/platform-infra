@@ -64,7 +64,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: ${{ values.appName }}-secret
-                  key: app-secret
+                  key: APP_SECRET
                   optional: true
 {%- if c.needsDb %}
             # DATABASE_URL — this component's DB connection string. The SOURCE Secret is

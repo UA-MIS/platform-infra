@@ -58,7 +58,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: ${{ values.appName }}-secret
-                  key: app-secret
+                  key: APP_SECRET
                   optional: true
             # Next.js standalone (`node server.js`) binds to $HOSTNAME, which defaults
             # to the pod name Kubernetes injects into HOSTNAME (NOT a bindable address,

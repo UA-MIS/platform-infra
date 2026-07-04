@@ -56,7 +56,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: ${{ values.appName }}-secret
-                  key: app-secret
+                  key: APP_SECRET
                   optional: true
             # MySQL connection string for EF Core (Pomelo). Sourced from the SAME
             # ESO-materialized Secret (${{ values.appName }}-secret) under key

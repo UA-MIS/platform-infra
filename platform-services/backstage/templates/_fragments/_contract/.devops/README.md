@@ -74,7 +74,7 @@ ships, alongside its workload:
   another team's secrets or the platform path);
 - an **`ExternalSecret`** (`app-secret.externalsecret.yaml`) that points `APP_SECRET`
   at Vault key `APP_SECRET` under `secret/tenants/<team>/<env>/app` and materializes
-  the in-namespace `Secret` `sample-secret` (key `app-secret`), which the Deployment
+  the in-namespace `Secret` `sample-secret` (key `APP_SECRET`), which the Deployment
   envs into `APP_SECRET`. The app proves it read the secret on `/` without leaking it.
 
 The image-pull cred (`harbor-pull`) is **NOT** on ESO in v1 — it stays a SealedSecret
