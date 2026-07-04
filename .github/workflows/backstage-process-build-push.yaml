@@ -96,6 +96,15 @@ concurrency:
 env:
   # The Harbor image repo for The Process (dedicated `backstage` project, D-046).
   IMAGE_REPO: harbor.capstone.uamishub.com/backstage/backstage-process
+  # Kaniko LAYER CACHE repo (CI-fast, #237). A sibling repository in the SAME dedicated
+  # `backstage` Harbor project as the image, so the existing project-scoped `harbor-push`
+  # robot (pull+push on the `backstage` project) already has write access to it — no new
+  # cred. Harbor auto-creates the repo on first cache push. Kaniko writes each Dockerfile
+  # stage's result here and, on the next build whose earlier stages are byte-identical,
+  # PULLS them instead of re-running — so a commit that doesn't touch package.json /
+  # yarn.lock skips the ~15-min `yarn install` stage. Cache is written ONLY on push
+  # (main) builds; untrusted PR builds stay build-only and never write cache (below).
+  CACHE_REPO: harbor.capstone.uamishub.com/backstage/cache
   # Where the Harbor push cred lands inside the Kaniko step pod (Kaniko's default
   # DOCKER_CONFIG dir). The platform runner's container-hook template injects
   # secret `harbor-push` (dockerconfigjson) -> config.json here. Only this value
@@ -193,10 +202,10 @@ jobs:
                     --use-new-run
                     --verbosity=info";
             if [ "${PUSH}" = "true" ]; then
-              echo "==> building + pushing ${IMAGE}";
-              /kaniko/executor $COMMON;
+              echo "==> building + pushing ${IMAGE} (layer cache: ${CACHE_REPO})";
+              /kaniko/executor $COMMON --cache=true --cache-repo="${CACHE_REPO}";
             else
-              echo "==> PR build-only validation for ${IMAGE} (no push)";
+              echo "==> PR build-only validation for ${IMAGE} (no push, no cache write)";
               /kaniko/executor $COMMON --no-push --tar-path=/tmp/image.tar;
             fi
             '
@@ -204,6 +213,8 @@ jobs:
           IMAGE: ${{ steps.resolve.outputs.IMAGE }}
           PUSH: ${{ steps.resolve.outputs.PUSH }}
           DOCKER_CONFIG_DIR: ${{ env.DOCKER_CONFIG_DIR }}
+          # Kaniko layer-cache repo (see top-level env). Only consumed on push builds.
+          CACHE_REPO: ${{ env.CACHE_REPO }}
 
   # ============================================================================
   # bump-portal — the GitOps deploy-bump for The Process portal (mirrors the
