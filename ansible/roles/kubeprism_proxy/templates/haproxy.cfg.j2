@@ -17,7 +17,10 @@ defaults
     timeout server  1h
 
 frontend kubeprism
+    # Loopback-only, both families: Cilium resolves localhost:7445 to [::1] first
+    # on a dual-stack node, so we must bind IPv6 loopback too (never exposed).
     bind 127.0.0.1:7445
+    bind [::1]:7445
     default_backend kube_apiservers
 
 backend kube_apiservers
