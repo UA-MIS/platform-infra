@@ -1,0 +1,38 @@
+---
+# KubePrism stand-in for non-Talos workers.
+#
+# On Talos nodes, Cilium dials the apiserver via KubePrism at 127.0.0.1:7445 (a
+# local TCP load-balancer Talos runs on every node). A Debian worker has no
+# KubePrism, so `cilium config init` crashloops "connection refused" on :7445 and
+# the node stays NotReady. We stand up a tiny haproxy that TCP-load-balances
+# 127.0.0.1:7445 across the control-plane apiserver endpoints, so Cilium finds the
+# same local endpoint it expects. This MUST be up and started BEFORE the kubelet
+# starts (this role runs before kubelet_join in site.yml).
+
+- name: Install haproxy (KubePrism stand-in for Cilium's 127.0.0.1:7445)
+  ansible.builtin.apt:
+    name: haproxy
+    state: present
+
+- name: Deploy the KubePrism haproxy config (127.0.0.1:7445 -> control-plane apiservers)
+  ansible.builtin.template:
+    src: haproxy.cfg.j2
+    dest: /etc/haproxy/haproxy.cfg
+    mode: "0644"
+    validate: "haproxy -c -f %s"
+  notify: restart haproxy
+
+- name: Enable and start haproxy
+  ansible.builtin.systemd:
+    name: haproxy
+    enabled: true
+    state: started
+
+- name: Flush handlers so haproxy is serving :7445 before the kubelet/Cilium start
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for the KubePrism endpoint to accept connections
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: 7445
+    timeout: 30

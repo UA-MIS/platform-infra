@@ -10,6 +10,8 @@
 #   hardening    key-only SSH, unattended-upgrades, disable services, (opt) nft
 #   containerd   CRI runtime, SystemdCgroup, pause image, CNI dirs
 #   tailscale    join the tailnet -> stable 100.x node IP
+#   kubeprism_proxy  haproxy TCP-LB on 127.0.0.1:7445 -> apiservers (KubePrism
+#                    stand-in so Cilium starts on a non-Talos node)
 #   kubelet_join TLS-bootstrap the kubelet against the Talos apiserver
 #
 # Prerequisites the OPERATOR completes BEFORE this run (cluster writes — the
@@ -62,5 +64,7 @@
       tags: [containerd]
     - role: tailscale
       tags: [tailscale]
+    - role: kubeprism_proxy
+      tags: [kubeprism]
     - role: kubelet_join
       tags: [kubelet, join]

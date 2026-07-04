@@ -27,6 +27,17 @@ apiserver_endpoints_all:
   - "https://100.89.87.126:6443"    # capstone-n2
   - "https://100.120.67.119:6443"   # capstone-n1
 
+# ---- KubePrism stand-in backends (Debian workers) --------------------------
+# Cilium dials the apiserver via KubePrism at 127.0.0.1:7445 (a local TCP LB that
+# Talos runs on every node). Debian has no KubePrism, so the kubeprism_proxy role
+# stands up haproxy that load-balances 127.0.0.1:7445 across these control-plane
+# apiserver endpoints (their Tailscale 100.x IPs; :6443 is appended in the LB
+# config). Keep in sync with the live control-plane set.
+controlplane_api_endpoints:
+  - "100.120.67.119"    # capstone-n1
+  - "100.89.87.126"     # capstone-n2
+  - "100.117.55.70"     # capstone-n3
+
 # ---- Cluster networking (read from live cluster) ---------------------------
 cluster_dns: "10.96.0.10"               # kube-dns svc ClusterIP
 cluster_domain: "cluster.local"
