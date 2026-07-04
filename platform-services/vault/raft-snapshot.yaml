@@ -11,9 +11,11 @@
 # method as the `vault-snapshot` ServiceAccount, bound to the `snapshot` role whose
 # only policy grants `read` on `sys/storage/raft/snapshot`. NO static token is
 # stored in git — the SA's projected token is exchanged for a short-lived Vault
-# token at run time. The policy + role are created by the human runbook
-# (artifacts/design/vault-dr-runbook.md §D); this manifest only ships the SA, PVC,
-# and CronJob (the GitOps-able half).
+# token at run time. The policy + role are created by the committed, re-runnable
+# script platform-services/external-secrets/vault-policies/snapshot-role.sh (operator
+# runs it once via `kubectl -n vault exec -i vault-0 -- sh < ...`; see runbook §D). If
+# that role is missing, EVERY run fails `invalid role name "snapshot"` at login. This
+# manifest only ships the SA, PVC, and CronJob (the GitOps-able half).
 #
 # RESTORE: `vault operator raft snapshot restore <file>` against a running, unsealed
 # Vault — see the runbook §E. RETENTION: the job keeps the newest $RETAIN snapshots

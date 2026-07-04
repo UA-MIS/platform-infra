@@ -55,6 +55,25 @@ spec:
               but NEW/refreshed secret sync is paused. Check `kubectl -n vault get pods`
               and unseal/recover per artifacts/design/vault-dr-runbook.md.
 
+        # The daily raft-snapshot CronJob is the ONLY Vault DR backup. A failing run
+        # means no fresh snapshot → data loss past the last good snapshot is
+        # unrecoverable. This alert exists because the job failed silently for >29h
+        # (missing `snapshot` k8s-auth role) with nothing watching it (retro #3).
+        - alert: VaultRaftSnapshotFailing
+          expr: kube_job_status_failed{namespace="vault", job_name=~"vault-raft-snapshot-.*"} > 0
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Vault raft-snapshot DR backup is failing"
+            description: >-
+              A vault-raft-snapshot job has FAILED — no fresh Vault DR snapshot is being
+              written to the vault-snapshots PVC. A Vault data loss right now would be
+              unrecoverable past the last good snapshot. Common cause: the `snapshot`
+              k8s-auth role is missing (`invalid role name "snapshot"` at login) —
+              re-run platform-services/external-secrets/vault-policies/snapshot-role.sh
+              (runbook §D). Inspect `kubectl -n vault logs job/<failed-job>`.
+
     # ── (b) External Secrets Operator: store not Ready / sync error ────────────
     - name: external-secrets
       rules:
