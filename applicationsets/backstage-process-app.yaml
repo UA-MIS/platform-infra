@@ -41,9 +41,9 @@ metadata:
 spec:
   project: platform
   source:
-    repoURL: ghcr.io/backstage/charts          # PINNED OCI chart repo (sourceRepos allowlist)
+    repoURL: ghcr.io/backstage/charts # PINNED OCI chart repo (sourceRepos allowlist)
     chart: backstage
-    targetRevision: 2.8.2                       # pinned chart version (no ^/~/latest)
+    targetRevision: 2.8.2 # pinned chart version (no ^/~/latest)
     helm:
       releaseName: backstage
       # STRUCTURED Helm values (ArgoCD `valuesObject`), NOT an inline `values: |`
@@ -57,7 +57,7 @@ spec:
       valuesObject:
         # ── The portal pod ────────────────────────────────────────────────────
         backstage:
-          replicas: 1                           # single replica for the 3-box cluster
+          replicas: 1 # single replica for the 3-box cluster
           # Recreate so plugin DB migrations never run concurrently (chart guidance:
           # a single Backstage pod at a time when migrations run on startup).
           strategy:
@@ -70,14 +70,13 @@ spec:
             # until the first build lands; the CI build tags by commit SHA.
             registry: harbor.capstone.uamishub.com
             repository: backstage/backstage-process
-            tag: c48f41fe9650                     # P5 Secrets-UX on ESO+Vault (#106 self-contained scaffolder + #108 Vault-write secrets-UX). FULL 12-char short-sha (CI tags with `git rev-parse | cut -c1-12`) — #110 mistakenly used the 7-char `bdc917b` → ImagePullBackOff NotFound. Built+pushed by backstage-process-build-push run 28138139272 (IMAGE log: ...backstage-process:bdc917baeeec). Gated on backstage-writer CLI semantics test PASS + #109 deploy wiring (SA backstage-vault-writer + projected audience=vault token + vault-ca CA mount) LIVE. prev: 251ce97987db (#98 scaffolder route); ca6ce4e9784d (M3+M4 PR #94).
+            tag: 3b39d66f39c1 # P5 Secrets-UX on ESO+Vault (#106 self-contained scaffolder + #108 Vault-write secrets-UX). FULL 12-char short-sha (CI tags with `git rev-parse | cut -c1-12`) — #110 mistakenly used the 7-char `bdc917b` → ImagePullBackOff NotFound. Built+pushed by backstage-process-build-push run 28138139272 (IMAGE log: ...backstage-process:bdc917baeeec). Gated on backstage-writer CLI semantics test PASS + #109 deploy wiring (SA backstage-vault-writer + projected audience=vault token + vault-ca CA mount) LIVE. prev: 251ce97987db (#98 scaffolder route); ca6ce4e9784d (M3+M4 PR #94).
             pullPolicy: IfNotPresent
             # Pull from the private Harbor `backstage` project via a robot
             # imagePullSecret (`harbor-pull`, minted at go-live by `make harbor-robot
             # NAME=backstage ENV=...` — same robot pattern as team workloads, see README).
             pullSecrets:
               - harbor-pull
-
           # Modest requests for the 3-OptiPlex converged cluster (resource-governance
           # backlog: small requests). Limits give headroom for the Node backend +
           # plugin migrations without starving the box.
@@ -88,12 +87,10 @@ spec:
             limits:
               cpu: "1"
               memory: 1Gi
-
           # OIDC client secret + backend signing key + DB password are env-injected
           # from the SealedSecret (platform-services/backstage/sealedsecret-oidc.yaml).
           extraEnvVarsSecrets:
             - backstage-process-secrets
-
           # ── Vault WRITE path for the secrets-UX (#108, ADR-030 B1) ──────────────
           # The backend writes tenant secret VALUES to Vault over KV-v2 (role
           # `backstage-writer`, see external-secrets/vault-policies/backstage-role.sh).
@@ -131,7 +128,6 @@ spec:
             - name: vault-ca
               mountPath: /etc/backstage/vault-ca
               readOnly: true
-
           # app-config.production.yaml baked into the custom image is the SOURCE OF TRUTH
           # for auth + integrations; this block is MERGED on top (chart -> ConfigMap ->
           # $APP_CONFIG_*). Kept to the host/deploy seams only (app/backend/catalog) — the
@@ -159,8 +155,8 @@ spec:
               # keepAliveTimeout (Node requirement). app-config-settable since backend-defaults
               # 0.13.0 / Backstage 1.44; takes effect on appConfig sync (no rebuild for THIS).
               server:
-                keepAliveTimeout: { seconds: 60 }
-                headersTimeout: { seconds: 65 }
+                keepAliveTimeout: {seconds: 60}
+                headersTimeout: {seconds: 65}
               cors:
                 origin: https://process.capstone.uamishub.com
                 methods: [GET, HEAD, PATCH, POST, PUT, DELETE]
@@ -172,9 +168,9 @@ spec:
               database:
                 client: pg
                 connection:
-                  host: backstage-postgresql       # the bundled Postgres Service
+                  host: backstage-postgresql # the bundled Postgres Service
                   port: 5432
-                  user: bn_backstage               # Bitnami app user
+                  user: bn_backstage # Bitnami app user
                   password: ${POSTGRES_PASSWORD}
             # ── SSO via the shared Dex broker ──────────────────────────────────────
             # The auth block MUST live HERE in the Helm appConfig: the chart launches the
@@ -212,7 +208,6 @@ spec:
                     # auth.experimentalRefreshToken.enabled (that flag gates the separate
                     # DB-backed offline-token service for OIDC/MCP clients, not this path).
                     additionalScopes: [offline_access]
-
             # ── Catalog: The Process golden-path templates + seed + GitHub-org ingest ──
             # CRITICAL (PR #71): the chart launches the backend with ONLY this overlay
             # ConfigMap — it does NOT load the image's baked app-config.production.yaml. So
@@ -240,17 +235,15 @@ spec:
                   githubUrl: https://github.com
                   orgs: ['UA-MIS']
                   schedule:
-                    initialDelay: { seconds: 30 }
-                    frequency: { hours: 1 }
-                    timeout: { minutes: 10 }
-
+                    initialDelay: {seconds: 30}
+                    frequency: {hours: 1}
+                    timeout: {minutes: 10}
             # ── Permission framework (M2: THE SPINE) ─────────────────────────────────
             # Turn enforcement ON so the custom CapstoneTeamPermissionPolicy filters the
             # catalog per-team. WITHOUT this the framework no-ops and serves everything
             # regardless of policy (plan R6, the §5 backend-API acceptance test catches it).
             permission:
               enabled: true
-
             # ── Integrations: GitHub App (M2) ────────────────────────────────────────
             # Authenticate as the UA-MIS GitHub App (ua-mis-backstage) for org ingestion
             # (and M4 Scaffolder repo create). M1 left this absent-tolerant; M2 makes it
@@ -270,7 +263,6 @@ spec:
                       clientSecret: ${GITHUB_APP_CLIENT_SECRET}
                       privateKey: ${GITHUB_APP_PRIVATE_KEY}
                       allowedInstallationOwners: ['UA-MIS']
-
             # ── Harbor provisioning (capstone:harbor-onboard, #114) ────────────────
             # MIRROR of app-config.production.yaml's capstone.harbor block (same
             # "chart loads ONLY this overlay" seam as auth/catalog/integrations above —
@@ -288,7 +280,6 @@ spec:
                 username: ${HARBOR_PROVISIONER_USERNAME}
                 secret: ${HARBOR_PROVISIONER_SECRET}
                 oidcGroupPrefix: UA-MIS
-
         # ── ServiceAccount for the Vault WRITE path (#108) ───────────────────────
         # Dedicated SA the secrets-UX backend authenticates to Vault as (k8s-auth role
         # `backstage-writer` binds THIS SA — NOT `default`, which would grant write-any-
@@ -299,7 +290,6 @@ spec:
           create: true
           name: backstage-vault-writer
           automountServiceAccountToken: true
-
         # ── Ingress: process.<domain> via Traefik (matches every other service) ──
         # Plain Ingress, TLS host listed but NO secretName — Traefik's default TLSStore
         # serves the cert-manager wildcard cert for *.capstone.uamishub.com (§5.1/§5.2),
@@ -311,12 +301,10 @@ spec:
           tls:
             enabled: true
             # No secretName: the wildcard cert is served via the default TLSStore.
-
         service:
           type: ClusterIP
           ports:
             backend: 7007
-
         # ── Bundled Postgres on ceph-block (Phase-4 Rook RBD, cluster default SC) ─
         # Same storage decision as Harbor: ceph-block is replica-3 RWO RBD (survives a
         # node loss); local-path does NOT exist on Talos. External DB (ua-mis-db-1 PG17)
@@ -326,7 +314,7 @@ spec:
           auth:
             username: bn_backstage
             database: backstage
-            existingSecret: backstage-postgresql   # our sealed keys: postgres-password, password
+            existingSecret: backstage-postgresql # our sealed keys: postgres-password, password
             # The bundled Bitnami postgresql subchart defaults its existingSecret keys
             # to `user-password`/`admin-password`, but our sealed `backstage-postgresql`
             # uses the classic `password`/`postgres-password` names (what the sealed file
@@ -336,8 +324,8 @@ spec:
             # it: CreateContainerConfigError "couldn't find key user-password in Secret
             # backstage/backstage-postgresql".
             secretKeys:
-              userPasswordKey: password            # app user (bn_backstage) — Backstage connects with this
-              adminPasswordKey: postgres-password  # postgres superuser
+              userPasswordKey: password # app user (bn_backstage) — Backstage connects with this
+              adminPasswordKey: postgres-password # postgres superuser
           primary:
             persistence:
               enabled: true
@@ -360,8 +348,8 @@ spec:
       prune: true
       selfHeal: true
     syncOptions:
-      - CreateNamespace=false      # backstage ns ships via platform-services/backstage
-      - ServerSideApply=true       # large chart objects
+      - CreateNamespace=false # backstage ns ships via platform-services/backstage
+      - ServerSideApply=true # large chart objects
     retry:
       limit: 5
-      backoff: { duration: 10s, factor: 2, maxDuration: 5m }
+      backoff: {duration: 10s, factor: 2, maxDuration: 5m}
