@@ -1,0 +1,73 @@
+---
+# Install and configure containerd (CRI runtime) for the kubelet.
+# Uses Docker's community containerd.io build, pinned to a 1.7.x line so the
+# shipped config.toml (schema version 2) is deterministic across the fleet.
+
+- name: Create keyrings dir
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+
+- name: Add Docker apt GPG key (for containerd.io)
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/debian/gpg
+    dest: /etc/apt/keyrings/docker.asc
+    mode: "0644"
+
+- name: Add Docker apt repository
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [arch={{ 'amd64' if ansible_architecture == 'x86_64' else ansible_architecture }}
+      signed-by=/etc/apt/keyrings/docker.asc]
+      https://download.docker.com/linux/debian {{ ansible_distribution_release }} stable
+    filename: docker
+    state: present
+
+- name: Install containerd.io (pinned)
+  ansible.builtin.apt:
+    name: "containerd.io={{ containerd_apt_version }}"
+    state: present
+    update_cache: true
+    allow_downgrade: true
+
+- name: Hold containerd.io at the pinned version
+  ansible.builtin.dpkg_selections:
+    name: containerd.io
+    selection: hold
+
+- name: Ensure containerd config dir
+  ansible.builtin.file:
+    path: /etc/containerd
+    state: directory
+    mode: "0755"
+
+- name: Ensure CNI dirs Cilium writes into exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - /opt/cni/bin        # Cilium install-cni-plugin drops binaries here
+    - /etc/cni/net.d      # Cilium writes 05-cilium.conflist here (cni-exclusive)
+
+- name: Deploy containerd config (SystemdCgroup + pinned pause image)
+  ansible.builtin.template:
+    src: config.toml.j2
+    dest: /etc/containerd/config.toml
+    mode: "0644"
+  notify: restart containerd
+
+- name: Enable and start containerd
+  ansible.builtin.systemd:
+    name: containerd
+    enabled: true
+    state: started
+
+- name: Flush handlers so containerd restarts before the kubelet joins
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for the containerd CRI socket
+  ansible.builtin.wait_for:
+    path: /run/containerd/containerd.sock
+    timeout: 30

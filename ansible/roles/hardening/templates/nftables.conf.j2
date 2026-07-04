@@ -1,0 +1,64 @@
+#!/usr/sbin/nft -f
+# ============================================================================
+# Overlay-safe host firewall for a Cilium (hostLegacyRouting=true) worker.
+# Managed by Ansible (capstone). Default OFF — enable via hardening_firewall_enabled
+# in a maintenance window after validating on clay-mac1.
+#
+# DESIGN NOTE: this node's cluster traffic (apiserver<->kubelet, Cilium VXLAN)
+# rides Tailscale (100.x) because the kubelet registers node-ip = Tailscale IP.
+# So "iif tailscale0 accept" covers the bulk of it. Explicit cluster rules are
+# added for the on-LAN path too. FORWARD is left accept: pod policy is enforced
+# by Cilium eBPF / NetworkPolicy, NOT by this host firewall — filtering forwarded
+# pod traffic here would fight the datapath.
+# ============================================================================
+flush ruleset
+
+table inet filter {
+    chain input {
+        type filter hook input priority 0; policy drop;
+
+        iif "lo" accept
+        ct state established,related accept
+        ct state invalid drop
+
+        # Trust the overlay: cluster control + data plane arrive here.
+        iifname "tailscale0" accept
+
+        # Cilium-managed interfaces (host routing, pod veths, vxlan device).
+        iifname "cilium_*" accept
+        iifname "lxc*" accept
+
+        # Cilium VXLAN underlay (on-LAN path from control-plane nodes).
+        udp dport 8472 accept
+
+        # ICMP / ICMPv6 (PMTU, health).
+        ip protocol icmp accept
+        ip6 nexthdr ipv6-icmp accept
+
+        # SSH — admin CIDRs only.
+{% for cidr in hardening_ssh_allow_cidrs %}
+        ip saddr {{ cidr }} tcp dport 22 accept
+{% endfor %}
+
+        # kubelet API (apiserver -> kubelet: logs/exec/metrics) from cluster CIDRs.
+{% for cidr in hardening_ssh_allow_cidrs %}
+        ip saddr {{ cidr }} tcp dport 10250 accept
+{% endfor %}
+
+        # Cilium agent health / connectivity checks.
+        tcp dport 4240 accept
+
+        # NodePort range (Cilium kube-proxy-replacement serves these).
+        tcp dport 30000-32767 accept
+        udp dport 30000-32767 accept
+    }
+
+    chain forward {
+        # Pod traffic is governed by Cilium / NetworkPolicy, not this host firewall.
+        type filter hook forward priority 0; policy accept;
+    }
+
+    chain output {
+        type filter hook output priority 0; policy accept;
+    }
+}

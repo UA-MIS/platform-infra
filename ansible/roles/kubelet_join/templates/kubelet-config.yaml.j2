@@ -1,0 +1,45 @@
+# Managed by Ansible (capstone). KubeletConfiguration.
+# Mirrors the secure kubeadm defaults + this cluster's DNS/cgroup settings.
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+
+# cgroup driver MUST match containerd (SystemdCgroup = true).
+cgroupDriver: systemd
+
+# CRI socket.
+containerRuntimeEndpoint: unix:///run/containerd/containerd.sock
+
+# Cluster DNS (kube-dns svc ClusterIP) + domain, read from the live cluster.
+clusterDNS:
+  - {{ cluster_dns }}
+clusterDomain: {{ cluster_domain }}
+
+# Real upstream resolv.conf (avoids the systemd-resolved 127.0.0.53 stub loop
+# inside pods). Detected by the common role.
+resolvConf: {{ kubelet_resolv_conf }}
+
+# Secure kubelet API: authenticate clients with the cluster CA, authorize via
+# the apiserver (Webhook), no anonymous access. Matches kubeadm hardening.
+authentication:
+  anonymous:
+    enabled: false
+  webhook:
+    enabled: true
+  x509:
+    clientCAFile: /etc/kubernetes/pki/ca.crt
+authorization:
+  mode: Webhook
+
+# Rotate the client certificate automatically before expiry (RBAC for
+# selfnodeclient renewal already exists in the cluster).
+rotateCertificates: true
+
+# We do NOT enable serverTLSBootstrap: the kubelet self-signs its serving cert,
+# so no kubelet-serving CSR needs manual approval. (There is no serving-cert
+# auto-approver in this cluster — enabling it would leave CSRs Pending.)
+serverTLSBootstrap: false
+
+# Talos nodes run swapless; we disabled swap in the common role.
+failSwapOn: true
+
+# Where the kubelet stores its rotating PKI.

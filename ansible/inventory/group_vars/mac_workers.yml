@@ -1,0 +1,115 @@
+# =============================================================================
+# Non-secret defaults for the Debian Mac-Mini worker fleet.
+#
+# Every value here was READ FROM THE LIVE CLUSTER (kubectl / talosctl, read-only)
+# on 2026-07-03. Re-verify with `make -C ansible show-cluster-facts` (see runbook)
+# if the cluster is upgraded. Secrets (bootstrap token, Tailscale auth key) live
+# in secrets.yml (git-ignored) — see secrets.example.yml.
+# =============================================================================
+
+# ---- Kubernetes version (must match the running control plane) -------------
+# Live: `kubectl version` -> Server v1.31.5 ; nodes report v1.31.5.
+k8s_version: "1.31.5"
+k8s_minor: "v1.31"                       # pkgs.k8s.io repo stream
+k8s_apt_version: "1.31.5-1.1"            # exact deb version to pin kubelet/crictl
+kubelet_apt_version: "{{ k8s_apt_version }}"
+crictl_apt_version: "1.31.1-1.1"      # cri-tools does NOT track kubelet patch versions; 1.31.1 is the latest in the v1.31 repo (no 1.31.5)
+
+# ---- Control-plane / API endpoint ------------------------------------------
+# Live: `kubectl cluster-info` -> https://100.117.55.70:6443 (capstone-n3 Tailscale IP).
+# The apiserver serving cert SANs include ALL THREE control-plane Tailscale IPs
+# (100.117.55.70, 100.89.87.126, 100.120.67.119) and their LAN IPs, so any of
+# them is a valid CA-verified endpoint. We point the kubelet at the primary; the
+# alternates are documented for failover in the runbook.
+apiserver_endpoint: "https://100.117.55.70:6443"
+apiserver_endpoints_all:
+  - "https://100.117.55.70:6443"    # capstone-n3
+  - "https://100.89.87.126:6443"    # capstone-n2
+  - "https://100.120.67.119:6443"   # capstone-n1
+
+# ---- KubePrism stand-in backends (Debian workers) --------------------------
+# Cilium dials the apiserver via KubePrism at 127.0.0.1:7445 (a local TCP LB that
+# Talos runs on every node). Debian has no KubePrism, so the kubeprism_proxy role
+# stands up haproxy that load-balances 127.0.0.1:7445 across these control-plane
+# apiserver endpoints (their Tailscale 100.x IPs; :6443 is appended in the LB
+# config). Keep in sync with the live control-plane set.
+controlplane_api_endpoints:
+  - "100.120.67.119"    # capstone-n1
+  - "100.89.87.126"     # capstone-n2
+  - "100.117.55.70"     # capstone-n3
+
+# ---- Cluster networking (read from live cluster) ---------------------------
+cluster_dns: "10.96.0.10"               # kube-dns svc ClusterIP
+cluster_domain: "cluster.local"
+service_cidr: "10.96.0.0/12"            # apiserver SAN shows 10.96.0.1 = kubernetes svc
+pod_cidr: "10.244.0.0/16"              # CiliumNode podCIDRs are 10.244.x.0/24 per node
+# Cilium tunnel (VXLAN) underlay: the control-plane nodes advertise InternalIP on
+# this LAN. The Mac's Cilium agent must have L3 reachability to it (see runbook
+# "routing prerequisite"). Used only for a validation reachability check.
+controlplane_underlay_cidr: "10.237.171.0/24"
+controlplane_underlay_probe_ip: "10.237.171.8"   # capstone-n3 InternalIP
+
+# ---- containerd -------------------------------------------------------------
+# Talos nodes run containerd 2.2.4. On Debian we install Docker's containerd.io
+# (community-standard CRI build). Pinned to a 1.7.x line so the shipped
+# config.toml (schema version 2) is deterministic. Confirm availability with
+# `apt-cache madison containerd.io` and bump if the pin is gone.
+containerd_apt_version: "1.7.27-1"
+pause_image: "registry.k8s.io/pause:3.10"   # matches kubeadm 1.31 default
+
+# ---- Pool identity ----------------------------------------------------------
+# Applied to the Node object by the OPERATOR after join (custom-prefix labels are
+# NOT settable by the kubelet under NodeRestriction). The runbook has the kubectl.
+node_pool_label_key: "capstone.io/pool"
+node_pool_label_value: "mac-debian"
+
+# Optional steering taint. The cluster is intentionally converged/untainted, so
+# this defaults OFF. When true, the kubelet self-applies it at registration
+# (--register-with-taints is permitted by NodeRestriction). Turn on only if you
+# want to keep general workloads off the Macs and opt them in with a toleration.
+mac_worker_taint_enabled: false
+mac_worker_taint: "capstone.io/pool=mac-debian:NoSchedule"
+
+# ---- Cluster CA -------------------------------------------------------------
+# Public cluster CA (kube-root-ca.crt), O=kubernetes, valid to 2036-06-14.
+# SHA-256 fingerprint 01:B9:37:6B:F2:41:3F:76:35:7E:81:31:D1:81:E4:30:E4:B3:A4:43:0B:CF:45:0B:5F:6C:8C:E0:18:B6:00:CE
+# Shipped as roles/kubelet_join/files/cluster-ca.crt. Refresh with the kubectl in
+# the runbook if the cluster CA is ever rotated.
+cluster_ca_src: "cluster-ca.crt"
+
+# ---- kubelet DNS resolver ---------------------------------------------------
+# Path the kubelet copies into pods' /etc/resolv.conf. On Debian with
+# systemd-resolved active this MUST be the real upstream file, not the 127.0.0.53
+# stub (a stub would loop). The common role detects systemd-resolved and sets
+# the fact; this is the fallback when it is not active.
+kubelet_resolv_conf_default: "/etc/resolv.conf"
+
+# ---- Tailscale --------------------------------------------------------------
+tailnet: "taile5d412.ts.net"
+# Keep the node's own DNS stable (LAN/campus resolvers); do NOT let Tailscale
+# MagicDNS rewrite /etc/resolv.conf — the kubelet manages pod DNS separately.
+tailscale_accept_dns: false
+tailscale_ssh: false
+
+# ---- Hardening --------------------------------------------------------------
+# Admin SSH public keys installed for the ansible_user (key-only login is enforced
+# AFTER at least one key is present). Fill real keys in secrets.yml or here.
+admin_ssh_keys: []
+# Overlay-safe host firewall. Defaults OFF: an incorrectly-scoped nftables ruleset
+# on a Cilium (hostLegacyRouting) node can break the datapath. The ruleset is
+# shipped and reviewed; enable it in a maintenance window once validated. See the
+# security tradeoff section in the runbook.
+hardening_firewall_enabled: false
+# CIDRs allowed to SSH in when the firewall is enabled (tailnet + campus admin).
+hardening_ssh_allow_cidrs:
+  - "100.64.0.0/10"        # Tailscale CGNAT range
+  - "10.237.171.0/24"      # lab LAN
+# unattended-upgrades installs security updates but never auto-reboots a node
+# (operators drain + reboot on their own schedule).
+hardening_unattended_upgrades: true
+hardening_disable_services:
+  - avahi-daemon
+  - cups
+  - cups-browsed
+  - bluetooth
+  - ModemManager

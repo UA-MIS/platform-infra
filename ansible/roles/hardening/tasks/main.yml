@@ -1,0 +1,104 @@
+---
+# Debian has a far larger attack surface than Talos (SSH, a package manager, a
+# mutable rootfs, general-purpose services). This role trims it back toward the
+# Talos baseline. See the "security tradeoff" section of the runbook.
+
+# --- SSH: install admin keys, then enforce key-only login -------------------
+- name: Ensure .ssh dir for the admin user
+  ansible.builtin.file:
+    path: "/home/{{ ansible_user }}/.ssh"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0700"
+  when: admin_ssh_keys | length > 0
+
+- name: Install admin SSH authorized keys
+  ansible.posix.authorized_key:
+    user: "{{ ansible_user }}"
+    key: "{{ item }}"
+    state: present
+  loop: "{{ admin_ssh_keys }}"
+
+- name: Guard — do not lock out password auth unless at least one key is present
+  ansible.builtin.assert:
+    that:
+      - admin_ssh_keys | length > 0
+    fail_msg: >-
+      Refusing to enforce key-only SSH with no admin_ssh_keys set — you would lock
+      yourself out. Add keys to secrets.yml / group_vars first.
+
+- name: Enforce key-only SSH (drop-in)
+  ansible.builtin.copy:
+    dest: /etc/ssh/sshd_config.d/10-capstone-hardening.conf
+    mode: "0644"
+    validate: "/usr/sbin/sshd -t -f %s"
+    content: |
+      # Managed by Ansible (capstone). Key-only, no root password login.
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      ChallengeResponseAuthentication no
+      PermitRootLogin prohibit-password
+      PubkeyAuthentication yes
+      X11Forwarding no
+      MaxAuthTries 3
+  notify: restart sshd
+
+# --- Unattended security upgrades (no auto-reboot; operators drain first) ----
+- name: Install unattended-upgrades
+  ansible.builtin.apt:
+    name:
+      - unattended-upgrades
+      - apt-listchanges
+    state: present
+  when: hardening_unattended_upgrades | bool
+
+- name: Configure unattended-upgrades (security only, never auto-reboot)
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/52capstone-unattended
+    mode: "0644"
+    content: |
+      // Managed by Ansible (capstone).
+      Unattended-Upgrade::Origins-Pattern {
+          "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";
+      };
+      // Never auto-reboot a node — the operator drains + reboots on schedule.
+      Unattended-Upgrade::Automatic-Reboot "false";
+      // Do NOT let auto-upgrades bump the pinned kubelet/containerd out from under us.
+      Unattended-Upgrade::Package-Blacklist {
+          "kubelet";
+          "kubeadm";
+          "kubectl";
+          "cri-tools";
+          "containerd.io";
+      };
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+  when: hardening_unattended_upgrades | bool
+
+# --- Disable general-purpose services not needed on a headless worker --------
+- name: Disable unused services
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+  loop: "{{ hardening_disable_services }}"
+  failed_when: false
+
+# --- Optional overlay-safe host firewall (default OFF — see runbook) ---------
+- name: Host firewall (nftables)
+  when: hardening_firewall_enabled | bool
+  block:
+    - name: Deploy overlay-safe nftables ruleset
+      ansible.builtin.template:
+        src: nftables.conf.j2
+        dest: /etc/nftables.conf
+        mode: "0644"
+        validate: "/usr/sbin/nft -c -f %s"
+      notify: reload nftables
+
+    - name: Enable nftables
+      ansible.builtin.systemd:
+        name: nftables
+        enabled: true
+        state: started

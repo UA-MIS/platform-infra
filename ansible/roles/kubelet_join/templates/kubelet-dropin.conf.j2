@@ -1,0 +1,31 @@
+# Managed by Ansible (capstone). Overrides the kubelet ExecStart with the flags
+# for a manual (non-kubeadm) TLS bootstrap into the Talos cluster.
+[Service]
+# --node-ip is the STABLE Tailscale 100.x address, so this node registers with an
+# InternalIP that survives the Mac being relocated onto a new DHCP LAN (the
+# apiserver reaches the kubelet at this IP over the tailnet). The control-plane
+# nodes register their LAN InternalIP; the Mac's Cilium agent must have L3 reach
+# to that LAN for VXLAN (see the routing prerequisite in the runbook).
+#
+# No custom --node-labels here: NodeRestriction forbids the kubelet from setting
+# arbitrary label prefixes, and a rejected label fails the whole registration.
+# The capstone.io/pool label is applied by the operator after join.
+ExecStart=
+{% if mac_worker_taint_enabled %}
+ExecStart=/usr/bin/kubelet \
+  --bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf \
+  --kubeconfig=/etc/kubernetes/kubelet.conf \
+  --config=/var/lib/kubelet/config.yaml \
+  --cert-dir=/var/lib/kubelet/pki \
+  --hostname-override={{ kube_node_name }} \
+  --node-ip={{ tailscale_node_ip }} \
+  --register-with-taints={{ mac_worker_taint }}
+{% else %}
+ExecStart=/usr/bin/kubelet \
+  --bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf \
+  --kubeconfig=/etc/kubernetes/kubelet.conf \
+  --config=/var/lib/kubelet/config.yaml \
+  --cert-dir=/var/lib/kubelet/pki \
+  --hostname-override={{ kube_node_name }} \
+  --node-ip={{ tailscale_node_ip }}
+{% endif %}

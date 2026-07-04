@@ -1,0 +1,109 @@
+---
+# Base OS prep shared by every Mac worker: packages, kernel modules, sysctl,
+# swap off, time sync. Idempotent — safe to re-run.
+
+- name: Install base packages
+  ansible.builtin.apt:
+    name:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg
+      - lsb-release
+      - conntrack        # kube-proxy-replacement / connection tracking helpers
+      - socat            # port-forward, some CNI helpers
+      - ethtool          # cilium queries NIC features
+      - ipset
+      - nftables
+      - chrony           # accurate clock => TLS bootstrap does not fail on skew
+      - python3
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+# --- APT signature verifier: Debian 13 (trixie) ships `sqv`, which rejects some
+# third-party repo signatures (e.g. pkgs.k8s.io's SHA1/v3 sig — upstream k8s
+# #133098: "Signature Packet v3 is not considered secure since 2026-02-01 ...
+# repository is not signed"). Point apt back at the legacy gpgv verifier BEFORE
+# any third-party repo (tailscale, pkgs.k8s.io) is added or updated. ---
+- name: Ensure gpgv present (trixie sqv rejects some third-party repo signatures)
+  ansible.builtin.apt:
+    name: gpgv
+    state: present
+
+- name: Point apt at legacy gpgv verifier (trixie sqv rejects k8s repo SHA1/v3 sig, upstream k8s #133098)
+  ansible.builtin.copy:
+    content: "APT::Key::gpgvcommand \"/usr/bin/gpgv\";\n"
+    dest: /etc/apt/apt.conf.d/90gpgv
+    mode: "0644"
+
+- name: Ensure chrony (time sync) is running — TLS bootstrap is clock-sensitive
+  ansible.builtin.service:
+    name: chrony
+    state: started
+    enabled: true
+
+# --- Swap off: kubelet defaults to failSwapOn=true; Talos nodes run swapless ---
+- name: Disable all active swap now
+  ansible.builtin.command: swapoff -a
+  changed_when: false
+
+- name: Remove swap entries from /etc/fstab (persist swap-off across reboot)
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: '^([^#].*\s+swap\s+.*)$'
+    replace: '# \1  # disabled for kubernetes (capstone)'
+
+- name: Disable dphys-swapfile if present
+  ansible.builtin.systemd:
+    name: dphys-swapfile
+    state: stopped
+    enabled: false
+  failed_when: false
+
+# --- Kernel modules required for the CRI + Cilium datapath ---
+- name: Persist required kernel modules
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/capstone-k8s.conf
+    mode: "0644"
+    content: |
+      # Managed by Ansible (capstone). Loaded at boot for the CRI + Cilium.
+      overlay
+      br_netfilter
+
+- name: Load kernel modules now
+  community.general.modprobe:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - overlay
+    - br_netfilter
+
+# --- sysctl for the container/pod datapath ---
+- name: Apply kubernetes sysctls
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/99-capstone-k8s.conf
+    mode: "0644"
+    content: |
+      # Managed by Ansible (capstone).
+      net.ipv4.ip_forward = 1
+      net.bridge.bridge-nf-call-iptables = 1
+      net.bridge.bridge-nf-call-ip6tables = 1
+  notify: reload sysctl
+
+- name: Flush handlers so sysctls apply before later roles
+  ansible.builtin.meta: flush_handlers
+
+# --- DNS resolver detection for the kubelet (avoid the 127.0.0.53 stub loop) ---
+- name: Detect whether systemd-resolved is active
+  ansible.builtin.command: systemctl is-active systemd-resolved
+  register: resolved_active
+  changed_when: false
+  failed_when: false
+
+- name: Set kubelet resolvConf fact (real upstream file when resolved is active)
+  ansible.builtin.set_fact:
+    kubelet_resolv_conf: >-
+      {{ '/run/systemd/resolve/resolv.conf'
+         if resolved_active.stdout == 'active'
+         else kubelet_resolv_conf_default }}

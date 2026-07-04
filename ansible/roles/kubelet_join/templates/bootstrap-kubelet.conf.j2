@@ -1,0 +1,20 @@
+# Managed by Ansible (capstone). TLS-bootstrap kubeconfig.
+# The kubelet uses this ONCE to request its real client certificate, then writes
+# /etc/kubernetes/kubelet.conf and never uses this file again.
+apiVersion: v1
+kind: Config
+clusters:
+  - name: capstone
+    cluster:
+      certificate-authority: /etc/kubernetes/pki/ca.crt
+      server: {{ apiserver_endpoint }}
+contexts:
+  - name: bootstrap
+    context:
+      cluster: capstone
+      user: tls-bootstrap
+current-context: bootstrap
+users:
+  - name: tls-bootstrap
+    user:
+      token: {{ kubelet_bootstrap_token }}

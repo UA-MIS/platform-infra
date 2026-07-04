@@ -1,0 +1,31 @@
+# {{ ansible_managed }}
+# KubePrism stand-in: TCP load-balancer so Cilium can reach the apiserver at the
+# local 127.0.0.1:7445 endpoint it expects on Talos nodes. Backends are the
+# control-plane apiserver endpoints (controlplane_api_endpoints, group_vars).
+
+global
+    log /dev/log local0
+    maxconn 4096
+    daemon
+
+defaults
+    mode    tcp
+    log     global
+    option  tcplog
+    timeout connect 5s
+    timeout client  1h
+    timeout server  1h
+
+frontend kubeprism
+    # Loopback-only, both families: Cilium resolves localhost:7445 to [::1] first
+    # on a dual-stack node, so we must bind IPv6 loopback too (never exposed).
+    bind 127.0.0.1:7445
+    bind [::1]:7445
+    default_backend kube_apiservers
+
+backend kube_apiservers
+    balance roundrobin
+    option tcp-check
+{% for ep in controlplane_api_endpoints %}
+    server cp{{ loop.index }} {{ ep }}:6443 check
+{% endfor %}

@@ -1,0 +1,130 @@
+---
+# Join a non-Talos node to the Talos-bootstrapped cluster via the standard
+# Kubernetes TLS bootstrap flow (Talos has no kubeadm, so the node bootstraps
+# itself with a bootstrap-token kubeconfig instead of `kubeadm join`).
+#
+# Flow:
+#   1. Install kubelet + crictl from pkgs.k8s.io, pinned to the cluster version.
+#   2. Drop the cluster CA, the bootstrap kubeconfig (token), and the kubelet
+#      config + systemd flags.
+#   3. Start the kubelet. On first start it presents the bootstrap token, the
+#      csrapprover auto-approves its client CSR (RBAC for system:bootstrappers:nodes
+#      already exists in the cluster), and the kubelet writes its own credential
+#      to /etc/kubernetes/kubelet.conf. Cilium then schedules on the node.
+
+# --- kubelet + crictl from pkgs.k8s.io --------------------------------------
+- name: Add the pkgs.k8s.io apt GPG key
+  ansible.builtin.get_url:
+    url: "https://pkgs.k8s.io/core:/stable:/{{ k8s_minor }}/deb/Release.key"
+    dest: /etc/apt/keyrings/kubernetes-apt-keyring.asc
+    mode: "0644"
+
+- name: Add the pkgs.k8s.io apt repository (pinned minor)
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.asc]
+      https://pkgs.k8s.io/core:/stable:/{{ k8s_minor }}/deb/ /
+    filename: kubernetes
+    state: present
+
+- name: Install kubelet + crictl (pinned, NOT kubeadm — we bootstrap manually)
+  ansible.builtin.apt:
+    name:
+      - "kubelet={{ kubelet_apt_version }}"
+      - "cri-tools={{ crictl_apt_version }}"
+    state: present
+    update_cache: true
+    allow_downgrade: true
+
+- name: Hold kubelet + crictl at the pinned version
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop:
+    - kubelet
+    - cri-tools
+
+- name: crictl runtime endpoint (so `crictl` talks to containerd out of the box)
+  ansible.builtin.copy:
+    dest: /etc/crictl.yaml
+    mode: "0644"
+    content: |
+      runtime-endpoint: unix:///run/containerd/containerd.sock
+      image-endpoint: unix:///run/containerd/containerd.sock
+      timeout: 10
+
+# --- Cluster join material --------------------------------------------------
+- name: Ensure kubernetes pki dir
+  ansible.builtin.file:
+    path: /etc/kubernetes/pki
+    state: directory
+    mode: "0755"
+
+- name: Install the cluster CA
+  ansible.builtin.copy:
+    src: "{{ cluster_ca_src }}"
+    dest: /etc/kubernetes/pki/ca.crt
+    mode: "0644"
+
+- name: Write the TLS-bootstrap kubeconfig (bootstrap token)
+  ansible.builtin.template:
+    src: bootstrap-kubelet.conf.j2
+    dest: /etc/kubernetes/bootstrap-kubelet.conf
+    mode: "0600"
+  no_log: true      # contains the bootstrap token
+
+- name: Write the kubelet configuration
+  ansible.builtin.template:
+    src: kubelet-config.yaml.j2
+    dest: /var/lib/kubelet/config.yaml
+    mode: "0644"
+  notify: restart kubelet
+
+- name: Ensure kubelet systemd drop-in directory exists
+  # We install kubelet WITHOUT kubeadm, so nothing creates this dir (kubeadm's
+  # deb normally does). Without it the drop-in template task fails
+  # "Destination directory ... does not exist".
+  ansible.builtin.file:
+    path: /etc/systemd/system/kubelet.service.d
+    state: directory
+    mode: "0755"
+
+- name: Write the kubelet systemd drop-in (flags incl. --node-ip=<tailscale>)
+  ansible.builtin.template:
+    src: kubelet-dropin.conf.j2
+    dest: /etc/systemd/system/kubelet.service.d/10-capstone-kubelet.conf
+    mode: "0644"
+  notify:
+    - reload systemd
+    - restart kubelet
+
+- name: Enable the kubelet
+  ansible.builtin.systemd:
+    name: kubelet
+    enabled: true
+    daemon_reload: true
+
+- name: Flush handlers so the kubelet starts with the final config
+  ansible.builtin.meta: flush_handlers
+
+- name: Ensure the kubelet is started (first start triggers TLS bootstrap)
+  ansible.builtin.systemd:
+    name: kubelet
+    state: started
+
+# --- Verify the bootstrap actually completed --------------------------------
+- name: Wait for the kubelet to obtain its client credential (bootstrap success)
+  ansible.builtin.wait_for:
+    path: /etc/kubernetes/kubelet.conf
+    timeout: 120
+  register: kubelet_conf_wait
+
+- name: Report join result
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}: kubelet bootstrapped (client cert issued). It will
+      show NotReady until the Cilium agent DaemonSet schedules a pod here and
+      installs the CNI. Verify from the control plane:
+      `kubectl get node {{ kube_node_name }} -o wide` and
+      `kubectl -n kube-system get pod -o wide | grep {{ kube_node_name }}`.
+      Then apply the pool label (operator step — see runbook).
