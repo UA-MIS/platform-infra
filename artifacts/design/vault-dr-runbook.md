@@ -176,28 +176,31 @@ kubectl -n external-secrets get clustersecretstore   # STATUS Valid once it reco
 ### Snapshot CronJob auth (Vault-side policy + k8s role — one-time)
 
 The `vault-raft-snapshot` CronJob authenticates via the Kubernetes auth method as SA
-`vault-snapshot` (vault ns). Create its policy + role once (k8s auth is already
-enabled per vault/README.md §D step 6):
+`vault-snapshot` (vault ns). Its policy + role are now a COMMITTED, re-runnable script
+(`platform-services/external-secrets/vault-policies/snapshot-role.sh`) — same mechanism
+as the ESO/Backstage/Crossplane roles — so it survives a Vault re-init instead of
+living only as prose here. **If the CronJob fails `invalid role name "snapshot"`, the
+role is missing → re-run the script.** (k8s auth must already be enabled per
+vault/README.md §D step 6.)
 
 ```bash
-kubectl -n vault exec -i vault-0 -- sh -ec '
-  vault policy write snapshot - <<EOF
-path "sys/storage/raft/snapshot" { capabilities = ["read"] }
-EOF
-  vault write auth/kubernetes/role/snapshot \
-      bound_service_account_names=vault-snapshot \
-      bound_service_account_namespaces=vault \
-      token_policies=snapshot token_ttl=10m'
+# Idempotent — overwrites the policy + role. Note: NO audience= (the CronJob presents
+# the DEFAULT SA token, audience=apiserver, not a projected audience:vault token).
+kubectl -n vault exec -i vault-0 -- \
+  env VAULT_CACERT=/vault/userconfig/vault-server-tls/ca.crt sh \
+  < platform-services/external-secrets/vault-policies/snapshot-role.sh
 ```
 
 The CronJob then runs daily at 03:00, writing `/snapshots/vault-raft-<UTC>.snap` to
 the `vault-snapshots` Ceph PVC and pruning to the newest **14** (tune via the
-`RETAIN` env / `schedule` in `raft-snapshot.yaml`). Verify after the first run:
+`RETAIN` env / `schedule` in `raft-snapshot.yaml`). Verify (no need to wait for 03:00):
 
 ```bash
 kubectl -n vault get cronjob vault-raft-snapshot
 kubectl -n vault create job --from=cronjob/vault-raft-snapshot snap-test   # manual trigger
-kubectl -n vault logs job/snap-test
+kubectl -n vault wait --for=condition=complete job/snap-test --timeout=120s
+kubectl -n vault logs job/snap-test    # expect "[snapshot] saved <N> bytes"
+kubectl -n vault delete job snap-test
 ```
 
 ---
