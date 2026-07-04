@@ -33,6 +33,59 @@ spec:
         runAsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
+      # Database migrations run to completion BEFORE the app container starts, so the app
+      # never serves against an un-migrated schema. This uses the SAME image as the app
+      # (the overlay `images:` override rewrites both containers) with the PINNED Prisma
+      # CLI baked in at /app/prisma-cli (app/Dockerfile `migrator` stage) — it NEVER runs
+      # `npx prisma` (that resolves to v7 and breaks the v6 `url = env(...)` schema). It is
+      # idempotent (`migrate deploy` only applies pending migrations) so re-runs on restart
+      # are no-ops, and it SKIPS when DATABASE_URL is unset so a fresh scaffold with nothing
+      # in Vault still deploys green (M4 zero-config), exactly like the app container.
+      initContainers:
+        - name: migrate
+          # SEAM: same image + tag as the app container (overlays patch both via images:).
+          image: ${{ values.appName }}:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              if [ -z "${DATABASE_URL:-}" ]; then
+                echo "DATABASE_URL not set — skipping migrations (M4 zero-config scaffold)."
+                exit 0
+              fi
+              # HOME/TMPDIR point at the writable emptyDir: the root filesystem is read-only.
+              export HOME=/tmp TMPDIR=/tmp
+              echo "Applying Prisma migrations (migrate deploy)..."
+              exec node /app/prisma-cli/node_modules/prisma/build/index.js \
+                migrate deploy --schema /app/prisma-cli/prisma/schema.prisma
+          env:
+            # Same DATABASE_URL the app reads, from the same ESO-materialized Secret.
+            # optional: true keeps the zero-config contract (unset -> the guard above skips).
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ${{ values.appName }}-secret
+                  key: DATABASE_URL
+                  optional: true
+          volumeMounts:
+            # Prisma writes only to $HOME/$TMPDIR; back them with the tmp emptyDir so the
+            # rest of the root filesystem can stay read-only (below).
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
       containers:
         - name: app
           # SEAM: overlays override registry + tag via kustomize images:.

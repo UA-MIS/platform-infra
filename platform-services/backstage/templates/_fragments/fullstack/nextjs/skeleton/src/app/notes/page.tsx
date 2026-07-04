@@ -38,7 +38,7 @@ export default async function NotesPage() {
       {error ? (
         <div className="mt-6 rounded border border-amber-300 bg-amber-50 p-4 text-sm text-amber-800">
           The database is not reachable yet. Set <code>DATABASE_URL</code> in the
-          Secrets tab and run <code>npx prisma migrate deploy</code>.
+          Secrets tab; migrations run automatically on the next deploy.
         </div>
       ) : notes.length === 0 ? (
         <p className="mt-6 text-gray-600">No notes yet.</p>

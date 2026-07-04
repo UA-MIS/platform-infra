@@ -6,9 +6,11 @@
 // .gitignore excludes), e.g.:
 //   DATABASE_URL="mysql://user:password@127.0.0.1:3306/appdb"
 //
-// After changing models, create + apply a migration:
-//   npx prisma migrate dev --name <change>     # local: creates the migration
-//   npx prisma migrate deploy                  # CI / prod: applies pending migrations
+// An initial migration is already committed under prisma/migrations, and every deploy
+// runs `prisma migrate deploy` (a migration init container) automatically — so you do NOT
+// run it by hand. After changing models, just create the migration locally and commit it:
+//   npx prisma migrate dev --name <change>     # local: creates + applies the migration
+// The committed migration is then applied automatically on the next deploy.
 
 generator client {
   provider = "prisma-client-js"

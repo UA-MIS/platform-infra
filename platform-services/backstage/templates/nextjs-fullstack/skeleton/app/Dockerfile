@@ -33,6 +33,44 @@ COPY . .
 # 'force-dynamic'`, so nothing connects to MySQL during the build.
 RUN npm run build
 
+# ---- migrator: a self-contained, PINNED Prisma CLI for `prisma migrate deploy` ----
+# WHY a dedicated toolchain: `next build`'s standalone output only traces the node_modules
+# subset that `server.js` imports — the Prisma CLI is NOT among them, so migrations need
+# their own copy. We build a closed, PINNED v6 CLI tree here; the chart's migration
+# initContainer runs it (see .devops/chart/base/deployment.yaml). We NEVER call
+# `npx prisma` at runtime: npx resolves to the LATEST prisma (v7), which dropped
+# `url = env(...)` in schema.prisma — it now demands a prisma.config.ts loaded through
+# `jiti` — and would fail this v6 schema with `Cannot find module 'jiti'`. A pinned v6 CLI
+# reads the datasource url straight from schema.prisma (verified: `prisma validate` passes
+# and `migrate deploy` reaches the DB).
+FROM ${NODE_IMAGE} AS migrator
+WORKDIR /prisma-cli
+ENV NEXT_TELEMETRY_DISABLED=1 \
+    PRISMA_HIDE_UPDATE_MESSAGE=1
+# OpenSSL MUST be installed BEFORE `npm install prisma`: prisma's postinstall selects the
+# engine build from the libssl it detects. Debian-slim ships NO openssl, so prisma would
+# default to the openssl-1.1.x engines, which then FAIL to load at runtime on bookworm
+# (libssl.so.3) with `libssl.so.1.1: cannot open shared object file`. Installing openssl
+# first makes prisma detect OpenSSL 3.x and fetch the debian-openssl-3.0.x engines. Same
+# proven apt-over-:443 bootstrap as the runtime stage (ARC runner egress is :443 ONLY,
+# SEC-014; slim Debian has no ca bundle, so the first HTTPS fetch runs peer-verify OFF).
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' \
+        /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list 2>/dev/null || true; \
+    apt-get -o Acquire::https::Verify-Peer=false update && \
+    apt-get -o Acquire::https::Verify-Peer=false install -y --no-install-recommends ca-certificates && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends openssl && \
+    rm -rf /var/lib/apt/lists/*
+# Pin the CLI to the same MAJOR as @prisma/client in package.json (v6). Keep it v6.x — do
+# NOT bump to v7 without also adding a prisma.config.ts (see the WHY note above).
+ARG PRISMA_VERSION=6.2.1
+RUN npm init -y >/dev/null && \
+    npm install --omit=dev --no-audit --no-fund "prisma@${PRISMA_VERSION}"
+# schema.prisma + prisma/migrations from THIS component's source (build context = the app
+# dir). Migrations a team later creates with `prisma migrate dev` flow through on the next
+# build. An initial migration is shipped so the sample schema applies out of the box.
+COPY prisma ./prisma
+
 # ---- runtime: the standalone server on a slim, non-root image ----
 FROM ${NODE_IMAGE} AS runtime
 WORKDIR /app
@@ -67,6 +105,10 @@ COPY --from=build --chown=65532:65532 /app/public ./public
 COPY --from=build --chown=65532:65532 /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=build --chown=65532:65532 /app/node_modules/@prisma/client ./node_modules/@prisma/client
 COPY --from=build --chown=65532:65532 /app/prisma ./prisma
+# The self-contained, pinned Prisma CLI (+ this app's schema & migrations) that the chart's
+# migration initContainer runs (`node /app/prisma-cli/node_modules/prisma/build/index.js
+# migrate deploy`). It sits OUTSIDE the app's runtime path — server.js never loads it.
+COPY --from=migrator --chown=65532:65532 /prisma-cli ./prisma-cli
 
 USER 65532:65532
 EXPOSE ${{ values.port }}
