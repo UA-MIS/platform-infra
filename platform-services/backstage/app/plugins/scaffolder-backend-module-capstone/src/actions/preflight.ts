@@ -8,17 +8,26 @@
  * the Location as a 409 (already registered). That left an orphaned repo with no
  * catalog entry and no tenant claim, and the student saw an opaque mid-run failure
  * instead of a clear "pick a different name" message up front. This action is step 1
- * of the wizard (before compose/publish/register): it checks the THREE places a name
- * collision can hide and throws one clear, user-facing error if any of them already
- * exist, so nothing is created at all on a collision.
+ * of every project/VM wizard (before compose/fetch/publish/register): it checks the
+ * FOUR places a name collision can hide and throws one clear, user-facing error if any
+ * of them already exist, so nothing is created at all on a collision.
  *
- * WHAT IT CHECKS (all three, so the error message names every place that collides —
+ * WHAT IT CHECKS (all four, so the error message names every place that collides —
  * not just the first one hit):
  *   1. the target GitHub repo `<owner>/<appName>` (does publish:github's create fail?)
  *   2. the catalog entry for it (does catalog:register's Location fail?) — checked as
  *      the Component entity `component:default/<appName>` the register step would
  *      produce; if that entity exists, its backing Location already exists too.
- *   3. the tenant claim `tenants/_claims/<team>-<appName>.yaml` on `<owner>/platform-infra`
+ *   3. the team's NAMESPACES — checked as the imperative onboarding marker
+ *      `tenants/team-<team>/` on `<owner>/platform-infra` main. That directory is what
+ *      the tenants-appset git generator reconciles into the team's `<team>-dev`,
+ *      `<team>-staging`, and `<team>-prod` namespaces (+ AppProject/RBAC/quota), so its
+ *      presence means the team is already onboarded and those namespaces already exist.
+ *      GIT is the source of truth (ArgoCD reconciles namespaces FROM it), so this is a
+ *      more reliable — and lower-trust — signal than querying the live cluster: it reuses
+ *      the already-wired GitHub App and needs NO cluster credentials in this web-facing
+ *      backend (the same blast-radius concern harborOnboard calls out).
+ *   4. the tenant claim `tenants/_claims/<team>-<appName>.yaml` on `<owner>/platform-infra`
  *      main (does the zero-touch claim-emit/commit step collide with a prior claim?)
  *
  * AUTH: same model as capstone:commit-to-main / publish:github — NO token input. The
@@ -128,6 +137,33 @@ export async function claimExists(
 }
 
 /**
+ * true if the team's imperative onboarding dir `tenants/team-<team>/` already exists on
+ * `<owner>/platform-infra` main. That dir is what the tenants-appset git generator
+ * reconciles into the team's `<team>-dev`/`<team>-staging`/`<team>-prod` namespaces, so
+ * its presence is the git-source-of-truth signal that the team is already onboarded and
+ * those namespaces already exist. A directory `getContent` returns 200 (an array) when
+ * present and 404 when absent — same not-found handling as the repo/claim probes.
+ */
+export async function tenantDirExists(
+  octokit: OctokitLike,
+  owner: string,
+  team: string,
+): Promise<boolean> {
+  try {
+    await octokit.rest.repos.getContent({
+      owner,
+      repo: CLAIMS_REPO,
+      path: `tenants/team-${team}`,
+      ref: 'main',
+    });
+    return true;
+  } catch (err) {
+    if (isNotFound(err)) return false;
+    throw err;
+  }
+}
+
+/**
  * true if the catalog already has a Component named `appName` in the default namespace
  * — i.e. the entity `catalog:register` would produce for a fresh scaffold. If that
  * entity is present, the Location that backs it is already registered too, so this is
@@ -184,8 +220,9 @@ export function createPreflightAction(deps: PreflightActionDeps) {
   return createTemplateAction({
     id: 'capstone:preflight',
     description:
-      'Fail fast, before any repo/catalog/claim is created, if a project with this name ' +
-      'already exists (GitHub repo, catalog entry, or tenant claim). Read-only.',
+      'Fail fast, before any repo/catalog/namespace/claim is created, if a project with ' +
+      'this name already exists (GitHub repo, catalog entry, the team namespaces via ' +
+      'tenants/team-<team>/, or a zero-touch tenant claim). Read-only.',
     schema: {
       input: {
         team: z =>
@@ -224,15 +261,20 @@ export function createPreflightAction(deps: PreflightActionDeps) {
       const apiBaseUrl = integrations.github.byHost('github.com')?.config.apiBaseUrl;
       const octokit = octokitFactory({ auth: token, baseUrl: apiBaseUrl });
 
-      const [hasRepo, hasCatalogEntry, hasClaim] = await Promise.all([
+      const [hasRepo, hasCatalogEntry, hasNamespaces, hasClaim] = await Promise.all([
         repoExists(octokit, owner, appName),
         catalogEntryExists(catalog, auth, appName),
+        tenantDirExists(octokit, owner, team),
         claimExists(octokit, owner, team, appName),
       ]);
 
       const collisions: string[] = [];
       if (hasRepo) collisions.push(`the GitHub repo ${owner}/${appName}`);
       if (hasCatalogEntry) collisions.push('a catalog entry');
+      if (hasNamespaces)
+        collisions.push(
+          `the team's namespaces (${team}-dev/staging/prod — tenants/team-${team}/)`,
+        );
       if (hasClaim) collisions.push(`a tenant claim (tenants/_claims/${team}-${appName}.yaml)`);
 
       if (collisions.length > 0) {

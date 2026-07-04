@@ -19,6 +19,7 @@ import {
   claimExists,
   createPreflightAction,
   repoExists,
+  tenantDirExists,
   type OctokitLike,
 } from './preflight';
 
@@ -31,12 +32,18 @@ function notFound(): never {
   throw e;
 }
 
-/** Mock Octokit whose repos.get/getContent either succeed or 404, per the flags given. */
+/**
+ * Mock Octokit whose repos.get/getContent either succeed or 404, per the flags given.
+ * getContent serves TWO probes, differentiated by path: the zero-touch claim file
+ * (`tenants/_claims/...`) and the imperative team namespaces dir (`tenants/team-...`).
+ */
 function mockOctokit(opts: {
   repoExists?: boolean;
   claimExists?: boolean;
+  tenantDirExists?: boolean;
   repoError?: unknown;
   claimError?: unknown;
+  tenantDirError?: unknown;
 }): { octokit: OctokitLike; getRepoCalls: GetRepoParams[]; getContentCalls: GetContentParams[] } {
   const getRepoCalls: GetRepoParams[] = [];
   const getContentCalls: GetContentParams[] = [];
@@ -51,6 +58,12 @@ function mockOctokit(opts: {
         },
         getContent: async (params: GetContentParams) => {
           getContentCalls.push(params);
+          const isTeamDir = params.path.startsWith('tenants/team-');
+          if (isTeamDir) {
+            if (opts.tenantDirError) throw opts.tenantDirError;
+            if (!opts.tenantDirExists) notFound();
+            return { data: [{ name: 'appproject.yaml' }] };
+          }
           if (opts.claimError) throw opts.claimError;
           if (!opts.claimExists) notFound();
           return { data: { sha: 'abc' } };
@@ -123,6 +136,28 @@ describe('claimExists', () => {
   });
 });
 
+describe('tenantDirExists', () => {
+  it('true when tenants/team-<team>/ is present on platform-infra main', async () => {
+    const { octokit, getContentCalls } = mockOctokit({ tenantDirExists: true });
+    await expect(tenantDirExists(octokit, 'UA-MIS', 'acme')).resolves.toBe(true);
+    expect(getContentCalls).toEqual([
+      { owner: 'UA-MIS', repo: 'platform-infra', path: 'tenants/team-acme', ref: 'main' },
+    ]);
+  });
+
+  it('false on a 404 (team not yet onboarded)', async () => {
+    const { octokit } = mockOctokit({ tenantDirExists: false });
+    await expect(tenantDirExists(octokit, 'UA-MIS', 'acme')).resolves.toBe(false);
+  });
+
+  it('rethrows a non-404 error', async () => {
+    const boom: any = new Error('server error');
+    boom.status = 500;
+    const { octokit } = mockOctokit({ tenantDirError: boom });
+    await expect(tenantDirExists(octokit, 'UA-MIS', 'acme')).rejects.toThrow(/server error/i);
+  });
+});
+
 describe('catalogEntryExists', () => {
   it('true when a matching Component is found, using the service identity', async () => {
     const { catalog, calls } = mockCatalog([{ kind: 'Component', metadata: { name: 'widgets' } }]);
@@ -186,8 +221,12 @@ describe('capstone:preflight action', () => {
     });
   });
 
-  it('throws naming ALL collisions when repo + catalog + claim all already exist', async () => {
-    const { octokit } = mockOctokit({ repoExists: true, claimExists: true });
+  it('throws naming ALL collisions when repo + catalog + namespaces + claim all already exist', async () => {
+    const { octokit } = mockOctokit({
+      repoExists: true,
+      claimExists: true,
+      tenantDirExists: true,
+    });
     const { catalog } = mockCatalog([{ kind: 'Component', metadata: { name: 'widgets' } }]);
     const action = createPreflightAction({
       config: config(),
@@ -198,8 +237,28 @@ describe('capstone:preflight action', () => {
     });
 
     await expect(action.handler(ctxFor({ team: 'acme', appName: 'widgets' }))).rejects.toThrow(
-      /already exists.*UA-MIS\/widgets.*catalog entry.*tenants\/_claims\/acme-widgets\.yaml/s,
+      /already exists.*UA-MIS\/widgets.*catalog entry.*acme-dev\/staging\/prod.*tenants\/_claims\/acme-widgets\.yaml/s,
     );
+  });
+
+  it('throws naming just the namespaces when only the team tenant dir collides', async () => {
+    const { octokit } = mockOctokit({
+      repoExists: false,
+      claimExists: false,
+      tenantDirExists: true,
+    });
+    const { catalog } = mockCatalog([]);
+    const action = createPreflightAction({
+      config: config(),
+      catalog,
+      auth: mockAuth,
+      githubCredentialsProvider: credsProvider,
+      octokitFactory: () => octokit,
+    });
+
+    await expect(
+      action.handler(ctxFor({ team: 'acme', appName: 'widgets' })),
+    ).rejects.toThrow(/acme-dev\/staging\/prod.*tenants\/team-acme\//);
   });
 
   it('throws naming just the repo when only the GitHub repo collides', async () => {
