@@ -78,6 +78,29 @@ spec:
         #     restricted posture via the controller.) ---
         template:
           spec:
+            # --- Node placement for the RUNNER pod (CI-fast, #237) ---
+            # The runner pod itself (listener/job orchestration) also prefers the beefier
+            # control-plane OptiPlexes over the 2-core Macs. The 3 control-plane nodes
+            # carry taint `capstone.io/control-plane=true:PreferNoSchedule`; the toleration
+            # makes them eligible and the preferred nodeAffinity pulls the runner onto
+            # them, falling back to the Macs under load. NOTE: the actual Kaniko BUILD
+            # runs in a separate step pod (containerMode:kubernetes) whose placement is
+            # set in platform-services/arc/hook-template.yaml — the SAME toleration +
+            # affinity are mirrored there (that is what makes the slow build land on an
+            # OptiPlex). Both are needed; this one only moves the lightweight runner pod.
+            tolerations:
+              - key: capstone.io/control-plane
+                operator: Equal
+                value: "true"
+                effect: PreferNoSchedule
+            affinity:
+              nodeAffinity:
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 100
+                    preference:
+                      matchExpressions:
+                        - key: node-role.kubernetes.io/control-plane
+                          operator: Exists
             securityContext:
               runAsNonRoot: true
               runAsUser: 1001

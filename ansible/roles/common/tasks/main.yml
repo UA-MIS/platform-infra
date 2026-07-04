@@ -91,6 +91,25 @@
       net.bridge.bridge-nf-call-ip6tables = 1
   notify: reload sysctl
 
+# --- inotify limits for CI build workers (CI-fast, #237) ---
+# Debian's default fs.inotify.max_user_instances (128) is exhausted by the ARC Kaniko
+# build pods + esbuild/tsc/yarn watchers on a busy worker, so a Backstage build died with
+# `failed to create fsnotify watcher: too many open files`. Raise the per-user inotify
+# INSTANCE and WATCH ceilings so future Debian workers get the headroom automatically
+# (the operator already applied these live to the current Macs; this makes it permanent).
+# ansible.builtin.sysctl both sets the value live and persists it to sysctl_file — idempotent.
+- name: Raise inotify limits (CI build watchers exhaust the Debian defaults)
+  ansible.builtin.sysctl:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/99-capstone-inotify.conf
+    sysctl_set: true
+    state: present
+    reload: true
+  loop:
+    - { name: fs.inotify.max_user_instances, value: "1024" }
+    - { name: fs.inotify.max_user_watches, value: "524288" }
+
 - name: Flush handlers so sysctls apply before later roles
   ansible.builtin.meta: flush_handlers
 

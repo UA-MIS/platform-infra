@@ -31,6 +31,30 @@ metadata:
 data:
   content: |
     spec:
+      # --- Node placement for the KANIKO BUILD pod (CI-fast, #237) ---
+      # In containerMode:kubernetes the Kaniko build runs HERE (this step pod), NOT on
+      # the runner pod — so the build's node placement is governed by THIS template, not
+      # arc-runner-scaleset-app.yaml. The 3 control-plane OptiPlex nodes carry the taint
+      # `capstone.io/control-plane=true:PreferNoSchedule`; without a toleration the
+      # scheduler steers build pods onto the 2-core Macs, where Backstage builds crawl
+      # (~45-60 min). This toleration makes the OptiPlexes eligible again, and the
+      # preferred nodeAffinity gives them positive weight — so builds PREFER the beefier
+      # OptiPlexes and FALL BACK to the Macs only when the OptiPlexes are saturated.
+      # (PreferNoSchedule is soft: the toleration alone would only make them eligible;
+      # the affinity is what actually pulls builds onto them.)
+      tolerations:
+        - key: capstone.io/control-plane
+          operator: Equal
+          value: "true"
+          effect: PreferNoSchedule
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: Exists
       # Resolve the Harbor registry host to Traefik IN-CLUSTER so the Kaniko PUSH
       # never traverses the Cloudflare edge (CF Free/Pro caps request bodies at 100MB
       # → a >100MB image layer 413s). The public host externally resolves to the

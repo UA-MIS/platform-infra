@@ -28,6 +28,23 @@ metadata:
 data:
   content: |
     spec:
+      # Prefer the beefier control-plane OptiPlexes for the KANIKO BUILD pod, fall back
+      # to the Macs under load (CI-fast, #237). The build runs in THIS step pod (not the
+      # runner pod), so its node placement is set here. Mirrors the shared
+      # platform-services/arc/hook-template.yaml.
+      tolerations:
+        - key: capstone.io/control-plane
+          operator: Equal
+          value: "true"
+          effect: PreferNoSchedule
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: Exists
       # Resolve the Harbor registry host to Traefik IN-CLUSTER so the Kaniko PUSH
       # never traverses the Cloudflare edge (CF Free/Pro caps request bodies at 100MB
       # → a >100MB image layer 413s). Points the build pod straight at Traefik's
