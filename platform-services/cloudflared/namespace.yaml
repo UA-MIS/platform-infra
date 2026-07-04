@@ -17,6 +17,7 @@ metadata:
   name: cloudflared
   labels:
     platform.capstone/component: platform
+    goldilocks.fairwinds.com/enabled: "true"   # Goldilocks recommend-only VPAs (Off mode; no eviction)
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/warn: restricted
     pod-security.kubernetes.io/audit: restricted

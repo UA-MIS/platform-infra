@@ -100,6 +100,15 @@ spec:
     # InvalidSpecError "repo not permitted".
     - https://prometheus-community.github.io/helm-charts   # kube-prometheus-stack (platform-kube-prometheus-stack Application)
     - https://grafana.github.io/helm-charts                # Loki + Alloy (platform-loki / platform-alloy Applications)
+    # Resource governance (resource-governance-backlog): the Fairwinds stable chart repo
+    # serves BOTH the Vertical Pod Autoscaler chart (platform-vpa @ vpa 4.12.3) and the
+    # Goldilocks recommendation dashboard (platform-goldilocks @ goldilocks 10.4.1). ONE
+    # named source, chart versions pinned in the Applications. ⚠ INSTALL-OWNED (same as
+    # every add above): reaches the live `platform` AppProject only via `make bootstrap`/
+    # `make bootstrap-reapply` + VERIFY (the AppProject is bootstrap-managed, not
+    # GitOps-reconciled) or platform-vpa / platform-goldilocks will InvalidSpecError
+    # "repo not permitted".
+    - https://charts.fairwinds.com/stable                  # VPA + Goldilocks (platform-vpa / platform-goldilocks Applications)
 
   # Platform services are cluster-wide; allow any namespace on the in-cluster API.
   destinations:

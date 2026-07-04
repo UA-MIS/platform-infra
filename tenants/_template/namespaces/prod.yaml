@@ -11,6 +11,8 @@ metadata:
   name: __TEAM__-prod
   labels:
     app.kubernetes.io/managed-by: argocd
+    # Goldilocks recommend-only (Off mode) — sizing suggestions, never an eviction.
+    goldilocks.fairwinds.com/enabled: "true"
     platform.capstone/team: __TEAM__
     platform.capstone/semester: __SEMESTER__
     platform.capstone/env: prod
@@ -38,6 +40,9 @@ spec:
     limits.memory: 8Gi
     pods: "15"
     services: "5"
+    # Storage cap (replica-3 Ceph starvation fence). Prod = higher ceiling than non-prod.
+    requests.storage: 20Gi
+    persistentvolumeclaims: "6"
 ---
 # LimitRange — per-container defaults + ceiling (§3.2). Ensures every pod gets
 # requests/limits even if the workload omits them, so the quota is enforceable.

@@ -1,0 +1,99 @@
+# Vertical Pod Autoscaler Application (resource governance, resource-governance-backlog).
+# VPA observes each workload's real CPU/MEM usage (via the already-installed
+# metrics-server, applicationsets/metrics-server-app.yaml) and recommends — or, in
+# Auto mode, sets — right-sized requests. This is the ENGINE; the recommendations are
+# surfaced by Goldilocks (applicationsets/goldilocks-app.yaml) and the active
+# right-sizing policy is applied by explicit VerticalPodAutoscaler objects
+# (applicationsets/vpa-platform-policies-app.yaml).
+#
+# Deploy method A (D-028): pinned Fairwinds chart + the chart repo added to the
+# `platform` AppProject sourceRepos allowlist (bootstrap/platform-appproject.yaml in
+# this PR; security audits the addition). ⚠ INSTALL-OWNED like every other Helm-source
+# add — reaches the live `platform` AppProject only via `make bootstrap`/`make
+# bootstrap-reapply` + VERIFY, else this app InvalidSpecErrors "repo not permitted".
+#
+# ── components ────────────────────────────────────────────────────────────────
+# All three VPA components are installed (recommender + updater + admissionController)
+# because the platform policy uses updateMode: Auto (updater evicts to apply, admission
+# controller injects the recommended requests on pod recreation). Goldilocks' Off-mode
+# VPAs only need the recommender, which is a subset — one install serves both.
+#
+#   metrics-server sub-chart: DISABLED. metrics-server is already installed
+#   cluster-wide (platform-metrics-server, chart 3.13.1). Enabling the VPA chart's
+#   bundled copy would collide on the metrics.k8s.io APIService.
+#
+# ── the CRDs ──────────────────────────────────────────────────────────────────
+# The VPA CRDs (VerticalPodAutoscaler + VerticalPodAutoscalerCheckpoint) ship in the
+# chart's crds/ dir; ArgoCD includes them (helm.skipCrds default false). This app is
+# sync-wave 0 so the CRDs land BEFORE any VerticalPodAutoscaler object — Goldilocks
+# (wave 1) and the platform policies (wave 1) both create VPA objects and would
+# fail admission without the CRD present first.
+#
+# ── admission-webhook safety (verified) ──────────────────────────────────────
+# The MutatingWebhookConfiguration the chart installs is failurePolicy: Ignore,
+# sideEffects: None, timeoutSeconds: 5 — so if the single-replica admission controller
+# is down, pod creation proceeds UNMODIFIED (no cluster-wide scheduling block). This is
+# the one property that makes a single-replica VPA safe on the 3-node cluster.
+#
+# ── in-place resize follow-up ─────────────────────────────────────────────────
+# Pre-Kubernetes-1.33, Auto/Recreate VPA applies new requests by EVICTING and
+# recreating the pod (one at a time, respecting PDBs). In-place pod resize
+# (resizePolicy, no eviction) needs the InPlacePodVerticalScaling GA in k8s 1.33 —
+# a documented follow-up (cluster upgrade), NOT attempted here. Until then the
+# platform policy is scoped to stateless, single-eviction-safe controllers only
+# (see the vpa-platform-policies app).
+#
+# Chart: vpa 4.12.3 (appVersion 1.6.0), pinned. Bump deliberately.
+# Root-app recurses applicationsets/, so this Application is registered.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-vpa
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"   # CRDs + controllers first, before any VPA object (wave 1)
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://charts.fairwinds.com/stable   # PINNED chart repo (sourceRepos allowlist)
+    chart: vpa
+    targetRevision: 4.12.3                          # pinned chart version (appVersion 1.6.0); no ^/~/latest
+    helm:
+      releaseName: vpa
+      values: |
+        # Single-replica each for the 3-node homelab. None is on a data path — the
+        # recommender/updater run periodically and the admission webhook fails open
+        # (failurePolicy: Ignore), so a single replica is safe.
+        recommender:
+          enabled: true
+          replicaCount: 1
+        updater:
+          enabled: true
+          replicaCount: 1
+        admissionController:
+          enabled: true
+          replicaCount: 1
+          # Pre-install hook generates the webhook serving cert (kube-webhook-certgen).
+          generateCertificate: true
+        # metrics-server is already installed cluster-wide (platform-metrics-server).
+        # Disable the chart's bundled copy so it does not collide on the metrics.k8s.io
+        # APIService.
+        metrics-server:
+          enabled: false
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: vpa
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true    # dedicated `vpa` namespace (no PSA label — the certgen hook runs here)
+      - ServerSideApply=true    # the VPA CRD is large — SSA avoids the 256KB last-applied-config anno limit
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

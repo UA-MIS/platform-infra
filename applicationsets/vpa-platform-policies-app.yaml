@@ -1,0 +1,59 @@
+# Platform VPA policies Application (resource governance). This is the ACTIVE
+# right-sizing layer: explicit VerticalPodAutoscaler objects with
+# `updateMode: Auto` + `controlledValues: RequestsOnly` for a CURATED allowlist of
+# platform controllers. VPA sets right-sized REQUESTS (never touches limits — a
+# workload that had a limit keeps it) and the updater applies them.
+#
+# ── why a curated allowlist, not "all platform workloads" ────────────────────
+# Pre-k8s-1.33 (no in-place resize), Auto/Recreate applies new requests by EVICTING
+# and recreating the pod. That is fine for a stateless, self-healing controller (a
+# ~15s reconcile gap) but UNSAFE for the platform's stateful singletons — evicting
+# Vault (single-node, manual unseal) seals it; evicting a Ceph mon/OSD or a Postgres
+# risks the data plane. So this policy targets ONLY stateless controllers where a
+# one-time eviction is harmless, and every OTHER workload gets recommend-only VPAs
+# from Goldilocks (updateMode: Off, no eviction). Extend the allowlist deliberately,
+# one reviewed stateless Deployment at a time — never with a namespace-wide selector.
+#
+# ⚠ HUMAN-APPROVAL FLAG: merging + syncing this app triggers a ONE-TIME eviction of
+# each targeted controller as VPA applies its first recommendation. The targets are
+# stateless + self-healing so this is a non-event, but it IS a live disruption — the
+# reviewer should confirm the allowlist before this app is allowed to auto-sync. If a
+# zero-eviction rollout is preferred, change updateMode to `Initial` (VPA then only
+# sets requests at the pod's next NATURAL restart) — noted in the objects.
+#
+# ── depends on VPA CRDs (sync-wave 1) ─────────────────────────────────────────
+# These are VerticalPodAutoscaler objects → the CRD from platform-vpa (wave 0) must
+# exist first. Directory-source app (no Helm) over platform-services/vpa-policies/.
+# Root-app recurses applicationsets/, so this Application is registered.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-vpa-policies
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"   # VPA objects after the CRDs (platform-vpa = wave 0)
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/UA-MIS/platform-infra
+    targetRevision: HEAD
+    path: platform-services/vpa-policies
+  destination:
+    server: https://kubernetes.default.svc
+    # Each VPA object carries its OWN namespace (it must live next to its target);
+    # this is only the fallback namespace for any object that omitted one (none do).
+    namespace: vpa
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false   # targets pre-existing platform namespaces
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

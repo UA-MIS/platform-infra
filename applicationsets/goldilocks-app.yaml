@@ -1,0 +1,84 @@
+# Goldilocks Application (resource governance, resource-governance-backlog). Goldilocks
+# is the DASHBOARD over VPA: for every namespace labelled
+# `goldilocks.fairwinds.com/enabled=true` it creates an Off-mode (recommend-only)
+# VerticalPodAutoscaler per workload and renders the VPA recommendations (current vs.
+# guaranteed-QoS vs. burstable request/limit suggestions) as a web UI. It is the tool an
+# operator uses to DECIDE the requests to bake into a chart — pure observation, it never
+# evicts a pod.
+#
+# Deploy method A (D-028): pinned Fairwinds chart + the shared charts.fairwinds.com/stable
+# repo added to the `platform` AppProject sourceRepos allowlist (same add as the VPA app,
+# bootstrap/platform-appproject.yaml). ⚠ INSTALL-OWNED — reaches the live AppProject only
+# via `make bootstrap`/`make bootstrap-reapply` + VERIFY.
+#
+# ── depends on VPA (sync-wave 1) ──────────────────────────────────────────────
+# Goldilocks creates VerticalPodAutoscaler objects, so the VPA CRDs must exist first.
+# This app is sync-wave 1; platform-vpa (wave 0) installs the CRDs + the recommender
+# Goldilocks reads from. The chart's own VPA sub-chart is DISABLED (vpa.enabled=false)
+# because platform-vpa already provides the recommender — two recommenders would double
+# the metrics-server load and race on the same VPA objects.
+#
+# ── which namespaces Goldilocks watches ───────────────────────────────────────
+# on-by-default is left OFF (the chart default): Goldilocks only acts on namespaces
+# EXPLICITLY labelled `goldilocks.fairwinds.com/enabled=true`. The platform namespaces
+# carry that label in their own in-repo Namespace manifests
+# (platform-services/*/namespace.yaml) and the tenant namespaces carry it via the
+# tenancy bundle (tenants/_template/namespaces/*.yaml + the CapstoneTenant Composition),
+# so every workload — platform and tenant — gets a recommendation, and NONE gets an
+# eviction from Goldilocks (its VPAs are updateMode: Off by construction). Active
+# right-sizing is a separate, curated opt-in (vpa-platform-policies app).
+#
+# ── accessing the dashboard ───────────────────────────────────────────────────
+# The dashboard is a ClusterIP Service (no ingress — it exposes request data for every
+# workload, so it stays cluster-internal). Reach it with:
+#   kubectl -n goldilocks port-forward svc/goldilocks-dashboard 8080:80
+# then open http://localhost:8080. Publishing it behind Traefik+OIDC is a documented
+# follow-up, not wired here.
+#
+# Chart: goldilocks 10.4.1 (appVersion v4.14.1), pinned. Bump deliberately.
+# Root-app recurses applicationsets/, so this Application is registered.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-goldilocks
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"   # after the VPA CRDs + recommender (platform-vpa = wave 0)
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://charts.fairwinds.com/stable   # PINNED chart repo (sourceRepos allowlist)
+    chart: goldilocks
+    targetRevision: 10.4.1                          # pinned chart version (appVersion v4.14.1); no ^/~/latest
+    helm:
+      releaseName: goldilocks
+      values: |
+        # platform-vpa already installs the recommender — do NOT let Goldilocks install
+        # its own VPA sub-chart (would be a second recommender racing on the same objects).
+        vpa:
+          enabled: false
+        # metrics-server is already installed cluster-wide (platform-metrics-server).
+        metrics-server:
+          enabled: false
+        # Only act on explicitly-labelled namespaces (chart default). Every VPA Goldilocks
+        # creates is updateMode: Off (recommend-only) — it never evicts.
+        controller:
+          rbac:
+            create: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: goldilocks
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true    # dedicated `goldilocks` namespace
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

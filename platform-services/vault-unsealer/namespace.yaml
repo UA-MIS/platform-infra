@@ -12,3 +12,4 @@ metadata:
   name: vault-unsealer
   labels:
     platform.capstone/component: platform
+    goldilocks.fairwinds.com/enabled: "true"   # Goldilocks recommend-only VPAs (Off mode; no eviction)
