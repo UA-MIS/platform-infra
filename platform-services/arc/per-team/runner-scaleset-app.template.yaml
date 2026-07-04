@@ -52,6 +52,22 @@ spec:
                 storage: "5Gi"
         template:
           spec:
+            # Prefer the beefier control-plane OptiPlexes over the 2-core Macs (CI-fast,
+            # #237). Mirrors the org-wide scale set (applicationsets/arc-runner-scaleset-app.yaml)
+            # and the build step-pod placement in per-team/hook-template.template.yaml.
+            tolerations:
+              - key: capstone.io/control-plane
+                operator: Equal
+                value: "true"
+                effect: PreferNoSchedule
+            affinity:
+              nodeAffinity:
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 100
+                    preference:
+                      matchExpressions:
+                        - key: node-role.kubernetes.io/control-plane
+                          operator: Exists
             securityContext:
               runAsNonRoot: true
               runAsUser: 1001
