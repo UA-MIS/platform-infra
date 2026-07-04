@@ -21,6 +21,22 @@
     update_cache: true
     cache_valid_time: 3600
 
+# --- APT signature verifier: Debian 13 (trixie) ships `sqv`, which rejects some
+# third-party repo signatures (e.g. pkgs.k8s.io's SHA1/v3 sig — upstream k8s
+# #133098: "Signature Packet v3 is not considered secure since 2026-02-01 ...
+# repository is not signed"). Point apt back at the legacy gpgv verifier BEFORE
+# any third-party repo (tailscale, pkgs.k8s.io) is added or updated. ---
+- name: Ensure gpgv present (trixie sqv rejects some third-party repo signatures)
+  ansible.builtin.apt:
+    name: gpgv
+    state: present
+
+- name: Point apt at legacy gpgv verifier (trixie sqv rejects k8s repo SHA1/v3 sig, upstream k8s #133098)
+  ansible.builtin.copy:
+    content: "APT::Key::gpgvcommand \"/usr/bin/gpgv\";\n"
+    dest: /etc/apt/apt.conf.d/90gpgv
+    mode: "0644"
+
 - name: Ensure chrony (time sync) is running — TLS bootstrap is clock-sensitive
   ansible.builtin.service:
     name: chrony
