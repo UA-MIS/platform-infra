@@ -84,10 +84,21 @@ spec:
           command: ["/bin/sh", "-eu", "-c"]
           args:
             - |
+              echo "==> network diagnostics ..."
+              echo "--- DNS resolution ---"
+              nslookup minio.minio.svc.cluster.local || echo "nslookup failed"
+              echo "--- TCP connectivity to service IP ---"
+              curl -v --max-time 5 http://minio.minio.svc.cluster.local:9000/minio/health/ready 2>&1 || echo "curl via service failed"
+              echo "--- TCP connectivity to pod IP directly ---"
+              curl -v --max-time 5 http://10.244.3.244:9000/minio/health/ready 2>&1 || echo "curl via pod IP failed"
+              echo "--- routing table ---"
+              ip route show || echo "ip route failed"
+              echo "--- end diagnostics ---"
+
               echo "==> waiting for MinIO API at http://minio.minio.svc.cluster.local:9000 ..."
               i=0
               until mc alias set local http://minio.minio.svc.cluster.local:9000 \
-                  "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null 2>&1; do
+                  "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"; do
                 i=$((i+1)); [ "$i" -ge 60 ] && { echo "MinIO not reachable after ~5m"; exit 1; }
                 echo "   ...not ready yet (attempt $i), sleeping 5s"; sleep 5
               done
