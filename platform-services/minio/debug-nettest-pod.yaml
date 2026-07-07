@@ -26,25 +26,16 @@ spec:
       command: ["/bin/bash", "-c"]
       args:
         - |
-          echo "====== SCAN LAN SUBNET FOR SSH (port 22) ======"
-          echo "Scanning 192.168.1.0/24 for hosts with port 22 open ..."
-          nmap -sT -p 22 --open -T4 192.168.1.0/24 2>&1 || true
-          echo ""
-          echo "Scanning 192.168.0.0/24 ..."
-          nmap -sT -p 22 --open -T4 192.168.0.0/24 2>&1 || true
-          echo ""
-          echo "Scanning 10.0.0.0/24 ..."
-          nmap -sT -p 22 --open -T4 10.0.0.0/24 2>&1 || true
-          echo ""
-
-          echo "====== NODE INTERNAL IPs via Kubernetes API ======"
-          curl -s --max-time 5 \
-            -H "Authorization: Bearer $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" \
-            --cacert /var/run/secrets/kubernetes.io/serviceaccount/ca.crt \
+          echo "====== ALL NODE IPs FROM KUBERNETES API ======"
+          TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+          CACERT=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+          curl -s --max-time 10 \
+            -H "Authorization: Bearer $TOKEN" \
+            --cacert $CACERT \
             https://kubernetes.default.svc.cluster.local/api/v1/nodes \
-            | grep -E '"address"|"type"|"hostname"' | head -60
+            | grep -E '"type"|"address"' \
+            | paste - -
           echo ""
-
           echo "====== DONE ======"
           sleep 3600
       resources:
