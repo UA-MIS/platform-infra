@@ -55,6 +55,29 @@ spec:
               but NEW/refreshed secret sync is paused. Check `kubectl -n vault get pods`
               and unseal/recover per artifacts/design/vault-dr-runbook.md.
 
+        # 3-node Raft HA (this PR): a degraded-but-serving state is now possible —
+        # 1 or 2 of 3 pods down while the cluster still has quorum via the rest.
+        # This is warning (not critical): secret sync is NOT interrupted, but the
+        # cluster has lost its failure headroom (one more pod loss = full outage,
+        # the VaultSealedOrDown alert above). Distinct metric from (a) on purpose —
+        # replicas < spec.replicas, not replicas_ready == 0.
+        - alert: VaultHADegraded
+          expr: >-
+            kube_statefulset_status_replicas_ready{namespace="vault", statefulset="vault"}
+            < kube_statefulset_spec_replicas{namespace="vault", statefulset="vault"}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Vault Raft HA is degraded"
+            description: >-
+              The vault StatefulSet has fewer ready replicas than desired
+              (spec.replicas: 3) for 10m — one or more Vault pods is down, sealed,
+              or unjoined. The cluster still has quorum and secret sync continues,
+              but availability headroom is reduced. Check
+              `kubectl -n vault get pods` and `vault operator raft list-peers`;
+              see artifacts/design/vault-dr-runbook.md §G.
+
         # The daily raft-snapshot CronJob is the ONLY Vault DR backup. A failing run
         # means no fresh snapshot → data loss past the last good snapshot is
         # unrecoverable. This alert exists because the job failed silently for >29h

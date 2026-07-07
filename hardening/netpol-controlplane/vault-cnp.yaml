@@ -23,8 +23,9 @@
 #     work" for egress; matches both the VIP and the node-IP path).
 #   - `toEntities: cluster` (vault ONLY) — ALL in-cluster endpoints, the Cilium-native
 #     equivalent of vault's intra-cluster ipBlock allows. Restores vault -> unsealer
-#     :8200 + future raft peers. SAFE for vault: it is trusted control-plane and its
-#     only intra-cluster peers are the unsealer + its own raft members.
+#     :8200 + raft peers (LIVE — 3-node HA, ha.replicas: 3). SAFE for vault: it is
+#     trusted control-plane and its only intra-cluster peers are the unsealer + its
+#     own raft members.
 #     vault-unsealer deliberately does NOT get `cluster` — it INITIATES nothing
 #     in-cluster (it is purely a server: vault dials it; it only egresses to the
 #     apiserver for service_registration). Granting `cluster` would needlessly widen

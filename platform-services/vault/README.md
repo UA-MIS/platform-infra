@@ -48,37 +48,115 @@ Option 1 — secure, just higher-touch.
 
 ## §B — Topology decision: single-node Raft vs 3-node HA
 
-**Configured: single-node Raft (`ha.replicas: 1`).** Rationale + tradeoff:
+**Configured: 3-node Raft HA (`ha.replicas: 3`), upgraded from the original
+single-node topology.** Rationale + tradeoff:
 
-- **Why single-node:** lowest operating burden — **one** pod to unseal after a
-  restart, not three. Raft storage engine still gives real snapshots/restore. Data
-  lives on a **replica-3 Ceph RBD PVC**, so a **node loss is survivable** (the pod
-  reschedules and reattaches the RBD; the data is on Ceph, not node-local disk).
-- **Tradeoff:** no Vault-**process** HA. If the single Vault pod is down, secret
-  **sync** pauses — but **ESO keeps serving already-materialized k8s Secrets**, so
-  **running apps are not impacted**; only new/refreshed secrets wait for Vault to
-  come back. For a student-capstone platform this is an acceptable availability
-  posture.
-- **To go 3-node HA later:** set `ha.replicas: 3` in `vault-app.yaml`, re-sync, then
-  unseal all three and `vault operator raft join` the two followers to `vault-0`
-  (see the upstream HA-raft procedure). **No re-init / no data migration needed.**
+- **Why 3-node now:** single-node Raft had no Vault-**process** HA — if the one
+  pod went down, secret **sync** paused platform-wide until it rescheduled. With
+  3-node Raft, the cluster tolerates **one node/pod loss** with **zero**
+  interruption to secret sync — an active leader is always reachable via the
+  `vault-active` Service. Each replica keeps its own **replica-3 Ceph RBD PVC**
+  (unchanged from single-node), so a node loss is doubly survivable: Raft quorum
+  on the other two nodes, and the PVC reattaches if/when the pod reschedules.
+- **Hard pod anti-affinity** (`server.affinity` in `vault-app.yaml`) pins one
+  Vault server pod per node — required so a single node loss can never take out
+  2-of-3 pods (which would cost the cluster quorum). There are exactly 3
+  control-plane OptiPlex nodes and 3 replicas, so this is a clean 1:1 mapping.
+- **Tradeoff vs single-node:** 3x the pods/PVCs, and a one-time
+  `vault operator raft join` per new follower during the rollout (see §G below).
+  Ongoing unseal toil is **unchanged** — transit auto-unseal (decision A) still
+  means no manual Shamir typing on *any* of the 3 main-Vault pods; only the small
+  unsealer Vault stays single-node/manual-unseal (see §A).
+- **No re-init / no data migration needed** for the 1→3 scale-up: `vault-0` keeps
+  its existing Raft data; `vault-1`/`vault-2` join it empty and replicate.
+
+### §G — ⚠ HA ROLLOUT RUNBOOK (human keyboard steps, 1 → 3 replicas)
+
+> Prereq: decision A (transit auto-unseal) must already be live and proven on the
+> single node — do **not** combine the Shamir→Transit migration and this HA
+> scale-up in the same sync (see the ORDERING warning in `vault-app.yaml`'s
+> header). The full write-up + failure cheatsheet lives in
+> `artifacts/design/vault-dr-runbook.md` §G.
+
+```bash
+# 1) Sync the updated platform-vault Application (ha.replicas: 1 -> 3). ArgoCD
+#    scales the StatefulSet; vault-1 and vault-2 come up immediately (Parallel
+#    podManagementPolicy) as NEW, empty, sealed Raft nodes — vault-0 is untouched.
+argocd app sync platform-vault
+kubectl -n vault get pods -w
+#    vault-0: Running 1/1 (already unsealed, untouched)
+#    vault-1, vault-2: Running 0/1 (sealed, not yet raft members — expected)
+
+# 2) Join vault-1, THEN vault-2 (order matters only in that each join is a
+#    separate operator-run command; both target the existing leader vault-0 via
+#    its stable per-pod DNS on the headless vault-internal Service).
+kubectl -n vault exec -it vault-1 -- vault operator raft join \
+    https://vault-0.vault-internal:8200
+kubectl -n vault exec -it vault-2 -- vault operator raft join \
+    https://vault-0.vault-internal:8200
+
+# 3) Unseal each follower — because transit auto-unseal is already active
+#    cluster-wide (the seal "transit" stanza + VAULT_TOKEN env apply to every
+#    pod in the StatefulSet, not just vault-0), each follower AUTO-unseals within
+#    seconds of joining. There is NO Shamir key-share typing here (that only
+#    applies to the small unsealer Vault, which stays manual — decision A).
+#    Just watch for Ready:
+kubectl -n vault get pods -w
+#    vault-1, vault-2 -> Running 1/1 within ~10-30s of the join command.
+#    If a pod stays 0/1 for minutes, see the failure cheatsheet (§G below /
+#    vault-dr-runbook.md §G) — do NOT assume it needs a manual `vault operator
+#    unseal`; that command only accepts Shamir shares and this cluster has none.
+
+# 4) Verify full quorum — all 3 as voters, one leader.
+kubectl -n vault exec -it vault-0 -- vault operator raft list-peers
+#    Expect 3 rows, Voter=true for all three, exactly one has state "leader".
+kubectl -n vault exec -it vault-0 -- vault status
+#    HA Enabled: true, Sealed: false on all 3 (run per-pod to confirm each).
+
+# 5) Confirm the active/standby Services picked up the new topology.
+kubectl -n vault get endpoints vault-active vault-standby
+#    vault-active: 1 endpoint (the leader). vault-standby: 2 endpoints.
+
+# 6) Optional but recommended: kill the current leader pod and confirm a standby
+#    is promoted and `vault-active` re-points to it automatically (proves the
+#    HA failover path end-to-end before you rely on it).
+kubectl -n vault exec -it vault-0 -- vault operator raft list-peers   # note current leader
+kubectl -n vault delete pod <current-leader-pod>
+kubectl -n vault get pods -w                                          # it restarts, auto-unseals, rejoins
+kubectl -n vault exec -it vault-1 -- vault operator raft list-peers   # confirm a new leader was elected
+```
+
+**Rollback:** scaling back down (`ha.replicas: 3 -> 1`) is NOT a supported
+downgrade path for a live Raft cluster — removing voters without first running
+`vault operator raft remove-peer` can strand the cluster below quorum. If you
+need to revert, remove the two extra peers via `remove-peer` first, then scale
+down; do not just edit `ha.replicas` back down under load.
 
 ---
 
 ## §C — Server TLS cert (built at init, NOT committed)
 
 TLS is on; the listener reads `/vault/userconfig/vault-server-tls/{tls.crt,tls.key}`
-from the **`vault-server-tls`** Secret. This Secret is **created by the human at
-init** (a SAN-correct cert for the in-cluster Vault service names) and is **not in
-git** (B1: no secret material in the repo). Generate with cert-manager (preferred —
-a `Certificate` against the in-cluster issuer) or `openssl`. **Required SANs:**
+from the **`vault-server-tls`** Secret. **The same Secret is mounted into all 3
+server pods** (one Certificate/cert, shared — not per-pod), so its SAN list must
+cover every pod's raft-peer hostname, not just `vault-0`. This Secret is **created
+by the human at init** (a SAN-correct cert for the in-cluster Vault service names)
+and is **not in git** (B1: no secret material in the repo). Generate with
+cert-manager (preferred — a `Certificate` against the in-cluster issuer) or
+`openssl`. **Required SANs:**
 
 ```
 vault, vault.vault, vault.vault.svc, vault.vault.svc.cluster.local,
 vault-active, vault-active.vault.svc.cluster.local,
-vault-internal, *.vault-internal, vault-0.vault-internal,
-127.0.0.1   (the pod's own VAULT_ADDR=https://127.0.0.1:8200)
+vault-standby, vault-standby.vault.svc.cluster.local,
+vault-internal, *.vault-internal,
+vault-0.vault-internal, vault-1.vault-internal, vault-2.vault-internal,
+127.0.0.1   (each pod's own VAULT_ADDR=https://127.0.0.1:8200)
 ```
+
+(`*.vault-internal` alone technically covers all three pod hostnames — the
+explicit `vault-N.vault-internal` entries are listed for clarity/verifiability
+when reviewing an issued cert, not because the wildcard is insufficient.)
 
 Recommended (cert-manager Certificate, kept out of git or applied imperatively):
 
@@ -99,7 +177,10 @@ spec:
     - vault.vault.svc
     - vault.vault.svc.cluster.local
     - vault-active.vault.svc.cluster.local
+    - vault-standby.vault.svc.cluster.local
     - vault-0.vault-internal
+    - vault-1.vault-internal
+    - vault-2.vault-internal
     - "*.vault-internal"
   ipAddresses: ["127.0.0.1"]
   issuerRef: { name: <in-cluster-ca-issuer>, kind: ClusterIssuer }
@@ -139,8 +220,10 @@ kubectl -n vault exec -it vault-0 -- vault operator init -key-shares=5 -key-thre
 kubectl -n vault exec -it vault-0 -- vault operator unseal <KEY_SHARE_1>
 kubectl -n vault exec -it vault-0 -- vault operator unseal <KEY_SHARE_2>
 kubectl -n vault exec -it vault-0 -- vault operator unseal <KEY_SHARE_3>
-#    (If ha.replicas were 3: repeat unseal on vault-1/vault-2 and `vault operator
-#     raft join https://vault-0.vault-internal:8200` the followers.)
+#    ha.replicas is 3 here: vault-1/vault-2 come up sealed + NOT yet raft members.
+#    They are brought in AFTER this initial Shamir bring-up + the transit
+#    auto-unseal migration (§9 below) — see §G in this file for the join order
+#    (`vault operator raft join` + auto-unseal, no Shamir typing on followers).
 
 # 5) Log in with the root token to configure auth (subsequent steps).
 kubectl -n vault exec -it vault-0 -- vault login <ROOT_TOKEN>
@@ -166,6 +249,11 @@ kubectl -n vault exec -it vault-0 -- sh -c \
 #    auto-unseal token, seed the k8s Secrets, run the one-time `vault operator unseal
 #    -migrate`, and configure the snapshot CronJob's policy/role) lives in:
 #        artifacts/design/vault-dr-runbook.md   (§C bring-up, §D migrate, §E restore)
+
+# 10) 3-node HA rollout (decision B, THIS PR) — join vault-1/vault-2 into the raft
+#     cluster and confirm quorum. Do this AFTER step 9 (transit auto-unseal must
+#     already be proven on the single node first). Full procedure: §G above /
+#     artifacts/design/vault-dr-runbook.md §G.
 ```
 
 ### Rollback / recovery
@@ -174,15 +262,22 @@ kubectl -n vault exec -it vault-0 -- sh -c \
   delete pvc data-vault-0` (⚠ destroys all stored secrets) and re-init. This is why
   step 3 says save them offline immediately.
 - **Bad TLS cert (pod CrashLoop on listener)** → fix the `vault-server-tls` Secret
-  SANs (§C), `kubectl -n vault delete pod vault-0` to restart.
+  SANs (§C), `kubectl -n vault delete pod vault-0` (or vault-1/vault-2) to restart.
 - **Sync issues** → `platform-vault` is `automated{selfHeal}`; the StatefulSet +
-  PVC are retained on delete (`persistentVolumeClaimRetentionPolicy: Retain`).
+  PVCs are retained on delete (`persistentVolumeClaimRetentionPolicy: Retain`).
+- **HA scale-down** → not a supported live operation; see §G's Rollback note
+  (`vault operator raft remove-peer` before reducing `ha.replicas`).
 
 ---
 
 ## Validation (this PR, no apply)
 
-`helm template hashicorp/vault 0.33.0` with `vault-app.yaml`'s values renders the
-StatefulSet (TLS listener, raft, Ceph PVCs) + PDB + Services cleanly; the netpols
-(`hardening/netpol-controlplane/vault-netpol.yaml`) pass `kubeconform -strict`. See
-the PR body for the captured output.
+`helm template hashicorp/vault 0.33.0` with `vault-app.yaml`'s values (now
+`ha.replicas: 3` + explicit `server.affinity` + `server.service.active/standby`)
+renders cleanly: 1 StatefulSet (3 replicas, `OnDelete` update strategy, hard
+`podAntiAffinity` on `kubernetes.io/hostname`, 2 volumeClaimTemplates per pod), 1
+PDB (`maxUnavailable: 1`), and 5 Services (`vault`, `vault-active`,
+`vault-standby`, `vault-internal` headless, `vault-ui`) — `kubeconform -strict`
+passes all 13 rendered resources. The netpols
+(`hardening/netpol-controlplane/vault-netpol.yaml`,`vault-cnp.yaml`) also pass
+`kubeconform -strict`. See the PR body for the captured output.
