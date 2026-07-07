@@ -46,7 +46,16 @@ Field names below match `promotion.yaml` (schema `apiVersion: platform.capstone/
 | preview | `pull_request` | `pull-<sha>` | `pull-<short-sha>` | auto |
 | dev | `branch:main` | `git-describe` | `<git describe --tags>` | auto |
 | staging | `tag:v*` | `semver` | `<X.Y.Z>` | auto |
-| prod | `tag:v*` | `semver` | `<X.Y.Z>` | **manual** |
+| prod | `manual:promote-to-prod` | `semver` | `<X.Y.Z>` (whatever staging is live at) | **auto*** |
+
+\* prod's gate is `auto` in the ApplicationSet, but nothing ever writes prod's
+overlay except a human running `promote-to-prod` (below) — that click IS the
+gate. See `artifacts/design/promotion-model.md` in the platform-infra repo for
+the full rationale (the old `tag:v*` prod trigger made prod's desired state =
+"latest tag," so prod was perpetually OutOfSync and conflated "deploy to
+staging" with "prod candidate"). This file ships into the app repo (this is a
+platform-managed `.devops` contract file) — the design doc lives in
+platform-infra, not here; it's referenced for context, not a working link.
 
 Examples (every component is built/bumped together — one tag for the whole repo):
 
@@ -54,9 +63,10 @@ Examples (every component is built/bumped together — one tag for the whole rep
 SEMVER=1.4.0 sh .devops/ci/build-and-push.sh staging   # build+push each component :1.4.0
 COMMIT=1 sh .devops/ci/bump-image.sh staging 1.4.0     # staging auto-syncs
 
-SEMVER=1.4.0 sh .devops/ci/build-and-push.sh prod
-COMMIT=1 sh .devops/ci/bump-image.sh prod 1.4.0        # prod overlay updated, but...
-# ...prod has NO automated sync — a human approves the sync in ArgoCD (the gate, §4).
+# PROMOTE staging -> prod: no fresh build, no new tag — re-point prod at
+# whatever tag is CURRENTLY LIVE in staging's overlay. In practice this runs as
+# the promote-to-prod GitHub Action (workflow_dispatch), not by hand:
+COMMIT=1 sh .devops/ci/promote.sh staging prod         # reads staging's live tag, writes+commits it to prod
 ```
 
 ## How the seam works (for reviewers)
@@ -70,6 +80,11 @@ COMMIT=1 sh .devops/ci/bump-image.sh prod 1.4.0        # prod overlay updated, b
   rewrites **every component's** `images[].newTag` in that overlay (all components share
   the one tag). With `COMMIT=1` it commits the change — **that commit is the signal ArgoCD
   watches.** No imperative `kubectl apply`; GitOps owns the cluster.
+- `promote.sh <from> <to>` is the click-to-promote seam: it reads the tag CURRENTLY
+  LIVE in `<from>`'s overlay (refusing to promote if the components there don't all
+  agree on one tag) and hands off to `bump-image.sh` to write + commit it into
+  `<to>`'s overlay. `.github/workflows/promote-to-prod.yaml` runs this on
+  `workflow_dispatch` — the human clicking "Run workflow" is the gate.
 - To change a convention (e.g. "staging tracks a release branch, not a tag"),
   edit the one entry in `promotion.yaml`. The scripts and overlays follow.
 

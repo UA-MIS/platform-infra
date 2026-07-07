@@ -1,0 +1,91 @@
+# ============================================================================
+# promote-to-prod.yaml — the click-to-promote GATE (promotion-model redesign;
+# see artifacts/design/promotion-model.md, option (a), in platform-infra).
+#
+# WHY: the old model pointed prod's `trigger` at `tag:v*` — the same trigger
+# staging uses — so a human bumping the tag for staging also, in practice,
+# bumped prod's overlay, making prod's desired state = "whatever tag was last
+# pushed" and conflating "deploy to staging" with "prod candidate." Prod
+# tracks an EXPLICITLY-promoted version now; nothing bumps its overlay except
+# this workflow.
+#
+# WHAT IT DOES: a human runs this via workflow_dispatch — that click IS the
+# gate (no code edit, no new build, no new tag). It reads whatever image tag
+# is CURRENTLY LIVE in the `from` env's overlay and writes the SAME tag into
+# the `to` env's overlay, then commits. ArgoCD reconciles `to` on its next
+# sync — the overlay stays Synced/green normally; it goes OutOfSync only for
+# the moment between this commit and that reconcile (see promotion.yaml: the
+# gate for an EXPLICITLY-tracked env is `auto` — the human gate already
+# happened here, ArgoCD is a pure executor of the already-approved state).
+#
+# Default staging -> prod (the primary use case). from/to are generic so the
+# same gate can promote dev -> staging if a team wants a second checkpoint
+# there too.
+# ============================================================================
+name: promote-to-prod
+
+on:
+  workflow_dispatch:
+    inputs:
+      from:
+        description: "Promote FROM this environment (whatever is live there)"
+        required: true
+        type: choice
+        default: staging
+        options:
+          - dev
+          - staging
+      to:
+        description: "Promote TO this environment (the gate)"
+        required: true
+        type: choice
+        default: prod
+        options:
+          - staging
+          - prod
+
+permissions:
+  contents: write
+
+concurrency:
+  group: promote-${{ inputs.to }}
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ua-mis-kaniko
+    container:
+      image: node:24-trixie-slim
+    steps:
+      - name: Guard — from and to must differ
+        run: |
+          if [ "${{ inputs.from }}" = "${{ inputs.to }}" ]; then
+            echo "::error::from and to must be different environments (got '${{ inputs.from }}' twice)"
+            exit 1
+          fi
+      - name: Checkout main (writable; full history for a clean commit base)
+        # Digest-pinned (SEC, D-030): immutable SHA. sha = actions/checkout v4.3.1.
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Promote — read ${{ inputs.from }}'s live tag, write it to ${{ inputs.to }}, commit
+        env:
+          GIT_AUTHOR_NAME: ua-mis-ci
+          GIT_AUTHOR_EMAIL: ci@capstone.uamishub.com
+          GIT_COMMITTER_NAME: ua-mis-ci
+          GIT_COMMITTER_EMAIL: ci@capstone.uamishub.com
+        run: |
+          set -eu
+          # promote.sh reads the live tag from `from`'s overlay and hands off to
+          # bump-image.sh (COMMIT=1) for the write + "[skip ci]" commit — the SAME
+          # write path every other env-bump goes through (see .devops/ci/promote.sh).
+          COMMIT=1 sh .devops/ci/promote.sh "${{ inputs.from }}" "${{ inputs.to }}"
+          git push origin HEAD:main
+      - name: Summary
+        run: |
+          {
+            echo "### Promoted \`${{ inputs.from }}\` -> \`${{ inputs.to }}\`"
+            echo "ArgoCD will reconcile \`${{ inputs.to }}\` on its next sync (webhook/poll)."
+          } >> "$GITHUB_STEP_SUMMARY"
