@@ -1,0 +1,39 @@
+# CloudNativePG CLUSTER Application (db-setup task (a)+(c)). The `Cluster` CR
+# (`capstone-pg`, PG17, 3-instance HA) + its `ObjectStore`/`ScheduledBackup`
+# (backups to the in-cluster MinIO) + the per-app `Database`/`DatabaseRole` CRs
+# (Backstage, Harbor, and a Crossplane-tenant-provisioning-parity role) — see
+# platform-services/cnpg/cluster/ for the manifests and
+# docs/operator/in-cluster-db-tier-runbook.md for the full picture. Git-source
+# Application, sync-wave 1 -> lands AFTER platform-cnpg-operator +
+# platform-cnpg-barman-plugin (both wave 0), so the `postgresql.cnpg.io` and
+# `barmancloud.cnpg.io` CRDs exist before these objects are applied.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-cnpg-cluster
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"   # Cluster CR after the operator+plugin (wave 0)
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/UA-MIS/platform-infra
+    targetRevision: HEAD
+    path: platform-services/cnpg/cluster
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: db-tier
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false      # db-tier ns ships via platform-services/db-tier
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

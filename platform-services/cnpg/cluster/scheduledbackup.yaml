@@ -1,0 +1,21 @@
+# Nightly scheduled base backup of `capstone-pg` to the MinIO ObjectStore
+# (objectstore.yaml). `method: plugin` (NOT `barmanObjectStore` — that in-tree
+# method is deprecated since CNPG v1.26; see barman-plugin/kustomization.yaml).
+# Continuous WAL archiving (PITR between nightly bases) is already enabled via
+# `Cluster.spec.plugins[].isWALArchiver: true` (cluster.yaml) — this CR is only
+# the periodic full base backup.
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: capstone-pg-nightly
+  namespace: db-tier
+  labels:
+    platform.capstone/component: platform
+spec:
+  cluster:
+    name: capstone-pg
+  schedule: "0 0 3 * * *"   # 03:00 daily (CNPG cron is 6-field: sec min hour dom mon dow)
+  backupOwnerReference: self
+  method: plugin
+  pluginConfiguration:
+    name: barman-cloud.cloudnative-pg.io

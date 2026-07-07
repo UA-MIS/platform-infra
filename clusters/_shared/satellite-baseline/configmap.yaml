@@ -1,0 +1,22 @@
+# Registration marker — the concrete, human-checkable signal that this cluster is
+# now reconciled by the hub ArgoCD (`kubectl --context <satellite> -n
+# capstone-satellite-baseline get cm cluster-registered` succeeding IS the "it worked"
+# check after `make cluster-register`). Not templated per-cluster (this path is shared
+# verbatim across every matched cluster by the appset in
+# applicationsets/satellite-clusters-appset.yaml) — the cluster's own identity is
+# already visible via `kubectl config current-context` / `argocd cluster list`, so this
+# stays static rather than faking per-cluster substitution the kustomize path doesn't do.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-registered
+  namespace: capstone-satellite-baseline
+  labels:
+    platform.capstone/component: multi-cluster
+data:
+  note: |
+    This namespace is reconciled by the hub ArgoCD (UA-MIS/platform-infra,
+    applicationsets/satellite-clusters-appset.yaml) via the ApplicationSet `clusters`
+    generator. Its presence confirms the cluster-registration + selector/label
+    contract worked end-to-end. See docs/operator/multi-cluster.md for what (if
+    anything) is expected to run on this cluster beyond this baseline.

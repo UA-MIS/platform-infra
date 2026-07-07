@@ -1,0 +1,18 @@
+# Shared baseline rendered onto every ArgoCD-registered satellite cluster by
+# applicationsets/satellite-clusters-appset.yaml (`clusters` generator). One kustomize
+# dir, fanned out to N clusters — same shape as clusters/real-talos vs local-k3d being
+# two DIFFERENT dirs, except here it is deliberately ONE dir reused across many
+# destinations because the baseline itself does not vary per satellite (see
+# docs/operator/multi-cluster.md for what, if anything, should start varying).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - networkpolicy.yaml
+  - configmap.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: multi-cluster
+    includeSelectors: false

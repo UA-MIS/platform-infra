@@ -107,11 +107,27 @@ targets parse `{name,secret}` straight from the response.
 
 ## Trivy scan gate
 
-Projects are created with `auto_scan:true` (scan-on-push). The shipped default is
-**scan + WARN** (results visible, nothing blocked) — safest for a teaching
-platform. To enforce, set the project's "Prevent vulnerable images from running"
-threshold (recommend `prod` pulls only, not dev/preview). That is a human
-decision, project-by-project.
+Projects are created with `auto_scan:true` (scan-on-push). Harbor's own
+**registry-side** gate stays **scan + WARN** (results visible, nothing blocked
+on pull) — safest default for a teaching platform. To enforce THAT gate, set the
+project's "Prevent vulnerable images from running" threshold (recommend `prod`
+pulls only, not dev/preview). That remains a human decision, project-by-project.
+
+**CI-side gate (supply-chain hardening, separate from the above):** every image
+build (`tenant-build.yaml`@v1 and the Backstage portal build) now polls Harbor's
+own scan-on-push result right after pushing and **fails the CI job** (so the
+GitOps `bump-dev` never runs) if the artifact has any **CRITICAL** finding — see
+`.github/actions/supply-chain-verify/action.yml`. This does not touch the
+registry-side "prevent vulnerable images from running" setting above; it is a
+second, independent check gating whether the pipeline *deploys* the image, not
+whether Harbor lets it be *pulled*.
+
+That poll needs the push-robot to hold `{"resource":"scan","action":"read"}` in
+addition to its existing `repository` pull/push — added to the
+`make harbor-push-robot` target. **Every already-onboarded team's push robot
+must be re-minted** (`make harbor-push-robot NAME=<team> ... > harbor-push-sealed.yaml`,
+re-commit the refreshed SealedSecret) or its Trivy-gate step 403s with a
+clear error until then.
 
 ---
 

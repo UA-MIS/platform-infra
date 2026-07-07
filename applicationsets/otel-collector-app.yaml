@@ -1,0 +1,127 @@
+# OpenTelemetry Collector Application (Observability — tracing). The single ingress
+# point for traces: instrumented apps/services send OTLP here; it samples, batches,
+# and forwards to Tempo (platform-services/monitoring/tempo.yaml, raw manifests —
+# see that file's header for why it's not a Helm chart). Nothing in the platform
+# talks to Tempo directly — this is deliberate, so the sampling rate below is the
+# ONE place trace volume (and therefore Tempo's RAM/disk) is controlled.
+#
+# Deploy method A (D-022/D-028): Helm-source Application, chart repo pinned +
+# allowlisted in the `platform` AppProject sourceRepos (bootstrap/platform-appproject
+# .yaml — INSTALL-OWNED, re-apply via `make bootstrap-reapply`).
+#
+# Chart: opentelemetry-collector 0.162.0 (appVersion v0.154.0), pinned. Bump
+# deliberately. `mode: deployment` (stateless, 1 replica) — NOT `daemonset`; unlike
+# Alloy (which must run per-node to read local pod logs), a trace collector has no
+# node-local data to gather, so one central Deployment is the right shape and the
+# lower-RAM choice (one pod, not 3×).
+#
+# ⚠ SAMPLING (RAM guard, "cap sampling low"): the `probabilistic_sampler` processor
+# keeps only 15% of traces BEFORE they reach Tempo. This is what actually bounds
+# memory/disk here — Tempo's own retention (24h) only bounds how long the sampled
+# 15% is kept, not the ingest volume. 15% is a starting point for a homelab/student
+# platform with no real trace volume yet; raise it (or drop it further under
+# pressure) via `sampling_percentage` below, no other change needed.
+#
+# The chart's default config ships receivers/pipelines for logs and metrics too
+# (this platform already has those covered by Loki+Alloy and Prometheus — routing
+# them through the Collector as well would be pure duplication). Those pipelines
+# and their receivers (jaeger/zipkin/prometheus) are explicitly removed (`null`) —
+# this is a top-level Helm install (not a subchart), so `null` map-key removal is
+# safe (see chart values.yaml's own note on the subchart-only `alternateConfig`
+# workaround — not needed here).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-otel-collector
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://open-telemetry.github.io/opentelemetry-helm-charts   # PINNED chart repo (sourceRepos allowlist)
+    chart: opentelemetry-collector
+    targetRevision: 0.162.0                                               # pinned chart version (appVersion v0.154.0); no ^/~/latest
+    helm:
+      releaseName: otel-collector
+      values: |
+        fullnameOverride: otel-collector
+        mode: deployment
+        replicaCount: 1
+
+        # The chart no longer defaults an image (UPGRADING.md 0.88.0→0.89.0) — pick
+        # the Contrib distribution explicitly: `probabilistic_sampler` (the RAM guard
+        # below) is a contrib-only processor, not in the minimal -k8s distro.
+        image:
+          repository: otel/opentelemetry-collector-contrib
+          tag: "0.154.0"   # pinned; matches the chart's appVersion
+
+        resources:
+          requests: { cpu: 50m, memory: 64Mi }
+          limits: { memory: 128Mi }
+
+        # Only the OTLP ports are needed — no Jaeger/Zipkin protocol clients exist
+        # in this platform today; leaving those listeners/Services off shrinks the
+        # surface. otlp (4317/grpc) and otlp-http (4318) stay on (chart default).
+        ports:
+          jaeger-compact: { enabled: false }
+          jaeger-thrift: { enabled: false }
+          jaeger-grpc: { enabled: false }
+          zipkin: { enabled: false }
+
+        config:
+          receivers:
+            # Remove the chart-default jaeger/zipkin/prometheus receivers — nothing
+            # emits those protocols to this Collector; traces only ever arrive OTLP.
+            jaeger: null
+            zipkin: null
+            prometheus: null
+            otlp:
+              protocols:
+                grpc:
+                  endpoint: ${env:MY_POD_IP}:4317
+                http:
+                  endpoint: ${env:MY_POD_IP}:4318
+
+          processors:
+            memory_limiter: {}   # chart default: 80%/25% of resources.limits.memory
+            # THE RAM guard (see Application header): keep 15% of traces, drop 85%
+            # before they ever reach batch/export. Tune this one number to control
+            # trace volume platform-wide.
+            probabilistic_sampler:
+              sampling_percentage: 15
+            batch: {}
+
+          exporters:
+            # Remove the chart-default `debug` exporter (log-spam, not a real sink).
+            debug: null
+            otlp/tempo:
+              endpoint: tempo.monitoring.svc.cluster.local:4317
+              tls:
+                insecure: true   # in-cluster only, plaintext (same posture as the Loki datasource wiring)
+
+          service:
+            # Remove the chart-default logs/metrics pipelines (Loki/Alloy and
+            # Prometheus already own those paths) — traces only.
+            pipelines:
+              logs: null
+              metrics: null
+              traces:
+                receivers: [otlp]
+                processors: [memory_limiter, probabilistic_sampler, batch]
+                exporters: [otlp/tempo]
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

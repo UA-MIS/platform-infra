@@ -1,0 +1,31 @@
+# Declarative per-app PostgreSQL databases on `capstone-pg`, one shared cluster
+# hosting multiple app-owned databases (`Database` CRD, decoupled from the Cluster
+# object — see roles.yaml for the corresponding owner roles). Both are cutover
+# targets, not yet consumed live — see roles.yaml header + the runbook.
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: capstone-pg-backstage
+  namespace: db-tier
+  labels:
+    platform.capstone/component: platform
+spec:
+  name: backstage
+  owner: backstage
+  cluster:
+    name: capstone-pg
+  databaseReclaimPolicy: retain
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: capstone-pg-harbor
+  namespace: db-tier
+  labels:
+    platform.capstone/component: platform
+spec:
+  name: harbor
+  owner: harbor
+  cluster:
+    name: capstone-pg
+  databaseReclaimPolicy: retain

@@ -1,0 +1,27 @@
+# CloudNativePG operator namespace (db-setup task). Hosts the CNPG operator
+# controller (applicationsets/cnpg-operator-app.yaml, Helm, wave 0) AND the
+# Barman Cloud plugin sidecar-manager (applicationsets/cnpg-barman-plugin-app.yaml,
+# git-kustomize, wave 0) — the plugin's own upstream manifest pins its Deployment
+# into `cnpg-system` (verified in the vendored release manifest), so this namespace
+# is shared between the two, same co-location convention as rook-ceph
+# (operator + cluster CR share one ns). The CNPG Cluster CR itself lives in the
+# separate `db-tier` namespace (platform-services/db-tier/namespace.yaml) — same
+# split as rook-ceph operator-ns vs the workload landing elsewhere would use, kept
+# distinct here so the app-facing DB tier isn't mixed with the operator's own RBAC/
+# webhook surface.
+#
+# No privileged PSA needed: CNPG + the barman-cloud plugin sidecar run as regular
+# non-root containers (no hostPath/raw block devices, unlike rook-ceph) — the
+# cluster's default PSA level is sufficient.
+#
+# Ships via the platform-services directory generator (platform-services-appset) →
+# Application `platform-svc-cnpg-system`. The two Helm/kustomize sources
+# (applicationsets/cnpg-operator-app.yaml, applicationsets/cnpg-barman-plugin-app.yaml)
+# are SEPARATE Applications and do not render through here.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cnpg-system
+  labels:
+    platform.capstone/component: platform
+    goldilocks.fairwinds.com/enabled: "true"   # recommend-only VPAs (Off mode; no eviction)

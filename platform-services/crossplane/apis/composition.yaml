@@ -291,6 +291,12 @@ spec:
                       # also renders, so the whitelist + the CRs can never drift apart.
                       - { group: external-secrets.io, kind: ExternalSecret }
                       - { group: external-secrets.io, kind: SecretStore }
+                      # Argo Rollouts (progressive-delivery, opt-in —
+                      # docs/operator/progressive-delivery.md). Kept in sync with
+                      # tenants/_template/appproject.yaml (same tenancy-safe, namespaced
+                      # kind as Deployment above): a team MAY run a Rollout instead of a
+                      # Deployment in its own namespace; never a cluster-scoped object.
+                      - { group: argoproj.io, kind: Rollout }
                     roles:
                       - name: developer
                         description: {{ printf "Team %s developers — sync/get own apps only." $team | quote }}

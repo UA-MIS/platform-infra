@@ -1,0 +1,100 @@
+# verify-image-signature — admission-time proof that a Harbor-hosted image was
+# actually built + pushed by THIS org's CI (supply-chain hardening): only
+# images cosign KEYLESS-signed by a GitHub Actions run under the UA-MIS org
+# (public Fulcio cert + Rekor transparency-log entry — no key material anywhere,
+# see .github/actions/supply-chain-verify) are admitted to run.
+#
+# SCOPE — Harbor images ONLY (imageReferences glob below). Every other platform
+# addon (cert-manager, Rook-Ceph, ArgoCD, Traefik, kube-prometheus-stack, ...)
+# pulls UNSIGNED upstream images from public registries and is completely
+# unaffected by this rule — verifyImages only ACTS on images whose reference
+# matches `imageReferences`; everything else passes through untouched. This is
+# deliberately narrower than "every image in the cluster" — it verifies exactly
+# the supply chain this platform controls (its own CI -> its own registry).
+#
+# IDENTITY — subjectRegExp binds the Fulcio cert to "some GitHub Actions run in
+# the UA-MIS org, on any ref" (tenant push/dev, tag/prod, AND pull_request/preview
+# builds all sign — see supply-chain-verify). issuer is GitHub's fixed OIDC
+# issuer. Narrower than "signed by anyone" (scoped to our org) but intentionally
+# not pinned to one repo/workflow/ref, since every tenant repo + the platform's
+# own Backstage build share this one policy.
+#
+# CRITICAL SAFETY (ALL THREE policies in this dir):
+#   - failurePolicy: Ignore — if the Kyverno webhook is unreachable/crashed/mid-
+#     rollout (esp. during DR/control-plane recovery), the API server admits the
+#     request UNVALIDATED rather than blocking it. A policy engine must never be
+#     the reason nothing can schedule. (Belt: the Kyverno Application ALSO sets
+#     `features.forceFailurePolicyIgnore.enabled: true` chart-wide, so this can't
+#     drift even if a future rule edit forgets the field — see kyverno-app.yaml.)
+#   - exclude kube-system / argocd / vault / rook-ceph / cert-manager / arc-system /
+#     arc-runners / harbor / traefik / monitoring / backstage / external-secrets
+#     (+ kyverno itself, defense in depth): the control plane, GitOps engine,
+#     secrets store, storage layer, cert issuer, CI system + build runners, and
+#     every platform addon's OWN pods can NEVER be blocked by a policy that
+#     engine itself enforces — a self-inflicted deadlock during recovery (or a
+#     bricked CI pipeline) would be exactly the outage this platform cannot risk.
+#
+# ⚠ OPERATOR REVIEW (post-review widened exclude list): `failureAction: Enforce`
+# below BLOCKS an unsigned/unverified Harbor image at admission. The exclude
+# list was widened (blocking review finding on the sibling require-limits
+# policy) to also cover arc-system/arc-runners/harbor/traefik/monitoring/
+# backstage/external-secrets so no platform or CI pod can ever be blocked here
+# either — Kaniko builder pods and Harbor's own sub-components in particular
+# must never be gated by this rule. Before this policy syncs live, confirm every
+# currently-running Harbor-sourced workload outside the excluded namespaces
+# (tenant apps) was already built by a supply-chain-verify-enabled pipeline —
+# anything built before this PR merged has no signature and will be rejected on
+# its next reschedule. Add more `exclude.any[].resources.namespaces` entries
+# here if a namespace needs a grace period.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-image-signature
+  annotations:
+    policies.kyverno.io/title: Verify Image Signature (cosign keyless)
+    policies.kyverno.io/category: Supply Chain Security
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/subject: Pod
+    policies.kyverno.io/description: >-
+      Only Harbor images cosign KEYLESS-signed by a GitHub Actions run in the
+      UA-MIS org (public Fulcio + Rekor) are admitted to run.
+spec:
+  failurePolicy: Ignore   # CRITICAL SAFETY — see header. A down webhook fails OPEN.
+  background: false       # admission-time gate only; no periodic re-verify of running pods.
+  webhookConfiguration:
+    timeoutSeconds: 30    # Harbor/Fulcio/Rekor round trip needs more than Kyverno's 10s default.
+  rules:
+    - name: verify-harbor-image-signed
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - argocd
+                - vault
+                - rook-ceph
+                - cert-manager
+                - arc-system
+                - arc-runners
+                - harbor
+                - traefik
+                - monitoring
+                - backstage
+                - external-secrets
+                - kyverno
+      verifyImages:
+        - imageReferences:
+            - "harbor.capstone.uamishub.com/*"
+          failureAction: Enforce
+          attestors:
+            - entries:
+                - keyless:
+                    subjectRegExp: "^https://github\\.com/UA-MIS/.+/\\.github/workflows/.+@refs/.+$"
+                    issuer: "https://token.actions.githubusercontent.com"
+                    rekor:
+                      url: https://rekor.sigstore.dev

@@ -1,0 +1,19 @@
+# The in-cluster Postgres tier's CRs (db-setup task). Source for
+# applicationsets/cnpg-cluster-app.yaml (sync-wave 1 — AFTER the CNPG operator +
+# Barman Cloud plugin, both wave 0, so the postgresql.cnpg.io + barmancloud.cnpg.io
+# CRDs exist before these objects are submitted). Same two-app split precedent as
+# rook-ceph / cdi / kubevirt (operator+CRD app first, CR app second).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - objectstore.yaml
+  - cluster.yaml
+  - scheduledbackup.yaml
+  - roles.yaml
+  - databases.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false

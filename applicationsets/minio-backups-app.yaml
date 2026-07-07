@@ -1,0 +1,144 @@
+# MinIO Application (db-setup task (a)+(b), "scheduled backups to MinIO"). A
+# single-node, Ceph-RBD-backed MinIO instance dedicated to holding the CNPG
+# (`postgres-backups` bucket) and MariaDB (`mariadb-backups` bucket) backup
+# artifacts — the S3-compatible target both the Barman Cloud plugin
+# (platform-services/cnpg/cluster/objectstore.yaml) and the mariadb-cluster
+# chart's `physicalBackups[].storage.s3` (mariadb-cluster-app.yaml) point at.
+#
+# `mode: standalone` (single pod, not the chart's 16-replica distributed
+# default): this is a backup-artifact store on already-replica-3 Ceph RBD
+# storage, not a primary data path — durability comes from the underlying Ceph
+# PVC, not MinIO-level erasure coding. Revisit if backup-store availability
+# during a node loss becomes a requirement (would mean `mode: distributed` across
+# multiple nodes, more storage + a second bucket-per-tenant model).
+#
+# Plain HTTP (no TLS): ClusterIP-only, never Ingress-exposed, reachable only from
+# inside the cluster network — same posture as the ObjectStore/PhysicalBackup
+# configs that consume it (see their headers for the tradeoff note).
+#
+# Chart: minio (official min.io chart) 5.4.0 — repo https://charts.min.io, index
+# confirmed live. Pin; bump deliberately.
+#
+# sync-wave 0: independent of the CNPG/MariaDB operator installs, but must exist
+# before the wave-1 Cluster/MariaDB CR apps try to write backups into it.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-minio-backups
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://charts.min.io
+    chart: minio
+    targetRevision: 5.4.0
+    helm:
+      releaseName: minio-backups
+      values: |
+        mode: standalone
+        replicas: 1
+        drivesPerNode: 1
+
+        existingSecret: minio-root-credentials   # platform-services/db-tier/externalsecrets.yaml
+
+        persistence:
+          enabled: true
+          storageClass: ceph-block
+          size: 100Gi   # backup artifacts only (compressed WAL/base-backup + mysqldump-style physical backups)
+
+        resources:
+          requests:
+            cpu: 100m
+            memory: 512Mi
+          limits:
+            memory: 1Gi
+
+        service:
+          type: ClusterIP
+        consoleService:
+          type: ClusterIP
+        ingress:
+          enabled: false
+        consoleIngress:
+          enabled: false
+
+        # Two custom bucket-scoped policies (NOT the canned `readwrite`, which
+        # grants s3:*Object on EVERY bucket) — each backup user can read/write/
+        # list ONLY its own bucket. Least-privilege: neither user is the root
+        # account, and neither can touch the other engine's backups.
+        policies:
+          - name: postgres-backups-rw
+            statements:
+              - resources:
+                  - 'arn:aws:s3:::postgres-backups/*'
+                actions:
+                  - "s3:AbortMultipartUpload"
+                  - "s3:GetObject"
+                  - "s3:DeleteObject"
+                  - "s3:PutObject"
+                  - "s3:ListMultipartUploadParts"
+              - resources:
+                  - 'arn:aws:s3:::postgres-backups'
+                actions:
+                  - "s3:GetBucketLocation"
+                  - "s3:ListBucket"
+                  - "s3:ListBucketMultipartUploads"
+          - name: mariadb-backups-rw
+            statements:
+              - resources:
+                  - 'arn:aws:s3:::mariadb-backups/*'
+                actions:
+                  - "s3:AbortMultipartUpload"
+                  - "s3:GetObject"
+                  - "s3:DeleteObject"
+                  - "s3:PutObject"
+                  - "s3:ListMultipartUploadParts"
+              - resources:
+                  - 'arn:aws:s3:::mariadb-backups'
+                actions:
+                  - "s3:GetBucketLocation"
+                  - "s3:ListBucket"
+                  - "s3:ListBucketMultipartUploads"
+
+        # Two scoped backup users bound to the policies above. `accessKey` (the
+        # username) is a literal, non-secret string; `existingSecretKey` pulls
+        # ONLY the secret-key/password half from the SAME ESO-materialized Secret
+        # that the CNPG ObjectStore / MariaDB PhysicalBackup configs read (single
+        # source of truth per credential pair, one Vault write covers both
+        # consumers).
+        users:
+          - accessKey: cnpg-backup
+            existingSecret: minio-cnpg-backup-credentials
+            existingSecretKey: ACCESS_SECRET_KEY
+            policy: postgres-backups-rw
+          - accessKey: mariadb-backup
+            existingSecret: minio-mariadb-backup-credentials
+            existingSecretKey: secret-access-key
+            policy: mariadb-backups-rw
+
+        buckets:
+          - name: postgres-backups
+            policy: none
+            purge: false
+          - name: mariadb-backups
+            policy: none
+            purge: false
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: db-tier
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false      # db-tier ns ships via platform-services/db-tier
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

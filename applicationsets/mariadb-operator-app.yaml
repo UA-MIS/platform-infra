@@ -1,0 +1,41 @@
+# mariadb-operator OPERATOR Application (db-setup task (b)). The controller that
+# reconciles `MariaDB`/`Database`/`User`/`Grant`/`Backup`/`PhysicalBackup` CRs —
+# the in-cluster HA MariaDB 11.8 tier, successor to the off-cluster `ua-mis-db-1`
+# MariaDB role (docs/db-tier-runbook.md). sync-wave 0 -> after the CRDs chart
+# (mariadb-operator-crds-app.yaml, wave -1), before the MariaDB CR itself
+# (mariadb-cluster-app.yaml, wave 1).
+#
+# Chart: mariadb-operator 26.6.0 (version-matched to the CRDs chart). Pin; bump
+# deliberately.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-mariadb-operator
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://mariadb-operator.github.io/mariadb-operator
+    chart: mariadb-operator
+    targetRevision: 26.6.0
+    helm:
+      releaseName: mariadb-operator
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: mariadb-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false      # mariadb-system ns ships via platform-services/mariadb-system
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

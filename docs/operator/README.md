@@ -49,7 +49,7 @@ outbound-only) to in-cluster **Traefik**.
 | Observability | **kube-prometheus-stack + Loki** | Prom v3.12.0 / Loki 3.6.7 | Metrics, logs, Grafana dashboards, alerts |
 | Ingress | **Traefik** | bundled | Host-routing for `*.capstone.uamishub.com` |
 | Public edge | **cloudflared** | — | Cloudflare Tunnel, outbound-only (no inbound ports) |
-| Data tier | **Postgres 17 + MariaDB** on `ua-mis-db-1` | — | **Off-cluster** shared multi-tenant DB host (Tailscale-reachable) |
+| Data tier | **Postgres 17 + MariaDB** on `ua-mis-db-1` | — | **Off-cluster** shared multi-tenant DB host (Tailscale-reachable) — still the system of record; an **in-cluster CNPG (PG17) + mariadb-operator (11.8) tier** is deployed (`db-tier` ns) but not yet cut over → [in-cluster-db-tier-runbook.md](in-cluster-db-tier-runbook.md) |
 | Backups | **Velero + MinIO** | Velero 1.18.1 / MinIO `RELEASE.2025-09-07` | Nightly all-namespace + PV backup into node-local (non-Ceph) object storage |
 
 Architecture diagram + rationale: [`docs/index.md`](../index.md). Deeper component
@@ -149,6 +149,13 @@ Ceph-level or cluster-wide failure doesn't take the backups down with it. →
 **[dr-backup.md](dr-backup.md)** (architecture, day-2 checks, and the **tested-restore
 drill an operator must run** to actually prove this works).
 
+### 4.8 Multi-cluster (scaffolding, inert)
+
+Only one physical cluster exists today. An ArgoCD `clusters`-generator ApplicationSet
+is wired and ready for a future second cluster (the planned homelab k3s) but produces
+zero Applications until one is registered: `make cluster-register CONTEXT=<ctx>
+NAME=<short-name>`. → **[multi-cluster.md](multi-cluster.md)**.
+
 ---
 
 ## 5. Known DR gaps & risks (read before you rely on it)
@@ -195,6 +202,9 @@ These are **live-verified** weak spots a successor should close:
 | [argocd-gitops.md](argocd-gitops.md) | GitOps model, bootstrap, the `argocd-cm` SSA-wipe gotcha |
 | [observability.md](observability.md) | Prometheus/Loki/Grafana + alerts |
 | [resource-governance.md](resource-governance.md) | VPA/Goldilocks + per-tenant quotas |
+| [progressive-delivery.md](progressive-delivery.md) | Argo Rollouts controller + opt-in canary scaffolder toggle |
 | [db-tier-runbook.md](../db-tier-runbook.md) · [db-tier-provisioner-setup.md](db-tier-provisioner-setup.md) | Off-cluster Postgres/MariaDB tier |
+| [in-cluster-db-tier-runbook.md](in-cluster-db-tier-runbook.md) | The in-cluster CNPG/MariaDB tier — Vault wiring + the pg_dump/mysqldump cutover from `ua-mis-db-1` and the bundled per-app subcharts |
 | [vm-path-harbor-provisioner.md](vm-path-harbor-provisioner.md) | KubeVirt VM scaffolder wiring |
+| [multi-cluster.md](multi-cluster.md) | Multi-cluster scaffolding (ApplicationSet cluster generator, inert until a 2nd cluster is registered) |
 | [gotchas-and-lessons.md](gotchas-and-lessons.md) | Process-layer war stories |

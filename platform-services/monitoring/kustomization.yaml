@@ -26,11 +26,24 @@ resources:
   - servicemonitors.yaml
   # SealedSecrets consumed by the kube-prometheus-stack Helm app (separate
   # Application) — they live here because this app owns the `monitoring` ns and its
-  # non-chart CRs. alertmanager-webhook → the notification destination; grafana-admin
-  # → the rotated Grafana admin creds. Both ship as PLACEHOLDER ciphertext and MUST be
-  # resealed before go-live (see README).
+  # non-chart CRs. alertmanager-webhook → the notification destination (now a REAL
+  # seal pointed at ntfy.yaml below, no longer a placeholder — see README);
+  # grafana-admin → the rotated Grafana admin creds (still ships as a PLACEHOLDER,
+  # MUST be resealed before go-live, see README).
   - sealedsecret-alertmanager-webhook.yaml
   - sealedsecret-grafana-admin.yaml
+  # Tracing: Tempo (raw manifests — the single-binary Helm chart is upstream
+  # `deprecated: true`, see the file header) + the OTel Collector Helm Application's
+  # matching ConfigMap comment (applicationsets/otel-collector-app.yaml).
+  - tempo.yaml
+  # Thanos long-term metrics (Query/Store-Gateway/Compactor + the objstore
+  # SealedSecret the Prometheus sidecar also reads) — see the file header for the
+  # hard dependency on platform-minio's `dr-backup` bucket.
+  - thanos.yaml
+  # ntfy — the real Alertmanager notification destination (self-hosted push,
+  # replaces the example.com placeholder). See the file header for the auth model
+  # + phone-subscription path.
+  - ntfy.yaml
   # Admin observability dashboards (dashboards-as-code). Each ConfigMap carries
   # `grafana_dashboard: "1"`; the Grafana chart's default k8s-sidecar watches for that
   # label and auto-provisions the JSON payload — no manual Grafana import step, no
@@ -41,6 +54,10 @@ resources:
   - dashboard-tenant-quota.yaml
   - dashboard-platform-health.yaml
   - dashboard-tenant-cicd.yaml
+  # Cost allocation (OpenCost, applicationsets/opencost-app.yaml): per-namespace
+  # $/hr and est. monthly cost derived from OpenCost's owned-hardware custom
+  # pricing. See README "Cost allocation (OpenCost)" for the pricing derivation.
+  - dashboard-cost-allocation.yaml
 
 labels:
   - pairs:

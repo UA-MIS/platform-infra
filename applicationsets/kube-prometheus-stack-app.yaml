@@ -13,9 +13,19 @@
 # Chart: kube-prometheus-stack 87.3.0 (appVersion / prometheus-operator v0.92.0),
 # pinned. Bump deliberately.
 #
-# SCOPE (anti-gold-plate, per the retro): NO Thanos/Mimir, NO remote-write, NO
-# long-term object storage — single Prometheus with 15d local retention on a Ceph
-# RBD PVC. That is the right altitude for a homelab/student-capstone platform.
+# SCOPE (anti-gold-plate, per the retro): NO remote-write, NO HA Prometheus pairs —
+# single Prometheus (7d local retention, tuned further below) on a Ceph RBD PVC.
+# That is still the right altitude for a homelab/student-capstone platform.
+#
+# ⚠ UPDATE (observability follow-up): a Thanos SIDECAR is now attached (below,
+# `prometheus.prometheusSpec.thanos`) so blocks upload to the `dr-backup` MinIO
+# bucket for LONG-TERM retention beyond the local 7d window — the Store Gateway/
+# Query/Compactor components that read that long-term data back live as their own
+# raw-manifest Application (platform-services/monitoring/thanos.yaml), not here.
+# ⚠ DEPENDENCY: this sidecar reads the `thanos-objstore-config` SealedSecret (shipped
+# by that same file) — if `platform-minio` or its `dr-backup` bucket is ever removed
+# without also disabling this block, the sidecar just fails to upload (Prometheus
+# itself is unaffected; local scrape/query/alerting keep working).
 #
 # ── The two values that make this a PLATFORM monitor (not just self-monitoring) ──
 # serviceMonitor/podMonitor/probe/ruleSelectorNilUsesHelmValues: false → Prometheus
@@ -141,6 +151,25 @@ spec:
                   resources:
                     requests:
                       storage: 20Gi
+            # Thanos sidecar — uploads completed TSDB blocks to the `dr-backup` MinIO
+            # bucket for LONG-TERM storage beyond the 7d local retention above (see
+            # the Application header + platform-services/monitoring/thanos.yaml,
+            # which ships the objstore SealedSecret this references, plus the Query/
+            # Store-Gateway/Compactor that read the uploaded blocks back). Adding this
+            # does NOT change local scrape/query/alerting — it only adds a sidecar
+            # container that (a) uploads finished blocks and (b) serves the Store
+            # API (gRPC :10901, auto-added to the `prometheus-operated` headless
+            # Service by the operator) so Thanos Query can read recent data straight
+            # from this Prometheus while history comes from the Store Gateway.
+            thanos:
+              image: quay.io/thanos/thanos:v0.41.0   # pinned; matches platform-services/monitoring/thanos.yaml
+              objectStorageConfig:
+                existingSecret:
+                  key: objstore.yml
+                  name: thanos-objstore-config
+              resources:
+                requests: { cpu: 50m, memory: 64Mi }
+                limits: { memory: 256Mi }
 
         alertmanager:
           alertmanagerSpec:
@@ -148,9 +177,13 @@ spec:
             # platform-services/monitoring/sealedsecret-alertmanager-webhook.yaml) into
             # the Alertmanager pods at /etc/alertmanager/secrets/alertmanager-webhook/.
             # The `platform-oncall` receiver below reads its `url` key via url_file, so
-            # the webhook endpoint is NEVER inlined in these values. ⚠ ships as a
-            # PLACEHOLDER seal — reseal a real URL before relying on notifications
-            # (platform-services/monitoring/README.md).
+            # the webhook endpoint is NEVER inlined in these values. ⚠ UPDATE
+            # (observability follow-up): this now ships a REAL seal — the URL points
+            # at the in-cluster `platform-alerts` topic on the self-hosted ntfy server
+            # (platform-services/monitoring/ntfy.yaml), including `?template=alertmanager`
+            # so ntfy renders readable firing/resolved notifications instead of raw
+            # JSON. See that file + README "Notification channel" for the ntfy
+            # dependency + phone-subscription instructions.
             secrets:
               - alertmanager-webhook
             # Resource-reclaim (VPA-driven, task follow-up): actual usage (`kubectl
@@ -178,8 +211,8 @@ spec:
           # the values — repoint it at a Slack/Discord/PagerDuty relay, an incident
           # bot, or Alertmanager→Slack bridge. To switch to native slack_configs /
           # email_configs instead, keep the same pattern: put the URL/token in the
-          # SealedSecret and reference it by *_file. ⚠ url_file resolves a PLACEHOLDER
-          # seal until reseal — alerts stay effectively silent till then (README).
+          # SealedSecret and reference it by *_file. url_file now resolves a REAL,
+          # live destination (self-hosted ntfy, README "Notification channel").
           config:
             global:
               resolve_timeout: 5m
@@ -254,6 +287,26 @@ spec:
               type: loki
               access: proxy
               url: http://loki.monitoring.svc.cluster.local:3100
+            # Tempo (platform-services/monitoring/tempo.yaml, raw manifests) — trace
+            # datasource. Traces arrive via the OTel Collector
+            # (applicationsets/otel-collector-app.yaml); nothing writes to Tempo
+            # directly.
+            - name: Tempo
+              type: tempo
+              access: proxy
+              url: http://tempo.monitoring.svc.cluster.local:3200
+            # Thanos Query (platform-services/monitoring/thanos.yaml) — a SECOND,
+            # ADDITIONAL Prometheus-compatible datasource (the default "Prometheus"
+            # datasource this chart auto-adds is untouched, and every existing
+            # dashboard's `${datasource}` variable still defaults to it). Pick
+            # "Thanos" instead when a query needs data older than the 7d local
+            # Prometheus retention above — Thanos Query merges live data straight
+            # from the Prometheus sidecar with historical blocks from the Store
+            # Gateway (dr-backup MinIO bucket).
+            - name: Thanos
+              type: prometheus
+              access: proxy
+              url: http://thanos-query.monitoring.svc.cluster.local:10902
 
         kube-state-metrics:
           # Resource-reclaim (VPA-driven, task follow-up): actual usage (`kubectl

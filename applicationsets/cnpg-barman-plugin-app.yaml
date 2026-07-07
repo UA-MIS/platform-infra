@@ -1,0 +1,45 @@
+# Barman Cloud Plugin Application (db-setup task (a)). The CNPG-i sidecar plugin
+# that provides the CURRENT (non-deprecated) backup/WAL-archiving path for CNPG
+# Clusters — see platform-services/cnpg/barman-plugin/kustomization.yaml for the
+# full deprecation rationale. Git-source Application (pinned upstream release
+# manifest referenced from a local kustomization.yaml, SAME pattern as
+# cert-manager's install — platform-services/cert-manager/kustomization.yaml).
+#
+# Prereq: cert-manager must be live (the manifest ships its own self-signed Issuer
+# + two Certificates for operator<->plugin mTLS) — already true, cert-manager has
+# been live since P2/T4.
+#
+# sync-wave 0 — parallel to platform-cnpg-operator (also wave 0); independent
+# installs, both land in cnpg-system. The Cluster/ObjectStore CRs
+# (cnpg-cluster-app.yaml, wave 1) that reference this plugin's `objectstores.
+# barmancloud.cnpg.io` CRD land AFTER both wave-0 apps.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-cnpg-barman-plugin
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/UA-MIS/platform-infra
+    targetRevision: HEAD
+    path: platform-services/cnpg/barman-plugin
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: cnpg-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false      # cnpg-system ns ships via platform-services/cnpg-system
+      - ServerSideApply=true       # the vendored manifest ships a CRD
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

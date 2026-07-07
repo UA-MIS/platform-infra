@@ -1,0 +1,15 @@
+# CloudNativePG operator prereqs (db-setup task) — the namespace that must exist
+# before the CNPG operator + Barman Cloud plugin Helm/kustomize Applications
+# (applicationsets/cnpg-operator-app.yaml, applicationsets/cnpg-barman-plugin-app.yaml)
+# install. Managed by the platform-services-appset (directory generator over
+# platform-services/*; this dir produces app `platform-svc-cnpg-system`).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false

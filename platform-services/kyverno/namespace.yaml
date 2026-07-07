@@ -1,0 +1,16 @@
+# Kyverno namespace (supply-chain hardening). Kyverno is the cluster admission-
+# policy engine: verifies every Pod image carries a valid cosign KEYLESS signature
+# bound to this org's GitHub Actions identity, disallows `:latest`, and requires
+# resource limits (platform-services/kyverno-policies/, a SEPARATE Application —
+# see its header for why). Its own namespace scopes the admission/background/
+# cleanup/reports controllers + their webhook TLS secrets. The Helm chart itself
+# is a SEPARATE Application (applicationsets/kyverno-app.yaml, method A) — this
+# kustomize dir ships ONLY the namespace (the prereq the chart app installs into),
+# same split as harbor/vault/external-secrets.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kyverno
+  labels:
+    platform.capstone/component: platform
+    goldilocks.fairwinds.com/enabled: "true"   # Goldilocks recommend-only VPAs (Off mode; no eviction)

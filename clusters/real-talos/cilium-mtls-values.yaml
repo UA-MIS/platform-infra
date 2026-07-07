@@ -1,0 +1,51 @@
+# Cilium Mutual Authentication (mTLS) — ADDITIVE Helm values overlay.
+#
+# Turns on Cilium's built-in service-mesh mutual-auth feature (SPIFFE/SPIRE-backed
+# workload identity, sidecarless — no Istio/Linkerd) for east-west pod-to-pod
+# traffic. This is a values OVERLAY on top of the live install documented in
+# docs/cilium-cni-runbook.md (Cilium v1.17.4, kubeProxyReplacement, VXLAN,
+# bpf.hostLegacyRouting=true) — it does NOT touch any of those existing values.
+# Cilium itself is INSTALL-OWNED in this repo (helm CLI, not an ArgoCD Application
+# — chicken/egg: the CNI must exist before ArgoCD's own pod networking works), so
+# this file is the pinned, reviewable record of the values a human applies via:
+#
+#   helm upgrade cilium cilium/cilium --version 1.17.4 --namespace kube-system \
+#     --reuse-values -f clusters/real-talos/cilium-mtls-values.yaml
+#   kubectl -n kube-system rollout restart deployment/cilium-operator
+#   kubectl -n kube-system rollout restart ds/cilium
+#
+# Full validation + rollback procedure: docs/cilium-cni-runbook.md Step 5.
+# What this covers vs the Tailscale node-level encryption: docs/service-mesh-mtls.md.
+
+authentication:
+  # Master switch — without this, `mutual.spire.*` below is inert.
+  enabled: true
+  mutual:
+    spire:
+      # Cilium's agents request+present SPIFFE X.509-SVIDs (short-lived workload
+      # certs, one per Cilium security identity) and Cilium enforces "prove who
+      # you are" (mutual TLS handshake) for any flow a CiliumNetworkPolicy marks
+      # `authentication.mode: Required` (see the mtls-*-cnp.yaml policies in
+      # hardening/netpol-controlplane/). Flows NOT marked stay exactly as they are
+      # today (unauthenticated, but still netpol-scoped) — this is why the feature
+      # is additive/opt-in per policy rather than a blanket cluster-wide flip.
+      enabled: true
+      install:
+        # Deploys a bundled SPIRE server + per-node SPIRE agents (as part of THIS
+        # `cilium` Helm release, in their own `cilium-spire` namespace) — no
+        # separate SPIRE install/operator to manage.
+        enabled: true
+        namespace: cilium-spire
+        server:
+          dataStorage:
+            # SPIRE server persists its registration entries + CA/trust bundle to
+            # a PVC. Defaults to 1Gi/ReadWriteOnce with no storageClass (falls back
+            # to the cluster default SC) — pin it explicitly to `ceph-block` (the
+            # same replica-3 Ceph RBD class Vault/Harbor use) so SPIRE's identity
+            # data survives a node loss like every other stateful control-plane
+            # component in this cluster, instead of silently landing on whatever
+            # the cluster-default SC happens to be.
+            enabled: true
+            size: 1Gi
+            storageClass: ceph-block
+            accessMode: ReadWriteOnce

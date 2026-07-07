@@ -1,0 +1,81 @@
+# require-limits — every container must declare BOTH cpu and memory resource
+# limits. Without a limit a single runaway container can starve/OOM-kill its
+# node's neighbors — on this 6-node homelab (3 OptiPlex control-plane + 3 Mac
+# workers) that blast radius is a much bigger fraction of capacity than on a
+# large cloud cluster.
+#
+# CRITICAL SAFETY (see verify-image-signature.yaml for the full rationale, shared
+# across all three policies in this dir):
+#   - failurePolicy: Ignore — a down Kyverno webhook fails OPEN, never blocking
+#     scheduling.
+#   - exclude kube-system / argocd / vault / rook-ceph / cert-manager / arc-system /
+#     arc-runners / harbor / traefik / monitoring / backstage / external-secrets
+#     (+ kyverno itself) — the control plane, GitOps engine, secrets store,
+#     storage layer, cert issuer, CI system + build runners, and every platform
+#     addon that does not yet guarantee explicit cpu+memory limits on every
+#     container are never gated by this policy.
+#
+# ⚠ BLOCKING FIX (post-review): this policy previously shipped as
+# `validationFailureAction: Enforce` with only kube-system/argocd/vault/
+# rook-ceph/cert-manager/kyverno excluded. Kaniko build pods in arc-runners (and
+# Harbor's many sub-components, Traefik, monitoring, Backstage,
+# external-secrets) do not all set explicit memory limits today, so Enforce
+# would have REJECTED the very next Kaniko pod at admission — bricking CI
+# cluster-wide the moment this synced. Fixed by (1) switching to Audit
+# (report-only) until a PolicyReport pass across all in-scope namespaces shows
+# zero violations, and (2) excluding every platform/CI system namespace above so
+# no platform or CI pod can ever be blocked by this rule regardless of mode.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-limits
+  annotations:
+    policies.kyverno.io/title: Require Resource Limits
+    policies.kyverno.io/category: Best Practices
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/subject: Pod
+    policies.kyverno.io/description: >-
+      Requires every container to declare both cpu and memory resource limits.
+spec:
+  validationFailureAction: Audit   # report-only until backfilled — see header. NOT Enforce.
+  failurePolicy: Ignore   # CRITICAL SAFETY — see header. A down webhook fails OPEN.
+  background: true
+  rules:
+    - name: require-container-limits
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - argocd
+                - vault
+                - rook-ceph
+                - cert-manager
+                - arc-system
+                - arc-runners
+                - harbor
+                - traefik
+                - monitoring
+                - backstage
+                - external-secrets
+                - kyverno
+      validate:
+        message: "Every container must set resources.limits.cpu and resources.limits.memory."
+        foreach:
+          - list: "request.object.spec.containers"
+            pattern:
+              resources:
+                limits:
+                  cpu: "?*"
+                  memory: "?*"
+          - list: "request.object.spec.initContainers"
+            pattern:
+              resources:
+                limits:
+                  cpu: "?*"
+                  memory: "?*"

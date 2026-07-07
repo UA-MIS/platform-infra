@@ -1,0 +1,81 @@
+# Demo workload — proves a real pod gets a SPIFFE SVID end to end:
+#   1. Job pod is admitted with ServiceAccount spire-demo-client in ns spire-demo.
+#   2. spire-controller-manager (spire-server ns) has already reconciled
+#      demo-clusterspiffeid.yaml into a SPIRE registration entry matching this
+#      pod (by namespace + pod label selector, see that file's header).
+#   3. The pod mounts the SPIFFE Workload API unix socket as an ephemeral CSI
+#      volume (driver csi.spiffe.io, published by the spiffe-csi-driver DaemonSet
+#      in spire-system) — no hostPath, no elevated privilege needed on this side.
+#   4. spire-agent (also spire-system, DaemonSet on this node) performs k8s
+#      workload attestation (verifies the calling process's pod/SA/labels against
+#      the kubelet) and hands back an X.509-SVID over that socket.
+#   5. The container's ENTRYPOINT is overridden to run `spire-agent api fetch
+#      x509` ONCE (the spire-agent binary doubles as its own Workload API CLI
+#      client) and print the resulting SVID to stdout, then exit 0.
+#
+# Verify after ArgoCD syncs:
+#   kubectl -n spire-demo logs job/spire-demo-client
+# Expected output: one X.509-SVID block, SPIFFE ID
+#   spiffe://capstone.internal/ns/spire-demo/sa/spire-demo-client
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spire-demo-client
+  namespace: spire-demo
+  labels:
+    platform.capstone/component: platform
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: spire-demo-client
+  namespace: spire-demo
+  labels:
+    platform.capstone/component: platform
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        # Matches demo-clusterspiffeid.yaml's podSelector — the label the
+        # controller manager (and k8s workload attestor) key the SVID off of.
+        app.kubernetes.io/name: spire-demo-client
+    spec:
+      serviceAccountName: spire-demo-client
+      restartPolicy: Never
+      automountServiceAccountToken: false   # not needed; identity comes from SPIRE, not a k8s SA token
+      containers:
+        - name: spire-agent-cli
+          # Pinned to the same appVersion as the spire chart (applicationsets/
+          # spire-app.yaml, chart spire 0.29.0 / appVersion 1.14.5) — the
+          # spire-agent binary is also the Workload API fetch CLI, no separate
+          # "client" image needed.
+          image: ghcr.io/spiffe/spire-agent:1.14.5
+          command: ["/opt/spire/bin/spire-agent"]
+          args:
+            - api
+            - fetch
+            - x509
+            - -socketPath
+            - /spiffe-workload-api/spire-agent.sock
+            - -timeout
+            - 10s
+          volumeMounts:
+            - name: spiffe-workload-api
+              mountPath: /spiffe-workload-api
+              readOnly: true
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+            readOnlyRootFilesystem: true
+      volumes:
+        - name: spiffe-workload-api
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true

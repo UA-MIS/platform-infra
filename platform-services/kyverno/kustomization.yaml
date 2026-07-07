@@ -1,0 +1,8 @@
+# Kyverno namespace-only kustomize dir (the Helm chart is the SEPARATE
+# applicationsets/kyverno-app.yaml Application, method A) — same split as
+# harbor/vault/external-secrets. Picked up by the generic platform-services
+# ApplicationSet directory generator as `platform-svc-kyverno`.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml

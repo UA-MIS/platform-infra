@@ -1,0 +1,40 @@
+# service-mesh mutual-auth CNPs (Cilium SPIFFE/SPIRE `authentication.mode:
+# required`) — DELIBERATELY NOT wired to any ArgoCD Application (auto or
+# manual-sync). See each file's header + docs/service-mesh-mtls.md.
+#
+# Cilium v1.17.4 (the pinned version, clusters/real-talos/cilium-mtls-values.yaml)
+# fails CLOSED — DROPS the flow — when a required mutual-auth handshake can't
+# complete (e.g. SPIRE not yet installed/registered). Fail-open on an
+# incomplete handshake only lands in Cilium 1.19+. That means these manifests
+# must NEVER be applied through the routine, SPIRE-independent
+# `platform-netpol-controlplane` manual-sync path (hardening/netpol-controlplane/)
+# — doing so before SPIRE is live and has registered entries for every
+# participating identity would sever ESO/Backstage/provider-vault -> Vault and
+# provider-harbor -> Harbor traffic.
+#
+# APPLY ORDER (manual, human-run, in this sequence — never automated):
+#   1. Install SPIRE via the Cilium Helm overlay:
+#      clusters/real-talos/cilium-mtls-values.yaml (docs/cilium-cni-runbook.md
+#      Step 5).
+#   2. Verify SPIRE is healthy AND has registered entries for every
+#      participating identity (vault, external-secrets, crossplane-system
+#      provider-vault/provider-harbor runtimes, backstage):
+#        kubectl -n cilium-spire get pods
+#        kubectl exec -n cilium-spire spire-server-0 -c spire-server -- \
+#          /opt/spire/bin/spire-server entry show -selector cilium:mutual-auth
+#   3. Only then: kubectl apply -k hardening/service-mesh-mtls/
+#   4. Immediately verify: hubble observe --namespace vault --verdict DROPPED
+#      and --namespace harbor --verdict DROPPED are empty for legitimate
+#      traffic, and a real ExternalSecret / Project-RobotAccount reconcile
+#      still succeeds. Roll back per each file's header if not.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - mtls-vault-cnp.yaml
+  - mtls-harbor-provider-cnp.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false

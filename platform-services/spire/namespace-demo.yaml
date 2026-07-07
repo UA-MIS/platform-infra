@@ -1,0 +1,16 @@
+# spire-demo namespace — a STAND-IN for "some tenant workload" that consumes a
+# SPIFFE identity. Deliberately separate from spire-system/spire-server: the point
+# of the demo is to prove a workload OUTSIDE spire's own namespaces can be issued
+# an SVID via the CSI-driver + ClusterSPIFFEID path, which is the real integration
+# story for tenant/platform workloads later. Fully restricted PSS — the demo Job
+# runs non-root, no extra capabilities (see demo-workload.yaml).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: spire-demo
+  labels:
+    platform.capstone/component: platform
+    goldilocks.fairwinds.com/enabled: "false"   # one-shot demo Job, not a steady-state workload
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted

@@ -1,6 +1,8 @@
 # Cilium CNI swap — runbook (Talos, NetworkPolicy enforcement)
 
-**Status: ✅ COMPLETE / HISTORICAL (verified live 2026-07-04).** Cilium **v1.17.4** is
+**Status: ✅ COMPLETE / HISTORICAL (verified live 2026-07-04)** for Steps 1–4
+(the CNI swap itself). **Step 5 (mutual-auth mTLS) is NEW in this PR — manifests
++ values are in git, NOT applied.** Cilium **v1.17.4** is
 the live CNI on all nodes — VXLAN tunnel mode, `kubeProxyReplacement=true`,
 `ipam=kubernetes`, `bpf.hostLegacyRouting=true`; **kube-proxy is absent** and
 `cniConfig.name: none` is set in `talconfig.yaml`. NetworkPolicies are enforced. Keep
@@ -150,3 +152,109 @@ Only node-1 was touched (that's why it's first), so blast radius is one node.
 - Follow-up: Cilium FQDN egress to tighten the runner's external :443 from 0.0.0.0/0 to
   GitHub's domains/CIDRs (CiliumNetworkPolicy `toFQDNs`) — a real upgrade over the current
   port-only scope.
+- Done: Step 5 below (service-mesh east-west mTLS via Cilium's built-in mutual auth).
+
+## Step 5 — Mutual Authentication (mTLS) via SPIRE (service-mesh, additive)
+
+**Status: manifests + values in git; NOT applied.** This turns on Cilium's
+built-in, sidecarless service-mesh mutual-auth feature — SPIFFE/SPIRE-backed
+workload identity, cryptographically proving "who is on the other end of this
+connection" for east-west pod-to-pod traffic. It does **not** replace or
+require Istio/Linkerd; Cilium *is* the mesh here (it already terminates every
+packet as the CNI). Full concept/scope writeup, and what it covers vs the
+Tailscale node-level encryption: **docs/service-mesh-mtls.md**.
+
+This is an **overlay on the live Cilium install** (Step 2 above) — it does not
+touch `kubeProxyReplacement`, `bpf.hostLegacyRouting`, or any other existing
+value. Cilium remains INSTALL-OWNED (helm CLI, not an ArgoCD Application) for
+the same chicken/egg reason as the original install, so the overlay lives as a
+pinned, reviewable values file rather than a Helm-source Application:
+`clusters/real-talos/cilium-mtls-values.yaml`.
+
+```fish
+set -x KUBECONFIG /home/ccsmith33/Projects/Capstone-Modernization/.wt-talos/clusters/real-talos/talos-kubeconfig
+helm upgrade cilium cilium/cilium --version 1.17.4 --namespace kube-system \
+  --reuse-values -f clusters/real-talos/cilium-mtls-values.yaml
+kubectl -n kube-system rollout restart deployment/cilium-operator
+kubectl -n kube-system rollout restart ds/cilium
+```
+
+This installs a bundled SPIRE server + per-node SPIRE agents (own `cilium-spire`
+namespace, part of the same `cilium` Helm release) with the SPIRE server's
+registration/trust-bundle data on a `ceph-block` PVC (replica-3, survives a node
+loss — same convention as Vault/Harbor). It does **not** enforce anything by
+itself: mutual auth is opt-in **per CiliumNetworkPolicy rule**
+(`authentication.mode: "required"`) — flows with no such rule keep behaving
+exactly as they do today. The two opt-in policies shipped in this PR:
+
+- `hardening/service-mesh-mtls/mtls-vault-cnp.yaml` — requires mTLS for
+  ESO / provider-vault / Backstage → Vault:8200 (Vault is TLS end-to-end
+  already, so this is mutual-auth ONLY, no L7 — see the file header for why).
+- `hardening/service-mesh-mtls/mtls-harbor-provider-cnp.yaml` — requires
+  mTLS **and** restricts to the Harbor `/api/v2.0/projects*` +
+  `/api/v2.0/robots*` paths for provider-harbor → harbor-core:8080 (this path
+  is plaintext HTTP in-cluster, so Cilium's L7 proxy can actually parse it —
+  see the file header for a known Cilium gotcha to verify before trusting the
+  L7 narrowing).
+
+**⚠ These do NOT live in `hardening/netpol-controlplane/` and are NOT synced
+by `platform-netpol-controlplane`.** Cilium v1.17.4 (pinned) **fails CLOSED**
+on `authentication.mode: required` — it DROPS the flow if the mTLS handshake
+can't complete, it does not fall back to unauthenticated (fail-open on an
+incomplete handshake only lands in Cilium 1.19+). `platform-netpol-
+controlplane`'s manual sync is used for routine, SPIRE-independent netpol
+changes; if these policies lived in that directory, a routine sync run before
+SPIRE is live would immediately drop ESO/Backstage/provider-vault → Vault and
+provider-harbor → Harbor traffic. So instead these two manifests live in
+`hardening/service-mesh-mtls/` — a directory with **no ArgoCD Application
+wired to it at all** — and are applied ONLY by a human, in this exact order:
+
+```fish
+# 1. SPIRE must already be installed and healthy (the helm upgrade above) with
+#    a registered entry for every participating identity — verify FIRST:
+kubectl -n cilium-spire get pods
+kubectl exec -n cilium-spire spire-server-0 -c spire-server -- \
+  /opt/spire/bin/spire-server entry show -selector cilium:mutual-auth
+
+# 2. Only then apply the required-auth policies (never via ArgoCD sync):
+kubectl apply -k hardening/service-mesh-mtls/
+```
+
+**Validate:**
+```fish
+# SPIRE is healthy + has registered identities for the participating workloads:
+kubectl -n cilium-spire get pods
+kubectl exec -n cilium-spire spire-server-0 -c spire-server -- \
+  /opt/spire/bin/spire-server entry show -selector cilium:mutual-auth
+
+# Cilium status shows mutual auth up:
+cilium status   # look for the "Authentication" row
+
+# A real ESO ExternalSecret still resolves (Vault path) and a real
+# Project/RobotAccount reconcile still succeeds (Harbor path) — i.e. the
+# REQUIRED auth handshake is succeeding for the legitimate peers, not just
+# silently dropping them:
+hubble observe --namespace vault --verdict DROPPED
+hubble observe --namespace harbor --verdict DROPPED
+
+# The Harbor L7 gotcha (see mtls-harbor-provider-cnp.yaml header) — confirm the
+# HTTP proxy redirect actually exists for harbor-core, not shadowed by the
+# pre-existing L3/L4-only allow in harbor-netpol.yaml:
+kubectl -n kube-system exec ds/cilium -c cilium-agent -- cilium-dbg status --all-redirects
+```
+
+**Rollback:** if a legitimate control-plane path breaks (Vault access from
+ESO/Backstage/provider-vault, or Harbor onboarding from provider-harbor) and
+the fix isn't obvious quickly:
+```fish
+kubectl delete -k hardening/service-mesh-mtls/
+# and/or fully disable the feature cluster-wide:
+helm upgrade cilium cilium/cilium --version 1.17.4 --namespace kube-system \
+  --reuse-values --set authentication.enabled=false
+kubectl -n kube-system rollout restart deployment/cilium-operator
+kubectl -n kube-system rollout restart ds/cilium
+```
+The `mtls-*-cnp.yaml` policies are additive on top of the existing L3/L4
+allows (`vault-netpol.yaml`, `harbor-netpol.yaml`) — deleting them (or
+disabling `authentication.enabled` entirely) returns those paths to exactly
+their pre-mTLS behavior; no other traffic is affected.

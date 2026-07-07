@@ -1,0 +1,72 @@
+# CloudNativePG `Cluster` — the in-cluster Postgres 17 tier (db-setup task (a)).
+# HA: 3 instances (1 primary + 2 streaming replicas, automatic failover managed by
+# the operator), required pod anti-affinity across the 3 control-plane nodes (one
+# instance per node — matches the Rook-Ceph replica-3/failure-domain-host posture:
+# survives ANY single node loss with no data loss and no manual failover).
+#
+# Image: pinned to the exact (non-floating) CNPG-published PG17 build, Trixie
+# base — version + OS-family parity with the off-cluster ua-mis-db-1 box
+# (docs/db-tier-runbook.md: "PostgreSQL 17... pgBackRest from the Trixie repo").
+# Pin; bump deliberately (project convention — no :latest / floating minor tags).
+#
+# Storage: ceph-block (Rook-Ceph RBD, replica-3) — the cluster default SC. 10Gi is
+# generous headroom for small application-metadata databases (Backstage catalog +
+# Harbor metadata; NOT image blobs — those live in Harbor's own object storage).
+#
+# Bootstrap: CNPG requires an initdb bootstrap database; `app`/`app` is UNUSED by
+# any real consumer (Backstage/Harbor get their OWN databases + roles via
+# databases.yaml/roles.yaml, declared separately and decoupled from the Cluster
+# object). No `bootstrap.initdb.secret` -> the operator auto-generates + owns
+# `capstone-pg-app` (harmless, nothing reads it).
+#
+# Backups: via the Barman Cloud plugin (platform-services/cnpg/barman-plugin/),
+# NOT the deprecated in-tree `spec.backup.barmanObjectStore` — see
+# platform-services/cnpg/barman-plugin/kustomization.yaml for why. `isWALArchiver:
+# true` turns on continuous WAL shipping (PITR) in addition to the nightly
+# ScheduledBackup (scheduledbackup.yaml).
+#
+# No `enableSuperuserAccess` / no `managed.roles` here — per-app roles are
+# declared via the separate `DatabaseRole` CRD (roles.yaml), least-privilege and
+# decoupled from this object (no need to touch the Cluster spec to add a role).
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: capstone-pg
+  namespace: db-tier
+  labels:
+    platform.capstone/component: platform
+spec:
+  instances: 3
+  imageName: ghcr.io/cloudnative-pg/postgresql:17.9-202605110912-standard-trixie
+
+  storage:
+    storageClass: ceph-block
+    size: 10Gi
+
+  affinity:
+    enablePodAntiAffinity: true
+    topologyKey: kubernetes.io/hostname   # one instance per node (3 nodes, 3 instances)
+    podAntiAffinityType: required
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+    # No CPU limit — same reasoning as the Ceph OSDs (rook-ceph-cluster-app.yaml):
+    # avoid CPU-throttling a DB under load; the memory limit is the real RAM-
+    # governance guardrail on this fleet. Revisit if Goldilocks (goldilocks.
+    # fairwinds.com/enabled label above -> N/A, this is set on the namespace) flags
+    # a better-fit request/limit once real traffic lands.
+
+  bootstrap:
+    initdb:
+      database: app
+      owner: app
+
+  plugins:
+    - name: barman-cloud.cloudnative-pg.io
+      isWALArchiver: true
+      parameters:
+        barmanObjectName: capstone-pg-backup-store   # platform-services/cnpg/cluster/objectstore.yaml

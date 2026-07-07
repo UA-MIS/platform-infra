@@ -1,0 +1,14 @@
+# spire-server namespace — the SPIRE server StatefulSet + spire-controller-manager
+# (reconciles ClusterSPIFFEID CRs into SPIRE registration entries, ADR-pending
+# "Kubernetes Workload Registrar" model). Ordinary workload, no host access needed
+# — baseline PSS is enough (contrast with the privileged spire-system namespace).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: spire-server
+  labels:
+    platform.capstone/component: platform
+    goldilocks.fairwinds.com/enabled: "true"
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: baseline
+    pod-security.kubernetes.io/audit: restricted

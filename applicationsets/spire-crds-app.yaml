@@ -1,0 +1,47 @@
+# SPIRE CRDs Application (SPIFFE/SPIRE workload-identity baseline, exploratory).
+# Ships ONLY the CRDs (ClusterSPIFFEID, ClusterFederatedTrustDomain,
+# ClusterStaticEntry, ControllerManagerConfig) that spire-controller-manager and
+# our demo-clusterspiffeid.yaml need. Two-app split mirrors the established
+# operator/CRDs-first-then-CR pattern in this repo (rook-ceph-operator/-cluster,
+# kubevirt/cdi operator/cr, arc-controller/-runner-scaleset): THIS app is wave -1
+# (CRDs before anything), applicationsets/spire-app.yaml (server+agent+controller-
+# manager+CSI-driver) is wave 0.
+#
+# Chart: spire-crds 0.5.0 (from the same spiffe/helm-charts-hardened repo as the
+# spire umbrella chart; no separate appVersion — it is CRDs only). Repo pinned +
+# allowlisted in the platform AppProject sourceRepos (bootstrap/platform-appproject.yaml)
+# — that add is INSTALL-OWNED (same as every other Helm-source Application in this
+# repo): reaches the live `platform` AppProject only via `make bootstrap`/`make
+# bootstrap-reapply` + VERIFY, or platform-spire-crds will InvalidSpecError "repo
+# not permitted".
+# Root-app recurses applicationsets/, so this Application is registered.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-spire-crds
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"   # CRDs first, before spire-app (wave 0)
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://spiffe.github.io/helm-charts-hardened/   # PINNED chart repo (sourceRepos allowlist)
+    chart: spire-crds
+    targetRevision: 0.5.0                                       # pinned chart version; no ^/~/latest
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: spire-server   # CRDs are cluster-scoped; namespace is a fallback, not authoritative
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false   # spire-server ns ships via platform-services/spire
+      - ServerSideApply=true    # CRDs
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

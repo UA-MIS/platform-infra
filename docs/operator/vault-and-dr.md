@@ -2,7 +2,10 @@
 
 HashiCorp Vault is the runtime secret store: ESO reads from it and materializes
 namespaced Kubernetes Secrets (see [Secrets & ESO](secrets-eso.md)). Vault runs
-single-node, Raft on Ceph, in the `vault` namespace.
+**3-node Raft HA** (one pod per control-plane node, hard anti-affinity), Raft
+storage on Ceph, in the `vault` namespace — tolerating one node/pod loss with no
+interruption to secret sync. (Prior to the HA rollout it ran single-node; see
+`artifacts/design/vault-dr-runbook.md` §G for the rollout procedure.)
 
 > **The authoritative procedure is `artifacts/design/vault-dr-runbook.md`.** This
 > page summarizes the architecture and the operator-facing actions. **Every step
@@ -21,8 +24,9 @@ GitOps surfaces:
 ## Transit auto-unseal architecture
 
 The retro flagged Vault as "single-node, manual-unseal, no DR." Track-2 (ADR-030
-B1, PR #126) fixed unseal toil and DR without going to 3-node HA (explicitly out
-of scope — anti-gold-plate).
+B1, PR #126) fixed unseal toil and DR first, on the single node. A follow-up PR
+then added 3-node Raft HA (below) — Vault-**process** HA, not just data
+durability.
 
 ```
   ┌─────────────────────────┐  seal "transit" (TLS, token-auth)   ┌──────────────────────────┐
@@ -66,12 +70,39 @@ and store them offline (`vault operator rekey -target=recovery ...`).
 
 ---
 
+## 3-node Raft HA
+
+`applicationsets/vault-app.yaml` runs the main Vault at `ha.replicas: 3` with a
+hard `podAntiAffinity` (one Vault server pod per control-plane node — there are
+exactly 3). The cluster tolerates **one node/pod loss** with **zero** interruption
+to secret sync: a leader is always reachable via the chart-managed `vault-active`
+Service (label `vault-active: "true"`, re-pointed automatically on failover); the
+two followers are reachable via `vault-standby`. Transit auto-unseal (above)
+applies to all 3 pods identically — a follower that restarts or newly joins
+auto-unseals within seconds, no Shamir typing.
+
+- **Rollout procedure** (1 → 3, one-time): `vault operator raft join` each new
+  follower against the existing leader, confirm auto-unseal, confirm quorum via
+  `vault operator raft list-peers`. Full steps + a failure cheatsheet:
+  `artifacts/design/vault-dr-runbook.md` §G.
+- **Steady state:** a rebooted/rescheduled pod rejoins on its own from its
+  persisted Raft state on its Ceph PVC — no manual re-join needed. Only a
+  brand-new (empty-PVC) pod needs an explicit `raft join`.
+- **Scale-down is not supported live** — see the runbook §G Rollback note
+  (`vault operator raft remove-peer` before reducing `ha.replicas`).
+- **The unsealer stays single-node, manual-unseal** — 3-node HA applies only to
+  the main Vault (see §A above).
+
+---
+
 ## DR: Raft snapshots
 
 A daily CronJob `vault-raft-snapshot` (`vault` ns, `platform-services/vault/raft-snapshot.yaml`)
 runs `vault operator raft snapshot save` to the `vault-snapshots` Ceph PVC (5Gi,
 replica-3), schedule `0 3 * * *`, retaining the newest **14** (`RETAIN` env). It
-authenticates via Kubernetes auth as SA `vault-snapshot`.
+authenticates via Kubernetes auth as SA `vault-snapshot`, and targets
+`vault-active.vault.svc` (not the generic `vault` Service) so the snapshot is
+always taken against the current raft leader, never a standby.
 
 > ⚠ **The snapshot auth (Vault policy + k8s role) is a one-time operator setup
 > that is not yet done** — issue #126 follow-up. The CronJob fails
@@ -88,13 +119,18 @@ kubectl -n vault logs job/snap-test           # expect a /snapshots/vault-raft-<
 
 ### Restore (runbook §E)
 
-A snapshot restores into a **running, unsealed** Vault and **replaces all data**.
+A snapshot restores into a **running, unsealed** Vault and **replaces all data**
+cluster-wide (the leader replicates the restored state to both followers over
+raft — you do not restore into each pod separately). Run it against whichever pod
+is currently the leader (`vault operator raft list-peers` to confirm; `vault-0`
+below assumes it still is):
 
 ```bash
-# copy the chosen .snap into vault-0, then (logged in with a root/recovery-derived token):
+# copy the chosen .snap into the LEADER pod, then (logged in with a root/recovery-derived token):
 kubectl -n vault cp <local>/vault-raft-<UTC>.snap vault/vault-0:/tmp/restore.snap
 kubectl -n vault exec -it vault-0 -- vault operator raft snapshot restore -force /tmp/restore.snap
 kubectl -n vault exec -it vault-0 -- vault status        # Sealed=false (auto-unseals)
+kubectl -n vault exec -it vault-0 -- vault operator raft list-peers   # confirm all 3 still voters after restore
 ```
 
 > **Cross-seal note (runbook §E):** these snapshots are taken under **Transit**, so
@@ -127,17 +163,25 @@ sops/age key in the handoff vault (`docs/OPERATIONS-AND-HANDOFF.md` §5).
 | TLS verify error in main Vault logs | `vault-unsealer-ca` wrong/missing | re-create from the unsealer's CA (§C-5) |
 | snapshot CronJob `permission denied` | `snapshot` policy/role not created | run [Runbooks → (A)](runbooks.md) |
 | snapshot CronJob TLS error | `vault-server-tls` missing `ca.crt` | re-issue the cert with `ca.crt` (cert-manager CA issuer) |
+| `vault-1`/`vault-2` stuck `0/1`, no raft-join errors | transit auto-unseal in progress (a few seconds to ~30s after join) | wait, then `vault status`; see the runbook §G cheatsheet if still sealed after 2 min |
+| `vault operator raft list-peers` shows <3 voters | a pod hasn't been joined yet, or a node/pod is down | join it (runbook §G) if new; otherwise wait for reschedule (rejoins automatically from its own PVC) |
 
 The `VaultSealedOrDown` alert (critical, via kube-state-metrics) fires when the
-vault StatefulSet has 0 ready replicas for 5m — see [Observability](observability.md).
+vault StatefulSet has 0 ready replicas for 5m (all 3 pods down/sealed — full
+outage). The `VaultHADegraded` warning alert fires when fewer than 3 of 3 replicas
+are ready for 10m (one pod down but the cluster still has quorum and is serving
+via the other two) — see [Observability](observability.md).
 
 ---
 
 ## ⚠ `OnDelete` StatefulSet update strategy
 
 The Vault StatefulSet uses the `OnDelete` update strategy on purpose: a change to
-the StatefulSet spec does **not** roll the pod automatically — you delete the pod
-to apply it, on your schedule. This once **prevented an accidental Vault brick**
-(an auto-roll into a bad config would have sealed Vault with no operator present).
-Expect to `kubectl -n vault delete pod vault-0` deliberately after a Vault config
-change, and confirm it returns Ready (auto-unseals) before moving on.
+the StatefulSet spec does **not** roll pods automatically — you delete each pod
+to apply it, on your schedule, one at a time. This once **prevented an accidental
+Vault brick** (an auto-roll into a bad config would have sealed Vault with no
+operator present); with 3-node HA it also means a bad config rolls out to at most
+one pod before you notice, instead of all 3 simultaneously. Expect to `kubectl -n
+vault delete pod vault-0` (then `vault-1`, then `vault-2` — one at a time,
+confirming each returns `1/1` and auto-unseals before moving to the next) after a
+Vault config change.
