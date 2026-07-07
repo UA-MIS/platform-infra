@@ -41,6 +41,10 @@ resources:
   - dashboard-tenant-quota.yaml
   - dashboard-platform-health.yaml
   - dashboard-tenant-cicd.yaml
+  # Cost allocation (OpenCost, applicationsets/opencost-app.yaml): per-namespace
+  # $/hr and est. monthly cost derived from OpenCost's owned-hardware custom
+  # pricing. See README "Cost allocation (OpenCost)" for the pricing derivation.
+  - dashboard-cost-allocation.yaml
 
 labels:
   - pairs:

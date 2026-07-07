@@ -1,0 +1,214 @@
+# OpenCost Application (cost visibility — per-namespace/tenant spend on OWNED
+# hardware, not cloud). Wires OpenCost to the existing platform Prometheus
+# (platform-kube-prometheus-stack) and configures CUSTOM PRICING so the per-core/
+# per-GiB/per-GB rates reflect this platform's actual electricity + amortized
+# hardware cost instead of OpenCost's build-in default (GCP us-central1 list
+# pricing, meaningless for owned SFF desktops and Mac Minis).
+#
+# Deploy method A (D-022/D-028), same as every other Helm-source platform app: a
+# Helm-source Application with the chart repo pinned + allowlisted in the
+# `platform` AppProject sourceRepos (bootstrap/platform-appproject.yaml —
+# INSTALL-OWNED, re-apply via `make bootstrap-reapply` after merge). Root-app
+# recurses applicationsets/, so this Application is registered.
+#
+# Chart: opencost 2.5.26 (appVersion 1.120.4), pinned. Bump deliberately.
+#
+# ── depends on Prometheus (sync-wave 1) ───────────────────────────────────────
+# OpenCost is a pure Prometheus CONSUMER (it queries node/pod resource metrics and
+# re-exposes cost metrics derived from them) — it has no CRDs of its own to race.
+# Wave 1 just orders it after platform-kube-prometheus-stack (wave 0), which is the
+# thing it points at (opencost.prometheus.internal below); not strictly required
+# for ArgoCD (retry/selfHeal would converge either order) but documents the real
+# dependency and avoids a cold-start where OpenCost's first scrape returns nothing
+# because Prometheus/kube-state-metrics aren't up yet.
+#
+# ── why custom pricing (the actual point of this PR) ──────────────────────────
+# OpenCost's stock "default" pricing model assumes a GCP us-central1 cluster
+# ($0.031611/core-hr CPU, $0.004237/GiB-hr RAM, $0.0000548/GiB-hr storage) — on
+# OWNED hardware that number means nothing; every namespace's "cost" would just be
+# a fixed multiple of its requests, not a reflection of what this platform
+# actually costs to run. `customPricing.enabled: true` below overrides those three
+# rates with a FLAT, BLENDED per-core/per-GiB/per-GB-hour rate derived from this
+# fleet's real electricity draw + an amortized hardware replacement cost — see
+# "PRICING ASSUMPTIONS" below and platform-services/monitoring/README.md for the
+# full worked derivation (so the next operator can re-derive it, not just trust a
+# magic number).
+#
+# ⚠ Same caveat OpenCost's own docs give for on-prem: this is ONE flat rate for
+# the whole cluster (the chart's customPricing.costModel has no concept of "this
+# node type costs more than that one") — it deliberately blends the OptiPlex
+# control-plane fleet and the Mac Mini worker fleet into one weighted-average
+# $/core-hr and $/GiB-hr. Good enough for relative namespace-to-namespace
+# comparison and showback; NOT a precise per-node bill (OpenCost's node-level
+# `node_cpu_hourly_cost` metric will show the SAME number for every node).
+#
+# ══════════════════════════ PRICING ASSUMPTIONS ══════════════════════════════
+# Fleet (confirmed live via `kubectl get nodes`, 2026-07-07):
+#   3× capstone-n1/2/3   (Dell OptiPlex 7080, Talos)   16 vCPU, 16 GiB RAM each
+#   3× mac-debian-01/2/3 (Late-2014 Mac Mini, Debian)   4 vCPU,  8 GiB RAM each
+#   Fleet totals: 60 vCPU, 72 GiB RAM.
+#
+# Two cost components per node, both HOURLY:
+#   1. Electricity:  (avg sustained watts / 1000) * $/kWh
+#   2. Hardware:     (replacement-value $) / (amortization years * 8760 h/yr)
+#      — this hardware is already-owned/surplus capstone equipment (sunk cost,
+#      not a real invoice), but a showback tool that reports $0 hardware cost
+#      is not useful for "what would it cost to replace/scale this platform" —
+#      so we amortize a REPLACEMENT-VALUE estimate, same TCO convention any
+#      on-prem OpenCost writeup uses. Treat every number below as an editable
+#      default, not a measured fact — re-derive with your real utility rate and
+#      real acquisition/replacement prices if you have them.
+#
+# OptiPlex 7080 (SFF desktop, i7-10700, always-on lightly-loaded k8s node):
+#   electricity: 40W avg sustained (SFF idle ~10-15W + moderate always-on k8s
+#     load; NOT peak draw) * $0.16/kWh (~2024-2025 US blended average retail
+#     electricity price, EIA reference) = $0.0064/hr
+#   hardware:    $250 refurb/used-market replacement value, 4yr amortization
+#     (35,040 h) = $0.007135/hr
+#   node total:  $0.013535/hr  ×3 nodes = $0.040605/hr (CP fleet)
+#
+# Mac Mini (Late-2014, dual-core, famously low-power, worker-only):
+#   electricity: 12W avg sustained (Mac Minis idle ~6-10W; light k8s load) *
+#     $0.16/kWh = $0.00192/hr
+#   hardware:    $50 replacement-value estimate (EOL/surplus unit, short
+#     remaining life), 3yr amortization (26,280 h) = $0.001903/hr
+#   node total:  $0.003823/hr  ×3 nodes = $0.011469/hr (worker fleet)
+#
+# Fleet hourly total = $0.040605 + $0.011469 = $0.052074/hr
+#
+# Split fleet cost into CPU vs RAM pools (needed because OpenCost wants two
+# separate $/core-hr and $/GiB-hr numbers, not one lump sum): 70% of the
+# electricity+hardware total is attributed to CPU, 30% to RAM. This ratio is a
+# documented judgment call (roughly reflects a commodity-desktop BOM split:
+# CPU/board/PSU dominate, RAM is a smaller line item) — not a market price
+# signal, because none exists for capacity you already own. Adjust the split if
+# you disagree with the weighting; the derivation is fully in this comment so
+# it is easy to redo.
+#   CPU pool: 0.70 * $0.052074/hr = $0.036452/hr  ÷ 60 vCPU  = $0.000608/core-hr
+#   RAM pool: 0.30 * $0.052074/hr = $0.015622/hr  ÷ 72 GiB   = $0.000217/GiB-hr
+#
+# Storage: priced SEPARATELY from the CPU/RAM pool above (avoids double-counting
+# the node's own price). Only the 3 OptiPlex nodes carry a Ceph OSD disk (the
+# 500GB SATA SSD alongside the NVMe boot disk — Phase-4 hardware runbook); Rook-
+# Ceph replicates 3× (replica-3), so 3 raw 500GB devices buy 500GB of USABLE
+# storage.
+#   3× $35 (budget 500GB SATA SSD replacement value) = $105 raw hardware cost
+#   amortized over 4yr (35,040h) = $0.002997/hr, for 500GB of usable capacity
+#   = $0.000006/GiB-hr. (Electricity for the disks is already folded into the
+#   40W/node figure above — a SATA SSD's incremental draw over a bare board is
+#   small enough that splitting it out separately isn't worth the precision it
+#   implies.)
+#
+# Final values wired into opencost.customPricing.costModel below:
+#   CPU:     0.000608   ($/vCPU-hour)
+#   RAM:     0.000217   ($/GiB-hour)
+#   storage: 0.000006   ($/GiB-hour)
+# ═══════════════════════════════════════════════════════════════════════════
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-opencost
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"   # after platform-kube-prometheus-stack (wave 0)
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://opencost.github.io/opencost-helm-chart   # PINNED chart repo (sourceRepos allowlist)
+    chart: opencost
+    targetRevision: 2.5.26                                    # pinned chart version (appVersion 1.120.4); no ^/~/latest
+    helm:
+      releaseName: opencost
+      values: |
+        # ⚠ Do NOT set top-level `clusterName` to anything but the real k8s DNS
+        # domain: the chart's _helpers.tpl reuses this SAME value to build the
+        # in-cluster Prometheus/Thanos Service FQDN (`svc.<clusterName>`), despite
+        # the values.yaml comment describing it as a cosmetic "cluster name" label.
+        # Confirmed live (`kubectl -n kube-system get cm coredns -o jsonpath=
+        # '{.data.Corefile}'`): this cluster's DNS domain is the k8s standard
+        # `cluster.local`, so this is left at the chart default (unset here) — the
+        # cluster-identity label used by cost metrics/UI is `exporter.defaultClusterId`
+        # below instead, which is a distinct, safe-to-customize field.
+
+        opencost:
+          # Point at the existing platform Prometheus (platform-kube-prometheus-stack,
+          # applicationsets/kube-prometheus-stack-app.yaml) instead of installing/using
+          # a second one. Confirmed live Service: kube-prometheus-stack-prometheus.monitoring
+          # :9090 (`kubectl -n monitoring get svc`).
+          prometheus:
+            internal:
+              enabled: true
+              serviceName: kube-prometheus-stack-prometheus
+              namespaceName: monitoring
+              port: 9090
+
+          exporter:
+            defaultClusterId: capstone
+
+          # ── Custom pricing: owned-hardware rates, NOT OpenCost's cloud defaults ──
+          # See "PRICING ASSUMPTIONS" in the header comment for the full derivation.
+          # `provider: custom` (not aws/gcp/azure/...) — this is a from-scratch rate
+          # sheet, not a discount off a cloud provider's list price.
+          customPricing:
+            enabled: true
+            provider: custom
+            costModel:
+              description: >-
+                Capstone platform owned-hardware rates: blended electricity +
+                amortized-replacement-value cost across 3x OptiPlex 7080 (CP,
+                16 vCPU/16GiB each) + 3x Mac Mini (worker, 4 vCPU/8GiB each).
+                $0.16/kWh, 4yr HW amortization (3yr for the EOL Mac Minis), 70/30
+                CPU/RAM cost split. Full derivation in this Application's header
+                comment and platform-services/monitoring/README.md. Edit these
+                three numbers if your real electricity rate or replacement-value
+                assumptions differ — they are documented defaults, not measured
+                invoices.
+              CPU: "0.000608"        # $/vCPU-hour
+              RAM: "0.000217"        # $/GiB-hour
+              storage: "0.000006"    # $/GiB-hour (Ceph RBD, replica-3, usable capacity) -- quoted so Helm/Go doesn't reformat this small value into 6e-06 in the rendered JSON
+              # No cloud-specific fields (spotCPU/GPU/network egress/AWS-Athena-*)
+              # apply on owned hardware with no internet egress metering — left at
+              # chart default (0 / empty), not populated here.
+
+          # Cost metrics feed Prometheus (so the Grafana dashboard below can query
+          # them) — matches the pattern already used for every other component
+          # (ArgoCD/cert-manager/ESO/Crossplane ServiceMonitors in
+          # platform-services/monitoring/servicemonitors.yaml). Not additionalLabels-
+          # gated: platform-kube-prometheus-stack sets
+          # serviceMonitorSelectorNilUsesHelmValues: false, so Prometheus discovers
+          # this ServiceMonitor regardless of release label (same reasoning as every
+          # other ServiceMonitor in this repo).
+          metrics:
+            serviceMonitor:
+              enabled: true
+
+        # OpenCost's own UI has NO authentication (unlike Grafana, which sits behind
+        # an admin/password SealedSecret). Keeping it a ClusterIP-only Service (no
+        # ingress) rather than exposing it on the Cloudflare tunnel avoids adding an
+        # unauthenticated cost-data endpoint to the public surface — the same posture
+        # already used for Prometheus/Alertmanager (README: "ClusterIP only, port-
+        # forward for internal ops"). The Grafana dashboard shipped alongside this
+        # Application (behind Grafana's own auth) is the intended day-to-day view;
+        # `kubectl -n opencost port-forward svc/opencost 9090:9090` reaches the native
+        # OpenCost UI for deeper ad-hoc digging.
+        ui:
+          enabled: true
+          ingress:
+            enabled: false
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: opencost
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true    # dedicated `opencost` namespace
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

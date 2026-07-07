@@ -51,7 +51,7 @@ broad k8s/node/kubelet/etcd/apiserver coverage on top of these.
 
 ## Admin dashboards (dashboards-as-code)
 
-Four operator-facing Grafana dashboards, each shipped as a `ConfigMap` labeled
+Five operator-facing Grafana dashboards, each shipped as a `ConfigMap` labeled
 `grafana_dashboard: "1"` — the Grafana chart's default k8s-sidecar (`sidecar.dashboards`,
 chart default ON) watches for that label and auto-provisions the JSON, no manual
 Grafana import. Every panel's datasource is a `${datasource}` template variable
@@ -65,6 +65,7 @@ datasource.
 | **Per-Tenant Usage vs Quota** | `dashboard-tenant-quota.yaml` | CPU/memory/pods/services used vs `ResourceQuota` hard limits per tenant namespace, PVC storage usage | `kube_resourcequota` (kube-state-metrics) — real metrics, day-one. The `namespace` variable is populated FROM `kube_resourcequota` itself, so it lists tenant namespaces without needing custom labels allow-listed |
 | **Platform Health** | `dashboard-platform-health.yaml` | ArgoCD Synced/Healthy counts + apps needing attention (real); Vault/Harbor/ARC (**proxies** — pod/deployment/statefulset status via kube-state-metrics, not each component's own `/metrics`); Crossplane has a real `/metrics` PodMonitor as of this PR but the panel still reads the proxy (rewiring the panel is a follow-up) | ArgoCD + Crossplane ServiceMonitor/PodMonitor (real) + kube-state-metrics (proxy for Vault/Harbor/ARC) |
 | **Tenant CI/CD** | `dashboard-tenant-cicd.yaml` | `arc-runners` pod activity (all teams combined — real, but no per-team breakdown), tenant ArgoCD app deploy status (real); image pushes / per-team runner usage — **not shown**, see follow-ups panel in-dashboard | kube-state-metrics + ArgoCD |
+| **Cost Allocation** | `dashboard-cost-allocation.yaml` | Per-namespace CPU/RAM/storage $/hr and est. monthly cost, cluster-wide hourly/monthly totals, per-node pricing sanity check | OpenCost `/metrics` (real, day-one once `platform-opencost` is Healthy) — see "Cost allocation (OpenCost)" below |
 
 **Done in this PR:** Crossplane's controller-runtime `/metrics` is now scraped (a
 `PodMonitor` in `servicemonitors.yaml`, confirmed live 2026-07-02 via
@@ -117,6 +118,115 @@ Adding any of the above is: ship a `ServiceMonitor`/`PodMonitor` in this dir (sa
 pattern as `servicemonitors.yaml`) pointed at the component's metrics port, confirm
 Prometheus picks it up (`kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090`,
 check Status → Targets), then extend the relevant dashboard panel.
+
+## Cost allocation (OpenCost)
+
+**Component:** OpenCost, `applicationsets/opencost-app.yaml` (Helm, chart `2.5.26`,
+own `platform-opencost` Application + dedicated `opencost` namespace — same
+Helm-source pattern as Goldilocks/VPA, not part of this `monitoring` kustomize dir).
+It points at the existing `kube-prometheus-stack-prometheus` Service in this
+namespace (no second Prometheus) and re-exposes derived cost metrics
+(`node_cpu_hourly_cost`, `node_ram_hourly_cost`, `node_total_hourly_cost`,
+`pv_hourly_cost`, `container_cpu_allocation`, `container_memory_allocation_bytes`,
+`pod_pvc_allocation`, ...) back to that same Prometheus via a `ServiceMonitor` —
+picked up automatically because `serviceMonitorSelectorNilUsesHelmValues: false` is
+already set (see the header comment on `kube-prometheus-stack-app.yaml`). The
+**Cost Allocation** dashboard above reads those metrics.
+
+### Why custom pricing, and why it isn't cloud list pricing
+
+This is **owned hardware**, not a cloud account — OpenCost's built-in "default"
+pricing model assumes a GCP us-central1 cluster (`$0.031611`/vCPU-hr, `$0.004237`
+/GiB-hr RAM, `$0.0000548`/GiB-hr storage). Left as-is, every namespace's "cost"
+would just be a fixed multiple of its requests — not a reflection of what this
+platform actually costs to run. `opencost.customPricing` in the Application
+overrides CPU/RAM/storage with a **flat, blended** rate derived from this fleet's
+real electricity draw plus an amortized hardware-replacement cost.
+
+**Fleet** (confirmed live via `kubectl get nodes`, 2026-07-07):
+
+| Node type | Count | vCPU each | RAM each |
+| --- | --- | --- | --- |
+| Dell OptiPlex 7080 (Talos control-plane) | 3 | 16 | 16 GiB |
+| Mac Mini, Late-2014 (Debian worker) | 3 | 4 | 8 GiB |
+| **Fleet total** | 6 | **60 vCPU** | **72 GiB** |
+
+**Per-node hourly cost = electricity + amortized hardware**, both editable
+assumptions (this hardware is already-owned/surplus capstone equipment — the
+"hardware" term is a replacement-value estimate for TCO/showback purposes, not a
+real recurring invoice):
+
+| | OptiPlex 7080 | Mac Mini (Late-2014) |
+| --- | --- | --- |
+| Avg sustained power draw | 40 W (SFF, always-on, moderate k8s load) | 12 W (famously low-power) |
+| Electricity rate | $0.16/kWh (blended US retail average) | same |
+| → electricity $/hr | 0.040 kW × 0.16 = **$0.0064** | 0.012 kW × 0.16 = **$0.00192** |
+| Replacement value | $250 (refurb SFF i7/16GB/512GB market estimate) | $50 (EOL/surplus estimate) |
+| Amortization | 4 yr (35,040 h) | 3 yr (26,280 h) — shorter remaining life |
+| → hardware $/hr | 250/35,040 = **$0.007135** | 50/26,280 = **$0.001903** |
+| **Node total $/hr** | **$0.013535** | **$0.003823** |
+| ×3 nodes | $0.040605 | $0.011469 |
+
+**Fleet hourly total** = 0.040605 + 0.011469 = **$0.052074/hr**.
+
+That total is split into a CPU pool and a RAM pool — OpenCost's on-prem custom
+pricing wants one flat `$/vCPU-hr` and one flat `$/GiB-hr` number, not a lump sum,
+and there's no market price signal to split them by for capacity you already own.
+This PR uses a documented **70% CPU / 30% RAM** split (a commodity-desktop BOM
+approximation — CPU/board/PSU dominate, RAM is the smaller line item); change the
+ratio in the Application's header comment if you disagree with the weighting:
+
+- CPU pool: `0.70 × $0.052074 = $0.036452/hr ÷ 60 vCPU = $0.000608/vCPU-hr`
+- RAM pool: `0.30 × $0.052074 = $0.015622/hr ÷ 72 GiB = $0.000217/GiB-hr`
+
+**Storage** is priced separately (so it isn't double-counted against the node price
+above): only the 3 OptiPlex nodes carry the Ceph OSD disk (a 500GB SATA SSD
+alongside the NVMe boot disk, per the Phase-4 hardware runbook). Rook-Ceph
+replicates 3× (replica-3), so 3 raw 500GB devices buy 500GB of *usable* capacity:
+3 × $35 (budget 500GB SATA SSD estimate) = $105, amortized over 4yr (35,040h) =
+$0.002997/hr ÷ 500 GB = **$0.000006/GiB-hr**. (Electricity for the OSD disk is
+already folded into the 40W/node figure above — its incremental draw over a bare
+board is small enough that separating it out isn't worth the added complexity.)
+
+**Wired into `opencost.customPricing.costModel`:**
+
+| Rate | Value | Unit |
+| --- | --- | --- |
+| CPU | `0.000608` | $ / vCPU-hour |
+| RAM | `0.000217` | $ / GiB-hour |
+| storage | `0.000006` | $ / GiB-hour |
+
+⚠ **Limitations, stated plainly:**
+- This is **one flat rate for the whole cluster** — OpenCost's on-prem custom
+  pricing has no concept of "this node type costs more than that one". The
+  dashboard's node-pricing-sanity table will show the *same* `$/vCPU-hr` on every
+  node, OptiPlex or Mac Mini. Good for relative namespace-to-namespace showback,
+  not a precise per-node bill.
+- Every number above is a **documented default**, not a measured fact — local
+  electricity rate, real acquisition/replacement prices, and amortization horizon
+  will differ per operator. Re-derive with your own numbers using the same method
+  (electricity $/hr + hardware $/hr, split 70/30 CPU/RAM, storage priced
+  separately against usable-after-replication capacity).
+
+### Access
+
+OpenCost's own UI has **no authentication** (unlike Grafana's admin/password
+SealedSecret), so — same posture as Prometheus/Alertmanager — it is **not** exposed
+on the Cloudflare tunnel. Reach it with:
+
+```
+kubectl -n opencost port-forward svc/opencost 9090:9090
+```
+
+then open `http://localhost:9090`. Day-to-day, use the **Cost Allocation** Grafana
+dashboard instead (behind Grafana's own auth).
+
+### Deploy note
+
+Same as every other Helm-source platform app: `make bootstrap-reapply` after merge
+adds `https://opencost.github.io/opencost-helm-chart` to the **install-owned**
+`platform` AppProject `sourceRepos` — else `platform-opencost` `InvalidSpecError
+"repo not permitted"`. VERIFY it took.
 
 ## Notification channel (the `platform-oncall` webhook receiver)
 

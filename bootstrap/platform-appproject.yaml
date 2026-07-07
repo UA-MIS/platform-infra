@@ -109,6 +109,13 @@ spec:
     # GitOps-reconciled) or platform-vpa / platform-goldilocks will InvalidSpecError
     # "repo not permitted".
     - https://charts.fairwinds.com/stable                  # VPA + Goldilocks (platform-vpa / platform-goldilocks Applications)
+    # OpenCost (cost visibility on owned hardware): the official OpenCost Helm chart
+    # repo. ONE named source, chart version pinned in the Application (opencost @
+    # 2.5.26). ⚠ INSTALL-OWNED (same as every add above): reaches the live `platform`
+    # AppProject only via `make bootstrap`/`make bootstrap-reapply` + VERIFY (the
+    # AppProject is bootstrap-managed, not GitOps-reconciled) or platform-opencost
+    # will InvalidSpecError "repo not permitted".
+    - https://opencost.github.io/opencost-helm-chart        # OpenCost (platform-opencost Application)
 
   # Platform services are cluster-wide; allow any namespace on the in-cluster API.
   destinations:
