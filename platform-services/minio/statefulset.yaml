@@ -54,6 +54,31 @@ spec:
         fsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
+      # kubelet's fsGroup chown is unreliable for hostPath volumes (works for
+      # CSI-managed PVCs, silently no-ops for hostPath on some kernels/CRI
+      # combos). The kubelet auto-created /var/lib/minio-dr-backup on the node
+      # via `type: DirectoryOrCreate` but owns it root:root, so MinIO (uid 1000)
+      # gets EACCES on `.minio.sys/tmp`. This initContainer runs as root JUST
+      # long enough to chown the mount to 1000:1000, then exits — the main
+      # container still runs unprivileged as uid 1000 with fsGroup 1000.
+      initContainers:
+        - name: chown-data
+          image: busybox:1.37.0
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "chown 1000:1000 /data && chmod 0770 /data"]
+          securityContext:
+            runAsNonRoot: false
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN"]
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { cpu: 100m, memory: 32Mi }
+          volumeMounts:
+            - name: data
+              mountPath: /data
       containers:
         - name: minio
           image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
