@@ -101,21 +101,28 @@ spec:
     - https://prometheus-community.github.io/helm-charts   # kube-prometheus-stack (platform-kube-prometheus-stack Application)
     - https://grafana.github.io/helm-charts                # Loki + Alloy (platform-loki / platform-alloy Applications)
     # Tracing + long-term metrics (this PR): OTel Collector chart repo (traces pipe
-    # into Tempo, sampled low for RAM) and the MinIO chart repo (the `dr-backup`
-    # bucket that backs Thanos long-term metrics storage — see
-    # platform-services/monitoring/README.md "Long-term metrics (Thanos)" for the
-    # MinIO→Thanos dependency ordering). TWO named sources, chart versions pinned in
-    # the Applications (opentelemetry-collector @ 0.162.0, minio @ 5.4.0). Tempo and
-    # Thanos (query/store-gateway/compactor) are BOTH shipped as raw manifests
+    # into Tempo, sampled low for RAM). ONE named source, chart version pinned in
+    # the Application (opentelemetry-collector @ 0.162.0). Tempo and Thanos (query/
+    # store-gateway/compactor) are BOTH shipped as raw manifests
     # (platform-services/monitoring/{tempo,thanos}.yaml) — Tempo's own single-binary
     # Helm chart is upstream `deprecated: true` (see tempo.yaml's header) — so
     # neither needs a sourceRepos entry at all. ⚠ INSTALL-OWNED (same
     # as every add above): reaches the live `platform` AppProject only via `make
     # bootstrap`/`make bootstrap-reapply` + VERIFY (the AppProject is bootstrap-
-    # managed, not GitOps-reconciled) or platform-otel-collector / platform-minio
-    # will InvalidSpecError "repo not permitted".
+    # managed, not GitOps-reconciled) or platform-otel-collector will
+    # InvalidSpecError "repo not permitted".
+    #
+    # ⚠ NOTE (overnight integration merge): the standalone Helm `platform-minio`
+    # Application originally proposed alongside this (chart `charts.min.io`) was
+    # DROPPED during the merge — it would have deployed a second, conflicting MinIO
+    # into the same `minio` namespace/Service already owned by the `dr-backup`
+    # plain-manifest MinIO (platform-services/minio/, PR #247). See
+    # platform-services/monitoring/README.md "Long-term metrics (Thanos)" for the
+    # resulting unresolved integration gap (Thanos's `dr-backup` bucket + `thanos`
+    # IAM user still need to be provisioned against the existing MinIO). No
+    # `charts.min.io` sourceRepos entry is needed unless that follow-up switches
+    # back to a Helm-source MinIO.
     - https://open-telemetry.github.io/opentelemetry-helm-charts   # OTel Collector (platform-otel-collector Application)
-    - https://charts.min.io                                       # MinIO (platform-minio Application)
     # Resource governance (resource-governance-backlog): the Fairwinds stable chart repo
     # serves BOTH the Vertical Pod Autoscaler chart (platform-vpa @ vpa 4.12.3) and the
     # Goldilocks recommendation dashboard (platform-goldilocks @ goldilocks 10.4.1). ONE
@@ -145,6 +152,13 @@ spec:
     # + VERIFY (the AppProject is bootstrap-managed, not GitOps-reconciled) or
     # platform-kyverno will InvalidSpecError "repo not permitted".
     - https://kyverno.github.io/kyverno/                    # Kyverno (platform-kyverno Application)
+    # OpenCost (cost visibility on owned hardware): the official OpenCost Helm chart
+    # repo. ONE named source, chart version pinned in the Application (opencost @
+    # 2.5.26). ⚠ INSTALL-OWNED (same as every add above): reaches the live `platform`
+    # AppProject only via `make bootstrap`/`make bootstrap-reapply` + VERIFY (the
+    # AppProject is bootstrap-managed, not GitOps-reconciled) or platform-opencost
+    # will InvalidSpecError "repo not permitted".
+    - https://opencost.github.io/opencost-helm-chart        # OpenCost (platform-opencost Application)
 
   # Platform services are cluster-wide; allow any namespace on the in-cluster API.
   destinations:

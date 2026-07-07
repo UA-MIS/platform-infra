@@ -1,0 +1,224 @@
+# Admin dashboard 5/5 (Observability admin dashboards — cost visibility on owned
+# hardware, applicationsets/opencost-app.yaml). Reads OpenCost's own cost metrics
+# (node_cpu_hourly_cost / node_ram_hourly_cost / node_total_hourly_cost /
+# pv_hourly_cost / container_cpu_allocation / container_memory_allocation_bytes /
+# pod_pvc_allocation), which OpenCost derives by joining live k8s resource
+# allocation against the CUSTOM PRICING rates configured in the OpenCost
+# Application (owned-hardware electricity + amortized-hardware rates, NOT cloud
+# list pricing — see that Application's header comment and the README for the
+# full derivation). Real metrics, day-one once platform-opencost is Healthy.
+#
+# Query patterns for the per-namespace cost panels are adapted directly from
+# OpenCost's own documented examples (https://opencost.io/docs/integrations/metrics)
+# — `container_cpu_allocation`/`container_memory_allocation_bytes` join to their
+# owning node's hourly rate via `group_left` on the `node` label; PVC allocation
+# joins to `pv_hourly_cost` via `persistentvolume`. GPU is omitted — this fleet has
+# none (anti-gold-plate: no point charting an always-zero series).
+#
+# ⚠ Same caveat as the Application: pricing is ONE flat blended rate for the whole
+# fleet (OptiPlex control-plane + Mac Mini workers combined) — the node-pricing-
+# sanity table at the bottom will show the SAME $/core-hr and $/GiB-hr on every
+# node. This dashboard is for relative namespace-to-namespace showback, not a
+# precise per-node bill.
+#
+# Auto-provisioned by the Grafana sidecar via the `grafana_dashboard: "1"` label
+# (same mechanism as the other four admin dashboards — see README).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-cost-allocation
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    grafana_dashboard: "1"
+data:
+  cost-allocation.json: |
+    {
+      "uid": "platform-cost-allocation",
+      "title": "Platform / Cost Allocation (OpenCost)",
+      "tags": ["platform", "admin", "cost", "opencost"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "time": { "from": "now-24h", "to": "now" },
+      "refresh": "5m",
+      "templating": {
+        "list": [
+          {
+            "name": "datasource",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": {},
+            "hide": 0
+          },
+          {
+            "name": "namespace",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "${datasource}" },
+            "query": { "query": "label_values(container_cpu_allocation, namespace)", "refId": "namespace" },
+            "refresh": 2,
+            "multi": true,
+            "includeAll": true,
+            "current": { "text": "All", "value": ["$__all"] },
+            "sort": 1
+          }
+        ]
+      },
+      "panels": [
+        { "id": 1, "type": "row", "title": "Cluster overview", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 } },
+        {
+          "id": 2, "type": "stat", "title": "Cluster Total Hourly Cost",
+          "gridPos": { "h": 5, "w": 6, "x": 0, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 4 }, "overrides": [] },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "sum(node_total_hourly_cost)",
+              "instant": true,
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 3, "type": "stat", "title": "Cluster Est. Monthly Cost (rate x 730h)",
+          "gridPos": { "h": 5, "w": 6, "x": 6, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 2 }, "overrides": [] },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "sum(node_total_hourly_cost) * 730",
+              "instant": true,
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 4, "type": "stat", "title": "Configured CPU Rate ($/vCPU-hr)",
+          "gridPos": { "h": 5, "w": 6, "x": 12, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 6 }, "overrides": [] },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "avg(node_cpu_hourly_cost)",
+              "instant": true,
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 5, "type": "stat", "title": "Configured RAM Rate ($/GiB-hr)",
+          "gridPos": { "h": 5, "w": 6, "x": 18, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 6 }, "overrides": [] },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "avg(node_ram_hourly_cost)",
+              "instant": true,
+              "refId": "A"
+            }
+          ]
+        },
+        { "id": 6, "type": "row", "title": "Total cost by namespace (CPU + RAM + storage)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 6 } },
+        {
+          "id": 7, "type": "bargauge", "title": "Total Hourly Cost by Namespace",
+          "gridPos": { "h": 10, "w": 12, "x": 0, "y": 7 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "options": { "orientation": "horizontal", "displayMode": "gradient" },
+          "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 5 }, "overrides": [] },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "sort_desc(sum by (namespace) (label_replace((avg by (container, node, namespace, pod) (container_cpu_allocation{namespace=~\"$namespace\"}) * on (node) group_left() avg by (node) (node_cpu_hourly_cost)), \"type\", \"cpu\", \"\", \"\") or label_replace((avg by (container, node, namespace, pod) (container_memory_allocation_bytes{namespace=~\"$namespace\"}) / (1024*1024*1024) * on (node) group_left() avg by (node) (node_ram_hourly_cost)), \"type\", \"ram\", \"\", \"\") or label_replace((avg by (persistentvolume, namespace, pod) (pod_pvc_allocation{namespace=~\"$namespace\"}) * on (persistentvolume) group_left() avg by (persistentvolume) (pv_hourly_cost) / (1024*1024*1024)), \"type\", \"storage\", \"\", \"\")))",
+              "legendFormat": "{{namespace}}",
+              "instant": true,
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 8, "type": "table", "title": "Est. Monthly Cost by Namespace (rate x 730h)",
+          "gridPos": { "h": 10, "w": 12, "x": 12, "y": 7 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 2 }, "overrides": [] },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "sort_desc(sum by (namespace) (label_replace((avg by (container, node, namespace, pod) (container_cpu_allocation{namespace=~\"$namespace\"}) * on (node) group_left() avg by (node) (node_cpu_hourly_cost)), \"type\", \"cpu\", \"\", \"\") or label_replace((avg by (container, node, namespace, pod) (container_memory_allocation_bytes{namespace=~\"$namespace\"}) / (1024*1024*1024) * on (node) group_left() avg by (node) (node_ram_hourly_cost)), \"type\", \"ram\", \"\", \"\") or label_replace((avg by (persistentvolume, namespace, pod) (pod_pvc_allocation{namespace=~\"$namespace\"}) * on (persistentvolume) group_left() avg by (persistentvolume) (pv_hourly_cost) / (1024*1024*1024)), \"type\", \"storage\", \"\", \"\"))) * 730",
+              "format": "table",
+              "instant": true,
+              "refId": "A"
+            }
+          ]
+        },
+        { "id": 9, "type": "row", "title": "Cost breakdown by namespace over time", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 17 } },
+        {
+          "id": 10, "type": "timeseries", "title": "CPU Cost by Namespace ($/hr)",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 18 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "sum by (namespace) (avg by (container, node, namespace, pod) (container_cpu_allocation{namespace=~\"$namespace\"}) * on (node) group_left() avg by (node) (node_cpu_hourly_cost))",
+              "legendFormat": "{{namespace}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 11, "type": "timeseries", "title": "RAM Cost by Namespace ($/hr)",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 18 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "sum by (namespace) (avg by (container, node, namespace, pod) (container_memory_allocation_bytes{namespace=~\"$namespace\"}) / (1024*1024*1024) * on (node) group_left() avg by (node) (node_ram_hourly_cost))",
+              "legendFormat": "{{namespace}}",
+              "refId": "A"
+            }
+          ]
+        },
+        { "id": 12, "type": "row", "title": "Storage cost by namespace (namespaces with PVCs only)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 26 } },
+        {
+          "id": 13, "type": "timeseries", "title": "Storage Cost by Namespace ($/hr)",
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 27 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "sum by (namespace) (avg by (persistentvolume, namespace, pod) (pod_pvc_allocation{namespace=~\"$namespace\"}) * on (persistentvolume) group_left() avg by (persistentvolume) (pv_hourly_cost) / (1024*1024*1024))",
+              "legendFormat": "{{namespace}}",
+              "refId": "A"
+            }
+          ]
+        },
+        { "id": 14, "type": "row", "title": "Node pricing sanity check (confirms custom pricing loaded)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 35 } },
+        {
+          "id": 15, "type": "table", "title": "Per-Node Hourly Cost (CPU / RAM / Total)",
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 36 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 6 }, "overrides": [] },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "node_total_hourly_cost",
+              "legendFormat": "{{node}}",
+              "format": "table",
+              "instant": true,
+              "refId": "A"
+            }
+          ]
+        }
+      ]
+    }

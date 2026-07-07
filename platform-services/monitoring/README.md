@@ -11,7 +11,7 @@ telemetry was `metrics-server` and there was **no alert even on "Vault sealed"**
 | **Tempo** | Trace store, single-binary (raw manifests — chart is upstream deprecated), filesystem on Ceph, 24h retention | `tempo.yaml` (`platform-svc-monitoring`) |
 | **OTel Collector** | Trace ingress: OTLP in, sampled 15%, forwards to Tempo | `applicationsets/otel-collector-app.yaml` (Helm, chart `0.162.0`) |
 | **Thanos** (Query / Store Gateway / Compactor) | Long-term Prometheus metrics beyond the 7d local window, backed by the `dr-backup` MinIO bucket | `thanos.yaml` (`platform-svc-monitoring`) + a sidecar block in `kube-prometheus-stack-app.yaml` |
-| **MinIO** | S3-compatible object store, standalone mode — backs Thanos's `dr-backup` bucket | `applicationsets/minio-app.yaml` (Helm, chart `5.4.0`) |
+| **MinIO** | S3-compatible object store — backs Thanos's `dr-backup` bucket (⚠ see note below: this platform's MinIO is the pre-existing `dr-backup` plain-manifest deployment, not a separate Helm Application) | `platform-services/minio/` (plain manifests) |
 | **ntfy** | Self-hosted push notifications — the real Alertmanager destination | `ntfy.yaml` (`platform-svc-monitoring`) |
 | **monitoring** ns + alerts + scrape configs | this dir | `platform-svc-monitoring` (platform-services-appset) |
 
@@ -66,7 +66,7 @@ broad k8s/node/kubelet/etcd/apiserver coverage on top of these.
 
 ## Admin dashboards (dashboards-as-code)
 
-Four operator-facing Grafana dashboards, each shipped as a `ConfigMap` labeled
+Five operator-facing Grafana dashboards, each shipped as a `ConfigMap` labeled
 `grafana_dashboard: "1"` — the Grafana chart's default k8s-sidecar (`sidecar.dashboards`,
 chart default ON) watches for that label and auto-provisions the JSON, no manual
 Grafana import. Every panel's datasource is a `${datasource}` template variable
@@ -80,6 +80,7 @@ datasource.
 | **Per-Tenant Usage vs Quota** | `dashboard-tenant-quota.yaml` | CPU/memory/pods/services used vs `ResourceQuota` hard limits per tenant namespace, PVC storage usage | `kube_resourcequota` (kube-state-metrics) — real metrics, day-one. The `namespace` variable is populated FROM `kube_resourcequota` itself, so it lists tenant namespaces without needing custom labels allow-listed |
 | **Platform Health** | `dashboard-platform-health.yaml` | ArgoCD Synced/Healthy counts + apps needing attention (real); Vault/Harbor/ARC (**proxies** — pod/deployment/statefulset status via kube-state-metrics, not each component's own `/metrics`); Crossplane has a real `/metrics` PodMonitor as of this PR but the panel still reads the proxy (rewiring the panel is a follow-up) | ArgoCD + Crossplane ServiceMonitor/PodMonitor (real) + kube-state-metrics (proxy for Vault/Harbor/ARC) |
 | **Tenant CI/CD** | `dashboard-tenant-cicd.yaml` | `arc-runners` pod activity (all teams combined — real, but no per-team breakdown), tenant ArgoCD app deploy status (real); image pushes / per-team runner usage — **not shown**, see follow-ups panel in-dashboard | kube-state-metrics + ArgoCD |
+| **Cost Allocation** | `dashboard-cost-allocation.yaml` | Per-namespace CPU/RAM/storage $/hr and est. monthly cost, cluster-wide hourly/monthly totals, per-node pricing sanity check | OpenCost `/metrics` (real, day-one once `platform-opencost` is Healthy) — see "Cost allocation (OpenCost)" below |
 
 **Done in this PR:** Crossplane's controller-runtime `/metrics` is now scraped (a
 `PodMonitor` in `servicemonitors.yaml`, confirmed live 2026-07-02 via
@@ -179,22 +180,141 @@ Grafana --"Thanos" datasource--> Thanos Query <---------------------- Thanos Sto
 | Store Gateway | Serves historical blocks straight from `dr-backup` | `thanos.yaml` |
 | Compactor | The ONLY writer to the bucket — compacts + downsamples (raw 30d, 5m-res 180d, 1h-res 1y). **Must stay a singleton** (`strategy: Recreate`, never raise replicas) | `thanos.yaml` |
 | Query | Merged Prometheus-compatible query front door (sidecar + Store Gateway) | `thanos.yaml`, wired into Grafana as the **"Thanos"** datasource |
-| MinIO | S3-compatible object store, standalone mode, the `dr-backup` bucket | `applicationsets/minio-app.yaml` + `platform-services/minio/` |
+| MinIO | S3-compatible object store, the `dr-backup` bucket | `platform-services/minio/` (plain manifests, StatefulSet + local-disk PV — see `statefulset.yaml` header) |
 
-**⚠ DEPENDENCY, spelled out:** if `platform-minio` is ever removed, scaled down, or the
-`dr-backup` bucket deleted — the sidecar just stops uploading (Prometheus itself keeps
-working fine), and the Store Gateway/Compactor/Query pods start failing with bucket
-`AccessDenied`/`NoSuchBucket` errors. There is no automatic fallback; this coupling is
-deliberate and documented, not accidental. `thanos.yaml`'s header carries the same
-warning at the point of use.
+**⚠ DEPENDENCY, spelled out:** if MinIO (`platform-services/minio/`) is ever removed,
+scaled down, or the `dr-backup` bucket deleted — the sidecar just stops uploading
+(Prometheus itself keeps working fine), and the Store Gateway/Compactor/Query pods
+start failing with bucket `AccessDenied`/`NoSuchBucket` errors. There is no automatic
+fallback; this coupling is deliberate and documented, not accidental. `thanos.yaml`'s
+header carries the same warning at the point of use.
 
-Credentials (MinIO root creds, the bucket-scoped `thanos` IAM user, and the
-`thanos-objstore-config` SealedSecret all three components read) were generated and
-sealed against the live cluster **in this PR** — unlike the Grafana/Alertmanager
-secrets below, no human-supplied external value was needed, so there is nothing to
-reseal before go-live. Rotate them with the same `kubeseal` pattern as the runbooks
-below if you ever need to (rotate `minio-thanos-user`'s `password` and
-`thanos-objstore-config`'s `secret_key` TOGETHER — they must match).
+**⚠ INTEGRATION GAP (flagged during the overnight integration merge, unresolved):**
+this platform already runs MinIO as the `dr-backup` plain-manifest StatefulSet
+(`platform-services/minio/`, disaster-recovery — Velero's backup target, see
+`docs/operator/dr-backup.md`), not the standalone Helm `platform-minio` Application
+this section originally assumed. The Thanos `dr-backup` bucket + scoped `thanos` IAM
+user/policy this section describes were never provisioned against that existing
+instance (the competing Helm-based MinIO Application and its `minio-root-credentials`
+/ `minio-thanos-user` SealedSecrets were dropped during the merge to avoid deploying a
+second, conflicting MinIO into the same namespace/Service). The `thanos-objstore-config`
+SealedSecret below still exists and points at `minio.minio.svc.cluster.local:9000`
+(the endpoint is correct — both deployments used the same Service name/port), but its
+baked-in `access_key`/`secret_key` will NOT authenticate until a `thanos` bucket-scoped
+user + `dr-backup` bucket are actually created against the live MinIO (e.g. by
+extending `platform-services/minio/minio-provision-job.yaml`, mirroring the `mc`
+admin/policy commands from the dropped `applicationsets/minio-app.yaml`). Until that
+follow-up ships, expect the Store Gateway/Compactor/Query pods to fail with
+`AccessDenied`.
+
+## Cost allocation (OpenCost)
+
+**Component:** OpenCost, `applicationsets/opencost-app.yaml` (Helm, chart `2.5.26`,
+own `platform-opencost` Application + dedicated `opencost` namespace — same
+Helm-source pattern as Goldilocks/VPA, not part of this `monitoring` kustomize dir).
+It points at the existing `kube-prometheus-stack-prometheus` Service in this
+namespace (no second Prometheus) and re-exposes derived cost metrics
+(`node_cpu_hourly_cost`, `node_ram_hourly_cost`, `node_total_hourly_cost`,
+`pv_hourly_cost`, `container_cpu_allocation`, `container_memory_allocation_bytes`,
+`pod_pvc_allocation`, ...) back to that same Prometheus via a `ServiceMonitor` —
+picked up automatically because `serviceMonitorSelectorNilUsesHelmValues: false` is
+already set (see the header comment on `kube-prometheus-stack-app.yaml`). The
+**Cost Allocation** dashboard above reads those metrics.
+
+### Why custom pricing, and why it isn't cloud list pricing
+
+This is **owned hardware**, not a cloud account — OpenCost's built-in "default"
+pricing model assumes a GCP us-central1 cluster (`$0.031611`/vCPU-hr, `$0.004237`
+/GiB-hr RAM, `$0.0000548`/GiB-hr storage). Left as-is, every namespace's "cost"
+would just be a fixed multiple of its requests — not a reflection of what this
+platform actually costs to run. `opencost.customPricing` in the Application
+overrides CPU/RAM/storage with a **flat, blended** rate derived from this fleet's
+real electricity draw plus an amortized hardware-replacement cost.
+
+**Fleet** (confirmed live via `kubectl get nodes`, 2026-07-07):
+
+| Node type | Count | vCPU each | RAM each |
+| --- | --- | --- | --- |
+| Dell OptiPlex 7080 (Talos control-plane) | 3 | 16 | 16 GiB |
+| Mac Mini, Late-2014 (Debian worker) | 3 | 4 | 8 GiB |
+| **Fleet total** | 6 | **60 vCPU** | **72 GiB** |
+
+**Per-node hourly cost = electricity + amortized hardware**, both editable
+assumptions (this hardware is already-owned/surplus capstone equipment — the
+"hardware" term is a replacement-value estimate for TCO/showback purposes, not a
+real recurring invoice):
+
+| | OptiPlex 7080 | Mac Mini (Late-2014) |
+| --- | --- | --- |
+| Avg sustained power draw | 40 W (SFF, always-on, moderate k8s load) | 12 W (famously low-power) |
+| Electricity rate | $0.16/kWh (blended US retail average) | same |
+| → electricity $/hr | 0.040 kW × 0.16 = **$0.0064** | 0.012 kW × 0.16 = **$0.00192** |
+| Replacement value | $250 (refurb SFF i7/16GB/512GB market estimate) | $50 (EOL/surplus estimate) |
+| Amortization | 4 yr (35,040 h) | 3 yr (26,280 h) — shorter remaining life |
+| → hardware $/hr | 250/35,040 = **$0.007135** | 50/26,280 = **$0.001903** |
+| **Node total $/hr** | **$0.013535** | **$0.003823** |
+| ×3 nodes | $0.040605 | $0.011469 |
+
+**Fleet hourly total** = 0.040605 + 0.011469 = **$0.052074/hr**.
+
+That total is split into a CPU pool and a RAM pool — OpenCost's on-prem custom
+pricing wants one flat `$/vCPU-hr` and one flat `$/GiB-hr` number, not a lump sum,
+and there's no market price signal to split them by for capacity you already own.
+This PR uses a documented **70% CPU / 30% RAM** split (a commodity-desktop BOM
+approximation — CPU/board/PSU dominate, RAM is the smaller line item); change the
+ratio in the Application's header comment if you disagree with the weighting:
+
+- CPU pool: `0.70 × $0.052074 = $0.036452/hr ÷ 60 vCPU = $0.000608/vCPU-hr`
+- RAM pool: `0.30 × $0.052074 = $0.015622/hr ÷ 72 GiB = $0.000217/GiB-hr`
+
+**Storage** is priced separately (so it isn't double-counted against the node price
+above): only the 3 OptiPlex nodes carry the Ceph OSD disk (a 500GB SATA SSD
+alongside the NVMe boot disk, per the Phase-4 hardware runbook). Rook-Ceph
+replicates 3× (replica-3), so 3 raw 500GB devices buy 500GB of *usable* capacity:
+3 × $35 (budget 500GB SATA SSD estimate) = $105, amortized over 4yr (35,040h) =
+$0.002997/hr ÷ 500 GB = **$0.000006/GiB-hr**. (Electricity for the OSD disk is
+already folded into the 40W/node figure above — its incremental draw over a bare
+board is small enough that separating it out isn't worth the added complexity.)
+
+**Wired into `opencost.customPricing.costModel`:**
+
+| Rate | Value | Unit |
+| --- | --- | --- |
+| CPU | `0.000608` | $ / vCPU-hour |
+| RAM | `0.000217` | $ / GiB-hour |
+| storage | `0.000006` | $ / GiB-hour |
+
+⚠ **Limitations, stated plainly:**
+- This is **one flat rate for the whole cluster** — OpenCost's on-prem custom
+  pricing has no concept of "this node type costs more than that one". The
+  dashboard's node-pricing-sanity table will show the *same* `$/vCPU-hr` on every
+  node, OptiPlex or Mac Mini. Good for relative namespace-to-namespace showback,
+  not a precise per-node bill.
+- Every number above is a **documented default**, not a measured fact — local
+  electricity rate, real acquisition/replacement prices, and amortization horizon
+  will differ per operator. Re-derive with your own numbers using the same method
+  (electricity $/hr + hardware $/hr, split 70/30 CPU/RAM, storage priced
+  separately against usable-after-replication capacity).
+
+### Access
+
+OpenCost's own UI has **no authentication** (unlike Grafana's admin/password
+SealedSecret), so — same posture as Prometheus/Alertmanager — it is **not** exposed
+on the Cloudflare tunnel. Reach it with:
+
+```
+kubectl -n opencost port-forward svc/opencost 9090:9090
+```
+
+then open `http://localhost:9090`. Day-to-day, use the **Cost Allocation** Grafana
+dashboard instead (behind Grafana's own auth).
+
+### Deploy note
+
+Same as every other Helm-source platform app: `make bootstrap-reapply` after merge
+adds `https://opencost.github.io/opencost-helm-chart` to the **install-owned**
+`platform` AppProject `sourceRepos` — else `platform-opencost` `InvalidSpecError
+"repo not permitted"`. VERIFY it took.
 
 ## Notification channel (`platform-oncall` → self-hosted ntfy)
 
@@ -358,12 +478,12 @@ syncs, the `grafana-admin` Secret appears and the Grafana pod starts; log in at
   `grafana.github.io/helm-charts`, `open-telemetry.github.io/opentelemetry-helm-charts`,
   `charts.min.io`) to the **install-owned** `platform` AppProject sourceRepos — else
   the apps `InvalidSpecError "repo not permitted"`. VERIFY it took.
-- Sync order: `platform-minio` should reach Healthy **before** relying on Thanos —
-  the Store Gateway/Compactor/Query pods in `thanos.yaml` will CrashLoop against a
-  missing bucket otherwise (see "Long-term metrics" above). ArgoCD's automated
-  sync + retry doesn't strictly order across Applications, so on a fresh cluster
-  check `kubectl -n argocd get app platform-minio` is Synced/Healthy if the Thanos
-  pods look stuck.
+- Sync order: MinIO (`platform-svc-minio`, the existing `dr-backup` plain-manifest
+  deployment) should reach Healthy **before** relying on Thanos — the Store
+  Gateway/Compactor/Query pods in `thanos.yaml` will CrashLoop against a missing/
+  unauthorized bucket otherwise (see "Long-term metrics" above, including the
+  **unresolved integration gap**: the `dr-backup` bucket + `thanos` IAM user are not
+  yet provisioned against this MinIO instance).
 - First sync: `platform-svc-monitoring` may briefly fail until
   `platform-kube-prometheus-stack` installs the PrometheusRule/ServiceMonitor/PodMonitor
   CRDs; ArgoCD retry/selfHeal converges it. Same applies to `platform-otel-collector`
