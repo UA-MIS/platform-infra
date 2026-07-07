@@ -147,6 +147,7 @@ def compose(selection, out, *, app_name="demo-app", team="demo-team", port=8080,
         destination={"owner": "UA-MIS", "repo": app_name},
         components=plan["components"], database=plan["database"],
         dbWired=plan["dbWired"], single=plan["single"],
+        progressiveDelivery=False,
     )
 
     out = Path(out)
