@@ -12,16 +12,21 @@
 # across all three policies in this dir):
 #   - failurePolicy: Ignore — a down Kyverno webhook fails OPEN, never blocking
 #     scheduling.
-#   - exclude kube-system / argocd / vault / rook-ceph / cert-manager (+ kyverno
-#     itself) — the control plane, GitOps engine, secrets store, storage layer,
-#     cert issuer, and the policy engine's own pods are never gated by policies
-#     that engine itself runs.
+#   - exclude kube-system / argocd / vault / rook-ceph / cert-manager / arc-system /
+#     arc-runners / harbor / traefik / monitoring / backstage / external-secrets
+#     (+ kyverno itself) — the control plane, GitOps engine, secrets store,
+#     storage layer, cert issuer, CI system + build runners, and every platform
+#     addon are never gated by policies that engine itself runs.
 #
-# ⚠ OPERATOR REVIEW: `validationFailureAction: Enforce` BLOCKS a `:latest` (or
-# tagless) image at admission, cluster-wide except the excluded namespaces above.
-# Most platform Helm charts pin explicit versions already, but confirm no
-# in-cluster workload outside the excluded namespaces currently floats on
-# `:latest` before this syncs live — it will be rejected on its next reschedule.
+# ⚠ OPERATOR REVIEW (post-review widened exclude list): `validationFailureAction:
+# Enforce` BLOCKS a `:latest` (or tagless) image at admission, cluster-wide
+# except the excluded namespaces above. The exclude list was widened (blocking
+# review finding on the sibling require-limits policy) to also cover
+# arc-system/arc-runners/harbor/traefik/monitoring/backstage/external-secrets so
+# no platform or CI pod can ever be blocked here either. Most platform Helm
+# charts pin explicit versions already, but confirm no in-cluster workload
+# outside the excluded namespaces currently floats on `:latest` before this
+# syncs live — it will be rejected on its next reschedule.
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
@@ -53,6 +58,13 @@ spec:
                 - vault
                 - rook-ceph
                 - cert-manager
+                - arc-system
+                - arc-runners
+                - harbor
+                - traefik
+                - monitoring
+                - backstage
+                - external-secrets
                 - kyverno
       validate:
         message: "An image tag is required."
@@ -81,6 +93,13 @@ spec:
                 - vault
                 - rook-ceph
                 - cert-manager
+                - arc-system
+                - arc-runners
+                - harbor
+                - traefik
+                - monitoring
+                - backstage
+                - external-secrets
                 - kyverno
       validate:
         message: "Using a mutable image tag e.g. 'latest' is not allowed."

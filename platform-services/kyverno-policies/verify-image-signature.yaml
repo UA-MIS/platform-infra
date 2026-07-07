@@ -26,19 +26,26 @@
 #     the reason nothing can schedule. (Belt: the Kyverno Application ALSO sets
 #     `features.forceFailurePolicyIgnore.enabled: true` chart-wide, so this can't
 #     drift even if a future rule edit forgets the field — see kyverno-app.yaml.)
-#   - exclude kube-system / argocd / vault / rook-ceph / cert-manager (+ kyverno
-#     itself, defense in depth): the control plane, GitOps engine, secrets store,
-#     storage layer, cert issuer, and the policy engine's OWN pods can NEVER be
-#     blocked by a policy that engine itself enforces — a self-inflicted deadlock
-#     during recovery would be exactly the outage this platform cannot risk.
+#   - exclude kube-system / argocd / vault / rook-ceph / cert-manager / arc-system /
+#     arc-runners / harbor / traefik / monitoring / backstage / external-secrets
+#     (+ kyverno itself, defense in depth): the control plane, GitOps engine,
+#     secrets store, storage layer, cert issuer, CI system + build runners, and
+#     every platform addon's OWN pods can NEVER be blocked by a policy that
+#     engine itself enforces — a self-inflicted deadlock during recovery (or a
+#     bricked CI pipeline) would be exactly the outage this platform cannot risk.
 #
-# ⚠ OPERATOR REVIEW: `failureAction: Enforce` below BLOCKS an unsigned/unverified
-# Harbor image at admission. Before this policy syncs live, confirm every
-# currently-running Harbor-sourced workload (tenant apps, the Backstage portal)
-# was already built by a supply-chain-verify-enabled pipeline — anything built
-# before this PR merged has no signature and will be rejected on its next
-# reschedule. Add more `exclude.any[].resources.namespaces` entries here if a
-# namespace needs a grace period.
+# ⚠ OPERATOR REVIEW (post-review widened exclude list): `failureAction: Enforce`
+# below BLOCKS an unsigned/unverified Harbor image at admission. The exclude
+# list was widened (blocking review finding on the sibling require-limits
+# policy) to also cover arc-system/arc-runners/harbor/traefik/monitoring/
+# backstage/external-secrets so no platform or CI pod can ever be blocked here
+# either — Kaniko builder pods and Harbor's own sub-components in particular
+# must never be gated by this rule. Before this policy syncs live, confirm every
+# currently-running Harbor-sourced workload outside the excluded namespaces
+# (tenant apps) was already built by a supply-chain-verify-enabled pipeline —
+# anything built before this PR merged has no signature and will be rejected on
+# its next reschedule. Add more `exclude.any[].resources.namespaces` entries
+# here if a namespace needs a grace period.
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
@@ -72,6 +79,13 @@ spec:
                 - vault
                 - rook-ceph
                 - cert-manager
+                - arc-system
+                - arc-runners
+                - harbor
+                - traefik
+                - monitoring
+                - backstage
+                - external-secrets
                 - kyverno
       verifyImages:
         - imageReferences:

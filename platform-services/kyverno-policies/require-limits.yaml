@@ -8,17 +8,23 @@
 # across all three policies in this dir):
 #   - failurePolicy: Ignore — a down Kyverno webhook fails OPEN, never blocking
 #     scheduling.
-#   - exclude kube-system / argocd / vault / rook-ceph / cert-manager (+ kyverno
-#     itself) — the control plane, GitOps engine, secrets store, storage layer,
-#     cert issuer, and the policy engine's own pods are never gated by policies
-#     that engine itself runs.
+#   - exclude kube-system / argocd / vault / rook-ceph / cert-manager / arc-system /
+#     arc-runners / harbor / traefik / monitoring / backstage / external-secrets
+#     (+ kyverno itself) — the control plane, GitOps engine, secrets store,
+#     storage layer, cert issuer, CI system + build runners, and every platform
+#     addon that does not yet guarantee explicit cpu+memory limits on every
+#     container are never gated by this policy.
 #
-# ⚠ OPERATOR REVIEW: `validationFailureAction: Enforce` BLOCKS a container
-# missing cpu OR memory limits at admission, cluster-wide except the excluded
-# namespaces above. Several platform addons (Harbor's many sub-components,
-# monitoring stack, ARC runners, Backstage) may not all set explicit limits
-# today — confirm before this syncs live, or add their namespaces to the
-# exclude list here as a temporary grace period while limits are backfilled.
+# ⚠ BLOCKING FIX (post-review): this policy previously shipped as
+# `validationFailureAction: Enforce` with only kube-system/argocd/vault/
+# rook-ceph/cert-manager/kyverno excluded. Kaniko build pods in arc-runners (and
+# Harbor's many sub-components, Traefik, monitoring, Backstage,
+# external-secrets) do not all set explicit memory limits today, so Enforce
+# would have REJECTED the very next Kaniko pod at admission — bricking CI
+# cluster-wide the moment this synced. Fixed by (1) switching to Audit
+# (report-only) until a PolicyReport pass across all in-scope namespaces shows
+# zero violations, and (2) excluding every platform/CI system namespace above so
+# no platform or CI pod can ever be blocked by this rule regardless of mode.
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
@@ -31,7 +37,7 @@ metadata:
     policies.kyverno.io/description: >-
       Requires every container to declare both cpu and memory resource limits.
 spec:
-  validationFailureAction: Enforce
+  validationFailureAction: Audit   # report-only until backfilled — see header. NOT Enforce.
   failurePolicy: Ignore   # CRITICAL SAFETY — see header. A down webhook fails OPEN.
   background: true
   rules:
@@ -50,6 +56,13 @@ spec:
                 - vault
                 - rook-ceph
                 - cert-manager
+                - arc-system
+                - arc-runners
+                - harbor
+                - traefik
+                - monitoring
+                - backstage
+                - external-secrets
                 - kyverno
       validate:
         message: "Every container must set resources.limits.cpu and resources.limits.memory."
