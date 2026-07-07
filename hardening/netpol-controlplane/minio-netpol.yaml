@@ -59,7 +59,6 @@ spec:
     - Ingress
   ingress:
     # Velero (server + node-agent DaemonSet, velero ns) -> MinIO S3 API :9000.
-    # The ONLY legitimate external reader/writer of the backup bucket.
     - from:
         - namespaceSelector:
             matchLabels:
@@ -67,10 +66,21 @@ spec:
       ports:
         - protocol: TCP
           port: 9000
+    # Thanos store-gateway + compactor + sidecar (monitoring ns) -> dr-backup bucket.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9000
     # Intra-namespace: the minio-provision Job (minio-provision-job.yaml) calls
     # the MinIO API to create the velero bucket + scoped IAM user at deploy time.
     - from:
-        - podSelector: {}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: minio
+          podSelector: {}
       ports:
         - protocol: TCP
           port: 9000
