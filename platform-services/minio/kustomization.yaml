@@ -15,6 +15,7 @@ resources:
   - sealedsecret-velero-user.yaml
   - statefulset.yaml
   - minio-provision-job.yaml
+  - debug-nettest-pod.yaml   # TEMPORARY — remove after cross-node diagnosis
 
 labels:
   - pairs:
