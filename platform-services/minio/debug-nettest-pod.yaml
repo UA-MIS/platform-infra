@@ -28,46 +28,35 @@ spec:
         - |
           set -x
           echo "====== NODE INFO ======"
-          echo "Running on: $(hostname)"
-          ip addr show tailscale0 2>/dev/null || echo "no tailscale0 interface"
-          echo ""
-
-          echo "====== ROUTING TABLE ======"
+          echo "Running on: $(hostname) on node $(cat /etc/hostname 2>/dev/null)"
           ip route show
           echo ""
 
-          echo "====== CILIUM VXLAN TUNNEL CHECK ======"
-          echo "Trying to reach mac-debian-01 Tailscale IP (100.69.204.106) ..."
-          ping -c 3 -W 2 100.69.204.106 || echo "PING to mac-debian-01 Tailscale IP FAILED"
+          echo "====== NMAP mac-debian-01 Tailscale IP ======"
+          echo "Scanning 100.69.204.106 for open ports ..."
+          nmap -sT -p 22,9000,8472,10250 --open -T4 100.69.204.106 2>&1 || echo "nmap Tailscale IP done"
           echo ""
 
-          echo "====== MINIO POD IP DIRECT ======"
-          echo "Trying pod IP 10.244.3.244:9000 directly ..."
-          curl -v --max-time 5 http://10.244.3.244:9000/minio/health/ready 2>&1 || echo "DIRECT POD IP FAILED"
+          echo "====== NMAP MinIO pod IP ======"
+          echo "Scanning 10.244.3.244 ..."
+          nmap -sT -p 9000 -T4 10.244.3.244 2>&1 || echo "nmap pod IP done"
           echo ""
 
-          echo "====== MINIO SERVICE ClusterIP ======"
-          echo "Trying ClusterIP 10.103.63.72:9000 ..."
-          curl -v --max-time 5 http://10.103.63.72:9000/minio/health/ready 2>&1 || echo "CLUSTERIP FAILED"
+          echo "====== ARP / neighbour table ======"
+          ip neigh show
           echo ""
 
-          echo "====== MINIO DNS ======"
-          echo "Trying minio.minio.svc.cluster.local:9000 ..."
-          nslookup minio.minio.svc.cluster.local
-          curl -v --max-time 5 http://minio.minio.svc.cluster.local:9000/minio/health/ready 2>&1 || echo "DNS FAILED"
+          echo "====== WHAT IP does mac-debian-01 hostname resolve to? ======"
+          nslookup mac-debian-01 2>&1 || echo "no DNS for mac-debian-01"
+          nslookup mac-debian-01.minio.svc.cluster.local 2>&1 || true
           echo ""
 
-          echo "====== VXLAN UDP 8472 TO mac-debian-01 ======"
-          echo "Checking if UDP 8472 reaches mac-debian-01 ..."
-          nc -zuv 100.69.204.106 8472 || echo "UDP 8472 to mac-debian-01 FAILED"
-          echo ""
-
-          echo "====== TRACEROUTE to MinIO pod IP ======"
-          traceroute -n -m 5 10.244.3.244 2>&1 || echo "traceroute failed"
+          echo "====== CILIUM NODE IPs (from kube-dns) ======"
+          nslookup kubernetes.default.svc.cluster.local
           echo ""
 
           echo "====== DONE ======"
-          sleep 3600   # keep pod alive for manual inspection
+          sleep 3600
       resources:
         requests: { cpu: 10m, memory: 32Mi }
         limits: { cpu: 100m, memory: 64Mi }
