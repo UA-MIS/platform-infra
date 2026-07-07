@@ -39,7 +39,7 @@ spec:
     spec:
       restartPolicy: Never
       nodeSelector:
-        kubernetes.io/hostname: mac-debian-01
+        kubernetes.io/hostname: mac-debian-02
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
