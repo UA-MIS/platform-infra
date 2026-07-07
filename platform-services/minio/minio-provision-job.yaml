@@ -86,11 +86,6 @@ spec:
           command: ["/bin/sh", "-eu", "-c"]
           args:
             - |
-              echo "==> network diagnostics ..."
-              echo "--- mc ping via service hostname ---"
-              mc ping --count 3 http://minio.minio.svc.cluster.local:9000 || echo "mc ping via service failed"
-              echo "--- mc ping via pod IP directly ---"
-              mc ping --count 3 http://10.244.3.244:9000 || echo "mc ping via pod IP failed"
               echo "--- end diagnostics ---"
 
               echo "==> waiting for MinIO API at http://minio.minio.svc.cluster.local:9000 ..."
