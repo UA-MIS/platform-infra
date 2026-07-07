@@ -90,6 +90,14 @@ spec:
       kind: ExternalSecret
     - group: external-secrets.io
       kind: SecretStore
+    # Argo Rollouts (progressive-delivery, opt-in — docs/operator/progressive-delivery.md).
+    # Namespaced CRD, same tenancy-safe shape as Deployment above: a team may run a
+    # Rollout INSTEAD OF a Deployment in its own namespace, never a cluster-scoped
+    # object. Whitelisting it costs nothing for teams who never create one — ArgoCD
+    # only enforces this list against resources actually present in an Application's
+    # rendered manifests.
+    - group: argoproj.io
+      kind: Rollout
 
   # --- ArgoCD RBAC role for the team (§3.3) -----------------------------------
   # Phase 1: bound to the local admin for demonstration. Phase 2: bound to a

@@ -275,6 +275,104 @@ describe('capstone:compose-project', () => {
     expect(ctx.output).toHaveBeenCalledWith('fileCount', contract.length + FASTAPI.length - 1);
   });
 
+  it('progressive delivery: single + toggle on renders the REAL deployments.yaml as an Argo Rollouts Rollout with a canary strategy', async () => {
+    // Exercises the actual on-disk shared contract (not the minimal CONTRACT mock above) so
+    // this proves the real `{% if values.single and values.progressiveDelivery %}` gate in
+    // .devops/chart/base/deployments.yaml, not just a test fixture.
+    const contract = await readContractWithReaderQuirk(CONTRACT_DIR);
+    const reader = treeReader({ '/_contract': contract, '/backend/fastapi': asEntries(FASTAPI) });
+    const action = createComposeProjectAction({ reader });
+    const ws = mockDir.resolve('ws-pd-on');
+    await fs.ensureDir(ws);
+    const ctx = createMockActionContext({
+      input: {
+        ...common,
+        projectType: 'web' as const,
+        layout: 'single' as const,
+        singleFragment: 'backend/fastapi',
+        database: 'none' as const,
+        progressiveDelivery: true,
+      },
+      workspacePath: ws,
+    });
+
+    await action.handler(ctx);
+
+    const rendered = await fs.readFile(path.join(ws, '.devops/chart/base/deployments.yaml'), 'utf8');
+    expect(rendered).toContain('kind: Rollout');
+    expect(rendered).toContain('apiVersion: argoproj.io/v1alpha1');
+    // `setWeight: 25` only appears in the actual rendered strategy.canary block (never in
+    // prose comments, unlike the word "canary" alone), so it's an unambiguous structural marker.
+    expect(rendered).toContain('setWeight: 25');
+    expect(rendered).not.toContain('kind: Deployment');
+    expect(rendered).not.toContain('apiVersion: apps/v1');
+  });
+
+  it('progressive delivery: default (toggle omitted) still renders the REAL deployments.yaml as a plain Deployment', async () => {
+    // The toggle is optional on the action input (Backstage sends parameters.progressiveDelivery
+    // as a real boolean, but this guards the action's own default so a caller that omits it
+    // entirely — e.g. an older cached template render — never silently gets a Rollout).
+    const contract = await readContractWithReaderQuirk(CONTRACT_DIR);
+    const reader = treeReader({ '/_contract': contract, '/backend/fastapi': asEntries(FASTAPI) });
+    const action = createComposeProjectAction({ reader });
+    const ws = mockDir.resolve('ws-pd-default');
+    await fs.ensureDir(ws);
+    const ctx = createMockActionContext({
+      input: {
+        ...common,
+        projectType: 'web' as const,
+        layout: 'single' as const,
+        singleFragment: 'backend/fastapi',
+        database: 'none' as const,
+        // progressiveDelivery intentionally omitted
+      },
+      workspacePath: ws,
+    });
+
+    await action.handler(ctx);
+
+    const rendered = await fs.readFile(path.join(ws, '.devops/chart/base/deployments.yaml'), 'utf8');
+    expect(rendered).toContain('kind: Deployment');
+    expect(rendered).toContain('apiVersion: apps/v1');
+    expect(rendered).not.toContain('kind: Rollout');
+    expect(rendered).not.toContain('argoproj.io/v1alpha1');
+    expect(rendered).not.toContain('setWeight: 25');
+  });
+
+  it('progressive delivery: toggle on but frontend-backend layout still renders plain Deployments for both components', async () => {
+    // values.single is false for FE+BE, so the contract's gate (`values.single AND
+    // values.progressiveDelivery`) must stay off even though the caller asked for the toggle.
+    const contract = await readContractWithReaderQuirk(CONTRACT_DIR);
+    const reader = treeReader({
+      '/_contract': contract,
+      '/frontend/react': asEntries(REACT),
+      '/backend/express': asEntries(EXPRESS),
+    });
+    const action = createComposeProjectAction({ reader });
+    const ws = mockDir.resolve('ws-pd-febe');
+    await fs.ensureDir(ws);
+    const ctx = createMockActionContext({
+      input: {
+        ...common,
+        projectType: 'web' as const,
+        layout: 'frontend-backend' as const,
+        frontendFragment: 'frontend/react',
+        backendFragment: 'backend/express',
+        database: 'none' as const,
+        progressiveDelivery: true,
+      },
+      workspacePath: ws,
+    });
+
+    await action.handler(ctx);
+
+    const rendered = await fs.readFile(path.join(ws, '.devops/chart/base/deployments.yaml'), 'utf8');
+    const deploymentCount = (rendered.match(/kind: Deployment/g) || []).length;
+    expect(deploymentCount).toBe(2);
+    expect(rendered).not.toContain('kind: Rollout');
+    expect(rendered).not.toContain('setWeight: 25');
+  });
+
   it('fails closed on a bad appName', async () => {
     const action = createComposeProjectAction({ reader: mockReader({}) });
     await expect(
