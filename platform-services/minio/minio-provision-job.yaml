@@ -47,6 +47,9 @@ spec:
         - name: provision
           image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
           imagePullPolicy: IfNotPresent
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { cpu: 100m, memory: 64Mi }
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -92,12 +95,9 @@ spec:
 
               echo "==> ensuring bucket 'velero' exists ..."
               mc mb --ignore-existing local/velero
-              # Future observability reuse (retro follow-up, NOT implemented here —
-              # Thanos/Tempo are not deployed; anti-gold-plate): when they land, add
-              #   mc mb --ignore-existing local/thanos
-              #   mc mb --ignore-existing local/tempo
-              # and a matching scoped IAM user + policy per consumer, same pattern
-              # as the velero-rw policy below.
+
+              echo "==> ensuring bucket 'dr-backup' exists (Thanos long-term metrics) ..."
+              mc mb --ignore-existing local/dr-backup
 
               echo "==> writing least-privilege policy (velero-rw: only the velero bucket) ..."
               cat > /tmp/velero-rw-policy.json <<'EOF'
