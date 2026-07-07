@@ -100,25 +100,62 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       initContainers:
-        # Idempotent bootstrap: create the `platform-oncall` user (once — the ntfy
-        # CLI has no create-if-missing flag, so check first) and (re-)grant it
+        # Idempotent bootstrap: create the `platform-oncall` user and (re-)grant it
         # read-write on the `platform-alerts` topic (safe to repeat every restart).
+        #
+        # v2.25.0 CLI notes (verified against the real image — `ntfy user add --help`):
+        #   - There is NO `--password-stdin` flag. The password is passed via the
+        #     `NTFY_PASSWORD` env var (the only scripting-friendly option the CLI
+        #     supports — `ntfy user add phil` / `NTFY_PASSWORD=... ntfy user add phil`).
+        #   - `ntfy user add` takes `--ignore-exists`, which makes user creation
+        #     itself idempotent natively (no more `user list | grep` pre-check needed).
+        #   - Global flags like `--config` must come AFTER the subcommand noun and
+        #     BEFORE the verb, i.e. `ntfy user --config <file> add ...`, not
+        #     `ntfy user add --config <file> ...` (rejected: "flag provided but not
+        #     defined: -config") and not `ntfy --config <file> user add ...` (same
+        #     error — `--config` isn't a root-level flag, it's scoped to `user`/`access`).
+        #   - CRITICAL: `ntfy user`/`ntfy access` refuse to run against a fresh
+        #     `auth-file` that has never been created ("auth-file does not exist;
+        #     please start the server at least once to create it") — verified live.
+        #     On a brand-new PVC there is no auth.db yet, and an initContainer runs
+        #     BEFORE the main `ntfy serve` container ever starts, so the very first
+        #     deploy would otherwise crash-loop here even with correct CLI syntax.
+        #     Fix: if auth.db is missing, this script starts `ntfy serve` itself in
+        #     the background just long enough to let it create auth.db, runs the
+        #     user/access provisioning against that same file, then stops it —
+        #     the main container starts fresh afterwards and reuses the same PVC.
         - name: bootstrap
           image: binwiederhier/ntfy:v2.25.0   # pinned; match the main container below
           command: ["/bin/sh", "-ec"]
           args:
             - |
               CONF=/etc/ntfy/server.yml
-              if ntfy user list --config "$CONF" 2>/dev/null | grep -q 'platform-oncall'; then
-                echo "[ntfy-bootstrap] user platform-oncall already exists"
-              else
-                echo "[ntfy-bootstrap] creating user platform-oncall"
-                printf '%s' "$NTFY_ONCALL_PASSWORD" | ntfy user add --config "$CONF" --role=user --password-stdin platform-oncall
+              AUTHDB=/var/lib/ntfy/auth.db
+              SERVER_PID=""
+              if [ ! -f "$AUTHDB" ]; then
+                echo "[ntfy-bootstrap] auth.db missing (first deploy) — starting temp server to initialize it"
+                ntfy serve --config "$CONF" &
+                SERVER_PID=$!
+                i=0
+                while [ ! -f "$AUTHDB" ] && [ "$i" -lt 30 ]; do
+                  sleep 0.5
+                  i=$((i + 1))
+                done
+                if [ ! -f "$AUTHDB" ]; then
+                  echo "[ntfy-bootstrap] ERROR: auth.db still missing after 15s wait"
+                  exit 1
+                fi
               fi
+              ntfy user --config "$CONF" add --role=user --ignore-exists platform-oncall
+              echo "[ntfy-bootstrap] platform-oncall user present"
               ntfy access --config "$CONF" platform-oncall platform-alerts rw
               echo "[ntfy-bootstrap] platform-oncall has rw on platform-alerts"
+              if [ -n "$SERVER_PID" ]; then
+                kill "$SERVER_PID" 2>/dev/null || true
+                wait "$SERVER_PID" 2>/dev/null || true
+              fi
           env:
-            - name: NTFY_ONCALL_PASSWORD
+            - name: NTFY_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: ntfy-platform-oncall-credentials
