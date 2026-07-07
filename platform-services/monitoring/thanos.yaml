@@ -331,8 +331,8 @@ spec:
             # DNS SRV discovery: the Prometheus sidecar (via kube-prometheus-stack's
             # auto-extended `prometheus-operated` headless Service) and this file's
             # Store Gateway (headless Service above).
-            - --store=dnssrv+_grpc._tcp.prometheus-operated.monitoring.svc.cluster.local
-            - --store=dnssrv+_grpc._tcp.thanos-store-gateway.monitoring.svc.cluster.local
+            - --endpoint=dnssrv+_grpc._tcp.prometheus-operated.monitoring.svc.cluster.local
+            - --endpoint=dnssrv+_grpc._tcp.thanos-store-gateway.monitoring.svc.cluster.local
           ports:
             - name: http
               containerPort: 10902
