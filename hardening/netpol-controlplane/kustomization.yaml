@@ -22,6 +22,8 @@ resources:
   - vault-unsealer-netpol.yaml  # Track-2 DR: default-deny + vault-ns-only ingress for the unsealer ns
   - vault-cnp.yaml              # SEC-B1: Cilium apiserver/cluster egress by entity for vault+unsealer (ipBlock can't — flannel->Cilium gap)
   - crossplane-db-cnp.yaml      # ADR-033: Cilium egress for provider-sql -> off-cluster DB tier (tailnet:3306) + its apiserver/DNS surface
+  - mtls-vault-cnp.yaml            # service-mesh: Cilium mutual-auth (SPIFFE/SPIRE) required for ESO/provider-vault/Backstage -> vault:8200
+  - mtls-harbor-provider-cnp.yaml  # service-mesh: Cilium mutual-auth + L7 HTTP path scoping for provider-harbor -> harbor-core:8080
 
 labels:
   - pairs:

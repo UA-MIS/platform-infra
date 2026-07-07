@@ -1,0 +1,89 @@
+# Cilium mutual authentication (mTLS) — vault namespace.
+#
+# WHY THIS EXISTS (service-mesh east-west mTLS, additive to ADR-030 B1):
+# vault-netpol.yaml already scopes Vault's ingress at L3/L4 to exactly three
+# clients — ESO (external-secrets ns), provider-vault (crossplane-system ns),
+# Backstage (backstage ns) — on :8200. That answers "which namespace may open a
+# TCP connection to Vault." It does NOT answer "is the pod on the other end of
+# that connection cryptographically proven to be who its labels/namespace claim"
+# — a compromised or mis-scheduled pod that lands in one of those three
+# namespaces (or a spoofed source under a CNI bug) would still pass the existing
+# L3/L4 allow. Cilium mutual authentication closes that gap: it requires a
+# SPIFFE/SPIRE-backed mTLS handshake between the two Cilium security identities
+# before the connection is allowed to proceed, independent of and in addition to
+# the L3/L4 scoping. Vault is the platform's secrets store — the single highest-
+# value target for east-west identity spoofing — so it is the first candidate.
+#
+# NO L7 (HTTP) rules here: Vault's listener has `global.tlsDisable: false`
+# (vault-app.yaml) — the wire is already TLS end-to-end, so Cilium's L7 HTTP
+# proxy (which needs to see plaintext) cannot parse paths/methods without
+# terminating that TLS itself (a materially bigger, separate change — mounting
+# Vault's private key into Cilium's Envoy proxy — not undertaken here). Mutual
+# auth operates below that layer (it authenticates the TCP peer via SPIFFE
+# identity, not the HTTP payload), so it works unmodified against an already-TLS
+# service. Contrast with mtls-harbor-provider-cnp.yaml, where the target IS
+# plaintext HTTP and gets both mutual auth AND L7 path/method scoping.
+#
+# PREREQUISITE: this policy is INERT (falls back to "authentication not
+# required," i.e. today's behavior — fails safe, not closed) until the SPIRE
+# install lands (clusters/real-talos/cilium-mtls-values.yaml, applied per
+# docs/cilium-cni-runbook.md Step 5). Merging this PR only lands the manifest;
+# enforcement follows the SAME manual-sync + watched-validation discipline as
+# every other file in this directory (platform-netpol-controlplane, SEC-011).
+#
+# ADDITIVE: sits alongside vault-netpol.yaml (k8s NetworkPolicy, L3/L4 scoping)
+# and vault-cnp.yaml (Cilium apiserver/cluster egress-by-entity). This CNP only
+# ADDS the authentication requirement to the existing three ingress paths; it
+# does not change what is allowed, only what is additionally REQUIRED of it.
+#
+# ⚠ Verify at rollout: `kubectl exec -n cilium-spire spire-server-0 -c
+# spire-server -- /opt/spire/bin/spire-server entry show -selector
+# cilium:mutual-auth` should list one entry per participating identity (vault,
+# external-secrets, crossplane-system provider-vault runtime, backstage). If a
+# handshake fails (e.g. SPIRE not yet ready), Cilium DROPS the connection rather
+# than falling back to plaintext — hubble observe --namespace vault --verdict
+# DROPPED during the change window, and roll back via `helm upgrade --reuse-
+# values --set authentication.enabled=false` if ESO/Backstage/provider-vault
+# lose Vault access.
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: mtls-require-ingress-vault
+  namespace: vault
+  labels:
+    platform.capstone/component: platform
+spec:
+  endpointSelector: {}
+  ingress:
+    # ESO (external-secrets ns) -> vault:8200 — the ExternalSecret pull path.
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: external-secrets
+      toPorts:
+        - ports:
+            - port: "8200"
+              protocol: TCP
+      authentication:
+        mode: "required"
+    # provider-vault (crossplane-system ns) -> vault:8200 — tenant onboarding
+    # Policy/AuthBackendRole MRs (Track-5/ADR-031).
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: crossplane-system
+      toPorts:
+        - ports:
+            - port: "8200"
+              protocol: TCP
+      authentication:
+        mode: "required"
+    # Backstage (backstage ns) -> vault:8200 — the Secrets-tab writer path.
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: backstage
+      toPorts:
+        - ports:
+            - port: "8200"
+              protocol: TCP
+      authentication:
+        mode: "required"

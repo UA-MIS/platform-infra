@@ -1,0 +1,104 @@
+# Cilium mutual auth (mTLS) + L7 HTTP policy — provider-harbor -> harbor-core.
+#
+# WHY THIS EXISTS (service-mesh east-west hardening, ADR-031 Crossplane onboarding):
+# harbor-netpol.yaml already allows crossplane-system -> harbor-core:8080 at L3/L4
+# (provider-harbor calls the Harbor REST API directly over plain HTTP in-cluster —
+# see providerconfig-harbor.yaml: `http://harbor-core.harbor.svc`, port 8080, NOT
+# 443/TLS — Traefik terminates public TLS, harbor-core itself never does). That
+# rule permits ANY request on :8080 from the whole crossplane-system namespace.
+# provider-harbor's actual job (platform-services/crossplane/apis/composition.yaml)
+# is exactly two Harbor resource kinds: Project and RobotAccount — i.e. calls under
+# `/api/v2.0/projects*` and `/api/v2.0/robots*` (the unified robots API — Harbor
+# v2.15 removed the legacy per-project robots path). A compromised or misconfigured
+# provider-harbor pod (or any other crossplane-system workload that inherited the
+# namespace-wide L3/L4 allow) has no business calling Harbor's system/admin/scan
+# APIs — this policy narrows that to the two paths it actually uses, PLUS requires
+# a mutual-auth handshake so the peer's Cilium identity is cryptographically proven,
+# not just namespace-inferred.
+#
+# BECAUSE THIS IS PLAINTEXT HTTP (unlike Vault), Cilium's L7 proxy CAN parse the
+# request line — this is the one control-plane path in this PR where L7 path/method
+# scoping is actually possible (contrast mtls-vault-cnp.yaml, TLS end-to-end, L7-blind).
+#
+# ⚠⚠⚠ KNOWN CILIUM GOTCHA — VERIFY BEFORE TRUSTING THE L7 SCOPING ⚠⚠⚠
+# Cilium policies are additive/OR'd for the ALLOW decision. harbor-netpol.yaml's
+# plain k8s NetworkPolicy allow (crossplane-system -> harbor:8080, no path
+# restriction) and this CNP's L7-scoped allow both select the SAME identity+port.
+# Cilium's own docs/issue history note that a co-existing L3/L4-only allow for the
+# same endpoint+port can cause the L7 proxy redirect to be skipped for that traffic
+# (the coarser allow "wins" and the request never gets proxied for HTTP parsing) —
+# i.e. this policy's path/method narrowing may be a NO-OP today, silently, while
+# still being 100% correct for the mutual-auth requirement below (auth mode is
+# enforced independent of L7 redirection). VERIFY at rollout:
+#   kubectl -n kube-system exec ds/cilium -c cilium-agent -- \
+#     cilium-dbg status --all-redirects   # expect an HTTP redirect for the
+#                                          # harbor-core:8080 / provider-harbor identity
+#   # then confirm an out-of-scope call is actually blocked, e.g. from a
+#   # provider-harbor-labeled test pod: curl -s -o /dev/null -w '%{http_code}\n' \
+#   #   http://harbor-core.harbor.svc:8080/api/v2.0/health   -> expect DENIED, not 200.
+# If the redirect is absent / the out-of-scope call succeeds: the L3/L4-only allow
+# in harbor-netpol.yaml is shadowing this rule. Fix = remove the bare `port: 8080`
+# entry for the crossplane-system `from:` block in harbor-netpol.yaml's
+# allow-ingress-traefik-and-intra-ns rule so THIS policy becomes the sole permit
+# path (a deliberate, watched follow-up change to that live, manual-sync netpol —
+# not bundled into this additive PR to keep this change's blast radius to "add,
+# don't touch existing control-plane netpols").
+#
+# ⚠ Phase-0 (same caveat class as crossplane-db-cnp.yaml): confirm the harbor-core
+# pod labels (`app: harbor`, `component: core`, chart convention) and the
+# provider-harbor runtime pod label (`pkg.crossplane.io/provider: provider-harbor`,
+# same Crossplane convention as provider-sql) against the LIVE pods —
+# `kubectl -n harbor get pods --show-labels | grep core` /
+# `kubectl -n crossplane-system get pods --show-labels | grep provider-harbor` —
+# and adjust the selectors below if the installed chart/provider versions differ.
+#
+# PREREQUISITE: the `authentication.mode: required` rule is INERT until SPIRE is
+# installed (clusters/real-talos/cilium-mtls-values.yaml, docs/cilium-cni-runbook.md
+# Step 5) — fails safe (today's behavior), not closed. ADDITIVE alongside
+# harbor-netpol.yaml + apiserver-cnp.yaml. MANUAL-SYNC via platform-netpol-
+# controlplane (SEC-011 discipline) — merging lands the manifest only; enforcement
+# is the deliberate `argocd app sync` + the verification above.
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: mtls-l7-require-ingress-harbor-core-from-provider-harbor
+  namespace: harbor
+  labels:
+    platform.capstone/component: platform
+spec:
+  endpointSelector:
+    matchLabels:
+      app: harbor
+      component: core
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: crossplane-system
+            pkg.crossplane.io/provider: provider-harbor
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+          rules:
+            http:
+              # Project provisioning (ADR-031: one Project per team).
+              - method: "GET"
+                path: "/api/v2\\.0/projects.*"
+              - method: "POST"
+                path: "/api/v2\\.0/projects.*"
+              - method: "PUT"
+                path: "/api/v2\\.0/projects.*"
+              - method: "DELETE"
+                path: "/api/v2\\.0/projects.*"
+              # RobotAccount provisioning (unified API, push + pull robots).
+              - method: "GET"
+                path: "/api/v2\\.0/robots.*"
+              - method: "POST"
+                path: "/api/v2\\.0/robots.*"
+              - method: "PUT"
+                path: "/api/v2\\.0/robots.*"
+              - method: "DELETE"
+                path: "/api/v2\\.0/robots.*"
+      authentication:
+        mode: "required"
