@@ -21,10 +21,11 @@
 # flag + wires the DATABASE_URL ExternalSecret accordingly.
 #
 # DOWNSTREAM: compose assembles the repo, publish/register ship it, then the ZERO-TOUCH seam
-# (capstone:emit-tenant-claim -> a 1-click claim PR) provisions the tenant. The wizard's
-# RESOLVED database choice (compose output none|mysql) flows into the CapstoneTenant XR's
-# spec.database here — ADR-035 §C/§D1 — replacing the imperative harbor-onboard/render-tenant/
-# onboarding-PR trio with the same proven claim seam the zero-touch template already uses.
+# (capstone:emit-tenant-claim -> capstone:commit-to-main, straight onto platform-infra main,
+# NO PR / NO human merge) provisions the tenant. The wizard's RESOLVED database choice (compose
+# output none|mysql) flows into the CapstoneTenant XR's spec.database here — ADR-035 §C/§D1 —
+# replacing the imperative harbor-onboard/render-tenant/onboarding-PR trio with the same proven
+# claim seam the zero-touch template already uses.
 apiVersion: scaffolder.backstage.io/v1beta3
 kind: Template
 metadata:
@@ -422,35 +423,30 @@ spec:
         # one tenants/_claims/<team>-<app>.yaml file.
         targetPath: ./claim
 
-    # 6) Open a PR landing the claim on platform-infra `main`. A reviewer merges it with ONE
-    #    click; ArgoCD (platform-crossplane-claims) then syncs the XR and Crossplane reconciles
-    #    the whole tenant — Harbor, Vault, the k8s tenancy fence, and (when spec.database=mysql)
-    #    a per-env MariaDB. Same proven publish:github:pull-request mechanism. TRUE zero-touch
-    #    (no merge) swaps this ONE step for capstone:commit-to-main (ADR-035 §D7 / PR #190) once
-    #    that action is in the image — designed as a single-step change.
+    # 6) Land the claim DIRECTLY on platform-infra `main` — NO PR, NO human merge (true
+    #    zero-touch, ADR-031 §7 Option A(b) / ADR-035 §D7). capstone:commit-to-main PUTs the
+    #    single XR file straight onto main via the platform GitHub App (on the
+    #    tenants/_claims/** branch-protection bypass list). ArgoCD (platform-crossplane-claims)
+    #    then syncs the XR and Crossplane reconciles the whole tenant — Harbor, Vault, the k8s
+    #    tenancy fence, and (when spec.database=mysql) a per-env MariaDB.
+    #
+    #    This REPLACES the previous 1-click-merge claim PR (publish:github:pull-request): the
+    #    installed @backstage/plugin-scaffolder-backend-module-github @0.9.10 has NO autoMerge
+    #    input and NO github:pull-request:merge action (Context7-verified), so a PR could never
+    #    be truly auto-merged. capstone:commit-to-main is the clean no-PR realization (already
+    #    used by the new-capstone-project-zerotouch template — same seam, no drift). Auth is the
+    #    SAME integrations.github App as publish:github (no token input).
     - id: commit-claim
-      name: Land tenant claim on platform-infra (1-click merge)
-      action: publish:github:pull-request
+      name: Land tenant claim on platform-infra main (zero-touch, no PR)
+      action: capstone:commit-to-main
       input:
         repoUrl: github.com?owner=UA-MIS&repo=platform-infra
-        branchName: claim-${{ parameters.team }}-${{ parameters.appName }}
-        targetBranchName: main
-        title: "onboard tenant (zero-touch): ${{ parameters.team }}-${{ parameters.appName }} (Capstone ${{ parameters.season }} ${{ parameters.year }})"
-        sourcePath: ./claim
-        description: |
-          ## Zero-touch tenant claim — `${{ parameters.team }}-${{ parameters.appName }}` (Capstone ${{ parameters.season }} ${{ parameters.year }})
-
-          Emitted by **The Process** ("New Project") for app **${{ parameters.appName }}**
-          (repo: ${{ steps['publish'].output.remoteUrl }}).
-
-          This PR adds ONE `tenants/_claims/${{ parameters.team }}-${{ parameters.appName }}.yaml`
-          (a schema-validated `CapstoneTenant` XR). A reviewed-once Crossplane Composition
-          expands it into the full tenant — Harbor project/robots, Vault policy/role, the k8s
-          tenancy fence (AppProject, namespaces, quotas, netpol, RBAC, ESO plumbing,
-          env/preview ApplicationSets), and — when `spec.database: mysql` — a per-env MariaDB
-          schema + user + Vault creds (ADR-033). **No operator steps.** De-provision = `git rm`
-          this file.
-        token: ${{ secrets.GITHUB_TOKEN }}
+        branch: main
+        # Repo-relative destination = the emitted claim path (tenants/_claims/<team>-<app>.yaml).
+        path: ${{ steps['emit-claim'].output.claimPath }}
+        # Read the emitted XR from the workspace (emit-claim wrote it under ./claim).
+        sourcePath: ./claim/${{ steps['emit-claim'].output.claimPath }}
+        commitMessage: "onboard tenant (zero-touch): ${{ parameters.team }}-${{ parameters.appName }} (Capstone ${{ parameters.season }} ${{ parameters.year }})"
 
   output:
     links:
@@ -459,9 +455,9 @@ spec:
       - title: Open in catalog
         icon: catalog
         entityRef: ${{ steps['register'].output.entityRef }}
-      - title: Tenant claim (auto-provisioning)
+      - title: Tenant claim commit (auto-provisioning)
         icon: github
-        url: ${{ steps['commit-claim'].output.remoteUrl }}
+        url: ${{ steps['commit-claim'].output.commitUrl }}
     text:
       - title: Next steps
         content: |
@@ -472,7 +468,7 @@ spec:
           4. Tag `vX.Y.Z` -> **staging** auto-deploys; **prod** waits on the manual gate.
           Your app will be at `https://${{ parameters.appName }}.capstone.uamishub.com`.
 
-          A **tenant claim PR** was opened against `UA-MIS/platform-infra` (link above). One
-          reviewer merge provisions everything automatically — your team's namespaces, RBAC,
-          Harbor project/robots, Vault policy, and (if you picked Auto MySQL) a per-env MySQL —
-          via Crossplane from that single claim. No operator steps.
+          A **tenant claim** was committed directly to `UA-MIS/platform-infra` main (link
+          above) — no PR, no merge. Everything provisions automatically from it: your team's
+          namespaces, RBAC, Harbor project/robots, Vault policy, and (if you picked Auto
+          MySQL) a per-env MySQL, via Crossplane. No operator steps.
