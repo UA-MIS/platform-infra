@@ -139,6 +139,13 @@ install-owned and **not** GitOps-reconciled — after a PR touching `bootstrap/`
 [OPERATIONS §4](../OPERATIONS-AND-HANDOFF.md#4-day-2-operations). "Synced/Healthy" is
 **not** proof it works — assert pods actually reach `Running`.
 
+### 4.7 Multi-cluster (scaffolding, inert)
+
+Only one physical cluster exists today. An ArgoCD `clusters`-generator ApplicationSet
+is wired and ready for a future second cluster (the planned homelab k3s) but produces
+zero Applications until one is registered: `make cluster-register CONTEXT=<ctx>
+NAME=<short-name>`. → **[multi-cluster.md](multi-cluster.md)**.
+
 ---
 
 ## 5. Known DR gaps & risks (read before you rely on it)
@@ -181,4 +188,5 @@ These are **live-verified** weak spots a successor should close:
 | [resource-governance.md](resource-governance.md) | VPA/Goldilocks + per-tenant quotas |
 | [db-tier-runbook.md](../db-tier-runbook.md) · [db-tier-provisioner-setup.md](db-tier-provisioner-setup.md) | Off-cluster Postgres/MariaDB tier |
 | [vm-path-harbor-provisioner.md](vm-path-harbor-provisioner.md) | KubeVirt VM scaffolder wiring |
+| [multi-cluster.md](multi-cluster.md) | Multi-cluster scaffolding (ApplicationSet cluster generator, inert until a 2nd cluster is registered) |
 | [gotchas-and-lessons.md](gotchas-and-lessons.md) | Process-layer war stories |

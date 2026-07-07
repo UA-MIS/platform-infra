@@ -1,0 +1,49 @@
+# Default-deny + DNS-only egress for the baseline namespace — same fence shape as
+# every tenant namespace (tenants/_template/namespaces/*.yaml §3.4), applied here even
+# though the baseline ships no workload yet: whatever lands in this namespace next
+# (see docs/operator/multi-cluster.md roadmap) inherits least-privilege by default
+# instead of an operator having to remember to add it later.
+#
+# ⚠ ENFORCEMENT DEPENDS ON THE SATELLITE'S CNI. Stock k3s ships Flannel, and Flannel
+# does NOT enforce NetworkPolicy (the same "looks Synced/Healthy but is actually inert"
+# gotcha hit on the Talos hub pre-Cilium — see docs/cilium-cni-runbook.md). If the
+# homelab k3s is installed with its default CNI, this object will be present in git
+# and on the cluster but NOT ENFORCED. Install Cilium or Calico on it (or run k3s with
+# `--flannel-backend=none` + a policy-enforcing CNI) if enforcement is required —
+# tracked as a docs/operator/multi-cluster.md follow-up, not solved here.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: capstone-satellite-baseline
+  labels:
+    platform.capstone/component: multi-cluster
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-dns
+  namespace: capstone-satellite-baseline
+  labels:
+    platform.capstone/component: multi-cluster
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # DNS to CoreDNS in kube-system (UDP + TCP 53) — the one thing any future
+    # workload in this namespace will need regardless of what it turns out to be.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

@@ -34,6 +34,7 @@ nav:
       - Resource governance: operator/resource-governance.md
       - DB tier provisioner setup: operator/db-tier-provisioner-setup.md
       - VM path (Harbor provisioner): operator/vm-path-harbor-provisioner.md
+      - Multi-cluster (scaffolding): operator/multi-cluster.md
       - Runbooks: operator/runbooks.md
       - Gotchas & lessons: operator/gotchas-and-lessons.md
   - Reference runbooks:

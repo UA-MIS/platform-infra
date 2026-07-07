@@ -1,0 +1,13 @@
+# Namespace for the multi-cluster "proof of life" baseline (applicationsets/
+# satellite-clusters-appset.yaml). Restricted PSA to match the tenant convention even
+# though nothing privileged runs here — this baseline never grows privileged workloads
+# without a deliberate follow-up change.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: capstone-satellite-baseline
+  labels:
+    app.kubernetes.io/managed-by: argocd
+    platform.capstone/component: multi-cluster
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
