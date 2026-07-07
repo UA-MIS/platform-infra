@@ -1,0 +1,139 @@
+# NetworkPolicy for the db-tier namespace (db-setup task) — closes the gap noted
+# in docs/operator/in-cluster-db-tier-runbook.md §3 ("no NetworkPolicy hardening
+# yet... a natural next step"). Unlike the argocd/dex/harbor/vault policies in
+# hardening/netpol-controlplane/ (MANUAL sync — those namespaces are already
+# LIVE, so default-deny needs a deliberate watched apply to avoid a lockout),
+# db-tier is a BRAND-NEW namespace standing up for the first time in this same
+# PR — there is no running traffic to sever, so it's safe to ship this default-
+# deny + scoped-allow policy through the normal automated sync (platform-services-
+# appset), same "comes up together" reasoning the netpol-controlplane Application
+# itself documents for a fresh bootstrap.
+#
+# Scope: restrict which namespaces may reach the CNPG/MariaDB/MinIO pods in
+# db-tier — the tradeoff explicitly called out in
+# applicationsets/mariadb-cluster-app.yaml (crossplane_provisioner's MySQL
+# `host: "%"` login) and applicationsets/cnpg-cluster-app.yaml's roles: reachable
+# only via the in-cluster Service, boundary enforced here, not by the DB login's
+# host string.
+#
+# Cilium enforces standard `networking.k8s.io/v1` NetworkPolicy (no CNP needed —
+# this doesn't touch entity-based apiserver matching or the flannel->Cilium CIDR
+# gap that apiserver-cnp.yaml/vault-cnp.yaml work around). CNP and k8s
+# NetworkPolicy on the same endpoint/direction are ADDITIVE (OR).
+#
+# Talos/Cilium CIDRs (see hardening/netpol-controlplane/*-netpol.yaml headers):
+# pods 10.244.0.0/16, services 10.96.0.0/12, nodes 10.237.168.0/22
+# (apiserver :6443 + kubelet-probe source).
+
+# --- default-deny (ingress + egress) for every pod in db-tier ---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: zz-default-deny
+  namespace: db-tier
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# --- INGRESS: the two operator namespaces on their exact reconcile/health ports,
+#     full intra-namespace (Galera SST/replication on 4444/4567/4568, CNPG
+#     streaming replication on 5432, the barman-cloud sidecar and mariadb
+#     PhysicalBackup jobs reaching the MinIO pod on 9000 — all same-namespace
+#     traffic today, no other namespace is a live DB client yet per runbook §3/§4),
+#     and kubelet probes (node CIDR, source is the node IP not a pod/namespace). ---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-operators-and-intra-ns
+  namespace: db-tier
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    # cnpg-system (the CNPG operator) -> the Postgres instance manager status/
+    # webhook port (8000) + the Postgres port itself (5432) — exact port set from
+    # the upstream sample (https://cloudnative-pg.io/documentation/1.27/samples/
+    # networkpolicy-example): the operator polls instance status over 8000 and
+    # connects to 5432 for some checks.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cnpg-system
+      ports:
+        - protocol: TCP
+          port: 8000
+        - protocol: TCP
+          port: 5432
+    # mariadb-system (the mariadb-operator) -> MySQL (3306) + the per-pod Galera
+    # agent API (5555, used for cluster bootstrap/recovery orchestration —
+    # mariadb-operator/docs/galera.md).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: mariadb-system
+      ports:
+        - protocol: TCP
+          port: 3306
+        - protocol: TCP
+          port: 5555
+    # Intra-namespace: CNPG replication, Galera SST/replication, and the backup
+    # paths (barman-cloud sidecar + mariadb PhysicalBackup Job) reaching the MinIO
+    # pod — all same-namespace today.
+    - from:
+        - podSelector: {}
+    # Kubelet health probes (readiness/liveness) originate from the NODE IP, not a
+    # pod/namespace — without this, default-deny fails every db-tier pod's probes.
+    - from:
+        - ipBlock:
+            cidr: 10.237.168.0/22
+---
+# --- EGRESS: DNS, intra-cluster (pod + service CIDRs — covers Galera/CNPG peer
+#     replication over pod IPs, the MinIO ClusterIP on 9000, and the operators'
+#     own webhook/status callbacks), and the apiserver on the node IPs (the CNPG
+#     instance manager and the mariadb-operator's Galera agent both read/write
+#     status via the k8s API directly, not only through their operator). No
+#     external egress — nothing in db-tier talks off-cluster. ---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-scoped
+  namespace: db-tier
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # DNS to CoreDNS (kube-system), UDP+TCP 53.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Intra-cluster: any pod (10.244/16) or service (10.96/12) — Galera/CNPG peer
+    # replication + reaching the MinIO/CNPG/MariaDB ClusterIPs.
+    - to:
+        - ipBlock:
+            cidr: 10.244.0.0/16
+        - ipBlock:
+            cidr: 10.96.0.0/12
+    # kube-apiserver on the node IPs (:6443) — instance-manager/agent status
+    # read-writes.
+    - to:
+        - ipBlock:
+            cidr: 10.237.168.0/22
+      ports:
+        - protocol: TCP
+          port: 6443

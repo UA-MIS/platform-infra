@@ -134,7 +134,7 @@ spec:
               s3:
                 bucket: mariadb-backups
                 prefix: capstone
-                endpoint: minio.db-tier.svc.cluster.local:9000
+                endpoint: minio-backups.db-tier.svc.cluster.local:9000
                 region: us-east-1
                 accessKeyIdSecretKeyRef:
                   name: minio-mariadb-backup-credentials   # platform-services/db-tier/externalsecrets.yaml

@@ -19,7 +19,7 @@ spec:
   retentionPolicy: "30d"
   configuration:
     destinationPath: s3://postgres-backups/
-    endpointURL: http://minio.db-tier.svc.cluster.local:9000
+    endpointURL: http://minio-backups.db-tier.svc.cluster.local:9000
     s3Credentials:
       accessKeyId:
         name: minio-cnpg-backup-credentials   # platform-services/db-tier/externalsecrets.yaml

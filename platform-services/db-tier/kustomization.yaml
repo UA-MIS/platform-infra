@@ -1,16 +1,18 @@
 # In-cluster DB tier prereqs (db-setup task) — the namespace + the ExternalSecrets
 # that the dedicated Helm/CR Applications (applicationsets/cnpg-cluster-app.yaml,
 # applicationsets/mariadb-cluster-app.yaml, applicationsets/minio-backups-app.yaml)
-# consume by name. Managed by the platform-services directory generator
-# (platform-services-appset; this dir produces app `platform-svc-db-tier`) — same
-# "flat dir ships ns + secrets, the chart/CR is a separate Application" split as
-# Harbor/Vault/ESO.
+# consume by name, + the NetworkPolicy scoping which namespaces may reach this
+# tier's Postgres/MariaDB/MinIO pods (netpol.yaml). Managed by the platform-services
+# directory generator (platform-services-appset; this dir produces app
+# `platform-svc-db-tier`) — same "flat dir ships ns + secrets, the chart/CR is a
+# separate Application" split as Harbor/Vault/ESO.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
   - namespace.yaml
   - externalsecrets.yaml
+  - netpol.yaml
 
 labels:
   - pairs:

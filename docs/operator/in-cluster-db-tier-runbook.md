@@ -116,7 +116,7 @@ kubectl --context admin@capstone -n db-tier get cluster.postgresql.cnpg.io capst
 #   secrets land — 3 instances need to initialize + stream).
 kubectl --context admin@capstone -n db-tier get mariadb capstone-mariadb-mariadb-cluster
 #   STATUS Ready, 3/3 replicas.
-kubectl --context admin@capstone -n db-tier get pods -l app=minio-backups
+kubectl --context admin@capstone -n db-tier get pods -l app=minio,release=minio-backups
 kubectl --context admin@capstone -n db-tier get objectstore.barmancloud.cnpg.io capstone-pg-backup-store
 kubectl --context admin@capstone -n db-tier get scheduledbackup.postgresql.cnpg.io capstone-pg-nightly
 kubectl --context admin@capstone -n db-tier get physicalbackup   # from the mariadb-cluster chart
@@ -150,17 +150,22 @@ kubectl --context admin@capstone -n db-tier exec -it deploy/minio-backups -- mc 
   Postgres; the same least-privilege grant list, minus SUPER/FILE/PROCESS/
   RELOAD/SHUTDOWN, for MariaDB) so the ProviderConfig secrets **can** be repointed
   here later without a privilege-model change — see §4.
-- **No NetworkPolicy hardening** on `cnpg-system`/`mariadb-system`/`db-tier` yet.
-  Traffic is unrestricted-by-default in those namespaces (Cilium is
-  whitelist-additive — see `docs/cilium-cni-runbook.md` — absence of a policy in a
-  namespace means no restriction, not a deny). A security review adding scoped
-  `CiliumNetworkPolicy`/`NetworkPolicy` objects (mirroring
-  `hardening/netpol-controlplane/crossplane-db-cnp.yaml`'s pattern) restricting
-  which namespaces may reach `db-tier`'s Postgres/MariaDB/MinIO Services is the
-  natural next step, especially before the Crossplane repoint in §4 (the
-  `crossplane_provisioner` accounts are host-scoped `%`/any-source in-cluster —
-  see the comments in `applicationsets/mariadb-cluster-app.yaml` and
-  `platform-services/cnpg/cluster/roles.yaml` for the tradeoff).
+- **`db-tier` has default-deny + scoped-allow NetworkPolicy**
+  (`platform-services/db-tier/netpol.yaml`, auto-synced with the rest of this flat
+  dir — safe on day one since the namespace has no prior live traffic to sever):
+  ingress is scoped to the `cnpg-system`/`mariadb-system` operator namespaces on
+  their exact reconcile ports, intra-namespace (replication/SST/backup-to-MinIO),
+  and kubelet probes; egress is DNS + intra-cluster + apiserver only. `cnpg-system`
+  and `mariadb-system` themselves (the operator/controller pods) have **no**
+  NetworkPolicy yet — only their egress-side interaction with `db-tier` is fenced
+  from that side. Revisit before the Crossplane repoint in §4: the
+  `crossplane_provisioner` accounts are host-scoped `%`/any-source in-cluster (see
+  the comments in `applicationsets/mariadb-cluster-app.yaml` and
+  `platform-services/cnpg/cluster/roles.yaml`), so `db-tier`'s ingress allow-list
+  needs a companion edit (mirroring
+  `hardening/netpol-controlplane/crossplane-db-cnp.yaml`'s pattern) to admit
+  Backstage/Harbor/`crossplane-system` by namespace at that point — it is
+  deliberately NOT pre-opened here since none of those are live DB clients yet.
 - **MinIO has no TLS.** ClusterIP-only, never Ingress-exposed. Fine for a
   same-cluster-trust backup path; revisit if a review wants in-cluster mTLS
   everywhere (cert-manager is already available — same self-signed-issuer pattern
