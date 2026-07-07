@@ -54,6 +54,21 @@
     regexp: '^([^#].*\s+swap\s+.*)$'
     replace: '# \1  # disabled for kubernetes (capstone)'
 
+# Commenting fstab alone is NOT sufficient on these Debian workers: systemd can bring
+# swap back on its own at boot (systemd-fstab-generator re-derives .swap units from a
+# stale fstab snapshot/cache, and systemd-gpt-auto-generator can activate a GPT
+# "Linux swap" partition even with NO fstab entry at all). This bit us live — a
+# Debian-worker reboot silently re-enabled swap, and kubelet (failSwapOn=true) then
+# refused to start. Masking swap.target is the canonical, broad fix: every swap unit
+# (fstab-generated or gpt-auto-generated) is WantedBy=swap.target, and a masked unit
+# can never be started, so nothing systemd does at boot can re-enable swap.
+- name: Persistently mask swap.target (prevents systemd from re-enabling swap on reboot)
+  ansible.builtin.systemd:
+    name: swap.target
+    masked: true
+    enabled: false
+    state: stopped
+
 - name: Disable dphys-swapfile if present
   ansible.builtin.systemd:
     name: dphys-swapfile
