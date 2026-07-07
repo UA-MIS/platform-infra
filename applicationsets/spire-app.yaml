@@ -1,0 +1,129 @@
+# SPIRE Application (SPIFFE/SPIRE workload-identity baseline, exploratory task).
+# The `spire` umbrella chart: spire-server (StatefulSet, k8s_psat NODE attestation
+# + spire-controller-manager reconciling ClusterSPIFFEID CRs into registration
+# entries — the "Kubernetes Workload Registrar" model) + spire-agent (DaemonSet,
+# k8s WORKLOAD attestation) + spiffe-csi-driver (publishes the Workload API socket
+# into consuming pods as an ephemeral CSI volume, no hostPath on the workload side).
+# Helm-source Application, deploy method A (D-028): pinned chart + the chart repo
+# added to the `platform` AppProject sourceRepos allowlist
+# (bootstrap/platform-appproject.yaml this PR; security audits the addition).
+#
+# Chart: spiffe/spire 0.29.0 (appVersion 1.14.5 — the "hardened" charts, the
+# SPIFFE project's own supported Helm packaging: github.com/spiffe/helm-charts-hardened).
+# sync-wave 0 — AFTER the CRDs (applicationsets/spire-crds-app.yaml, wave -1); the
+# controller-manager's ClusterSPIFFEID watch needs the CRD to exist first.
+#
+# TWO-NAMESPACE LAYOUT (global.spire.recommendations.namespaceLayout, upstream's
+# own production recommendation): spire-system (privileged — agent DaemonSet +
+# CSI driver node plugin) / spire-server (baseline — server + controller-manager).
+# Both namespaces ship via platform-services/spire/ (Application-owned namespace
+# creation, same convention as vault/harbor/external-secrets) — NOT
+# global.spire.namespaces.create (left at its chart default `false`).
+#
+# ISOLATION (explicit task constraint — "keep isolated, don't disrupt Dex/Vault/
+# ESO"): this is a STANDALONE identity plane. It does NOT touch Vault, ESO, or Dex
+# in this change — no ClusterSecretStore wiring, no Dex OIDC client, no shared
+# trust anchor. The SPIFFE OIDC Discovery Provider (which WOULD let Vault's `jwt`
+# auth method trust SPIRE-issued JWT-SVIDs as a federation/bridge point) is
+# deliberately DISABLED below to keep the blast radius to "SPIRE exists and can
+# mint SVIDs" — see platform-services/spire/README.md "Integration path" for how a
+# human would wire it up later (Vault jwt auth backend trusting this OIDC
+# discovery endpoint, OR Cilium mTLS via the SPIFFE Workload API as the cert
+# source — both documented, neither implemented here).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-spire
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"   # after the CRDs (spire-crds-app = wave -1)
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://spiffe.github.io/helm-charts-hardened/   # PINNED chart repo (sourceRepos allowlist)
+    chart: spire
+    targetRevision: 0.29.0                                      # pinned chart version (appVersion 1.14.5); no ^/~/latest
+    helm:
+      releaseName: spire
+      values: |
+        global:
+          spire:
+            # Internal identity namespace — deliberately NOT the public PLATFORM_DOMAIN
+            # (Cloudflare/Dex's concern); SPIFFE trust domains are usually not
+            # internet-resolvable and never need to be. Bump only with a full
+            # re-registration (every SVID/registration entry is keyed by trust domain).
+            trustDomain: capstone.internal
+            # k8s_psat node attestation keys registration entries to THIS name; must
+            # stay in sync with the real cluster (clusters/real-talos). Purely a label
+            # inside SPIRE, not a k8s object reference.
+            clusterName: real-talos
+
+            # Recommended production defaults (upstream flag, NOT capstone-specific):
+            # turns on the two-namespace layout (spire-system/spire-server, see
+            # header), strict mode (registration entries require a specific
+            # SPIFFE ID scheme match), non-root securityContexts, PriorityClasses,
+            # and ServiceMonitors for the platform-kube-prometheus-stack (Track-3)
+            # to pick up automatically.
+            recommendations:
+              enabled: true
+
+            # Namespaces are Application-owned (platform-services/spire/), not
+            # chart-rendered — leave at the chart default (false).
+            namespaces:
+              create: false
+
+            # Ceph RBD PVC for the server's Raft-less local SQLite datastore (SPIRE's
+            # default embedded DB — fine at this scale; swap to Postgres later if the
+            # single-node datastore ever needs HA). Same storage class as vault/harbor.
+            persistence:
+              storageClass: ceph-block
+
+            caSubject:
+              country: US
+              organization: UA-MIS Capstone
+              commonName: capstone.internal
+
+        spire-server:
+          controllerManager:
+            enabled: true   # the Kubernetes Workload Registrar (reconciles ClusterSPIFFEID CRs)
+            # Pin an EXPLICIT className instead of the chart default (auto-derived
+            # from Release.Namespace-Release.Name = "spire-server-spire" — an
+            # implementation detail we don't want other manifests coupled to).
+            # ClusterSPIFFEID objects with no className are IGNORED
+            # (watchClassless defaults false) — demo-clusterspiffeid.yaml sets
+            # this SAME className so it actually gets reconciled.
+            className: capstone
+
+        # SPIFFE OIDC Discovery Provider OFF (see header "ISOLATION") — this baseline
+        # does not federate SPIRE identities into Vault or anywhere else yet.
+        spiffe-oidc-discovery-provider:
+          enabled: false
+
+        # Tornjak (SPIRE admin UI) / SPIKE (secrets-on-SPIFFE) subcharts: not part of
+        # this exploratory baseline — keep the footprint to server+agent+CSI+controller-
+        # manager only.
+        tornjak-frontend:
+          enabled: false
+        spike-keeper:
+          enabled: false
+        spike-nexus:
+          enabled: false
+        spike-pilot:
+          enabled: false
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: spire-server   # server + controller-manager land here; agent/CSI-driver render into spire-system (explicit per-resource namespace in the chart's own templates)
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false   # spire-system + spire-server ns ship via platform-services/spire
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }
