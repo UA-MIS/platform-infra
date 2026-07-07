@@ -1,0 +1,198 @@
+# Tempo — distributed tracing backend (Observability follow-up). Raw manifests, NOT
+# the `grafana/tempo` Helm chart: that chart (the single-binary "monolithic mode"
+# packaging, the only one with Loki-style simplicity) is marked `deprecated: true`
+# upstream (confirmed via `helm show chart grafana/tempo --version 1.24.4`) in favor
+# of `tempo-distributed`, which has NO equivalent single-process mode — only the full
+# microservices split (distributor/ingester/querier/compactor/memcached...), which is
+# the wrong altitude for this platform's trace volume. Rather than depend on a
+# deprecated chart, this ships the single-binary config directly as a StatefulSet —
+# same "raw manifests for a small, well-understood component" call as thanos.yaml /
+# ntfy.yaml in this same directory. The config below matches upstream single-binary
+# Tempo's own shape (verified against `helm template grafana/tempo`), just trimmed to
+# OTLP-only receivers and un-ballasted for this platform's small resource footprint.
+#
+# SCOPE (anti-gold-plate, same posture as Loki's single-binary choice): ONE process,
+# local filesystem storage on a Ceph RBD PVC — NOT the distributed/microservices
+# split, NO S3/GCS trace backend, NO memcached caches. `retention: 24h` — short on
+# purpose; traces are bursty and much larger per-event than metrics, and the real
+# RAM control for tracing is upstream in the OTel Collector's low sampling rate
+# (see otel-collector's ConfigMap comment below) — Tempo just stores whatever
+# fraction of traces survives sampling, for a day. A long-term trace store (Tempo
+# does support its own S3/GCS backend — the same dr-backup MinIO bucket could serve
+# it) is a possible future add, deliberately left as a follow-up, not built here.
+#
+# Ingest path: OTLP ONLY (grpc :4317 / http :4318) from the OTel Collector
+# (otel-collector.yaml, below) — the Collector is the one thing instrumented apps
+# talk to; nothing talks to Tempo directly.
+#
+# Grafana wiring: the `Tempo` entry in `additionalDataSources`
+# (applicationsets/kube-prometheus-stack-app.yaml), http://tempo.monitoring.svc.cluster.local:3200.
+#
+# Image: docker.io/grafana/tempo:2.9.0, pinned (same appVersion the now-deprecated
+# chart would have installed at 1.24.4) — bump deliberately.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tempo-config
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+data:
+  tempo.yaml: |
+    multitenancy_enabled: false
+    usage_report:
+      reporting_enabled: false
+    compactor:
+      compaction:
+        block_retention: 24h
+    distributor:
+      receivers:
+        otlp:
+          protocols:
+            grpc:
+              endpoint: 0.0.0.0:4317
+            http:
+              endpoint: 0.0.0.0:4318
+    ingester: {}
+    server:
+      http_listen_port: 3200
+    storage:
+      trace:
+        backend: local
+        local:
+          path: /var/tempo/traces
+        wal:
+          path: /var/tempo/wal
+    querier: {}
+    query_frontend: {}
+    overrides:
+      defaults: {}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: tempo
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: tempo
+spec:
+  replicas: 1
+  serviceName: tempo
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tempo
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tempo
+        platform.capstone/component: platform
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: tempo
+          image: docker.io/grafana/tempo:2.9.0   # pinned; bump deliberately
+          args:
+            - -config.file=/conf/tempo.yaml
+            # NO -mem-ballast-size-mbs: the chart default (1024MB, a permanent GC
+            # pre-allocation) would alone exceed this Deployment's whole memory
+            # limit below — irrelevant at this platform's trace volume.
+          ports:
+            - name: http
+              containerPort: 3200
+            - name: otlp-grpc
+              containerPort: 4317
+            - name: otlp-http
+              containerPort: 4318
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 3200
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: 3200
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          volumeMounts:
+            - name: config
+              mountPath: /conf
+            - name: storage
+              mountPath: /var/tempo
+      volumes:
+        - name: config
+          configMap:
+            name: tempo-config
+  volumeClaimTemplates:
+    - metadata:
+        name: storage
+        labels:
+          platform.capstone/component: platform
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: ceph-block   # replica-3 Ceph RBD (survives node loss)
+        resources:
+          requests:
+            storage: 5Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tempo
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: tempo
+spec:
+  selector:
+    app.kubernetes.io/name: tempo
+  ports:
+    - name: http
+      port: 3200
+      targetPort: http
+    - name: otlp-grpc
+      port: 4317
+      targetPort: otlp-grpc
+    - name: otlp-http
+      port: 4318
+      targetPort: otlp-http
+---
+# Scrape Tempo's own /metrics — same "scrape everything" ethos as servicemonitors.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: tempo
+  namespace: monitoring
+  annotations:
+    # Sync-deadlock fix (#127) precedent — see servicemonitors.yaml.
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    platform.capstone/component: platform
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames: ["monitoring"]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tempo
+  endpoints:
+    - port: http
+      interval: 60s

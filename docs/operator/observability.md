@@ -1,34 +1,48 @@
 # Observability
 
-Metrics, logs, and alerting for the platform. This closes the retro gap where the
-only telemetry was `metrics-server` and there was no alert even on "Vault sealed."
+Metrics, logs, traces, and alerting for the platform. This closes the retro gap
+where the only telemetry was `metrics-server` and there was no alert even on
+"Vault sealed" — and, as of this PR, closes two more: no tracing at all, and
+Alertmanager routed to a dead `example.com` placeholder.
 
 - Source of truth: `platform-services/monitoring/README.md`.
-- **Anti-gold-plate:** single Prometheus, 15d local retention (no Thanos/Mimir, no
-  remote-write); Loki **single-binary** (no SSD split, no S3/MinIO, no gateway).
-  Scale up via values only if volume ever demands it.
+- **Anti-gold-plate, still:** single Prometheus, 7d local retention, no remote-write,
+  no HA pairs; Loki + Tempo both **single-binary** (no SSD/microservices split, no
+  caches, no gateway). Thanos/MinIO/OTel/ntfy are deliberate, scoped EXCEPTIONS added
+  in this PR (long-term metrics, tracing, real alert delivery) — not speculative
+  scale-up. Scale further only if volume ever actually demands it.
 
-| Component | What | Application (Helm chart) |
+| Component | What | Application (Helm chart / raw manifests) |
 | --- | --- | --- |
-| kube-prometheus-stack | Prometheus + Alertmanager + Grafana + node-exporter + kube-state-metrics + operator/CRDs | `kube-prometheus-stack-app.yaml` (87.3.0) |
+| kube-prometheus-stack | Prometheus + Alertmanager + Grafana + node-exporter + kube-state-metrics + operator/CRDs (+ Thanos sidecar) | `kube-prometheus-stack-app.yaml` (87.3.0) |
 | Loki | log store, single-binary, filesystem on Ceph | `loki-app.yaml` (6.55.0) |
 | Alloy | log shipper (DaemonSet) → Loki | `alloy-app.yaml` (1.10.0) |
+| Tempo | trace store, single-binary, filesystem on Ceph (raw manifests — the chart is upstream deprecated) | `platform-services/monitoring/tempo.yaml` |
+| OTel Collector | OTLP trace ingress, sampled 15%, → Tempo | `otel-collector-app.yaml` (0.162.0) |
+| Thanos | long-term metrics: Query / Store Gateway / Compactor (raw manifests) | `platform-services/monitoring/thanos.yaml` — **hard-depends on MinIO** |
+| MinIO | S3-compatible object store, standalone, the `dr-backup` bucket | `minio-app.yaml` (5.4.0) |
+| ntfy | self-hosted push — the real Alertmanager destination | `platform-services/monitoring/ntfy.yaml` |
 | monitoring ns + alerts + scrape configs | this dir | `platform-svc-monitoring` (platform-services-appset) |
 
-Storage on `ceph-block` (replica-3): Prometheus 20Gi, Alertmanager 2Gi, Grafana
-5Gi, Loki 10Gi.
+Storage on `ceph-block` (replica-3): Prometheus 20Gi, Alertmanager 2Gi, Grafana 5Gi,
+Loki 10Gi, Tempo 5Gi, Thanos Store Gateway 5Gi (cache), Thanos Compactor 10Gi
+(scratch), ntfy 2Gi, MinIO 20Gi (the real long-term-metrics data).
 
 ---
 
 ## Access
 
 - **Grafana** — `https://grafana.capstone.uamishub.com` (Traefik + wildcard TLS).
-  Prometheus + Loki are pre-wired datasources.
+  Prometheus, Loki, Tempo, and Thanos (a second, long-term-history datasource) are
+  pre-wired.
 - **Prometheus / Alertmanager** — ClusterIP only. Port-forward:
   ```bash
   kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090
   kubectl -n monitoring port-forward svc/kube-prometheus-stack-alertmanager 9093
   ```
+- **ntfy** — `https://ntfy.capstone.uamishub.com` (public, phone-subscription only —
+  see "Notification channel" below). MinIO + Thanos Query/Store Gateway/Compactor
+  stay ClusterIP-only.
 
 ### ⚠ Rotate the default Grafana admin password (do this at/just after go-live)
 
@@ -66,27 +80,23 @@ add broad k8s/node/kubelet/etcd/apiserver coverage on top.
 
 ---
 
-## ⚠ Wire a notification channel (`platform-oncall` receiver)
+## Notification channel (`platform-oncall` receiver → self-hosted ntfy)
 
-Today alerts group, dedupe, and show in the **Alertmanager UI**, but are **not
-pushed anywhere** — the `platform-oncall` receiver is intentionally empty. The
-route already sends `severity =~ critical|warning` to it. To wire a real channel,
-edit `alertmanager.alertmanagerSpec.config.receivers` in
-`applicationsets/kube-prometheus-stack-app.yaml`:
+Alerts at `severity =~ critical|warning` route to `platform-oncall`, a generic
+webhook receiver whose URL comes from the `alertmanager-webhook` SealedSecret. This
+**used to be** a literal `example.com` placeholder — it now points at a self-hosted
+**ntfy** server (`platform-services/monitoring/ntfy.yaml`) using ntfy's built-in
+`?template=alertmanager` webhook format (renders firing/resolved notifications with
+no separate bridge process). See `platform-services/monitoring/README.md`
+"Notification channel" for the full wiring, the credential-rotation runbook, and
+**phone-subscription instructions** (subscribe the ntfy app to
+`https://ntfy.capstone.uamishub.com`, topic `platform-alerts`).
 
-```yaml
-receivers:
-  - name: 'null'
-  - name: 'platform-oncall'
-    slack_configs:            # or webhook_configs / email_configs / pagerduty_configs
-      - api_url_file: /etc/alertmanager/secrets/alertmanager-slack/url
-        channel: '#platform-alerts'
-        send_resolved: true
-```
-
-Put the webhook URL / Slack token / SMTP password in a **SealedSecret** and mount
-it via `alertmanager.alertmanagerSpec.secrets: [alertmanager-slack]` (it lands
-under `/etc/alertmanager/secrets/`). **Never inline the URL/token** in the values.
+To point `platform-oncall` at something else instead (Slack/Discord/PagerDuty/
+email), reseal `alertmanager-webhook` with a different URL — the receiver config
+itself needs no change (README "Reseal runbook — the Alertmanager webhook URL,
+generic form"). Any destination works as long as the URL/token lives in the
+SealedSecret and is read via `*_file` — **never inline it** in the values.
 
 ---
 
@@ -104,20 +114,28 @@ There is a sync ordering dependency that has deadlocked before (fixed in #127/#1
   app first, then re-sync monitoring.
 
 ```bash
-kubectl -n argocd get app platform-kube-prometheus-stack platform-loki platform-alloy platform-svc-monitoring
+kubectl -n argocd get app platform-kube-prometheus-stack platform-loki platform-alloy platform-otel-collector platform-minio platform-svc-monitoring
 ```
 
-> The two chart repos (`prometheus-community.github.io/helm-charts`,
-> `grafana.github.io/helm-charts`) are install-owned in the `platform` AppProject
-> `sourceRepos` — `make bootstrap-reapply` + verify after any `bootstrap/` change,
-> or the apps `InvalidSpecError "repo not permitted"`.
+> The four chart repos (`prometheus-community.github.io/helm-charts`,
+> `grafana.github.io/helm-charts`, `open-telemetry.github.io/opentelemetry-helm-charts`,
+> `charts.min.io`) are install-owned in the `platform` AppProject `sourceRepos` —
+> `make bootstrap-reapply` + verify after any `bootstrap/` change, or the apps
+> `InvalidSpecError "repo not permitted"`.
+
+⚠ **New ordering note (this PR):** Thanos (`platform-services/monitoring/thanos.yaml`)
+hard-depends on `platform-minio` and its `dr-backup` bucket — check
+`platform-minio` is Synced/Healthy first if the Thanos Store Gateway/Compactor/Query
+pods are CrashLooping (README "Long-term metrics").
 
 ---
 
 ## Day-2 checks
 
 ```bash
-kubectl -n monitoring get pods                          # prometheus/alertmanager/grafana/loki/alloy Running
+kubectl -n monitoring get pods                          # prometheus/alertmanager/grafana/loki/alloy/tempo/otel-collector/thanos-*/ntfy Running
+kubectl -n minio get pods                                # minio Running
 kubectl -n monitoring get prometheusrule,servicemonitor,podmonitor
-# Grafana → Explore → Loki datasource for logs; Prometheus targets page for scrape health.
+# Grafana → Explore → Loki/Tempo datasources; "Thanos" datasource for long-term
+# metrics; Prometheus targets page for scrape health.
 ```

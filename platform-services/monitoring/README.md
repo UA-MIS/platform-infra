@@ -8,27 +8,42 @@ telemetry was `metrics-server` and there was **no alert even on "Vault sealed"**
 | **kube-prometheus-stack** | Prometheus + Alertmanager + Grafana + node-exporter + kube-state-metrics + the operator/CRDs | `applicationsets/kube-prometheus-stack-app.yaml` (Helm, chart `87.3.0`) |
 | **Loki** | Log store, **single-binary** mode, filesystem on Ceph | `applicationsets/loki-app.yaml` (Helm, chart `6.55.0`) |
 | **Alloy** | Log shipper (DaemonSet) → Loki | `applicationsets/alloy-app.yaml` (Helm, chart `1.10.0`) |
+| **Tempo** | Trace store, single-binary (raw manifests — chart is upstream deprecated), filesystem on Ceph, 24h retention | `tempo.yaml` (`platform-svc-monitoring`) |
+| **OTel Collector** | Trace ingress: OTLP in, sampled 15%, forwards to Tempo | `applicationsets/otel-collector-app.yaml` (Helm, chart `0.162.0`) |
+| **Thanos** (Query / Store Gateway / Compactor) | Long-term Prometheus metrics beyond the 7d local window, backed by the `dr-backup` MinIO bucket | `thanos.yaml` (`platform-svc-monitoring`) + a sidecar block in `kube-prometheus-stack-app.yaml` |
+| **MinIO** | S3-compatible object store, standalone mode — backs Thanos's `dr-backup` bucket | `applicationsets/minio-app.yaml` (Helm, chart `5.4.0`) |
+| **ntfy** | Self-hosted push notifications — the real Alertmanager destination | `ntfy.yaml` (`platform-svc-monitoring`) |
 | **monitoring** ns + alerts + scrape configs | this dir | `platform-svc-monitoring` (platform-services-appset) |
 
-**Anti-gold-plate (per the retro):** single Prometheus with 15d local retention (NO
-Thanos/Mimir, NO remote-write); Loki **single-binary** (NO SSD/microservices split, NO
-MinIO/S3, NO caches, NO gateway). Scale up later via values if volume ever demands it.
+**Anti-gold-plate, still (per the retro):** single Prometheus, 7d local retention, NO
+remote-write, NO HA pairs; Loki + Tempo both **single-binary** (NO SSD/microservices
+split, NO caches, NO gateway). Thanos/MinIO/OTel/ntfy are the four EXCEPTIONS added in
+this PR — each closes a specific, previously-flagged gap (no long-term metrics history,
+no tracing at all, alerts routed to a dead `example.com` placeholder) rather than being
+speculative scale-up. Scale further only if volume ever actually demands it.
 
 ## Access
 
 - **Grafana** — `https://grafana.capstone.uamishub.com` (Traefik ingress + wildcard
-  TLS, same pattern as Harbor/Backstage/ArgoCD). Prometheus + Loki are pre-wired
-  datasources. Admin creds come from the **`grafana-admin` SealedSecret**
-  (`grafana.admin.existingSecret`), NOT the chart default. **⚠ it ships as a placeholder
-  that does not decrypt — reseal real values before go-live** (runbook below); until
-  then the Grafana pod stays `CreateContainerConfigError`.
+  TLS, same pattern as Harbor/Backstage/ArgoCD). Prometheus, Loki, **Tempo**, and
+  **Thanos** (a second, additional Prometheus-compatible datasource — see "Long-term
+  metrics" below) are pre-wired datasources. Admin creds come from the
+  **`grafana-admin` SealedSecret** (`grafana.admin.existingSecret`), NOT the chart
+  default. **⚠ it ships as a placeholder that does not decrypt — reseal real values
+  before go-live** (runbook below); until then the Grafana pod stays
+  `CreateContainerConfigError`.
 - **Prometheus / Alertmanager** — ClusterIP only (internal ops). Port-forward:
   `kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090` /
   `... svc/kube-prometheus-stack-alertmanager 9093`.
+- **ntfy** — `https://ntfy.capstone.uamishub.com` (public, for phone subscription
+  only — see "Notification channel" below). MinIO and the Thanos Query/Store
+  Gateway/Compactor stay ClusterIP-only; nothing outside the cluster needs to reach
+  them.
 
 ## Alerts (`alerts.yaml`)
 
-Six failure modes this platform has actually hit, routed to Alertmanager:
+Nine failure modes this platform has actually hit, routed to Alertmanager (now to
+**ntfy**, see "Notification channel" below — previously nowhere):
 
 | Alert | Fires when | Severity | Signal source |
 | --- | --- | --- | --- |
@@ -118,7 +133,70 @@ pattern as `servicemonitors.yaml`) pointed at the component's metrics port, conf
 Prometheus picks it up (`kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090`,
 check Status → Targets), then extend the relevant dashboard panel.
 
-## Notification channel (the `platform-oncall` webhook receiver)
+## Tracing (Tempo + OTel Collector)
+
+Instrumented apps/services send **OTLP** (grpc `:4317` / http `:4318`) to the OTel
+Collector at `otel-collector.monitoring.svc.cluster.local` — the ONE ingress point for
+traces platform-wide. Nothing talks to Tempo directly.
+
+```
+app (OTel SDK) --OTLP--> otel-collector --OTLP--> tempo --(Grafana "Tempo" datasource)
+```
+
+**⚠ the RAM guard is sampling, not retention:** the Collector's `probabilistic_sampler`
+processor keeps only **15%** of traces before they ever reach Tempo
+(`applicationsets/otel-collector-app.yaml`) — this is the one number that controls
+trace volume (and therefore Tempo's disk/RAM) platform-wide. Tempo's own `retention:
+24h` (`tempo.yaml`) only bounds how long the *sampled* 15% is kept.
+
+**Note this only provides the pipe** — no app in this platform is auto-instrumented.
+Getting real traces means adding an OpenTelemetry SDK to a service and pointing its
+exporter at `http://otel-collector.monitoring.svc.cluster.local:4317`; that is
+per-app work, out of scope here.
+
+`tempo.yaml` ships as raw manifests, not the `grafana/tempo` Helm chart — that chart
+(the only one with Loki-style single-binary simplicity) is upstream `deprecated: true`
+(confirmed via `helm show chart grafana/tempo --version 1.24.4`); the config in
+`tempo.yaml` mirrors what that chart would have rendered, just trimmed to OTLP-only
+and un-ballasted for this platform's resource limits.
+
+## Long-term metrics (Thanos) — ⚠ hard dependency on MinIO
+
+Prometheus keeps only **7d** locally (`retention: 7d` / `retentionSize: 5GB`,
+`kube-prometheus-stack-app.yaml` — tuned this low for RAM/disk, see that file's
+comments). Thanos extends history **beyond** that window:
+
+```
+Prometheus --(sidecar uploads blocks)--> dr-backup bucket (MinIO) <--(reads back)-- Thanos Store Gateway
+                                                                                          |
+Grafana --"Thanos" datasource--> Thanos Query <---------------------- Thanos Store Gateway
+                                       \--(DNS SRV, recent data)--> Prometheus sidecar
+```
+
+| Piece | Role | Shipped by |
+| --- | --- | --- |
+| Sidecar | Uploads finished TSDB blocks to `dr-backup`; serves recent data over the Store API | `prometheus.prometheusSpec.thanos` in `kube-prometheus-stack-app.yaml` |
+| Store Gateway | Serves historical blocks straight from `dr-backup` | `thanos.yaml` |
+| Compactor | The ONLY writer to the bucket — compacts + downsamples (raw 30d, 5m-res 180d, 1h-res 1y). **Must stay a singleton** (`strategy: Recreate`, never raise replicas) | `thanos.yaml` |
+| Query | Merged Prometheus-compatible query front door (sidecar + Store Gateway) | `thanos.yaml`, wired into Grafana as the **"Thanos"** datasource |
+| MinIO | S3-compatible object store, standalone mode, the `dr-backup` bucket | `applicationsets/minio-app.yaml` + `platform-services/minio/` |
+
+**⚠ DEPENDENCY, spelled out:** if `platform-minio` is ever removed, scaled down, or the
+`dr-backup` bucket deleted — the sidecar just stops uploading (Prometheus itself keeps
+working fine), and the Store Gateway/Compactor/Query pods start failing with bucket
+`AccessDenied`/`NoSuchBucket` errors. There is no automatic fallback; this coupling is
+deliberate and documented, not accidental. `thanos.yaml`'s header carries the same
+warning at the point of use.
+
+Credentials (MinIO root creds, the bucket-scoped `thanos` IAM user, and the
+`thanos-objstore-config` SealedSecret all three components read) were generated and
+sealed against the live cluster **in this PR** — unlike the Grafana/Alertmanager
+secrets below, no human-supplied external value was needed, so there is nothing to
+reseal before go-live. Rotate them with the same `kubeseal` pattern as the runbooks
+below if you ever need to (rotate `minio-thanos-user`'s `password` and
+`thanos-objstore-config`'s `secret_key` TOGETHER — they must match).
+
+## Notification channel (`platform-oncall` → self-hosted ntfy)
 
 Alerts at `severity =~ critical|warning` route to the **`platform-oncall`** receiver,
 a **generic webhook** (`webhook_configs`) whose endpoint is read from the
@@ -130,18 +208,92 @@ a **generic webhook** (`webhook_configs`) whose endpoint is read from the
 - the receiver reads it: `webhook_configs[].url_file:
   /etc/alertmanager/secrets/alertmanager-webhook/url` (+ `send_resolved: true`).
 
-A generic webhook is the simplest destination that needs no channel/token in the
-values — point the URL at a Slack/Discord incoming-webhook relay, a PagerDuty Events
-API bridge, or an Alertmanager→chat forwarder. To use native `slack_configs` /
-`email_configs` instead, keep the same posture: put the URL/token in the SealedSecret
-and reference it by `*_file` (e.g. `slack_configs[].api_url_file`), not inline.
+**⚠ this used to be a literal `example.com` placeholder — it is now wired to a real
+destination.** The URL resolved from that secret is:
 
-### Reseal runbook — the Alertmanager webhook URL (LOCAL shell, **fish**)
+```
+http://platform-oncall:<password>@ntfy.monitoring.svc.cluster.local:8080/platform-alerts?template=alertmanager
+```
 
-The committed `sealedsecret-alertmanager-webhook.yaml` holds a **placeholder** that
-does not decrypt (so no notifications are sent until you do this). Reseal with a real
-URL against the live cluster's controller. **Correct controller coordinates:**
-`--controller-namespace kube-system --controller-name sealed-secrets-controller`.
+- **ntfy** (`ntfy.yaml`) is a self-hosted, in-cluster push-notification server
+  (`binwiederhier/ntfy`), `auth-default-access: deny-all` (private — nothing
+  anonymous). ONE user, `platform-oncall`, granted read-write on ONE topic,
+  `platform-alerts` — bootstrapped idempotently by an initContainer (the ntfy CLI has
+  no create-if-missing flag, so it checks first).
+- `?template=alertmanager` is ntfy's **built-in** Alertmanager webhook template
+  (docs.ntfy.sh/publish) — it turns the raw Alertmanager JSON into a readable
+  firing/resolved notification with title + severity, no separate bridge/translator
+  process needed.
+- The URL is deliberately the **in-cluster** ClusterIP DNS
+  (`ntfy.monitoring.svc.cluster.local:8080`), not the public
+  `ntfy.capstone.uamishub.com` host — so alert **delivery** never depends on the
+  Cloudflare tunnel being up. Basic-auth creds are embedded in the URL, which is why
+  the whole thing lives in the SealedSecret, never inlined in values.
+- Credentials (the `platform-oncall` user/password, `ntfy-platform-oncall-credentials`
+  SealedSecret) were generated and sealed against the live cluster **in this PR** —
+  same posture as the Thanos/MinIO secrets above, nothing to reseal before go-live.
+
+### 📱 Phone subscription
+
+The ntfy Android/iOS apps subscribe to a topic on ANY ntfy server, not just
+ntfy.sh — point it at the self-hosted one:
+
+1. Install the ntfy app ([Android](https://play.google.com/store/apps/details?id=io.heckel.ntfy) /
+   [iOS](https://apps.apple.com/us/app/ntfy/id1625396347)).
+2. Add a server: `https://ntfy.capstone.uamishub.com`.
+3. Subscribe to topic: `platform-alerts`.
+4. When prompted for credentials, use the `platform-oncall` username/password (the
+   same ones sealed into `ntfy-platform-oncall-credentials` — ask whoever ran the
+   reseal, or generate new ones with the rotation runbook below and re-subscribe).
+
+Firing/resolved alerts then push straight to the phone, formatted by the
+`?template=alertmanager` rendering — no polling, no Slack workspace, no third-party
+relay.
+
+### Rotating the ntfy `platform-oncall` credentials (LOCAL shell, **fish**)
+
+Unlike the Grafana/Alertmanager-URL runbooks below, this one has **three** files to
+keep in sync: the credentials SealedSecret, the initContainer that grants topic
+access (re-runs automatically on next pod restart, no action needed), and the
+Alertmanager webhook URL (which embeds the same password).
+
+```fish
+# repo root of platform-infra, on a branch
+
+set NTFY_PW (openssl rand -base64 24 | tr -d '/+=' | cut -c1-24)
+
+kubectl create secret generic ntfy-platform-oncall-credentials \
+    --namespace monitoring \
+    --from-literal=username=platform-oncall \
+    --from-literal=password=$NTFY_PW \
+    --dry-run=client -o yaml \
+  | kubeseal --controller-namespace kube-system --controller-name sealed-secrets-controller \
+      --format yaml > /tmp/ntfy-creds-resealed.yaml
+# ⚠ ntfy.yaml is a multi-document file (ConfigMap/PVC/Deployment/Service/Ingress/
+# SealedSecret) — hand-splice the encryptedData block from /tmp/ntfy-creds-resealed.yaml
+# into the existing `ntfy-platform-oncall-credentials` SealedSecret document in
+# platform-services/monitoring/ntfy.yaml; do NOT redirect straight over that file.
+
+kubectl create secret generic alertmanager-webhook \
+    --namespace monitoring \
+    --from-literal=url="http://platform-oncall:$NTFY_PW@ntfy.monitoring.svc.cluster.local:8080/platform-alerts?template=alertmanager" \
+    --dry-run=client -o yaml \
+  | kubeseal --controller-namespace kube-system --controller-name sealed-secrets-controller \
+      --format yaml > platform-services/monitoring/sealedsecret-alertmanager-webhook.yaml
+
+echo "New ntfy password (re-subscribe the phone app with it): $NTFY_PW"
+set -e NTFY_PW
+```
+
+Commit both files on a branch + PR. After sync, the ntfy pod restarts (picks up the
+new password via the initContainer's idempotent bootstrap) and Alertmanager remounts
+the resealed webhook secret — re-subscribe the phone app with the new password.
+
+### Reseal runbook — the Alertmanager webhook URL, generic form (LOCAL shell, **fish**)
+
+To point `platform-oncall` at something OTHER than ntfy (Slack/Discord/PagerDuty/etc.
+instead), reseal the same secret with a different URL — the receiver config itself
+needs no change:
 
 ```fish
 # repo root of platform-infra, on a branch (never commit a reseal straight to main)
@@ -159,9 +311,11 @@ kubectl create secret generic alertmanager-webhook \
 set -e AM_URL      # clear the URL from the session
 ```
 
-This **overwrites** the placeholder with a real, cluster-decryptable seal. Commit it on
-a branch + PR. After it syncs, Alertmanager remounts the secret; test with `amtool` or
-by port-forwarding `svc/kube-prometheus-stack-alertmanager 9093`.
+Commit it on a branch + PR. After it syncs, Alertmanager remounts the secret; test
+with `amtool` or by port-forwarding `svc/kube-prometheus-stack-alertmanager 9093`. A
+generic webhook needs no channel/token in the values — to use native `slack_configs` /
+`email_configs` instead, keep the same posture: put the URL/token in the SealedSecret
+and reference it by `*_file` (e.g. `slack_configs[].api_url_file`), not inline.
 
 ## Rotating the Grafana admin password
 
@@ -199,12 +353,28 @@ syncs, the `grafana-admin` Secret appears and the Grafana pod starts; log in at
 
 ## Deploy notes
 
-- `make bootstrap-reapply` after merge to add the two chart repos
-  (`prometheus-community.github.io/helm-charts`, `grafana.github.io/helm-charts`) to
-  the **install-owned** `platform` AppProject sourceRepos — else the apps
-  `InvalidSpecError "repo not permitted"`. VERIFY it took.
+- `make bootstrap-reapply` after merge to add the **four** chart repos this dir now
+  depends on (`prometheus-community.github.io/helm-charts`,
+  `grafana.github.io/helm-charts`, `open-telemetry.github.io/opentelemetry-helm-charts`,
+  `charts.min.io`) to the **install-owned** `platform` AppProject sourceRepos — else
+  the apps `InvalidSpecError "repo not permitted"`. VERIFY it took.
+- Sync order: `platform-minio` should reach Healthy **before** relying on Thanos —
+  the Store Gateway/Compactor/Query pods in `thanos.yaml` will CrashLoop against a
+  missing bucket otherwise (see "Long-term metrics" above). ArgoCD's automated
+  sync + retry doesn't strictly order across Applications, so on a fresh cluster
+  check `kubectl -n argocd get app platform-minio` is Synced/Healthy if the Thanos
+  pods look stuck.
 - First sync: `platform-svc-monitoring` may briefly fail until
   `platform-kube-prometheus-stack` installs the PrometheusRule/ServiceMonitor/PodMonitor
-  CRDs; ArgoCD retry/selfHeal converges it.
-- Storage: Prometheus 20Gi, Alertmanager 2Gi, Grafana 5Gi, Loki 10Gi — all on
-  `ceph-block` (replica-3, survives node loss). Bump if needed.
+  CRDs; ArgoCD retry/selfHeal converges it. Same applies to `platform-otel-collector`
+  (it renders no CRs, so it isn't actually affected, but shares the `monitoring`
+  namespace race — `CreateNamespace=true` covers it).
+- Storage on `ceph-block` (replica-3, survives node loss): Prometheus 20Gi,
+  Alertmanager 2Gi, Grafana 5Gi, Loki 10Gi, Tempo 5Gi, Thanos Store Gateway 5Gi
+  (local cache only), Thanos Compactor 10Gi (scratch only), ntfy 2Gi, MinIO 20Gi
+  (the actual `dr-backup` long-term-metrics data). Bump if needed.
+- Images pinned across this PR (bump deliberately, together where noted):
+  `docker.io/grafana/tempo:2.9.0`, `otel/opentelemetry-collector-contrib:0.154.0`,
+  `quay.io/thanos/thanos:v0.41.0` (the sidecar in `kube-prometheus-stack-app.yaml`
+  AND all three components in `thanos.yaml` — keep these in lockstep, mixed Thanos
+  versions can break the gRPC StoreAPI contract), `binwiederhier/ntfy:v2.25.0`.

@@ -1,0 +1,409 @@
+# Thanos — long-term Prometheus metrics (Observability follow-up). Raw manifests
+# (NOT a Helm chart — see bootstrap/platform-appproject.yaml's sourceRepos comment
+# for why: this avoids adding a THIRD external Helm dependency for what is three
+# small, stateless-ish Deployments with no CRDs of their own; the raft-snapshot.yaml
+# / servicemonitors.yaml precedent in this same directory is exactly this pattern).
+#
+# ⚠ HARD DEPENDENCY: everything in this file needs `platform-minio`
+# (applicationsets/minio-app.yaml) and its `dr-backup` bucket to already exist and be
+# reachable at `minio.minio.svc.cluster.local:9000`. If MinIO is ever removed, scaled
+# to zero, or the `dr-backup` bucket deleted: the Prometheus sidecar (wired in
+# kube-prometheus-stack-app.yaml) simply stops uploading blocks (Prometheus itself is
+# fine), and the Store Gateway/Compactor/Query pods below start CrashLoopBackOff /
+# log continuous "AccessDenied"/"NoSuchBucket" errors reading it back. There is no
+# graceful degradation built in beyond that — this is intentionally a hard,
+# documented coupling, not a soft one.
+#
+# THE FOUR PIECES (the standard "sidecar + store gateway + compactor + query"
+# Thanos shape — no Receive/Ruler/Rule component; this platform's Prometheus and
+# Alertmanager already own scraping + alerting, Thanos only adds long-term storage +
+# a merged query view):
+#   1. Sidecar   — lives INSIDE the Prometheus pod (kube-prometheus-stack-app.yaml's
+#                  `prometheus.prometheusSpec.thanos` block), not here. Uploads
+#                  finished TSDB blocks to `dr-backup` and serves the recent-data
+#                  Store API.
+#   2. Store Gateway (below) — serves HISTORICAL blocks straight out of the
+#                  `dr-backup` bucket (no local retention pressure — Prometheus can
+#                  compact/upload/forget locally while history stays queryable here).
+#   3. Compactor (below) — the ONLY component allowed to write/compact/downsample
+#                  the bucket. Must be a SINGLETON (never run >1 replica — concurrent
+#                  compaction corrupts the bucket); `strategy: Recreate` enforces
+#                  that on rollout, no separate lock needed at this single-replica
+#                  scale.
+#   4. Query (below) — the merged Prometheus-compatible query front door. Discovers
+#                  the sidecar (DNS SRV against `prometheus-operated`, the governing
+#                  headless Service kube-prometheus-stack's operator auto-extends
+#                  with the sidecar's gRPC port once the thanos block is set) and
+#                  this file's Store Gateway. Wired into Grafana as the "Thanos"
+#                  datasource (kube-prometheus-stack-app.yaml).
+#
+# Image: quay.io/thanos/thanos:v0.41.0, pinned — MUST match the sidecar image in
+# kube-prometheus-stack-app.yaml (mixed Thanos versions across components is
+# unsupported / can break the gRPC StoreAPI contract). Bump both together.
+#
+# Sizing: all three components are homelab-scale (see each Deployment's resources).
+# Store Gateway + Compactor each get a small Ceph RBD PVC as LOCAL SCRATCH/CACHE
+# ONLY — the bucket, not the PVC, is the source of truth; losing either PVC just
+# means a slower cold start (index re-download / re-plan), not data loss.
+---
+# The S3-compatible object-storage config every Thanos component (sidecar here,
+# store-gateway/compactor below) reads via --objstore.config-file. A REAL seal (not
+# a placeholder) — generated in this PR alongside the matching `minio-thanos-user`
+# secret in platform-services/minio/; the `secret_key` here MUST equal that secret's
+# `password` value. Rotate both together (same kubeseal pattern as the README
+# reseal runbooks; no human-supplied external value is needed for either one).
+apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: thanos-objstore-config
+  namespace: monitoring
+spec:
+  encryptedData:
+    objstore.yml: AgCcuQopSEBMBxQW3I/fAmr5otE+bet0mr2VyWRFGgwGIWKRDFZtwYnx/p6xDoes9UCw0RPq6wD9AyaNkexLjCayvrX0eaqB1eXsNU0V0RUOBDx1ZPQ8LStOVx/Yn4vQiZOHVEdMp5lgbch/g18i7CWMCiJQ2uiPGHuFOPLOgy4SM5g9Nw2sURYbM7HAu0gYr7TWueNIB/N7aY96RQlGo6ytuvC02SM5tEtL873qJMAPgOSUYxvd403p1qT9xzYqp7uzjAbgraMsK52dfUXTRmA8mT6jFIfLoX5jijkaKo1mirMNhJPoISWBkwsg2l9+LkN/BYMGjtyBeYX3VYslT0RbA/8lpIHepfNcT+ZnJMWXBhD0EBPZSkL41hetDXstOvoqRQnfStWbNCRpYPtPxJeHb4VT4CkenGU1A8CXVdYe6P/EYq941f/983/fWVwlhpCEOLy7xuRvyBFBFrJgMt+IMsxTnsyyzORjuwBfrNm/FtbfQy1NYRHKp1Bu33o+NgsdL6sAlA9mAsMK+d3jO8dUB+OOhou8iSt92lbBZtAEnguZQSUSqjZmZm0/E0mFKu3Cs8knRMnSgiEzx10B7KDRdOkh8ezEwYUWLsVkfADj74cGptQmykbIgswKl2NHbNA6twLgG005+w9cec/ZFwe7zKC5ZlJDAOD/mZRdAK7PFyoe84JMuyJwdBXzlOtDIllF3zCuIqdirzpWsBJh11AhnP6RtCyyeaS5c8F7isJbq+KI71FWnh412liVufjzZqHRrmsJv0I1T7KgITXPSZymHeK8ur0oJbRtYlb1igbsHwNelEZavYjeXU2m+xOnpW/94aHGXGMDGi6HkzSp9FZYe3s+ZVY2I4FqVwtj4AgyjxhXJgVwEENU12WA6zfyPEIp+qb3017WrGJoiUnL85NsKw==
+  template:
+    metadata:
+      name: thanos-objstore-config
+      namespace: monitoring
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: thanos-store-gateway
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: ceph-block
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: thanos-store-gateway
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: thanos-store-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: thanos-store-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: thanos-store-gateway
+        platform.capstone/component: platform
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: thanos-store-gateway
+          image: quay.io/thanos/thanos:v0.41.0   # pinned; match kube-prometheus-stack-app.yaml's sidecar
+          args:
+            - store
+            - --log.level=info
+            - --data-dir=/data
+            - --objstore.config-file=/etc/thanos/objstore/objstore.yml
+            - --http-address=0.0.0.0:10902
+            - --grpc-address=0.0.0.0:10901
+            # Local scratch cache is a small PVC (see header) — bound so it can
+            # never grow unbounded on the Ceph RBD volume.
+            - --index-cache-size=250MB
+            - --chunk-pool-size=500MB
+          ports:
+            - name: http
+              containerPort: 10902
+            - name: grpc
+              containerPort: 10901
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: 10902
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: 10902
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: objstore
+              mountPath: /etc/thanos/objstore
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: thanos-store-gateway
+        - name: objstore
+          secret:
+            secretName: thanos-objstore-config
+---
+# Headless (clusterIP: None) so DNS SRV discovery (`dnssrv+_grpc._tcp.…`) works —
+# Thanos Query below finds this via that record on the `grpc` named port.
+apiVersion: v1
+kind: Service
+metadata:
+  name: thanos-store-gateway
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: thanos-store-gateway
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: thanos-store-gateway
+  ports:
+    - name: http
+      port: 10902
+      targetPort: http
+    - name: grpc
+      port: 10901
+      targetPort: grpc
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: thanos-compactor
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: ceph-block
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: thanos-compactor
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: thanos-compactor
+spec:
+  # SINGLETON — see file header. Never raise replicas above 1; Recreate guarantees
+  # the old pod fully terminates before a new one starts so two compactors can never
+  # touch the bucket concurrently.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: thanos-compactor
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: thanos-compactor
+        platform.capstone/component: platform
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: thanos-compactor
+          image: quay.io/thanos/thanos:v0.41.0   # pinned; match kube-prometheus-stack-app.yaml's sidecar
+          args:
+            - compact
+            - --log.level=info
+            - --data-dir=/data
+            - --objstore.config-file=/etc/thanos/objstore/objstore.yml
+            - --http-address=0.0.0.0:10902
+            - --wait
+            - --wait-interval=5m
+            # Downsampling retention — raw stays a month, 5m-resolution half a year,
+            # 1h-resolution a year. Homelab-scale numbers; tune freely, this is what
+            # actually bounds `dr-backup` bucket growth over time (not the PVC).
+            - --retention.resolution-raw=30d
+            - --retention.resolution-5m=180d
+            - --retention.resolution-1h=1y
+            - --compact.cleanup-interval=15m
+            - --delete-delay=48h
+          ports:
+            - name: http
+              containerPort: 10902
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: 10902
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: objstore
+              mountPath: /etc/thanos/objstore
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: thanos-compactor
+        - name: objstore
+          secret:
+            secretName: thanos-objstore-config
+---
+# Compactor exposes only /metrics + health — no StoreAPI, so a plain ClusterIP
+# (not headless) Service is enough; nothing discovers it via DNS SRV.
+apiVersion: v1
+kind: Service
+metadata:
+  name: thanos-compactor
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: thanos-compactor
+spec:
+  selector:
+    app.kubernetes.io/name: thanos-compactor
+  ports:
+    - name: http
+      port: 10902
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: thanos-query
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: thanos-query
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: thanos-query
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: thanos-query
+        platform.capstone/component: platform
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: thanos-query
+          image: quay.io/thanos/thanos:v0.41.0   # pinned; match kube-prometheus-stack-app.yaml's sidecar
+          args:
+            - query
+            - --log.level=info
+            - --http-address=0.0.0.0:10902
+            - --grpc-address=0.0.0.0:10901
+            - --query.replica-label=prometheus_replica
+            - --query.auto-downsampling
+            # DNS SRV discovery: the Prometheus sidecar (via kube-prometheus-stack's
+            # auto-extended `prometheus-operated` headless Service) and this file's
+            # Store Gateway (headless Service above).
+            - --store=dnssrv+_grpc._tcp.prometheus-operated.monitoring.svc.cluster.local
+            - --store=dnssrv+_grpc._tcp.thanos-store-gateway.monitoring.svc.cluster.local
+          ports:
+            - name: http
+              containerPort: 10902
+            - name: grpc
+              containerPort: 10901
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: 10902
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: 10902
+            initialDelaySeconds: 15
+            periodSeconds: 30
+  # (no volumes — Query is stateless: it only fans out/merges queries to the
+  # sidecar + Store Gateway, no local block data)
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: thanos-query
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: thanos-query
+spec:
+  selector:
+    app.kubernetes.io/name: thanos-query
+  ports:
+    - name: http
+      port: 10902
+      targetPort: http
+    - name: grpc
+      port: 10901
+      targetPort: grpc
+---
+# Scrape all three components' own /metrics (thanos_* families — bucket op
+# counters/latencies, compaction runs, query concurrency, etc.) — same
+# "scrape-everything" ethos as servicemonitors.yaml. Sync-deadlock precedent
+# (#127): these are CRs of a kube-prometheus-stack CRD, so the same
+# SkipDryRunOnMissingResource + sync-wave "1" annotations apply.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: thanos
+  namespace: monitoring
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    platform.capstone/component: platform
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames: ["monitoring"]
+  selector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [thanos-store-gateway, thanos-compactor, thanos-query]
+  endpoints:
+    - port: http
+      interval: 60s

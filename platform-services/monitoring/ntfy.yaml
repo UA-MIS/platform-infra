@@ -1,0 +1,279 @@
+# ntfy — the REAL Alertmanager notification destination (Observability follow-up).
+# Self-hosted, in-cluster (binwiederhier/ntfy), raw manifests (no maintained Helm
+# chart exists upstream — same "raw manifests for a small custom addition" call as
+# thanos.yaml in this same directory).
+#
+# WHY ntfy over a bridge service: ntfy has a BUILT-IN `?template=alertmanager` query
+# param (docs.ntfy.sh/publish) that turns Alertmanager's raw webhook JSON into a
+# readable firing/resolved push notification with NO separate translator process —
+# Alertmanager's `platform-oncall` receiver (kube-prometheus-stack-app.yaml) just
+# POSTs straight to this server's topic URL.
+#
+# AUTH MODEL: `auth-default-access: deny-all` (private server — nothing anonymous).
+# ONE user, `platform-oncall`, granted read-write on ONE topic, `platform-alerts`
+# (created/granted by the idempotent initContainer below — the ntfy CLI has no
+# "create if not exists" flag, so the container script checks first). The SAME
+# username/password is used for BOTH ends of the pipe:
+#   - Alertmanager PUBLISHES with it (embedded as HTTP Basic Auth in the resealed
+#     `alertmanager-webhook` SealedSecret's URL, kube-prometheus-stack-app.yaml —
+#     reused verbatim, no Alertmanager values changes needed for this PR).
+#   - A phone SUBSCRIBES with it (see "Phone subscription" below).
+# This is a single shared credential, not per-consumer scoping — a deliberate
+# homelab-scale simplification (see thanos.yaml's MinIO IAM policy for the more
+# rigorous per-consumer pattern used where credentials are otherwise root-equivalent;
+# here the ntfy user role is already the least privilege ntfy itself offers: `user`,
+# not `admin`, obeying the ACL grant rather than bypassing it).
+#
+# PERSISTENCE: auth.db (the user/ACL database) and cache.db (recent messages, so a
+# subscriber reconnecting after a blip doesn't miss anything within cache-duration)
+# both live on ONE Ceph RBD PVC. Losing that PVC means re-running the bootstrap
+# (idempotent — just deletes/recreates the pod) — acceptable for a notification
+# channel, not treated as DR-grade data.
+#
+# EXPOSURE: internal Alertmanager→ntfy traffic stays fully IN-CLUSTER
+# (ntfy.monitoring.svc.cluster.local:8080, plain HTTP — same posture as the Loki
+# datasource wiring) so alerting never depends on the Cloudflare tunnel being up.
+# The Ingress below is a SEPARATE, additional path that exists ONLY so a phone off
+# the home network can subscribe — same Traefik + wildcard-TLS pattern as
+# Grafana/Harbor/Dex (id.capstone.uamishub.com precedent).
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ntfy-config
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+data:
+  server.yml: |
+    base-url: "https://ntfy.capstone.uamishub.com"
+    listen-http: ":8080"          # unprivileged port — container runs as non-root
+    behind-proxy: true            # trust X-Forwarded-For from Traefik
+    cache-file: "/var/lib/ntfy/cache.db"
+    cache-duration: "12h"
+    attachment-cache-dir: "/var/lib/ntfy/attachments"
+    auth-file: "/var/lib/ntfy/auth.db"
+    auth-default-access: "deny-all"   # private server — nothing anonymous
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ntfy-data
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: ceph-block
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ntfy
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: ntfy
+spec:
+  replicas: 1
+  # Recreate — the single Ceph RBD PVC is ReadWriteOnce; a rolling update briefly
+  # running old+new pod together would fail the new pod's mount.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ntfy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ntfy
+        platform.capstone/component: platform
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # Idempotent bootstrap: create the `platform-oncall` user and (re-)grant it
+        # read-write on the `platform-alerts` topic (safe to repeat every restart).
+        #
+        # v2.25.0 CLI notes (verified against the real image — `ntfy user add --help`):
+        #   - There is NO `--password-stdin` flag. The password is passed via the
+        #     `NTFY_PASSWORD` env var (the only scripting-friendly option the CLI
+        #     supports — `ntfy user add phil` / `NTFY_PASSWORD=... ntfy user add phil`).
+        #   - `ntfy user add` takes `--ignore-exists`, which makes user creation
+        #     itself idempotent natively (no more `user list | grep` pre-check needed).
+        #   - Global flags like `--config` must come AFTER the subcommand noun and
+        #     BEFORE the verb, i.e. `ntfy user --config <file> add ...`, not
+        #     `ntfy user add --config <file> ...` (rejected: "flag provided but not
+        #     defined: -config") and not `ntfy --config <file> user add ...` (same
+        #     error — `--config` isn't a root-level flag, it's scoped to `user`/`access`).
+        #   - CRITICAL: `ntfy user`/`ntfy access` refuse to run against a fresh
+        #     `auth-file` that has never been created ("auth-file does not exist;
+        #     please start the server at least once to create it") — verified live.
+        #     On a brand-new PVC there is no auth.db yet, and an initContainer runs
+        #     BEFORE the main `ntfy serve` container ever starts, so the very first
+        #     deploy would otherwise crash-loop here even with correct CLI syntax.
+        #     Fix: if auth.db is missing, this script starts `ntfy serve` itself in
+        #     the background just long enough to let it create auth.db, runs the
+        #     user/access provisioning against that same file, then stops it —
+        #     the main container starts fresh afterwards and reuses the same PVC.
+        - name: bootstrap
+          image: binwiederhier/ntfy:v2.25.0   # pinned; match the main container below
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              CONF=/etc/ntfy/server.yml
+              AUTHDB=/var/lib/ntfy/auth.db
+              SERVER_PID=""
+              if [ ! -f "$AUTHDB" ]; then
+                echo "[ntfy-bootstrap] auth.db missing (first deploy) — starting temp server to initialize it"
+                ntfy serve --config "$CONF" &
+                SERVER_PID=$!
+                i=0
+                while [ ! -f "$AUTHDB" ] && [ "$i" -lt 30 ]; do
+                  sleep 0.5
+                  i=$((i + 1))
+                done
+                if [ ! -f "$AUTHDB" ]; then
+                  echo "[ntfy-bootstrap] ERROR: auth.db still missing after 15s wait"
+                  exit 1
+                fi
+              fi
+              ntfy user --config "$CONF" add --role=user --ignore-exists platform-oncall
+              echo "[ntfy-bootstrap] platform-oncall user present"
+              ntfy access --config "$CONF" platform-oncall platform-alerts rw
+              echo "[ntfy-bootstrap] platform-oncall has rw on platform-alerts"
+              if [ -n "$SERVER_PID" ]; then
+                kill "$SERVER_PID" 2>/dev/null || true
+                wait "$SERVER_PID" 2>/dev/null || true
+              fi
+          env:
+            - name: NTFY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ntfy-platform-oncall-credentials
+                  key: password
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 64Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/ntfy
+            - name: config
+              mountPath: /etc/ntfy
+              readOnly: true
+      containers:
+        - name: ntfy
+          image: binwiederhier/ntfy:v2.25.0   # pinned; bump deliberately
+          command: ["ntfy", "serve", "--config", "/etc/ntfy/server.yml"]
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            requests: { cpu: 25m, memory: 32Mi }
+            limits: { memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet:
+              path: /v1/health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /v1/health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/ntfy
+            - name: config
+              mountPath: /etc/ntfy
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: ntfy-data
+        - name: config
+          configMap:
+            name: ntfy-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ntfy
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: ntfy
+spec:
+  selector:
+    app.kubernetes.io/name: ntfy
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+# Public path for phone subscription ONLY (see file header — Alertmanager itself
+# never uses this, it talks to the ClusterIP Service directly). Matches the
+# dex/grafana/harbor Ingress convention exactly: plain Ingress, TLS host listed but
+# NO secretName — Traefik's default TLSStore serves the cert-manager wildcard cert
+# for *.capstone.uamishub.com. No Cloudflare-side change needed (the tunnel already
+# routes the whole wildcard to Traefik, platform-services/cloudflared/deployment.yaml).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ntfy
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: ntfy
+spec:
+  rules:
+    - host: ntfy.capstone.uamishub.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ntfy
+                port:
+                  number: 8080
+  tls:
+    - hosts:
+        - ntfy.capstone.uamishub.com
+---
+# REAL seal (not a placeholder) — generated in this PR. Same username/password used
+# by both the initContainer bootstrap above and the resealed `alertmanager-webhook`
+# SealedSecret (kube-prometheus-stack-app.yaml). Rotate ALL THREE together (this
+# file's bootstrap re-grants access idempotently on the next pod restart, but the
+# alertmanager-webhook secret needs a matching manual reseal — see README).
+apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: ntfy-platform-oncall-credentials
+  namespace: monitoring
+spec:
+  encryptedData:
+    password: AgAuvBBT3SVWJiiMaP4Je465x0WMYKpNiO9YfTQdJ7Fro8r7EVqejw1zO2WEAf5c8/yGb62mcrqa4PlzeL9IEXqyromcL6CHwNjJCn3H/91SdyjpKrgT+MrfOS0a5Wsy2AX4pShk38mjqWb2TAd063wc7arF8Ulqqr31/mfAqtZ/jvf6sgQoChd+XmZ5GJdOi/0AYxrzssDPrIpLYM0lVxber5ANQQIno6JD8FGtrgslWzMOMqJFMkcgMdeClFHuRkgEoEIyJ6G8pPFu8YKdWbBPGwbwmDZUMCj1Sy7W1+reO4cFkwxh0lGclkRDpWgeqyKma2WXVQ1Eqt2EalQOBs4VG8226dE8EvHQE7GzGJIf8zZo3VM1Rkmbsgp20DHpP7DbJ/y315bJDlm1XKTvvJL7lSv+viE+72ByB/SnON884UhxuRNTIiaaaa351rpA568J7sDHM1/KkR2gUH8u1P8graGokyx3SNEBkwJXp3GrQ3hw1qY3uHctv6SE4HR0A9zmjraaX5r+rsNW0v5065xNMJSIDkNMKeyX/M7SwxjkHI1pCw7wnXMWd+kTKZ7WXn34HeIDD0xREPWqp/pBNcGVqvoc7oSDwq0BckuRjNYrGLVJpcXEvg6V37qVgU9jdt65MbU9uQtl/3Zl6svR4EZXGOUCYN0E7uS5F/J2JB1hGXSfJCErKWlgm/txAEB55V/dYV/zJM2cm2qXPM2xDMe4DKxupnVQ0Us=
+    username: AgAbE2Z+jIPj5RgRiyhTWTzx8r9ztXz2ucfIEOee6J1HiLLu+XscfVuex44abXtHK6xKSjTXIJsJd4TUSojGcNbaylDjEoOg+QFaiLrfatRBedePKqc1G1Q4OWMd4zzJ6ZiVqMhlM4FpZExjulnfLeyBO5UiXqdT5Nb76xsRCqfl4PyzLAmFb3w/3QD+as+LGh9+RqW7mVu/PckShxxSnPS+qjLK7xOdCbiun/1bLyTovnIYxwQRmCXUTlWkOmlJtgneu2vLLJJIEzDJ9KBz8L464zgpruEI92r4LmtU/pFzMJWY5L8sDFRNB2hhmblfVdywBD8d8AS64hoAzFIwM+XtwRVSmdnT5Tn811HR8/VXCo/VgEil8gyDwFtMZSxCdNoBs9P6HvDMa5VEudSbQwJq2XFZSB08P5g5M+TswZZkVZxGiR/RzuihGw48uTU5Inam5S7sVvcmQvNRkGcYRk4e+2+NY3Cjt5iFIfuMFvnPXisE8Qvc5PVbfaVxXgZOcP5+A6liEHE7ju6CPi04fxBa/9wxdNXTckjgAezvCkZpAc3UFgM1G/aJx+CLj2lFR8um3wRLQTrGaGOmlmIMJmkMuyu8sjoqTI+TT9StgUHDvhR/Oy+tw0CWTE95XLp6TGg8bqj1VpQZs2aRpJeO2ReT18pj/1pSQN3MYwJTNFPXpmKWorEjavWUsErBzHcCMIg7r1u3pa/HX9MLZarWxAM=
+  template:
+    metadata:
+      name: ntfy-platform-oncall-credentials
+      namespace: monitoring
