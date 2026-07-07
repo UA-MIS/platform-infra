@@ -16,7 +16,7 @@ metadata:
     argocd.argoproj.io/sync-options: "Prune=false"   # don't auto-delete on next sync
 spec:
   nodeSelector:
-    kubernetes.io/hostname: mac-debian-02   # run on a DIFFERENT node than MinIO
+    kubernetes.io/hostname: capstone-n1   # run on OptiPlex to test different cross-node path
   restartPolicy: Never
   securityContext:
     runAsNonRoot: false   # netshoot needs root for some tools
