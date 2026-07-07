@@ -59,11 +59,18 @@ spec:
     - Ingress
   ingress:
     # Velero (server + node-agent DaemonSet, velero ns) -> MinIO S3 API :9000.
-    # The ONLY legitimate external reader/writer of the backup bucket.
     - from:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: velero
+      ports:
+        - protocol: TCP
+          port: 9000
+    # Thanos store-gateway + compactor + sidecar (monitoring ns) -> dr-backup bucket.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
       ports:
         - protocol: TCP
           port: 9000
