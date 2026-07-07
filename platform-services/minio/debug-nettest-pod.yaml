@@ -1,0 +1,73 @@
+# TEMPORARY DEBUG POD — cross-node connectivity to MinIO on mac-debian-01.
+# Scheduled on mac-debian-02 to test VXLAN/Tailscale cross-node path.
+# DELETE after diagnosis is complete.
+#
+# Run output:
+#   argocd app sync platform-svc-minio   (to apply)
+#   then check logs in ArgoCD or via `kubectl logs -n minio nettest`
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nettest
+  namespace: minio
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-options: "Prune=false"   # don't auto-delete on next sync
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: mac-debian-02   # run on a DIFFERENT node than MinIO
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: false   # netshoot needs root for some tools
+  containers:
+    - name: nettest
+      image: nicolaka/netshoot:latest
+      command: ["/bin/bash", "-c"]
+      args:
+        - |
+          set -x
+          echo "====== NODE INFO ======"
+          echo "Running on: $(hostname)"
+          ip addr show tailscale0 2>/dev/null || echo "no tailscale0 interface"
+          echo ""
+
+          echo "====== ROUTING TABLE ======"
+          ip route show
+          echo ""
+
+          echo "====== CILIUM VXLAN TUNNEL CHECK ======"
+          echo "Trying to reach mac-debian-01 Tailscale IP (100.69.204.106) ..."
+          ping -c 3 -W 2 100.69.204.106 || echo "PING to mac-debian-01 Tailscale IP FAILED"
+          echo ""
+
+          echo "====== MINIO POD IP DIRECT ======"
+          echo "Trying pod IP 10.244.3.244:9000 directly ..."
+          curl -v --max-time 5 http://10.244.3.244:9000/minio/health/ready 2>&1 || echo "DIRECT POD IP FAILED"
+          echo ""
+
+          echo "====== MINIO SERVICE ClusterIP ======"
+          echo "Trying ClusterIP 10.103.63.72:9000 ..."
+          curl -v --max-time 5 http://10.103.63.72:9000/minio/health/ready 2>&1 || echo "CLUSTERIP FAILED"
+          echo ""
+
+          echo "====== MINIO DNS ======"
+          echo "Trying minio.minio.svc.cluster.local:9000 ..."
+          nslookup minio.minio.svc.cluster.local
+          curl -v --max-time 5 http://minio.minio.svc.cluster.local:9000/minio/health/ready 2>&1 || echo "DNS FAILED"
+          echo ""
+
+          echo "====== VXLAN UDP 8472 TO mac-debian-01 ======"
+          echo "Checking if UDP 8472 reaches mac-debian-01 ..."
+          nc -zuv 100.69.204.106 8472 || echo "UDP 8472 to mac-debian-01 FAILED"
+          echo ""
+
+          echo "====== TRACEROUTE to MinIO pod IP ======"
+          traceroute -n -m 5 10.244.3.244 2>&1 || echo "traceroute failed"
+          echo ""
+
+          echo "====== DONE ======"
+          sleep 3600   # keep pod alive for manual inspection
+      resources:
+        requests: { cpu: 10m, memory: 32Mi }
+        limits: { cpu: 100m, memory: 64Mi }
