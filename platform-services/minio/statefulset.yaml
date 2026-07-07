@@ -42,7 +42,7 @@ spec:
       # those were ever loosened, this pod still only schedules onto the node that
       # actually has /var/lib/minio-dr-backup.
       nodeSelector:
-        kubernetes.io/hostname: mac-debian-01
+        kubernetes.io/hostname: mac-debian-02
       securityContext:
         # MinIO's official container guidance for Kubernetes: run as uid/gid 1000
         # ("minio"), fsGroup 1000 so the kubelet chowns the hostPath mount (works
