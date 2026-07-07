@@ -83,9 +83,14 @@ spec:
                   url = "http://loki.monitoring.svc.cluster.local:3100/loki/api/v1/push"
                 }
               }
+          # Resource-reclaim (VPA-driven, task follow-up): live VPA target for the
+          # `alloy` container is cpu 35m / mem ~283Mi (+15% headroom below) —
+          # memory was UNDER-provisioned (actual usage 181-268Mi across replicas,
+          # already brushing the old 256Mi limit; a real OOM-risk this closes).
+          # cpu comes down modestly (real signal, not the recommender's floor).
           resources:
-            requests: { cpu: 50m, memory: 128Mi }
-            limits: { memory: 256Mi }
+            requests: { cpu: 48m, memory: 336Mi }
+            limits: { memory: 512Mi }
   destination:
     server: https://kubernetes.default.svc
     namespace: monitoring

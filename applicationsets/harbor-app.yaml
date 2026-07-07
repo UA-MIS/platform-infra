@@ -73,8 +73,16 @@ spec:
         # --- Trivy vulnerability scanning ENABLED (scan-on-push set at project
         #     level post-install; enforce-block strength is a D-022 should-decide —
         #     default scan+WARN, flagged for the human, see README) ---
+        # Resource-reclaim (VPA-driven, task follow-up): chart default is a flat
+        # 200m/512Mi request, 1/1Gi limit for every install regardless of scale.
+        # Live VPA target for `trivy` is mem ~175Mi (+15% below); cpu keeps a
+        # conservative floor above the idle `kubectl top` reading (1m) because
+        # Trivy's real cost is a scan-time CPU burst, not steady-state.
         trivy:
           enabled: true
+          resources:
+            requests: { cpu: 50m, memory: 208Mi }
+            limits: { cpu: 500m, memory: 768Mi }
 
         # --- Deployment update strategy: Recreate (NOT the chart default
         #     RollingUpdate). The registry + jobservice Deployments mount RWO
@@ -96,10 +104,54 @@ spec:
           type: Recreate
 
         # Single-replica everything for Phase-2 local (laptop). Phase-4 scales.
-        portal:    { replicas: 1 }
-        core:      { replicas: 1 }
-        jobservice: { replicas: 1 }
-        registry:  { replicas: 1 }
+        #
+        # Resource-reclaim (VPA-driven, task follow-up): the chart ships every one
+        # of these components with NO requests/limits at all (Burstable-unbounded —
+        # verified live, `kubectl get deploy ... -o jsonpath=...resources` returns
+        # `{}`). Values below are the live VPA/Goldilocks recommendation target +
+        # ~15% headroom where the target is a real (non-floor) measurement; where
+        # the target is the recommender's short-history floor (15m cpu / 100Mi
+        # mem — the number every near-idle container reports under ~1h of
+        # history), this instead uses observed `kubectl top` actual usage + ~15%
+        # headroom, which is the more trustworthy signal for these low-traffic
+        # components.
+        portal:
+          replicas: 1
+          resources:
+            requests: { cpu: 20m, memory: 32Mi }
+            limits: { cpu: 100m, memory: 64Mi }
+        core:
+          replicas: 1
+          resources:
+            requests: { cpu: 20m, memory: 192Mi }
+            limits: { cpu: 200m, memory: 384Mi }
+        jobservice:
+          replicas: 1
+          resources:
+            requests: { cpu: 20m, memory: 64Mi }
+            limits: { cpu: 200m, memory: 256Mi }
+        registry:
+          replicas: 1
+          registry:
+            resources:
+              requests: { cpu: 20m, memory: 64Mi }
+              limits: { cpu: 100m, memory: 128Mi }
+          controller:
+            resources:
+              requests: { cpu: 20m, memory: 64Mi }
+              limits: { cpu: 100m, memory: 128Mi }
+
+        database:
+          internal:
+            resources:
+              requests: { cpu: 30m, memory: 128Mi }
+              limits: { cpu: 200m, memory: 256Mi }
+
+        redis:
+          internal:
+            resources:
+              requests: { cpu: 20m, memory: 64Mi }
+              limits: { cpu: 100m, memory: 128Mi }
   destination:
     server: https://kubernetes.default.svc
     namespace: harbor

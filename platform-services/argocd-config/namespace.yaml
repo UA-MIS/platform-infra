@@ -1,0 +1,27 @@
+# argocd namespace label ADOPTION (resource-reclaim, task follow-up).
+#
+# The `argocd` namespace itself is NOT created by any git manifest — it's created
+# imperatively by `make bootstrap` (`kubectl create namespace argocd`) before
+# ArgoCD exists to manage anything (bootstrap/argocd-install/kustomization.yaml).
+# That means it ships with zero labels, so it was invisible to Goldilocks even
+# though 7 Deployments + 1 StatefulSet (server, repo-server, controller,
+# applicationset-controller, dex-server, redis, notifications-controller) run
+# here — a real platform-scale blind spot.
+#
+# SAME SSA-MERGE PATTERN AS argocd-cm.yaml / argocd-rbac-cm.yaml in this same app
+# (see kustomization.yaml + argocd-cm.yaml header comment): the
+# platform-services-appset ships this Application with ServerSideApply=true, so
+# this Namespace object ADOPTS the existing `argocd` namespace and only touches
+# the label keys below — it does not own or prune anything else on the object.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: argocd
+  labels:
+    platform.capstone/component: platform
+    # Recommend-only (Off mode) — surfaces sizing suggestions in Goldilocks for
+    # every ArgoCD control-plane component. No Auto policy: ArgoCD's own
+    # components are the GitOps engine itself, out of scope for eviction-based
+    # right-sizing until in-place pod resize lands (k8s 1.33, documented
+    # elsewhere as a follow-up).
+    goldilocks.fairwinds.com/enabled: "true"

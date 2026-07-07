@@ -64,10 +64,13 @@ spec:
             repository: hashicorp/vault
             tag: "1.21.2"                            # pin to the chart's tested appVersion
 
-          # Tiny: this Vault holds ONE transit key, nothing else.
+          # Resource-reclaim (VPA-driven, task follow-up): live VPA target is cpu
+          # 35m / mem ~194Mi (+15% headroom below) — memory was UNDER-provisioned
+          # (actual usage `kubectl top` ~151Mi, already close to the old 128Mi
+          # request); cpu comes down substantially (real signal, actual usage ~21m).
           resources:
-            requests: { memory: 128Mi, cpu: 100m }
-            limits:   { memory: 256Mi, cpu: 250m }
+            requests: { memory: 224Mi, cpu: 48m }
+            limits:   { memory: 384Mi, cpu: 128m }
 
           # --- STANDALONE mode (single pod, file storage). The unsealer does NOT
           #     need Raft/HA — it stores one Transit key. File storage on a small

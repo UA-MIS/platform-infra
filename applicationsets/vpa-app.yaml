@@ -88,6 +88,15 @@ spec:
     server: https://kubernetes.default.svc
     namespace: vpa
   syncPolicy:
+    managedNamespaceMetadata:
+      labels:
+        platform.capstone/component: platform
+        # Resource-reclaim (task follow-up): the `vpa` namespace itself hosts the
+        # recommender/updater/admission-controller — stable single-replica
+        # deployments Goldilocks was blind to (the CreateNamespace=true default
+        # ships no labels). Recommend-only; the app's own workloads are not
+        # flipped to Auto here (see vpa-platform-policies for the curated set).
+        goldilocks.fairwinds.com/enabled: "true"
     automated:
       prune: true
       selfHeal: true
