@@ -173,6 +173,21 @@ spec:
   destinations:
     - server: https://kubernetes.default.svc
       namespace: '*'
+    # Multi-cluster scaffolding (applicationsets/satellite-clusters-appset.yaml,
+    # docs/operator/multi-cluster.md): fence by registered CLUSTER NAME, not server —
+    # the future homelab k3s (or any later satellite) isn't provisioned yet so its
+    # server URL is unknown, but the naming contract IS known up front. Matches by
+    # glob on `name` (the name passed to `argocd cluster add` / `make
+    # cluster-register`), so this entry is a no-op TODAY (no cluster is registered
+    # with that name) and only starts admitting Applications once one is. Belt-and-
+    # suspenders with the appset's own label selector: a cluster must be BOTH
+    # labelled `capstone.platform/tier: satellite` (selected by the appset) AND
+    # named `satellite-*` (admitted here) — get either wrong and the Application is
+    # rejected loudly ("cluster not permitted") instead of silently going nowhere or
+    # silently going everywhere. ⚠ INSTALL-OWNED like the sourceRepos adds above:
+    # reaches the live AppProject only via `make bootstrap`/`make bootstrap-reapply`.
+    - name: 'satellite-*'
+      namespace: '*'
 
   # The platform project is privileged BY DESIGN: it installs CRDs and
   # cluster-scoped controllers. This is the ONE project allowed to do so.

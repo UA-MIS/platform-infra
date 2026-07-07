@@ -149,6 +149,13 @@ Ceph-level or cluster-wide failure doesn't take the backups down with it. →
 **[dr-backup.md](dr-backup.md)** (architecture, day-2 checks, and the **tested-restore
 drill an operator must run** to actually prove this works).
 
+### 4.8 Multi-cluster (scaffolding, inert)
+
+Only one physical cluster exists today. An ArgoCD `clusters`-generator ApplicationSet
+is wired and ready for a future second cluster (the planned homelab k3s) but produces
+zero Applications until one is registered: `make cluster-register CONTEXT=<ctx>
+NAME=<short-name>`. → **[multi-cluster.md](multi-cluster.md)**.
+
 ---
 
 ## 5. Known DR gaps & risks (read before you rely on it)
@@ -197,4 +204,5 @@ These are **live-verified** weak spots a successor should close:
 | [resource-governance.md](resource-governance.md) | VPA/Goldilocks + per-tenant quotas |
 | [db-tier-runbook.md](../db-tier-runbook.md) · [db-tier-provisioner-setup.md](db-tier-provisioner-setup.md) | Off-cluster Postgres/MariaDB tier |
 | [vm-path-harbor-provisioner.md](vm-path-harbor-provisioner.md) | KubeVirt VM scaffolder wiring |
+| [multi-cluster.md](multi-cluster.md) | Multi-cluster scaffolding (ApplicationSet cluster generator, inert until a 2nd cluster is registered) |
 | [gotchas-and-lessons.md](gotchas-and-lessons.md) | Process-layer war stories |

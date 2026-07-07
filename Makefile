@@ -778,3 +778,40 @@ tenant-on: ## Reverse tenant-off: re-enable ArgoCD so it recreates the tenant fr
 	@test -n "$(TEAM)" || { echo "usage: make tenant-on TEAM=<slug> [DRY_RUN=false]" >&2; exit 1; }
 	@DRY_RUN="$(DRY_RUN)" KUBE_CONTEXT="$(KUBE_CONTEXT)" ARGOCD_NS="$(ARGOCD_NS)" \
 	  bash $(TENANT_ONOFF_SH) on "$(TEAM)"
+
+# ---- multi-cluster: register a satellite cluster with the hub ArgoCD ------
+# Wraps `argocd cluster add` with the naming+labelling CONTRACT the scaffolding in
+# applicationsets/satellite-clusters-appset.yaml and bootstrap/platform-appproject.yaml
+# depend on: the registered cluster NAME must start with `satellite-` (the AppProject
+# destinations glob) and carry the label capstone.platform/tier=satellite (the
+# ApplicationSet's cluster-generator selector). Get either wrong here and the
+# Application is rejected ("cluster not permitted") rather than silently mis-scoped.
+#
+# This is an IMPERATIVE, one-time, install-owned action against the LIVE hub ArgoCD —
+# like the AppProject sourceRepos adds, it is NOT GitOps-reconciled (a cluster
+# registration Secret holds live credentials; it does not belong in git). Requires the
+# `argocd` CLI already logged in to the hub (`argocd login argocd.$(PLATFORM_DOMAIN)`)
+# and the satellite's kubeconfig context already merged locally.
+#   make cluster-register CONTEXT=<satellite-kubeconfig-context> NAME=homelab-k3s
+# See docs/operator/multi-cluster.md for the full runbook + verification steps.
+# Namespaces the hub's argocd-manager ServiceAccount is scoped to on the SATELLITE
+# (least privilege — without --namespace, `argocd cluster add` installs a cluster-admin
+# argocd-manager on the target). Only the baseline namespace by default; widen with a
+# repeat `make cluster-register ... NAMESPACES="capstone-satellite-baseline monitoring"`
+# (or `argocd cluster set satellite-<name> --namespace ...`) once a real roadmap
+# workload (docs/operator/multi-cluster.md) needs another namespace on that cluster.
+NAMESPACES ?= capstone-satellite-baseline
+
+.PHONY: cluster-register
+cluster-register: ## Register a satellite cluster with the hub ArgoCD (naming+label contract + least-privilege namespace scope enforced). CONTEXT=<kubeconfig-context> NAME=<short-name> [NAMESPACES="ns1 ns2"].
+	@test -n "$(CONTEXT)" || { echo "usage: make cluster-register CONTEXT=<satellite-kubeconfig-context> NAME=<short-name>" >&2; exit 1; }
+	@test -n "$(NAME)" || { echo "usage: make cluster-register CONTEXT=<satellite-kubeconfig-context> NAME=<short-name>" >&2; exit 1; }
+	@command -v argocd >/dev/null || { echo "ERROR: argocd CLI not found. Install it and 'argocd login argocd.$(PLATFORM_DOMAIN)' first." >&2; exit 1; }
+	@kubectl config get-contexts "$(CONTEXT)" >/dev/null 2>&1 \
+	  || { echo "ERROR: kube-context '$(CONTEXT)' not found locally. Merge the satellite's kubeconfig first (KUBECONFIG=... kubectl config view --flatten)." >&2; exit 1; }
+	@echo "==> registering context '$(CONTEXT)' as ArgoCD cluster 'satellite-$(NAME)' (label capstone.platform/tier=satellite; namespace-scoped argocd-manager: $(NAMESPACES))..."
+	@argocd cluster add "$(CONTEXT)" --name "satellite-$(NAME)" --label capstone.platform/tier=satellite \
+	  $(foreach ns,$(NAMESPACES),--namespace $(ns)) --yes
+	@echo "cluster-register: DONE. Verify: argocd cluster list | grep satellite-$(NAME)"
+	@echo "  Then confirm the appset fired:  kubectl -n argocd get applications -l capstone.platform/satellite-cluster=satellite-$(NAME)"
+	@echo "  ...and the baseline landed:     kubectl --context $(CONTEXT) -n capstone-satellite-baseline get cm cluster-registered"

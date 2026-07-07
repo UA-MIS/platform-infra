@@ -1,0 +1,84 @@
+# Multi-cluster SCAFFOLDING (Track — "future homelab k3s"). A `clusters` generator
+# ApplicationSet: instead of a git directory, it enumerates ArgoCD's own registered-
+# cluster Secrets (the same store `argocd cluster add` / `argocd cluster list` use) and
+# emits one Application PER MATCHING cluster. This is the hub-and-spoke primitive —
+# ArgoCD stays a single control plane (running only on the hub, `admin@capstone`) and
+# "grows" to a second (or Nth) cluster purely by registering a cluster Secret + this
+# appset picking it up. No new ArgoCD install, no Cluster API management cluster, no
+# cluster-lifecycle CRDs — provisioning the box itself stays out-of-band (k3s install
+# script on the homelab hardware, same out-of-band pattern as Talos/talhelper and the
+# Debian Mac workers), and this appset owns only "what gets deployed to it" (§ADR — see
+# docs/operator/multi-cluster.md for the full ApplicationSet-vs-Cluster-API rationale).
+#
+# ⚠ INERT TODAY BY DESIGN. Exactly one physical cluster exists (the Talos hub); it has
+# no registered-cluster Secret matching the selector below (ArgoCD's implicit local
+# cluster carries no `capstone.platform/tier` label), so the `clusters` generator
+# returns ZERO items and this ApplicationSet emits NO Applications. It stays inert
+# until a human runs `make cluster-register` (or `argocd cluster add`) against a real
+# second cluster — see docs/operator/multi-cluster.md.
+#
+# Selector + naming contract (belt-and-suspenders, mirrors the tenants-appset
+# underscore-exclude pattern): a cluster only matches if BOTH are true —
+#   1. label   capstone.platform/tier: satellite   (this selector)
+#   2. name    satellite-*                          (enforced by the `platform`
+#      AppProject's `destinations` glob in bootstrap/platform-appproject.yaml — a
+#      registered cluster whose name does NOT start with `satellite-` is selected by
+#      this generator but its Application is then REJECTED by the AppProject with
+#      "cluster not permitted"; a naming mistake fails loud, not silently-wide-open).
+#
+# What lands automatically on a matched cluster TODAY: only the baseline in
+# clusters/_shared/satellite-baseline/ (namespace + default-deny NetworkPolicy +
+# a registration marker ConfigMap) — a deliberately minimal "proof of life" that the
+# hub can now reconcile a workload onto that cluster end-to-end. It is NOT the real
+# payload. docs/operator/multi-cluster.md lists the roadmap of what SHOULD deploy here
+# next (observability shipping, CI runner offload, tenant overflow, DR) — none of
+# that is implemented by this appset; each is a separate, larger design.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: satellite-clusters
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - clusters:
+        selector:
+          matchLabels:
+            capstone.platform/tier: satellite
+  template:
+    metadata:
+      # nameNormalized (not name): the cluster generator RFC-1123-safes it for us,
+      # so a registered display name with an invalid k8s-name character can't break
+      # the whole appset reconcile (same defensiveness as the tenants-appset
+      # underscore-exclude).
+      name: 'satellite-baseline-{{.nameNormalized}}'
+      labels:
+        platform.capstone/component: multi-cluster
+        # Which satellite this Application targets — lets `kubectl get application -n
+        # argocd -l capstone.platform/satellite-cluster=<name>` find it later without
+        # parsing the generated Application name.
+        capstone.platform/satellite-cluster: '{{.nameNormalized}}'
+    spec:
+      project: platform
+      source:
+        repoURL: https://github.com/UA-MIS/platform-infra
+        targetRevision: HEAD
+        path: clusters/_shared/satellite-baseline
+      destination:
+        # {{.server}} / {{.name}} come from the matched cluster Secret (`data.server`
+        # / `data.name`), exactly as recorded by `argocd cluster add`.
+        server: '{{.server}}'
+        namespace: capstone-satellite-baseline
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=false  # the baseline ships its own Namespace object
+          - ServerSideApply=true
+        retry:
+          limit: 5
+          backoff: { duration: 5s, factor: 2, maxDuration: 3m }
