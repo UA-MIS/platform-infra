@@ -1,0 +1,159 @@
+# MariaDB CLUSTER Application (db-setup task (b)+(c)). The `MariaDB` CR itself
+# (11.8, Galera multi-master HA across the 3 control-plane nodes) + a nightly
+# `PhysicalBackup` to the in-cluster MinIO + the Crossplane-tenant-provisioning-
+# parity `User`/`Grant` (mirrors docs/operator/db-tier-provisioner-setup.md §3
+# EXACTLY — same least-privilege grant list, excludes SUPER/FILE/PROCESS/RELOAD/
+# SHUTDOWN). Helm-source Application (the `mariadb-cluster` chart — an official
+# wrapper chart that renders the MariaDB CR + Database/User/Grant/Backup/
+# PhysicalBackup CRs from one values file, same "cluster" split as rook-ceph-cluster).
+# sync-wave 1 -> lands AFTER platform-mariadb-operator-crds (wave -1) and
+# platform-mariadb-operator (wave 0), so the `k8s.mariadb.com` CRDs exist and the
+# controller is running before this CR is submitted.
+#
+# NO `databases:` entries yet — no current platform app uses MySQL/MariaDB
+# (Backstage + Harbor are both Postgres-only; MariaDB is offered to TENANTS via
+# the ADR-033 Crossplane auto-provisioning path, today fulfilled by the off-box
+# ua-mis-db-1). This tier exists ahead of that cutover so it's ready
+# (docs/operator/in-cluster-db-tier-runbook.md §4) — the `users`/`grants` below
+# are the provisioner parity role, not an app database.
+#
+# Chart: mariadb-cluster 26.6.0 (version-matched to the operator/CRDs charts,
+# same repo). Pin; bump deliberately.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-mariadb-cluster
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"   # MariaDB CR after the CRDs (wave -1) + operator (wave 0)
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://mariadb-operator.github.io/mariadb-operator
+    chart: mariadb-cluster
+    targetRevision: 26.6.0
+    helm:
+      releaseName: capstone-mariadb
+      values: |
+        mariadb:
+          # Pinned exact patch (Docker Hub official image) — version parity with
+          # the off-cluster ua-mis-db-1 box (docs/db-tier-runbook.md: "MariaDB 11.8").
+          image: mariadb:11.8.8
+          rootPasswordSecretKeyRef:
+            name: mariadb-root-credentials   # platform-services/db-tier/externalsecrets.yaml
+            key: password
+            generate: false
+          storage:
+            size: 20Gi
+            storageClassName: ceph-block
+          # Galera multi-master synchronous replication across all 3 nodes (chart
+          # default) — any node accepts writes, automatic failover, no manual
+          # promotion. Matches the Rook-Ceph replica-3/failure-domain-host and
+          # CNPG 3-instance postures: survives ANY single node loss.
+          replicas: 3
+          galera:
+            enabled: true
+          affinity:
+            # One Pod per node (3 nodes, 3 replicas) — same anti-affinity intent
+            # as the CNPG Cluster's `enablePodAntiAffinity`.
+            antiAffinityEnabled: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              memory: 1Gi
+            # No CPU limit — same RAM-governance-over-CPU-throttling reasoning as
+            # the CNPG Cluster (applicationsets/cnpg-operator-app.yaml) and the
+            # Ceph OSDs (rook-ceph-cluster-app.yaml).
+
+        databases: []   # intentionally empty — see header
+
+        users:
+          # Crossplane tenant-provisioning parity login. Host `%` (not tailnet-
+          # CIDR-scoped like the off-box role): this login is reached only via the
+          # in-cluster `capstone-mariadb` Service, not a public/tailnet interface —
+          # the equivalent boundary here is a NetworkPolicy scoping which
+          # namespaces may reach db-tier, not a MySQL host string. NOT yet wired
+          # into Crossplane (config/providerconfig-sql.yaml still points at
+          # ua-mis-db-1) — see the runbook §4 for the repoint + the netpol
+          # follow-up this tradeoff calls for.
+          - name: crossplane_provisioner
+            passwordSecretKeyRef:
+              name: mariadb-crossplane-provisioner-credentials
+              key: password
+            host: "%"
+            cleanupPolicy: Skip
+
+        grants:
+          # EXACT parity with docs/operator/db-tier-provisioner-setup.md §3's
+          # least-privilege grant (create/drop DBs + users + delegate schema
+          # privileges; explicitly EXCLUDES SUPER/FILE/PROCESS/RELOAD/SHUTDOWN —
+          # this is NOT root-equivalent).
+          - name: crossplane-provisioner-grant
+            privileges:
+              - SELECT
+              - INSERT
+              - UPDATE
+              - DELETE
+              - CREATE
+              - DROP
+              - REFERENCES
+              - INDEX
+              - ALTER
+              - CREATE TEMPORARY TABLES
+              - LOCK TABLES
+              - EXECUTE
+              - CREATE VIEW
+              - SHOW VIEW
+              - CREATE ROUTINE
+              - ALTER ROUTINE
+              - EVENT
+              - TRIGGER
+              - CREATE USER
+            database: "*"
+            table: "*"
+            username: crossplane_provisioner
+            grantOption: true
+            host: "%"
+            cleanupPolicy: Skip
+
+        physicalBackups:
+          - name: capstone-mariadb-nightly
+            schedule:
+              cron: "0 2 * * *"   # 02:00 daily
+              suspend: false
+              immediate: true
+            compression: gzip
+            maxRetention: 720h   # 30 days
+            storage:
+              s3:
+                bucket: mariadb-backups
+                prefix: capstone
+                endpoint: minio-backups.db-tier.svc.cluster.local:9000
+                region: us-east-1
+                accessKeyIdSecretKeyRef:
+                  name: minio-mariadb-backup-credentials   # platform-services/db-tier/externalsecrets.yaml
+                  key: access-key-id
+                secretAccessKeySecretKeyRef:
+                  name: minio-mariadb-backup-credentials
+                  key: secret-access-key
+                # No tls.enabled: MinIO is plain HTTP in-cluster, same as the CNPG
+                # ObjectStore (platform-services/cnpg/cluster/objectstore.yaml).
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: db-tier
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false      # db-tier ns ships via platform-services/db-tier
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

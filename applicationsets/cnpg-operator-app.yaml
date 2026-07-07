@@ -1,0 +1,65 @@
+# CloudNativePG OPERATOR Application (db-setup task (a)). The CNPG operator +
+# its CRDs (`Cluster`, `Database`, `DatabaseRole`, `Backup`, `ScheduledBackup`,
+# `Pooler`, …) — the in-cluster HA Postgres 17 tier, successor to the off-cluster
+# `ua-mis-db-1` Postgres role (docs/db-tier-runbook.md). Helm-source Application,
+# deploy method A (D-028): pinned chart + the chart repo added to the `platform`
+# AppProject sourceRepos allowlist (bootstrap/platform-appproject.yaml; security
+# audits the addition — supply chain, same as every other Helm-source add).
+#
+# Two/three-app split (mirrors the rook-ceph precedent):
+#   wave 0 — THIS app: operator + CRDs (cloudnative-pg chart).
+#   wave 0 — cnpg-barman-plugin-app.yaml: the Barman Cloud backup/WAL-archive
+#            sidecar plugin + its ObjectStore CRD (independent install, same wave).
+#   wave 1 — cnpg-cluster-app.yaml: the Cluster CR + per-app Database/DatabaseRole
+#            CRs. The CRDs from THIS app (and the barmancloud CRD from the plugin
+#            app) must exist before the Cluster/ObjectStore CRs in that app are
+#            applied, hence the wave ordering.
+#
+# Chart: cloudnative-pg 0.29.0 (operator appVersion 1.30.0) — official chart repo
+# (https://cloudnative-pg.github.io/charts, index confirmed live). Pinned to this
+# exact version (not the slightly-older 0.28.3) because the `DatabaseRole` CRD
+# (platform-services/cnpg/cluster/roles.yaml) only ships from 0.29.0 onward —
+# verified by rendering both charts and diffing their CRD lists
+# (`databaseroles.postgresql.cnpg.io` is absent from 0.28.3). Pin; bump
+# deliberately (no ^/~/latest).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-cnpg-operator
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"   # operator + CRDs first, before the Cluster CR (wave 1)
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://cloudnative-pg.github.io/charts
+    chart: cloudnative-pg
+    targetRevision: 0.29.0   # pinned chart version (appVersion 1.30.0) — needed for the DatabaseRole CRD
+    helm:
+      releaseName: cnpg
+      values: |
+        # Single-replica operator is fine for a 3-node cluster (matches the
+        # rook-ceph-operator precedent — the DATA path, not the controller, is
+        # what needs HA, and that's the Cluster CR's 3 instances).
+        replicaCount: 1
+        # Leave monitoring.podMonitorEnabled at the chart default (true): the
+        # Prometheus Operator CRDs already exist in-cluster
+        # (kube-prometheus-stack, applicationsets/kube-prometheus-stack-app.yaml),
+        # so the default PodMonitor is picked up for free — no extra wiring here.
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: cnpg-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false           # cnpg-system ns ships via platform-services/cnpg-system
+      - ServerSideApply=true            # CNPG's CRDs are large — SSA avoids the 256KB anno limit
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

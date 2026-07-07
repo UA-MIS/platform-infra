@@ -1,0 +1,77 @@
+# Declarative PostgreSQL roles on `capstone-pg` (db-setup task (c) — the ESO/Vault
+# wiring for app DB connection secrets). `DatabaseRole` is the standalone CRD
+# (decoupled from the Cluster object, unlike inline `managed.roles`) — each role's
+# password comes from an ESO-materialized `kubernetes.io/basic-auth` Secret
+# (platform-services/db-tier/externalsecrets.yaml), never a literal in git.
+#
+# `databaseRoleReclaimPolicy: retain` on all three: never let a CR delete/DROP a
+# live role + its data as a side effect of a manifest being removed — deletion is
+# a deliberate operator action, not something ArgoCD prune should ever trigger.
+---
+# Backstage's eventual owner role (cutover target — see
+# docs/operator/in-cluster-db-tier-runbook.md §4). NOT yet consumed by the live
+# Backstage deployment (applicationsets/backstage-process-app.yaml still points at
+# its bundled Bitnami postgresql subchart) — this role + its Database
+# (databases.yaml) exist ahead of that cutover so the DB tier is ready when it
+# happens; the Helm-values switch itself is the cutover PR, out of scope here.
+apiVersion: postgresql.cnpg.io/v1
+kind: DatabaseRole
+metadata:
+  name: capstone-pg-backstage
+  namespace: db-tier
+  labels:
+    platform.capstone/component: platform
+spec:
+  cluster:
+    name: capstone-pg
+  name: backstage
+  login: true
+  superuser: false
+  databaseRoleReclaimPolicy: retain
+  passwordSecret:
+    name: cnpg-backstage-app-credentials   # platform-services/db-tier/externalsecrets.yaml
+---
+# Harbor's eventual owner role (same cutover-target status as backstage above;
+# applicationsets/harbor-app.yaml still uses the chart-bundled postgres+redis).
+apiVersion: postgresql.cnpg.io/v1
+kind: DatabaseRole
+metadata:
+  name: capstone-pg-harbor
+  namespace: db-tier
+  labels:
+    platform.capstone/component: platform
+spec:
+  cluster:
+    name: capstone-pg
+  name: harbor
+  login: true
+  superuser: false
+  databaseRoleReclaimPolicy: retain
+  passwordSecret:
+    name: cnpg-harbor-app-credentials
+---
+# Crossplane tenant-provisioning parity role — mirrors the off-box
+# `crossplane_provisioner` Postgres role EXACTLY (LOGIN CREATEDB CREATEROLE, NOT
+# SUPERUSER; docs/operator/db-tier-provisioner-setup.md §6b) so provider-sql's
+# `db-tier-postgres` ProviderConfig CAN be repointed at this in-cluster cluster
+# later without a privilege-model change (cutover runbook §4). NOT wired into
+# provider-sql yet — `config/providerconfig-postgres.yaml` still points at
+# ua-mis-db-1; repointing it is the cutover, out of scope here.
+apiVersion: postgresql.cnpg.io/v1
+kind: DatabaseRole
+metadata:
+  name: capstone-pg-crossplane-provisioner
+  namespace: db-tier
+  labels:
+    platform.capstone/component: platform
+spec:
+  cluster:
+    name: capstone-pg
+  name: crossplane_provisioner
+  login: true
+  superuser: false
+  createdb: true
+  createrole: true
+  databaseRoleReclaimPolicy: retain
+  passwordSecret:
+    name: cnpg-crossplane-provisioner-credentials

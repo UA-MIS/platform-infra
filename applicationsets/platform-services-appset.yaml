@@ -60,6 +60,17 @@ spec:
           # unaddressed; not repeated here).
           - path: platform-services/kyverno-policies
             exclude: true
+          # EXCLUDE cnpg/ (db-setup task, in-cluster DB tier): same reason as
+          # kubevirt/cdi above — platform-services/cnpg/ holds only a README + the
+          # GRANDCHILD dirs barman-plugin/ and cluster/, each owned by its own
+          # dedicated Application (applicationsets/cnpg-barman-plugin-app.yaml,
+          # applicationsets/cnpg-cluster-app.yaml — see platform-services/cnpg/README.md
+          # for the full split). The operator itself + the two namespaces it needs
+          # (cnpg-system, db-tier) are NOT under this excluded parent — cnpg-system/
+          # and db-tier/ are their OWN flat top-level platform-services/ dirs (still
+          # picked up by this glob, ns + secrets only, same split as harbor/vault/eso).
+          - path: platform-services/cnpg
+            exclude: true
           # NOTE (P5/M1, D-046): platform-services/backstage IS generated as
           # `platform-svc-backstage` (ns + the REAL sealed secrets: backstage-process-secrets
           # / backstage-postgresql / harbor-pull) — the prereqs the dedicated chart app
