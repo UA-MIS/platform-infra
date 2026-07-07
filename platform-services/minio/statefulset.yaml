@@ -65,7 +65,7 @@ spec:
         - name: chown-data
           image: busybox:1.37.0
           imagePullPolicy: IfNotPresent
-          command: ["sh", "-c", "chown 1000:1000 /data && chmod 0770 /data"]
+          command: ["sh", "-c", "chown -R 1000:1000 /data"]
           securityContext:
             runAsNonRoot: false
             runAsUser: 0
