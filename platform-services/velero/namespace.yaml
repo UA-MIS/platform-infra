@@ -1,0 +1,16 @@
+# Velero namespace (dr-backup). Velero backs up every namespace's Kubernetes
+# objects + PV data (via its node-agent file-system backup) into the MinIO
+# object store (platform-services/minio). Its own namespace keeps the Velero
+# Deployment, the node-agent DaemonSet, and its SealedSecret scoped — same split
+# as harbor/vault (ns + SealedSecrets here; the Helm chart is a SEPARATE
+# Application, applicationsets/velero-app.yaml, method A).
+#
+# Recommend-only (Off) Goldilocks label only — Velero backup/restore runs are
+# periodic batch jobs, not a service that should ever be auto-evicted mid-backup.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: velero
+  labels:
+    platform.capstone/component: platform
+    goldilocks.fairwinds.com/enabled: "true"

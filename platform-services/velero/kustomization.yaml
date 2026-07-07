@@ -1,0 +1,17 @@
+# Velero PREREQS (dr-backup) — the namespace + SealedSecret that must exist
+# before the Velero Helm Application (applicationsets/velero-app.yaml) installs
+# into the velero namespace. Managed by the platform-services-appset (kustomize
+# directory generator); the Helm chart itself is a SEPARATE Application (method A)
+# so it does NOT render through this dir. Same split as harbor/vault.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - sealedsecret-minio-credentials.yaml
+  - sealedsecret-repo-credentials.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false

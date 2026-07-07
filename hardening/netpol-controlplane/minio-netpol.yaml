@@ -1,0 +1,120 @@
+# Control-plane NetworkPolicies — minio namespace (dr-backup fix, blocking
+# review finding). MinIO (platform-services/minio/) is Velero's backup store —
+# its disk now holds a copy of EVERY namespace's Kubernetes Secrets (the
+# nightly `daily-full-backup` schedule backs up all namespaces except its own,
+# applicationsets/velero-app.yaml), including the sealed-secrets controller's
+# own signing key. That makes MinIO's data plane as sensitive as Vault's, even
+# though the server itself only speaks a fairly ordinary S3 API — treat network
+# access to it with the same default-deny + scoped-allow posture as vault/dex/
+# argocd/harbor rather than leaving it open to every pod in the cluster the way
+# an un-netpol'd platform-services workload would be.
+#
+# Same MANUAL-SYNC Application (platform-netpol-controlplane) and rollback
+# posture as the rest of this directory (see this dir's kustomization.yaml /
+# applicationsets/netpol-controlplane-app.yaml header) — default-deny only
+# takes effect on a deliberate, watched `argocd app sync platform-netpol-
+# controlplane`, never auto-applied.
+#   ROLL BACK on any NotReady / backup failure:
+#     kubectl -n minio delete netpol \
+#       zz-default-deny allow-ingress-velero-and-intra-ns allow-egress-scoped
+#
+# Talos/Cilium CIDRs (proven-enforced, SEC-011): pods 10.244.0.0/16,
+# services 10.96.0.0/12, nodes 10.237.168.0/22 (kubelet probes originate from
+# the node IP, not a pod/namespace — same as vault-netpol.yaml).
+#
+# NOTE: this is INGRESS/EGRESS restriction only — it does not, by itself,
+# encrypt data at rest or change who can read the MinIO disk directly on
+# mac-debian-01 (see docs/operator/dr-backup.md's "crown jewels" note, added by
+# this same fix, for the operational implications).
+
+# --- default-deny (ingress + egress) for every pod in minio ---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: zz-default-deny
+  namespace: minio
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# --- INGRESS: from Velero (the ONLY external consumer of the S3 API),
+#     intra-namespace (the minio-provision Job -> the MinIO server), and
+#     kubelet probes from the node. Console (:9001) is deliberately NOT opened
+#     to any namespace — reached only via `kubectl port-forward`
+#     (platform-services/minio/README.md), which does not traverse this netpol. ---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-velero-and-intra-ns
+  namespace: minio
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    # Velero (server + node-agent DaemonSet, velero ns) -> MinIO S3 API :9000.
+    # The ONLY legitimate external reader/writer of the backup bucket.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: velero
+      ports:
+        - protocol: TCP
+          port: 9000
+    # Intra-namespace: the minio-provision Job (minio-provision-job.yaml) calls
+    # the MinIO API to create the velero bucket + scoped IAM user at deploy time.
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 9000
+    # Kubelet readiness/liveness probes originate from the NODE IP (not a
+    # pod/namespace) — both target the api port (statefulset.yaml).
+    - from:
+        - ipBlock:
+            cidr: 10.237.168.0/22
+      ports:
+        - protocol: TCP
+          port: 9000
+---
+# --- EGRESS: DNS + intra-cluster only (the provision Job resolving/reaching
+#     the minio Service; the MinIO server itself needs no egress of its own).
+#     NO external egress — this store never needs to leave the cluster. ---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-scoped
+  namespace: minio
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # DNS to CoreDNS (kube-system), UDP+TCP 53.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Intra-cluster: any pod (10.244/16) or service (10.96/12) — covers the
+    # provision Job reaching the minio Service/pod.
+    - to:
+        - ipBlock:
+            cidr: 10.244.0.0/16
+        - ipBlock:
+            cidr: 10.96.0.0/12
+      ports:
+        - protocol: TCP
+          port: 9000

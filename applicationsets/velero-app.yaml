@@ -1,0 +1,149 @@
+# Velero Application (dr-backup) — scheduled backup of ALL namespaces' Kubernetes
+# objects + PV data, into the platform's own MinIO object store
+# (platform-services/minio, deliberately node-local/non-Ceph — see that
+# namespace's header for why). Deploy method A (D-022/D-028): pinned Helm chart +
+# the chart repo added to the `platform` AppProject sourceRepos allowlist
+# (bootstrap/platform-appproject.yaml in this PR). ⚠ INSTALL-OWNED like every
+# other Helm-source add — reaches the live `platform` AppProject only via `make
+# bootstrap`/`make bootstrap-reapply` + VERIFY, else this app InvalidSpecErrors
+# "repo not permitted".
+#
+# ── why file-system backup, not CSI/cloud snapshots ───────────────────────────
+# `snapshotsEnabled: false` (no VolumeSnapshotLocation) — this cluster has no
+# VolumeSnapshotClass wired for the Rook-Ceph RBD CSI driver yet (a documented
+# follow-up, not attempted here; anti-gold-plate). Instead `deployNodeAgent: true`
+# + `configuration.defaultVolumesToFsBackup: true` makes Velero back up every
+# pod volume's ACTUAL FILE DATA via Kopia (its built-in uploader), working
+# identically regardless of storage backend (Ceph RBD, the MinIO hostPath PV,
+# anything) — the generically-correct choice for "back up all namespaces + PVs"
+# without a CSI-snapshot prerequisite.
+#
+# ── credentials: a scoped, non-root MinIO user (least privilege) ─────────────
+# `credentials.existingSecret` points at the SealedSecret this PR ships
+# (platform-services/velero/sealedsecret-minio-credentials.yaml) for a DEDICATED
+# MinIO IAM user restricted to ONLY the `velero` bucket (created by
+# platform-services/minio/minio-provision-job.yaml) — not MinIO's root
+# credential. No secret material in git (ADR-030 B1 principle applied here too).
+#
+# ── the AWS provider plugin talks to MinIO, not AWS ───────────────────────────
+# Velero's own core has no S3 client; `velero-plugin-for-aws` (pinned initContainer
+# image) IS the S3 client, pointed at MinIO's in-cluster ClusterIP via
+# `s3Url` + `s3ForcePathStyle: true` (MinIO needs path-style, not the
+# virtual-hosted-style AWS uses) + `region: minio` (a placeholder the plugin
+# requires but MinIO ignores).
+#
+# ── the actual schedule (all namespaces + PVs) ────────────────────────────────
+# `schedules.daily-full-backup` runs at 04:00 (after Vault's own 03:00 Raft
+# snapshot, docs/operator/vault-and-dr.md, to spread nightly I/O), 30-day TTL,
+# `includedNamespaces: ["*"]` — every namespace. `excludedNamespaces: [minio]`
+# is the one deliberate carve-out: without it, Velero would back up MinIO's own
+# local data THROUGH MinIO's own S3 API into itself (the backup store backing up
+# its own backing store) — small but pointless recursive growth; excluding it
+# does not weaken DR coverage of anything else (MinIO's contents are ALREADY the
+# backups; the MinIO deployment's few Kubernetes objects — the StatefulSet,
+# Service, SealedSecrets — are cheap to recreate from this very git repo).
+#
+# Chart: velero 12.1.0 (appVersion 1.18.1), pinned. Bump deliberately.
+# Root-app recurses applicationsets/, so this Application is registered.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-velero
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://vmware-tanzu.github.io/helm-charts   # PINNED chart repo (sourceRepos allowlist)
+    chart: velero
+    targetRevision: 12.1.0                                  # pinned chart version (appVersion 1.18.1); no ^/~/latest
+    helm:
+      releaseName: velero
+      values: |
+        # AWS provider plugin — the actual S3 client Velero uses to speak to MinIO.
+        initContainers:
+          - name: velero-plugin-for-aws
+            image: velero/velero-plugin-for-aws:v1.13.1
+            imagePullPolicy: IfNotPresent
+            volumeMounts:
+              - mountPath: /target
+                name: plugins
+
+        # Scoped, non-root MinIO IAM user (see this file's header). NOT root.
+        credentials:
+          useSecret: true
+          existingSecret: velero-minio-credentials   # key: cloud (AWS-ini format)
+
+        configuration:
+          backupStorageLocation:
+            - name: default
+              provider: aws
+              bucket: velero
+              default: true
+              credential:
+                name: velero-minio-credentials
+                key: cloud
+              config:
+                region: minio
+                s3ForcePathStyle: "true"
+                s3Url: http://minio.minio.svc.cluster.local:9000
+          # No volumeSnapshotLocation — see header (fs-backup via node-agent instead).
+          volumeSnapshotLocation: []
+          # Back up every pod volume's real file data by default, without needing a
+          # per-pod annotation — the generically-correct "all PVs" behavior.
+          defaultVolumesToFsBackup: true
+          defaultBackupTTL: 720h0m0s   # 30 days retention (matches the schedule's own ttl)
+
+        # No cloud/CSI snapshotter is configured (see header) — Velero backs up PV
+        # DATA via the node-agent's file-system backup (Kopia) instead.
+        snapshotsEnabled: false
+        deployNodeAgent: true
+        nodeAgent:
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+
+        resources:
+          requests:
+            cpu: 250m
+            memory: 256Mi
+          limits:
+            cpu: "1"
+            memory: 512Mi
+
+        # The one scheduled backup this PR asks for: ALL namespaces + PVs, daily,
+        # 30-day retention. excludedNamespaces:[minio] avoids the backup store
+        # backing up itself (see header) — every other namespace is included.
+        schedules:
+          daily-full-backup:
+            disabled: false
+            schedule: "0 4 * * *"
+            useOwnerReferencesInBackup: false
+            template:
+              ttl: "720h0m0s"
+              includedNamespaces:
+                - "*"
+              excludedNamespaces:
+                - minio
+              defaultVolumesToFsBackup: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: velero
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      # No CreateNamespace: the velero namespace ships via the prereq dir
+      # (platform-services/velero/namespace.yaml), same split as Harbor/Vault.
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

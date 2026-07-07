@@ -1,0 +1,22 @@
+# MinIO (dr-backup) — single-node, local-disk (non-Ceph) S3-compatible object
+# store, the target Velero backs up into (platform-services/velero,
+# applicationsets/velero-app.yaml). Plain-manifest service (no Helm chart — see
+# statefulset.yaml header for why), managed by the platform-services-appset
+# (kustomize directory generator) like Dex/cloudflared/vault-unsealer.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - storageclass.yaml
+  - pv-local.yaml
+  - pvc.yaml
+  - sealedsecret-admin.yaml
+  - sealedsecret-velero-user.yaml
+  - statefulset.yaml
+  - minio-provision-job.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false

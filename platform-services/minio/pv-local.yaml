@@ -1,0 +1,62 @@
+# Static, node-pinned local PersistentVolume for MinIO's data directory (dr-backup).
+#
+# ── WHY hostPath (not the `local` volume type) ────────────────────────────────
+# Kubernetes' `local:` PV source is the more modern node-local primitive, but it
+# REQUIRES the target path to already exist on the node — the kubelet does not
+# create it, so it would need a manual, out-of-band `mkdir` on mac-debian-01
+# before this PV could ever bind (a manual node-prep step this GitOps PR cannot
+# perform). `hostPath` with `type: DirectoryOrCreate` is self-provisioning: the
+# kubelet creates /var/lib/minio-dr-backup on first mount if it is missing, so
+# this PV binds with ZERO manual node setup. The tradeoff (accepted): hostPath has
+# weaker path-escape isolation than `local` — acceptable here because the
+# consuming pod (MinIO) is a trusted platform workload, not arbitrary tenant code.
+#
+# ── WHY mac-debian-01, and why a SINGLE node at all ───────────────────────────
+# Any one of the 3 mac-debian workers would do — mac-debian-01 was picked
+# arbitrarily (first in the fleet). This PV (and therefore the whole MinIO
+# instance, statefulset.yaml) is a SINGLE-NODE, SINGLE-REPLICA design: the
+# store's job is to be a disaster-recovery target, not a highly-available
+# service, and adding real HA here would mean either MinIO's distributed
+# (erasure-coded, 4+ drive) mode — needlessly heavy for a homelab — or spreading
+# it back onto Ceph, which reintroduces the exact correlated-failure risk this
+# whole namespace exists to avoid (see namespace.yaml). ACCEPTED RISK: if
+# mac-debian-01 is down, Velero backup/restore is unavailable until it returns —
+# this is a backup-availability gap, not a data-loss risk (existing snapshots
+# already on the disk are untouched). To relocate: change BOTH the
+# `kubernetes.io/hostname` value below AND the `nodeSelector` in
+# statefulset.yaml, then move (or re-copy) /var/lib/minio-dr-backup to the new
+# node before the pod reschedules.
+#
+# ── sizing ─────────────────────────────────────────────────────────────────────
+# `capacity.storage` is NOT a physical pre-allocation for a hostPath volume — it
+# is only the number Kubernetes uses for PVC-to-PV capacity matching. The REAL
+# ceiling is the free space on mac-debian-01's root filesystem; there is no
+# enforced quota. 200Gi is a starting point — operator should confirm actual free
+# disk on the box (`df -h /var/lib`) and adjust both this value and the PVC's
+# request (pvc.yaml) if the real disk is smaller/larger. Monitor real usage with
+# `kubectl -n minio exec minio-0 -- df -h /data`.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: minio-dr-local-pv
+  labels:
+    platform.capstone/component: platform
+spec:
+  capacity:
+    storage: 200Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-hostpath
+  hostPath:
+    path: /var/lib/minio-dr-backup
+    type: DirectoryOrCreate
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - mac-debian-01

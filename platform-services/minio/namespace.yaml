@@ -1,0 +1,24 @@
+# MinIO namespace (dr-backup / issue: platform had NO off-cluster backup and did
+# not survive a power outage cleanly). MinIO is the platform's disaster-recovery
+# object store: a SINGLE-NODE, LOCAL-DISK (NOT Ceph-backed) S3-compatible target
+# that Velero backs up into (platform-services/velero, applicationsets/velero-app.yaml).
+#
+# ── WHY NOT CEPH-BACKED ──────────────────────────────────────────────────────
+# The whole point of this store is to survive a failure that Ceph itself does NOT
+# survive (a cluster-wide power outage, a Ceph mon quorum loss, a botched Rook
+# upgrade). Backing the backup target with the same storage system you are taking
+# backups TO PROTECT AGAINST would make it a single point of correlated failure —
+# so MinIO is pinned to one mac-debian worker's LOCAL disk via a static hostPath
+# PersistentVolume (pv-local.yaml), completely outside the Ceph/Rook data path.
+#
+# Recommend-only (Off) Goldilocks label — MinIO is a single-replica stateful
+# singleton (like Vault), so it never goes in the Auto right-sizing policy (an
+# eviction would interrupt in-flight backup/restore traffic); this label is
+# sizing visibility only, never an eviction.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: minio
+  labels:
+    platform.capstone/component: platform
+    goldilocks.fairwinds.com/enabled: "true"

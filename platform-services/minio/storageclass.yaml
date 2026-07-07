@@ -1,0 +1,29 @@
+# `local-hostpath` StorageClass (dr-backup) — backs ONLY the statically-provisioned
+# node-local PersistentVolume(s) in this dir (pv-local.yaml). NOT a dynamic
+# provisioner: `kubernetes.io/no-provisioner` means a PVC using this class binds
+# ONLY to a PV that already exists and explicitly names this class (there is no
+# controller that creates new PVs on demand). This is the correct, deliberate
+# choice for a single hand-pinned disk on a single named node — a real dynamic
+# local-path provisioner would be the wrong tool (it would let a PVC land on ANY
+# node's disk, defeating the "pinned to one specific mac-debian node" requirement
+# and silently spreading DR-backup data across nodes with no data-locality
+# guarantee).
+#
+# volumeBindingMode: WaitForFirstConsumer — the PVC is not bound until a POD that
+# claims it is actually scheduled, so the scheduler places that pod on the SAME
+# node the static PV's nodeAffinity requires (pv-local.yaml) rather than binding
+# eagerly and only then discovering a scheduling conflict.
+#
+# reclaimPolicy: Retain — this class exists to hold disaster-recovery data. A
+# deleted PVC must NEVER silently wipe the underlying MinIO bucket data; Retain
+# leaves the PV (and its hostPath directory contents) in place for the operator to
+# inspect/reattach/manually clean up.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-hostpath
+  labels:
+    platform.capstone/component: platform
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Retain

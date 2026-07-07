@@ -18,6 +18,8 @@
 #     #     zz-default-deny allow-ingress-traefik-and-intra-ns allow-egress-scoped
 #     #   kubectl -n dex   delete netpol \
 #     #     zz-default-deny allow-ingress-traefik-and-argocd allow-egress-scoped
+#     #   kubectl -n minio  delete netpol \
+#     #     zz-default-deny allow-ingress-velero-and-intra-ns allow-egress-scoped
 #
 # ⚠ MERGE ≠ ENFORCEMENT — couple the two (SEC-011). Merging this PR only makes the
 # manifests present + tracked (manual sync = applies nothing). Enforcement is the
