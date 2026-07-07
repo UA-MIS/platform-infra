@@ -7,10 +7,51 @@ deliberately **outside** the Rook-Ceph data path.
 
 GitOps surfaces:
 `platform-services/minio/` (the object store), `platform-services/velero/` (Velero's
-namespace + SealedSecret), `applicationsets/velero-app.yaml` (the Velero Helm
-Application), `applicationsets/minio` is **not** a separate Application — MinIO is
-plain manifests picked up by the `platform-services` ApplicationSet
-(`platform-svc-minio`), same as Dex/cloudflared/vault-unsealer.
+namespace + SealedSecrets), `applicationsets/velero-app.yaml` (the Velero Helm
+Application), `hardening/netpol-controlplane/minio-netpol.yaml` (network
+restriction on the store, MANUAL-SYNC — see below). `applicationsets/minio` is
+**not** a separate Application — MinIO is plain manifests picked up by the
+`platform-services` ApplicationSet (`platform-svc-minio`), same as Dex/cloudflared/
+vault-unsealer.
+
+---
+
+## ⚠⚠⚠ THE MINIO DISK IS THE CROWN JEWELS ⚠⚠⚠
+
+**Read this before touching MinIO.** Because the nightly schedule backs up **every
+namespace's Kubernetes Secrets** (`includedNamespaces: ["*"]`, only `minio` itself is
+excluded — `applicationsets/velero-app.yaml`), the `velero` bucket on
+`mac-debian-01`'s local disk (`/var/lib/minio-dr-backup`) is, in aggregate, a copy of
+**every credential this platform has**: Harbor robot tokens, the Dex/OIDC client
+secrets, Vault's own unseal material to the extent it's stored as a Secret, and —
+critically — **the sealed-secrets controller's own signing key**. Anyone who reads
+that key can decrypt **every SealedSecret in this entire git repo**, past and future.
+
+That makes this disk (and the MinIO root/IAM credentials that unlock it) more
+sensitive than almost anything else on the platform. Treat it accordingly:
+
+- The backup **content** (the actual repository objects Kopia writes) is encrypted
+  with the password in the `velero-repo-credentials` SealedSecret
+  (`platform-services/velero/sealedsecret-repo-credentials.yaml`) — a strong,
+  randomly-generated password sealed **before** Velero's first run, specifically so
+  Velero never falls back to its well-known upstream default
+  (`static-passw0rd`, see that file's header). Losing/rotating this password
+  incorrectly can make existing backups **permanently unreadable** — see the
+  file's no-rotate-after-first-backup caveat.
+- **Network** access to the MinIO Service is restricted to Velero only
+  (`hardening/netpol-controlplane/minio-netpol.yaml`) — same MANUAL-SYNC,
+  default-deny posture as Vault/ArgoCD/Dex (`hardening/netpol-controlplane/`).
+  This does **not** by itself protect the data at rest on disk or over anyone with
+  direct SSH/filesystem access to `mac-debian-01` — it only stops other in-cluster
+  pods from reaching the S3 API.
+- Anyone doing filesystem-level backup/restore/copy of `/var/lib/minio-dr-backup`
+  (e.g. the "Relocating MinIO" procedure below) is handling that same crown-jewels
+  data — copy it with the same care as a Vault Raft snapshot, not like an ordinary
+  application volume.
+- If the MinIO root credential or the `velero-repo-credentials` password is ever
+  suspected compromised, treat it as a **sealed-secrets-signing-key-compromise-level**
+  incident, not a routine credential rotation: everything ever backed up should be
+  considered readable by the party who got it.
 
 ---
 
@@ -45,13 +86,23 @@ plain manifests picked up by the `platform-services` ApplicationSet
   pod volume instead — works identically regardless of storage backend, and needs no
   CSI-snapshot prerequisite. `configuration.defaultVolumesToFsBackup: true` means this
   happens for **every** PV automatically — no per-pod annotation required.
-- **Credentials:** Velero authenticates as a **dedicated, non-root MinIO IAM user**
-  scoped to only the `velero` bucket (created by `platform-services/minio/minio-
-  provision-job.yaml`), not the MinIO root account — same least-privilege pattern as
-  Harbor's per-team robot accounts. See the SealedSecret file headers
-  (`platform-services/minio/sealedsecret-*.yaml`,
+- **Credentials — reaching MinIO:** Velero authenticates as a **dedicated, non-root
+  MinIO IAM user** scoped to only the `velero` bucket (created by
+  `platform-services/minio/minio-provision-job.yaml`), not the MinIO root account —
+  same least-privilege pattern as Harbor's per-team robot accounts. See the
+  SealedSecret file headers (`platform-services/minio/sealedsecret-*.yaml`,
   `platform-services/velero/sealedsecret-minio-credentials.yaml`) for the full
   key-custody picture.
+- **Credentials — encrypting what's stored:** this is a **separate** secret from the
+  one above. `platform-services/velero/sealedsecret-repo-credentials.yaml` seals a
+  strong, randomly-generated password into `velero-repo-credentials` (the
+  Kopia/restic backup-repository password) so the backup **contents** are encrypted
+  at rest with something other than Velero's well-known upstream default password.
+  See "THE MINIO DISK IS THE CROWN JEWELS" above.
+- **Network access:** restricted to the `velero` namespace only, via
+  `hardening/netpol-controlplane/minio-netpol.yaml` (MANUAL-SYNC — see "THE MINIO
+  DISK IS THE CROWN JEWELS" above and that dir's header for the sync/rollback
+  procedure).
 - **Reused bucket, future observability:** this MinIO instance is intended to also
   back Thanos long-term metrics storage and Tempo traces later (both currently
   **not deployed** — anti-gold-plate, per the retro). When they land, add their own
@@ -78,6 +129,12 @@ kubectl -n velero get backups                     # one per schedule firing
 kubectl -n velero describe backup <name>           # Phase: Completed, no errors
 kubectl -n minio get statefulset,pvc,pod
 kubectl -n minio exec minio-0 -- df -h /data       # real disk headroom (hostPath has no quota)
+
+# Confirm the repo password is OUR sealed value, not Velero's well-known default
+# (expect this to print nothing — a match means the backup store is unencrypted,
+# see "THE MINIO DISK IS THE CROWN JEWELS" above; escalate immediately if it prints):
+kubectl -n velero get secret velero-repo-credentials -o jsonpath='{.data.repository-password}' \
+  | base64 -d | grep -Fx 'static-passw0rd' && echo "!!! DEFAULT PASSWORD IN USE !!!"
 ```
 
 Reach the MinIO console (root credentials only — do this from an operator
@@ -224,6 +281,7 @@ The disk is pinned to one node deliberately (see architecture above). To move it
 | Backup `PartiallyFailed`, node-agent errors in the backup's logs | node-agent DaemonSet pod not Ready on the node the workload's PV lives on | `kubectl -n velero get pods -l name=node-agent -o wide`; `kubectl -n velero logs -l name=node-agent` |
 | Restore completes but PV data is empty | pod that owned the volume wasn't Running long enough for Kopia to complete the backup, or the restore ran before the node-agent's restore-helper init container finished | re-run the drill (§B) after confirming the ORIGINAL backup's `.status.progress` shows non-zero bytes for the volume |
 | `mc: <ERROR> ... Access Denied` from the provisioning Job | the `velero-rw` policy JSON or the IAM user attach step failed partway | re-run the Job (`argocd app sync platform-svc-minio` or delete+let ArgoCD recreate); check its logs for the exact `mc admin` step that failed |
+| Velero/node-agent times out reaching MinIO, or a NON-velero pod suddenly can't reach `minio.minio.svc.cluster.local:9000` | `hardening/netpol-controlplane/minio-netpol.yaml` was synced (`argocd app sync platform-netpol-controlplane`) and either legitimately blocked a non-Velero caller, or a rule is mis-scoped | confirm the caller is actually in the `velero` namespace; if it should be allowed and isn't, fix the netpol in git and re-sync — do NOT `kubectl edit` the live NetworkPolicy (drifts from git); rollback command is in that file's header |
 
 ---
 

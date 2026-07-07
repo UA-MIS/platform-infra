@@ -3,8 +3,18 @@
 Deployed as the ArgoCD Application `platform-velero`
 (`applicationsets/velero-app.yaml`, deploy method A — pinned `velero` chart
 `12.1.0`, appVersion `1.18.1`). This dir ships only the `velero` **namespace** and
-the SealedSecret with the credentials Velero uses to reach MinIO (the chart itself
-is a SEPARATE Application, same split as Harbor/Vault).
+two SealedSecrets (the chart itself is a SEPARATE Application, same split as
+Harbor/Vault):
+
+- `sealedsecret-minio-credentials.yaml` -> `velero-minio-credentials` — the S3
+  access-key pair Velero uses to *reach* MinIO.
+- `sealedsecret-repo-credentials.yaml` -> `velero-repo-credentials` — the
+  Kopia/restic **repository encryption password**. Pre-sealing a strong,
+  randomly-generated password here (instead of letting Velero mint its own on
+  first backup) is what keeps the backup store from being encrypted with
+  upstream's well-known default password. See that file's header and
+  `docs/operator/dr-backup.md` for why this matters and the no-rotate-after-
+  first-backup caveat.
 
 Backs up into `platform-services/minio/` (a dedicated, node-local, non-Ceph object
 store — see that dir's `namespace.yaml` for why) via the AWS S3 provider plugin

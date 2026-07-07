@@ -9,6 +9,7 @@ kind: Kustomization
 resources:
   - namespace.yaml
   - sealedsecret-minio-credentials.yaml
+  - sealedsecret-repo-credentials.yaml
 
 labels:
   - pairs:
