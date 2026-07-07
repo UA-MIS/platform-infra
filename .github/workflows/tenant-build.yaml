@@ -25,7 +25,13 @@
 #   3. checks         — per-component lint + unit test (language-detected),
 #                       BLOCKING. Runs in parallel with scan.
 #   4. build-and-push — per-component Kaniko build+push. `needs: [scan, checks]`,
-#                       so a failed gate never reaches the registry.
+#                       so a failed gate never reaches the registry. On a real push,
+#                       each pushed image is then GATED on Harbor's own Trivy
+#                       scan-on-push (fails the job on any CRITICAL finding),
+#                       cosign KEYLESS-signed (public Fulcio/Rekor), and given a
+#                       syft SBOM artifact — see .github/actions/supply-chain-verify
+#                       (shared with the Backstage portal build; same "stop
+#                       copying" rationale as tenant-ci-scripts below).
 #   5. bump-dev       — the GitOps dev-overlay image bump (push-to-main only).
 #   6. bump-staging   — the GitOps staging-overlay image bump (vX.Y.Z tag push
 #                       only; promotion.yaml: environments.staging.trigger =
@@ -90,10 +96,13 @@ on:
         default: ua-mis-kaniko
 
 # Least-privilege DEFAULT. `contents: read` is all the build/scan/checks jobs need.
-# bump-dev and bump-staging RE-DECLARE `contents: write` for themselves. NOTE: a
-# reusable workflow can only DOWNGRADE the caller's grant, so the caller's calling
-# job MUST grant `permissions: contents: write` for bump-dev/bump-staging to keep
-# their write scope.
+# bump-dev and bump-staging RE-DECLARE `contents: write` for themselves;
+# build-and-push RE-DECLARES `id-token: write` for itself (cosign keyless signing,
+# supply-chain hardening). NOTE: a reusable workflow can only DOWNGRADE the
+# caller's grant, so the caller's calling job MUST grant BOTH
+# `permissions: contents: write` (for bump-dev/bump-staging) AND
+# `permissions: id-token: write` (for build-and-push's cosign step) or those jobs
+# silently lose the scope they ask for.
 permissions:
   contents: read
 
@@ -306,10 +315,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.prepare.outputs.MATRIX) }}
+    # FULL node image (NOT -slim): the post-push supply-chain-verify composite
+    # action needs curl + tar + sha256sum (installing cosign/syft, same
+    # pinned+checksum-verified convention as the yq installs elsewhere in this
+    # file) AND a real /etc/ssl/certs/ca-certificates.crt bundle to extend with
+    # the platform CA (see that action's header). -slim ships none of these.
     container:
-      image: node:24-trixie-slim
+      image: node:24-trixie
     env:
       DOCKER_CONFIG_DIR: /kaniko/.docker
+    # RE-DECLARES id-token: write (workflow default is contents:read only) — cosign
+    # keyless signing needs the OIDC ID-token this grants. Reusable-workflow caveat
+    # (see the top-level permissions comment): the CALLER's job must also grant
+    # `permissions: id-token: write` or this downgrades to none and the supply-chain
+    # step's OIDC guard fails closed with a clear message.
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Checkout (build context)
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -351,7 +373,7 @@ jobs:
                     --verbosity=info";
             if [ "${PUSH}" = "true" ]; then
               echo "==> building + pushing ${IMAGE}";
-              /kaniko/executor $COMMON;
+              /kaniko/executor $COMMON --image-name-with-digest-file=${GITHUB_WORKSPACE}/.image-digest;
             else
               echo "==> PR build-only validation for ${IMAGE} (no push)";
               /kaniko/executor $COMMON --no-push --tar-path=/tmp/image.tar;
@@ -365,6 +387,43 @@ jobs:
           CONTEXT: ${{ matrix.context }}
           DOCKERFILE: ${{ matrix.dockerfile }}
           DOCKER_CONFIG_DIR: ${{ env.DOCKER_CONFIG_DIR }}
+
+      # --- post-push supply chain: Trivy gate + cosign sign + syft SBOM ---------
+      # PUSH-only (nothing to verify for a --no-push PR validation build — no image
+      # landed in the registry). `--image-name-with-digest-file` above writes
+      # `<destination>@sha256:<digest>` into the shared _work volume; this job's
+      # OWN pod (not a separate `docker://` step) reads it back with a real shell.
+      - name: Capture built image digest + derive the Harbor project
+        if: ${{ needs.prepare.outputs.PUSH == 'true' }}
+        id: digest
+        env:
+          REGISTRY: ${{ needs.prepare.outputs.REGISTRY }}
+        run: |
+          set -eu
+          DIGEST_FILE="${GITHUB_WORKSPACE}/.image-digest"
+          [ -s "${DIGEST_FILE}" ] || {
+            echo "ERROR: kaniko did not write a digest file at ${DIGEST_FILE} (expected" \
+                 "--image-name-with-digest-file to run on the push path)." >&2
+            exit 1
+          }
+          IMAGE_REF="$(cat "${DIGEST_FILE}")"
+          echo "built image ref: ${IMAGE_REF}"
+          {
+            echo "IMAGE_REF=${IMAGE_REF}"
+            # REGISTRY is always <harbor-host>/<team-project> (one path segment, no
+            # nesting — promotion.yaml schema v1); strip the host to get the project.
+            echo "HARBOR_PROJECT=${REGISTRY#*/}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Supply-chain verify (Harbor Trivy gate + cosign sign + syft SBOM)
+        if: ${{ needs.prepare.outputs.PUSH == 'true' }}
+        uses: UA-MIS/platform-infra/.github/actions/supply-chain-verify@v1
+        with:
+          image-ref: ${{ steps.digest.outputs.IMAGE_REF }}
+          harbor-project: ${{ steps.digest.outputs.HARBOR_PROJECT }}
+          harbor-repo: ${{ matrix.image }}
+          docker-config-dir: ${{ env.DOCKER_CONFIG_DIR }}
+          sbom-artifact-name: sbom-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
 
   # ============================================================================
   # 5) bump-dev — the GitOps image-bump (D-030 automated promotion: push -> builds

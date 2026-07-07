@@ -120,6 +120,15 @@ spec:
     # bootstrap-managed, not GitOps-reconciled) or platform-velero will
     # InvalidSpecError "repo not permitted".
     - https://vmware-tanzu.github.io/helm-charts            # Velero (platform-velero Application)
+    # Kyverno (supply-chain hardening): the admission-policy engine that verifies
+    # every Pod image carries a valid cosign KEYLESS signature bound to this org's
+    # GitHub Actions identity, disallows `:latest`, and requires resource limits.
+    # ONE named source, chart version pinned in the Application (kyverno @ 3.8.1,
+    # appVersion v1.18.1). ⚠ INSTALL-OWNED (same as every add above): reaches the
+    # live `platform` AppProject only via `make bootstrap`/`make bootstrap-reapply`
+    # + VERIFY (the AppProject is bootstrap-managed, not GitOps-reconciled) or
+    # platform-kyverno will InvalidSpecError "repo not permitted".
+    - https://kyverno.github.io/kyverno/                    # Kyverno (platform-kyverno Application)
 
   # Platform services are cluster-wide; allow any namespace on the in-cluster API.
   destinations:

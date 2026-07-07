@@ -1,0 +1,87 @@
+# Kyverno Application (supply-chain hardening). The policy engine + its CRDs
+# (ClusterPolicy, PolicyException, ...). Helm-source Application, deploy method A
+# (D-028): pinned chart + the chart repo added to the `platform` AppProject
+# sourceRepos allowlist (bootstrap/platform-appproject.yaml; security audits the
+# addition — supply chain, same as every other Helm-source add).
+#
+# Two-app split (mirrors the Rook-Ceph operator/cluster + VPA/VPA-policies
+# precedent in this repo):
+#   wave 0 — THIS app: the Kyverno controllers + CRDs (kyverno chart).
+#   wave 1 — kyverno-policies-app.yaml: the actual ClusterPolicy objects
+#            (platform-services/kyverno-policies/). The ClusterPolicy CRD from
+#            THIS app must exist before those objects are applied, hence the
+#            wave ordering.
+#
+# Chart: kyverno 3.8.1 (appVersion v1.18.1). Pin; bump deliberately.
+#
+# ⚠ CRITICAL SAFETY (fail-open by construction, not just via the policies'
+# `failurePolicy: Ignore` — see kyverno-policies-app.yaml). Kyverno ships
+# `failurePolicy: Fail` as ITS OWN engine default (kyverno.io docs: "Kyverno
+# defaults to `Fail` for enhanced security"); every policy in this repo
+# EXPLICITLY overrides that to `Ignore` at the policy level (belt) AND this
+# values block globally forces it too (suspenders) — `--forceFailurePolicyIgnore`
+# — so a down/unreachable Kyverno webhook can NEVER block scheduling anywhere in
+# the cluster, including during DR/control-plane recovery when Kyverno itself
+# might not be up yet. A single homelab replica (no HA needed for a teaching
+# platform) keeps this simple; if Kyverno is down, admission just proceeds
+# unvalidated rather than wedging the API server.
+#
+# Root-app recurses applicationsets/, so this Application is registered.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-kyverno
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"   # controllers+CRDs before the ClusterPolicy objects (wave 1)
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://kyverno.github.io/kyverno/   # PINNED chart repo (sourceRepos allowlist)
+    chart: kyverno
+    targetRevision: 3.8.1                          # pinned chart version (appVersion v1.18.1); no ^/~/latest
+    helm:
+      releaseName: kyverno
+      values: |
+        # CRITICAL SAFETY (see the header): force EVERY admission webhook Kyverno
+        # registers to failurePolicy=Ignore cluster-wide, regardless of what any
+        # individual ClusterPolicy asks for (values.yaml `features.
+        # forceFailurePolicyIgnore` — verified against the pinned 3.8.1 chart). A
+        # webhook timeout/crash/OOM then fails OPEN (the API server proceeds with
+        # the request) instead of blocking ALL pod scheduling cluster-wide — the
+        # one failure mode this platform cannot tolerate (esp. mid-DR, when
+        # Kyverno itself may not be Ready yet and everything else is trying to
+        # reschedule).
+        features:
+          forceFailurePolicyIgnore:
+            enabled: true
+        # Single homelab replica everywhere — no HA needed for a teaching platform.
+        # background/cleanup/reports controllers are not on the pod-admission path
+        # (they reconcile PolicyReport objects + cleanup, not gate scheduling), so
+        # they carry no fail-open requirement of their own; still single-replica
+        # for consistency + resource footprint.
+        admissionController:
+          replicas: 1
+        backgroundController:
+          replicas: 1
+        cleanupController:
+          replicas: 1
+        reportsController:
+          replicas: 1
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kyverno
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false   # kyverno ns ships via platform-services/kyverno
+      - ServerSideApply=true    # the kyverno.io CRDs are large — SSA avoids the 256KB anno limit
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

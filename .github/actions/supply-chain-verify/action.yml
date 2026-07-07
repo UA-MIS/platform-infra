@@ -1,0 +1,260 @@
+# ============================================================================
+# supply-chain-verify — the CENTRAL post-push supply-chain step, shared by every
+# platform + tenant image build (tenant-build.yaml@v1's build-and-push job AND
+# backstage-process-build-push.yaml's build-and-push job). Same "stop copying"
+# rationale as .github/actions/tenant-ci-scripts (retro #1): a threshold/version
+# bump here ships to every caller at once via @v1, instead of drifting per-repo.
+#
+# WHAT IT DOES, IN ORDER, for ONE already-pushed image (full ref incl. digest):
+#   1. Trusts the platform's internal CA alongside the public roots (needed for
+#      the in-cluster Harbor route AND the public Fulcio/Rekor/GitHub OIDC calls
+#      to share one process — see the CA note below).
+#   2. Installs cosign + syft as pinned, checksum-verified binaries (same
+#      convention as the yq install elsewhere in this repo — no unpinned curl).
+#   3. Verifies an OIDC ID-token is actually available (fails loud with a clear
+#      fix instead of a confusing cosign error if the caller forgot
+#      `permissions: id-token: write`).
+#   4. GATES on Harbor's OWN scan-on-push Trivy result (D-028; auto_scan:true is
+#      already on for every project) — polls the artifact's scan_overview until
+#      the scan finishes, then fails the job if any CRITICAL finding exists. This
+#      does NOT re-scan the image client-side (no Trivy dup) — it reads the scan
+#      Harbor already ran. Gating BEFORE signing on purpose: a build this rejects
+#      never gets a cosign signature recorded in the PUBLIC, immutable Rekor log.
+#   5. cosign KEYLESS-signs the pushed image (public Fulcio + Rekor, OIDC-bound
+#      to this exact GitHub Actions workflow identity — no key material anywhere).
+#   6. Generates a CycloneDX SBOM with syft and uploads it as a workflow artifact
+#      (retained for audit; not pushed to the registry — keeps this step simple
+#      and reliable, matching "finish functional before polish").
+#
+# A CRITICAL finding fails this composite step -> fails the build-and-push job ->
+# `needs: build-and-push` blocks bump-dev/bump-portal, so the GitOps overlay is
+# never bumped and the vulnerable image never deploys. The image itself stays in
+# Harbor (already scanned + tagged) — Harbor's own registry-side "prevent
+# vulnerable images from running" project setting (docs/operator/harbor.md) is
+# the separate, human-configured PULL-time backstop.
+#
+# WHY A COMBINED CA TRUST BUNDLE (not cosign-specific env). This step's ARC
+# runner (containerMode:kubernetes) resolves harbor.<domain> to Traefik's
+# ClusterIP IN-CLUSTER (arc-hook-template.yaml hostAliases, CI-fast #237) and
+# trusts it via the mounted `platform-ca` ConfigMap — but cosign (a Go binary)
+# ALSO needs the PUBLIC roots for fulcio.sigstore.dev / rekor.sigstore.dev /
+# token.actions.githubusercontent.com in the SAME process. Go's SSL_CERT_FILE
+# REPLACES the default root list rather than adding to it, so pointing it at
+# platform-ca ALONE would break the public Sigstore/OIDC calls. Appending
+# platform-ca.crt to the job container's system bundle (`/etc/ssl/certs/
+# ca-certificates.crt`) adds the one internal root without dropping the public
+# ones — cosign, curl, and node's fetch all read that same default file.
+#
+# CALLER CONTRACT (see tenant-build.yaml / backstage-process-build-push.yaml):
+#   - the calling JOB must run in a container with curl, tar, sha256sum, node,
+#     and a full /etc/ssl/certs/ca-certificates.crt bundle present — i.e.
+#     `node:24-trixie` (NOT -trixie-slim: slim ships none of these).
+#   - the calling JOB must grant `permissions: id-token: write` (step 3 above).
+#   - the Harbor push-robot credential must already be mounted at
+#     `docker-config-dir`/config.json (the arc-hook-template Option-C injection)
+#     and that robot must carry `{"resource":"scan","action":"read"}` in
+#     addition to repository pull/push (Makefile `harbor-push-robot` target;
+#     already-onboarded teams must re-mint — docs/operator/harbor.md).
+#   - only call this AFTER a successful PUSH (skip entirely for --no-push /
+#     build-only PR validation — there is nothing in the registry to verify).
+# ============================================================================
+name: supply-chain-verify
+description: >-
+  Gates on Harbor's Trivy scan-on-push (fails on CRITICAL), cosign keyless-signs
+  the pushed image (public Fulcio/Rekor), and uploads a syft SBOM artifact.
+
+inputs:
+  image-ref:
+    description: >-
+      Full pushed image reference WITH DIGEST, e.g. harbor.../team/app@sha256:...
+      (from kaniko's --image-name-with-digest-file).
+    required: true
+  harbor-project:
+    description: "Harbor project (namespace) the image was pushed to, e.g. 'sample' or 'backstage'."
+    required: true
+  harbor-repo:
+    description: "Harbor repository (leaf) name within the project, e.g. 'sample' or 'sample-frontend'."
+    required: true
+  docker-config-dir:
+    description: "Dir holding config.json with the Harbor push-robot credential (Kaniko's DOCKER_CONFIG dir)."
+    required: false
+    default: /kaniko/.docker
+  sbom-artifact-name:
+    description: "Name for the uploaded SBOM workflow artifact — MUST be unique across matrix legs/jobs in one run."
+    required: true
+  fail-on-severity:
+    description: "Harbor scan_overview summary key that fails the build if its count is > 0."
+    required: false
+    default: Critical
+  scan-timeout-seconds:
+    description: "Max seconds to wait for Harbor's scan-on-push to finish before failing closed."
+    required: false
+    default: "300"
+
+runs:
+  using: composite
+  steps:
+    - name: Trust the platform CA alongside the public roots (Harbor in-cluster TLS)
+      shell: bash
+      run: |
+        set -eu
+        CA=/kaniko/ssl/certs/platform-ca.crt
+        BUNDLE=/etc/ssl/certs/ca-certificates.crt
+        # Fresh job-step pod every run (containerMode:kubernetes) — no prior append to
+        # dedupe against; a straight, idempotent-by-construction append is enough.
+        if [ -s "${CA}" ] && [ -f "${BUNDLE}" ]; then
+          cat "${CA}" >> "${BUNDLE}"
+          echo "appended platform-ca.crt to ${BUNDLE} (Harbor in-cluster TLS trust)"
+        else
+          echo "::warning::platform-ca.crt not mounted at ${CA} or no system bundle at ${BUNDLE} — Harbor" \
+               "in-cluster TLS calls below may fail closed with an x509 error. Verify the arc-hook-template" \
+               "ConfigMap 'platform-ca' projection."
+        fi
+
+    - name: Install cosign + syft (pinned + checksum-verified)
+      shell: bash
+      env:
+        COSIGN_VERSION: v3.1.1
+        COSIGN_SHA256: ae1ecd212663f3693ad9edf8b1a183900c9a52d3155ba6e354237f9a0f6463fc
+        SYFT_VERSION: v1.46.0
+        SYFT_SHA256: d654f678b709eb53c393d38519d5ed7d2e57205529404018614cfefa0fb2b5ca
+      run: |
+        set -eu
+        curl -fsSL --retry 3 -o /usr/local/bin/cosign \
+          "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64"
+        echo "${COSIGN_SHA256}  /usr/local/bin/cosign" | sha256sum -c -
+        chmod +x /usr/local/bin/cosign
+
+        syft_ver="${SYFT_VERSION#v}"
+        curl -fsSL --retry 3 -o /tmp/syft.tar.gz \
+          "https://github.com/anchore/syft/releases/download/${SYFT_VERSION}/syft_${syft_ver}_linux_amd64.tar.gz"
+        echo "${SYFT_SHA256}  /tmp/syft.tar.gz" | sha256sum -c -
+        tar -xzf /tmp/syft.tar.gz -C /usr/local/bin syft
+        chmod +x /usr/local/bin/syft
+        rm -f /tmp/syft.tar.gz
+
+        cosign version
+        syft version
+
+    - name: Guard — OIDC ID-token required for keyless signing
+      shell: bash
+      run: |
+        set -eu
+        if [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+          echo "ERROR: no OIDC ID-token in this job. The CALLING job must grant" \
+               "'permissions: id-token: write' (see the reusable workflow's own" \
+               "job-level grant, and the caller-side note in its header) so cosign" \
+               "can mint a Fulcio certificate bound to this workflow's identity." \
+               "Refusing to gate/sign without it." >&2
+          exit 1
+        fi
+
+    # Gate BEFORE signing: a build this rejects never gets a signature recorded in
+    # the public, immutable Rekor transparency log.
+    - name: Gate on Harbor's Trivy scan-on-push (fail on ${{ inputs.fail-on-severity }})
+      shell: bash
+      env:
+        IMAGE_REF: ${{ inputs.image-ref }}
+        HARBOR_PROJECT: ${{ inputs.harbor-project }}
+        HARBOR_REPO: ${{ inputs.harbor-repo }}
+        DOCKER_CONFIG_DIR: ${{ inputs.docker-config-dir }}
+        FAIL_SEVERITY: ${{ inputs.fail-on-severity }}
+        TIMEOUT_SECONDS: ${{ inputs.scan-timeout-seconds }}
+      run: |
+        set -eu
+        case "${IMAGE_REF}" in
+          *@sha256:*) ;;
+          *) echo "ERROR: image-ref '${IMAGE_REF}' has no @sha256:<digest> — pass kaniko's" \
+                   "--image-name-with-digest-file output, not a bare tag." >&2; exit 1 ;;
+        esac
+        DIGEST="${IMAGE_REF##*@}"
+        HOST="$(printf '%s' "${IMAGE_REF}" | cut -d/ -f1)"
+        CFG="${DOCKER_CONFIG_DIR}/config.json"
+        [ -s "${CFG}" ] || {
+          echo "ERROR: no Harbor credential at ${CFG} — cannot read the Trivy scan report." >&2
+          exit 1
+        }
+        AUTH="$(CFG="${CFG}" HOST="${HOST}" node -e '
+          const fs = require("fs");
+          const cfg = JSON.parse(fs.readFileSync(process.env.CFG, "utf8"));
+          const e = cfg.auths && cfg.auths[process.env.HOST];
+          if (!e) { console.error("no auth entry for " + process.env.HOST + " in " + process.env.CFG); process.exit(1); }
+          process.stdout.write(e.auth || Buffer.from(e.username + ":" + e.password).toString("base64"));
+        ')"
+        API="https://${HOST}/api/v2.0/projects/${HARBOR_PROJECT}/repositories/${HARBOR_REPO}/artifacts/${DIGEST}?with_scan_overview=true"
+
+        deadline=$(( $(date +%s) + TIMEOUT_SECONDS ))
+        status=""
+        resp=""
+        while :; do
+          if resp="$(curl -sS -f -H "Authorization: Basic ${AUTH}" "${API}")"; then
+            status="$(printf '%s' "${resp}" | node -e '
+              let d = ""; process.stdin.on("data", c => d += c);
+              process.stdin.on("end", () => {
+                try {
+                  const j = JSON.parse(d);
+                  const ov = j.scan_overview || {};
+                  const k = Object.keys(ov)[0];
+                  process.stdout.write(k ? (ov[k].scan_status || "") : "");
+                } catch (e) { process.stdout.write(""); }
+              });')"
+          else
+            echo "WARNING: Harbor API call to ${API} failed — retrying (check the push-robot" \
+                 "carries scan:read; re-mint via 'make harbor-push-robot' if this never clears)." >&2
+            status=""
+          fi
+          [ "${status}" = "Success" ] && break
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            echo "ERROR: Harbor's Trivy scan for ${IMAGE_REF} did not finish within" \
+                 "${TIMEOUT_SECONDS}s (last status: '${status:-none}')." >&2
+            exit 1
+          fi
+          echo "waiting for Harbor's Trivy scan to finish (status: '${status:-none}')..."
+          sleep 10
+        done
+
+        count="$(printf '%s' "${resp}" | FAIL_SEVERITY="${FAIL_SEVERITY}" node -e '
+          let d = ""; process.stdin.on("data", c => d += c);
+          process.stdin.on("end", () => {
+            try {
+              const j = JSON.parse(d);
+              const ov = j.scan_overview || {};
+              const k = Object.keys(ov)[0];
+              const sum = (k && ov[k].summary && ov[k].summary.summary) || {};
+              process.stdout.write(String(sum[process.env.FAIL_SEVERITY] || 0));
+            } catch (e) { process.stdout.write("0"); }
+          });')"
+        echo "Harbor Trivy scan for ${IMAGE_REF}: ${count} ${FAIL_SEVERITY} finding(s)."
+        if [ "${count}" -gt 0 ]; then
+          echo "ERROR: refusing to complete the build — ${count} ${FAIL_SEVERITY}" \
+               "vulnerability finding(s) in ${IMAGE_REF}. See https://${HOST}/harbor/projects" \
+               " -> ${HARBOR_PROJECT} -> ${HARBOR_REPO} -> ${DIGEST} for the report." >&2
+          exit 1
+        fi
+
+    - name: Cosign keyless-sign the pushed image (public Fulcio + Rekor)
+      shell: bash
+      env:
+        IMAGE_REF: ${{ inputs.image-ref }}
+        DOCKER_CONFIG: ${{ inputs.docker-config-dir }}
+      run: |
+        set -eu
+        echo "==> cosign sign --yes ${IMAGE_REF}"
+        cosign sign --yes "${IMAGE_REF}"
+
+    - name: Generate SBOM with syft (CycloneDX)
+      shell: bash
+      env:
+        IMAGE_REF: ${{ inputs.image-ref }}
+        DOCKER_CONFIG: ${{ inputs.docker-config-dir }}
+      run: |
+        set -eu
+        mkdir -p "${RUNNER_TEMP}/sbom"
+        syft "${IMAGE_REF}" -o "cyclonedx-json=${RUNNER_TEMP}/sbom/sbom.cyclonedx.json"
+
+    - name: Upload SBOM as a workflow artifact
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ inputs.sbom-artifact-name }}
+        path: ${{ runner.temp }}/sbom/sbom.cyclonedx.json
+        retention-days: 90

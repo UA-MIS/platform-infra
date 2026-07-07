@@ -616,6 +616,14 @@ harbor-push-robot: _check-harbor-target ## (P2.3) Create a CI PUSH robot for pro
 	@# build can push to its OWN team's Harbor project and NO other. Harbor requires
 	@# `pull` ALONGSIDE `push` (you can't push without pull), so the access list is
 	@# pull+push on `repository` for project <name> — nothing cluster/system-wide.
+	@# ALSO grants `scan:read` (supply-chain hardening): the reusable CI's Trivy gate
+	@# (supply-chain-verify composite action) polls Harbor's own scan-on-push result
+	@# via GET .../artifacts/<ref>?with_scan_overview=true and fails the build on any
+	@# CRITICAL finding — that read needs the project-scoped "scan" resource "read"
+	@# action (rbac/const.go ScopeProject), which is NOT covered by repository
+	@# pull/push. Still nothing beyond THIS team's own project. ⚠ Re-run this target
+	@# for every ALREADY-onboarded team (re-seal the refreshed harbor-push-sealed.yaml)
+	@# or their CI's Trivy-gate step 403s until re-minted.
 	@# Same in-cluster pattern as harbor-robot: admin pw read via secretKeyRef (never
 	@# argv), token captured from the Job log, built into a docker-registry Secret
 	@# named `harbor-push`, kubesealed (strict) into RUNNER_NS -> STDOUT (clean YAML;
@@ -638,7 +646,7 @@ harbor-push-robot: _check-harbor-target ## (P2.3) Create a CI PUSH robot for pro
 	    '          curl -sS -u "admin:$$HARBOR_ADMIN_PASSWORD"' \
 	    '          -X POST http://harbor-core.harbor.svc:80/api/v2.0/robots' \
 	    "          -H 'Content-Type: application/json'" \
-	    "          -d '{\"name\":\"$(NAME)-ci-push\",\"duration\":-1,\"level\":\"project\",\"description\":\"per-team CI push robot ($(NAME), Kaniko)\",\"permissions\":[{\"kind\":\"project\",\"namespace\":\"$(NAME)\",\"access\":[{\"resource\":\"repository\",\"action\":\"pull\"},{\"resource\":\"repository\",\"action\":\"push\"}]}]}'" \
+	    "          -d '{\"name\":\"$(NAME)-ci-push\",\"duration\":-1,\"level\":\"project\",\"description\":\"per-team CI push robot ($(NAME), Kaniko)\",\"permissions\":[{\"kind\":\"project\",\"namespace\":\"$(NAME)\",\"access\":[{\"resource\":\"repository\",\"action\":\"pull\"},{\"resource\":\"repository\",\"action\":\"push\"},{\"resource\":\"scan\",\"action\":\"read\"}]}]}'" \
 	  | kubectl --context "$$ctx" apply -f - >&2; \
 	  kubectl --context "$$ctx" -n "$$ns" wait --for=condition=complete --timeout=120s job/"$$job" >&2 \
 	    || { echo "ERROR: push-robot Job failed:" >&2; kubectl --context "$$ctx" -n "$$ns" logs job/"$$job" >&2; exit 1; }; \

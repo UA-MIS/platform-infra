@@ -1,0 +1,49 @@
+# Kyverno POLICIES Application (supply-chain hardening). The actual
+# ClusterPolicy objects (verify-image-signature, disallow-latest-tag,
+# require-limits — platform-services/kyverno-policies/). Directory-source app
+# (no Helm), same two-app-split precedent as rook-ceph operator/cluster and
+# vpa/vpa-platform-policies in this repo.
+#
+# ── depends on the Kyverno CRDs (sync-wave 1) ─────────────────────────────────
+# These are ClusterPolicy objects -> the CRD from platform-kyverno (wave 0,
+# kyverno-app.yaml) must exist first.
+#
+# EXCLUDED from the generic platform-services ApplicationSet directory generator
+# (applicationsets/platform-services-appset.yaml) on purpose: that generic glob
+# does not set a sync-wave, so a ClusterPolicy landing through it could race the
+# CRD. Explicit exclude there avoids the double-management the vpa-policies
+# precedent left unaddressed (platform-services/vpa-policies IS still matched by
+# both the generic glob AND its own dedicated app — not fixed here, out of
+# scope for this PR, but not repeated for kyverno).
+#
+# Root-app recurses applicationsets/, so this Application is registered.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-kyverno-policies
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"   # ClusterPolicy objects after the CRDs (platform-kyverno = wave 0)
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/UA-MIS/platform-infra
+    targetRevision: HEAD
+    path: platform-services/kyverno-policies
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kyverno   # ClusterPolicy is cluster-scoped; namespace is a harmless default.
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }
