@@ -1,0 +1,126 @@
+# MinIO Application (Observability follow-up — long-term metrics). Single-instance,
+# standalone-mode S3-compatible object store. Its ONLY job today is to back the
+# Thanos long-term metrics store (platform-services/monitoring/thanos.yaml) with a
+# `dr-backup` bucket — see that file's header + README "Long-term metrics (Thanos)"
+# for the full dependency chain (Thanos sidecar/store-gateway/compactor all read
+# `objstore.yml` pointed at this MinIO; if this Application is ever removed or its
+# `dr-backup` bucket deleted, Thanos block uploads + historical queries fail).
+#
+# SCOPE (anti-gold-plate, same posture as Loki's single-binary choice): ONE
+# standalone MinIO instance (mode: standalone, replicas: 1), NOT the `distributed`
+# erasure-coded mode (16 replicas is the chart default — massive overkill for a
+# homelab and for a single internal consumer). Data durability instead comes from
+# Ceph RBD (replica-3) underneath the single PVC, matching every other stateful
+# platform component (Prometheus/Loki/Grafana/Vault).
+#
+# Deploy method A (D-022/D-028): Helm-source Application, chart repo pinned +
+# allowlisted in the `platform` AppProject sourceRepos (bootstrap/platform-appproject
+# .yaml — INSTALL-OWNED, re-apply via `make bootstrap-reapply`).
+#
+# Chart: minio/minio 5.4.0 (appVersion RELEASE.2024-12-18), pinned. Bump deliberately.
+#
+# Namespace: `minio` (platform-services/minio/ — dedicated, not folded into
+# `monitoring`; see that dir's namespace.yaml for why). platform-services/minio/
+# namespace.yaml is the tracked, declarative owner; this Application ALSO sets
+# CreateNamespace=true (idempotent create-if-missing, same belt-and-suspenders
+# pattern as kube-prometheus-stack/loki/alloy) so a fresh cluster's sync order
+# between the two apps can never deadlock either one.
+#
+# Credentials: root creds + the Thanos-scoped user's secret both come from REAL
+# SealedSecrets generated in this PR (platform-services/minio/sealedsecret-*.yaml) —
+# NOT chart-generated random creds (which ArgoCD would then fight every sync) and NOT
+# placeholders (unlike the Grafana/Alertmanager secrets, no human-supplied external
+# value is needed here, so there is nothing to reseal before go-live).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-minio
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://charts.min.io      # PINNED chart repo (sourceRepos allowlist)
+    chart: minio
+    targetRevision: 5.4.0               # pinned chart version (appVersion RELEASE.2024-12-18); no ^/~/latest
+    helm:
+      releaseName: minio
+      values: |
+        fullnameOverride: minio
+        mode: standalone
+
+        # Root creds from the SealedSecret (platform-services/minio/
+        # sealedsecret-minio-root-credentials.yaml) — keys rootUser / rootPassword,
+        # the chart's mandatory existingSecret keys.
+        existingSecret: minio-root-credentials
+
+        persistence:
+          enabled: true
+          storageClass: ceph-block     # replica-3 Ceph RBD (survives node loss)
+          accessModes: ["ReadWriteOnce"]
+          size: 20Gi                   # room for ~months of Thanos long-term blocks at homelab scale
+
+        resources:
+          requests: { cpu: 50m, memory: 128Mi }
+          limits: { memory: 512Mi }
+
+        # ClusterIP only — internal object storage, no external exposure (smaller
+        # attack surface than the Grafana/Harbor pattern; nothing outside the
+        # cluster needs to reach it).
+        service:
+          type: ClusterIP
+        consoleService:
+          type: ClusterIP
+
+        # The one bucket this instance exists to serve. `policy: none` — access is
+        # governed entirely by the IAM policy below, not an anonymous bucket policy.
+        buckets:
+          - name: dr-backup
+            policy: none
+            purge: false
+            versioning: false
+            objectlocking: false
+
+        # A bucket-scoped IAM policy (least-privilege — NOT the root creds, NOT a
+        # cluster-wide readwrite/consoleAdmin canned policy) so Thanos can only ever
+        # touch the dr-backup bucket.
+        policies:
+          - name: dr-backup-rw
+            statements:
+              - resources:
+                  - 'arn:aws:s3:::dr-backup'
+                  - 'arn:aws:s3:::dr-backup/*'
+                actions:
+                  - "s3:GetObject"
+                  - "s3:PutObject"
+                  - "s3:DeleteObject"
+                  - "s3:ListBucket"
+                  - "s3:GetBucketLocation"
+
+        # The Thanos-scoped user. accessKey is not sensitive (a username), so it is
+        # inlined here; the password/secretKey comes from the SealedSecret
+        # (platform-services/minio/sealedsecret-minio-thanos-user.yaml, key
+        # `password`) — the SAME value is sealed into thanos-objstore-config's
+        # objstore.yml (platform-services/monitoring/thanos.yaml) as secret_key, so
+        # the two secrets must be rotated together.
+        users:
+          - accessKey: thanos
+            existingSecret: minio-thanos-user
+            existingSecretKey: password
+            policy: dr-backup-rw
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: minio
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

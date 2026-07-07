@@ -1,0 +1,22 @@
+# minio PREREQ — the namespace + credential SealedSecrets the MinIO Helm Application
+# (applicationsets/minio-app.yaml) needs. Generated as `platform-svc-minio` by the
+# platform-services-appset directory generator.
+#
+# Both secrets below ship as REAL seals (not placeholders) — unlike the Grafana/
+# Alertmanager secrets elsewhere in this repo, these credentials are pure
+# internal-platform wiring (no human-supplied external URL/token is needed), so they
+# were generated and sealed against the live cluster's controller in this same PR.
+# Rotate them with the same `kubeseal` pattern documented in
+# platform-services/monitoring/README.md if you ever need to.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - sealedsecret-minio-root-credentials.yaml
+  - sealedsecret-minio-thanos-user.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false

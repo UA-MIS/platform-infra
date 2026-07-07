@@ -1,0 +1,22 @@
+# minio namespace (Observability follow-up — long-term metrics). Home for the
+# single-instance MinIO object store (`applicationsets/minio-app.yaml`, deploy
+# method A, same split as vault/vault-unsealer: this dir ships the namespace + the
+# root/service-account SealedSecrets, the chart is its own Application).
+#
+# WHY A DEDICATED NAMESPACE (not folded into `monitoring`): MinIO here is
+# general-purpose in-cluster object storage for disaster-recovery-shaped data, not
+# an observability-only concern. Today its only consumer is Thanos (the `dr-backup`
+# bucket long-term-metrics blocks), but keeping it out of `monitoring` means a
+# future consumer (e.g. the Vault raft-snapshot CronJob, currently a Ceph PVC only —
+# platform-services/vault/raft-snapshot.yaml) can point at the same bucket without
+# implying it is an observability component. Cross-namespace Service DNS
+# (`minio.minio.svc.cluster.local`) works with no NetworkPolicy change — `monitoring`
+# and `minio` both carry no default-deny today (see hardening/netpol-controlplane/,
+# which does not include either namespace).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: minio
+  labels:
+    platform.capstone/component: platform
+    goldilocks.fairwinds.com/enabled: "true"   # Goldilocks recommend-only VPAs (Off mode; no eviction)
