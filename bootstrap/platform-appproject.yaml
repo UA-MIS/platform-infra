@@ -159,6 +159,15 @@ spec:
     # AppProject is bootstrap-managed, not GitOps-reconciled) or platform-opencost
     # will InvalidSpecError "repo not permitted".
     - https://opencost.github.io/opencost-helm-chart        # OpenCost (platform-opencost Application)
+    # SPIFFE/SPIRE workload identity (exploratory baseline): the SPIFFE project's own
+    # "hardened" Helm chart repo, serving BOTH spire-crds (platform-spire-crds @ 0.5.0)
+    # and the spire umbrella chart (platform-spire @ 0.29.0, appVersion 1.14.5 —
+    # server+agent+controller-manager+CSI-driver). ONE named source, chart versions
+    # pinned in the Applications. ⚠ INSTALL-OWNED (same as every add above): reaches
+    # the live `platform` AppProject only via `make bootstrap`/`make bootstrap-reapply`
+    # + VERIFY (the AppProject is bootstrap-managed, not GitOps-reconciled) or
+    # platform-spire-crds / platform-spire will InvalidSpecError "repo not permitted".
+    - https://spiffe.github.io/helm-charts-hardened/        # SPIRE (platform-spire-crds / platform-spire Applications)
 
   # Platform services are cluster-wide; allow any namespace on the in-cluster API.
   destinations:

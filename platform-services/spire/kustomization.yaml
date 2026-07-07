@@ -1,0 +1,26 @@
+# SPIFFE/SPIRE workload-identity baseline (exploratory). This dir ships the
+# namespaces the spire-crds/spire Helm charts install into (Application-owned
+# namespace-creation convention, same as vault/external-secrets/harbor) plus a
+# self-contained demo: a ClusterSPIFFEID CR + a one-shot Job that fetches and
+# prints a real SVID (README.md has the full story + verification steps).
+#
+# The spire-crds/spire Helm charts themselves are SEPARATE Applications
+# (applicationsets/spire-crds-app.yaml, applicationsets/spire-app.yaml, method A) —
+# they do not render through here (same split as vault/harbor/rook-ceph).
+#
+# Ships via the platform-services directory generator (platform-services-appset)
+# -> Application `platform-svc-spire`.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace-system.yaml
+  - namespace-server.yaml
+  - namespace-demo.yaml
+  - demo-clusterspiffeid.yaml
+  - demo-workload.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false

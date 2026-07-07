@@ -1,0 +1,39 @@
+# Demo ClusterSPIFFEID (spire.spiffe.io/v1alpha1) — the "Kubernetes Workload
+# Registrar" model: instead of hand-running `spire-server entry create`, the
+# spire-controller-manager (deployed by the spire chart into spire-server ns,
+# applicationsets/spire-app.yaml) watches ClusterSPIFFEID objects cluster-wide and
+# reconciles them into real SPIRE registration entries automatically whenever a
+# matching pod is scheduled. This is a NORMAL namespaced-selector custom resource
+# (cluster-scoped kind, namespace-scoped selection) — it can be shipped from ANY
+# Application; it does not need to live inside the spire Helm release. Requires the
+# CRD from spire-crds (applicationsets/spire-crds-app.yaml, sync-wave -1) and the
+# controller-manager from spire-app (sync-wave 0) to both be running before it
+# reconciles — both land before this kustomize app in the normal case, and
+# ArgoCD's self-heal converges it either way if not.
+#
+# Selects the demo Job's pod (spire-demo ns, label app.kubernetes.io/name=spire-demo-client,
+# ServiceAccount spire-demo-client) and mints it:
+#   spiffe://capstone.internal/ns/spire-demo/sa/spire-demo-client
+# (the chart's DEFAULT spiffeIDTemplate — ns/<namespace>/sa/<service-account> — is
+# left as-is; no custom spiffeIDTemplate override needed for this baseline.)
+#
+# className MUST match spire-server.controllerManager.className in
+# applicationsets/spire-app.yaml ("capstone") — the controller-manager runs with
+# watchClassless: false (the chart default), so a classless (className-unset)
+# ClusterSPIFFEID is silently ignored, never reconciled.
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: spire-demo-client
+  labels:
+    platform.capstone/component: platform
+spec:
+  className: capstone
+  namespaceSelector:
+    matchExpressions:
+      - key: kubernetes.io/metadata.name
+        operator: In
+        values: [spire-demo]
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: spire-demo-client

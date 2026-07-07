@@ -1,0 +1,33 @@
+# spire-system namespace (SPIFFE/SPIRE workload-identity baseline, exploratory).
+# Holds the NODE-LEVEL DaemonSets: spire-agent (runs on every node, does k8s_psat
+# node attestation + k8s workload attestation) and the spiffe-csi-driver (mounts the
+# agent's Workload API unix socket into consuming pods as an ephemeral CSI volume).
+# This is the upstream "hardened" chart's recommended two-namespace layout
+# (global.spire.recommendations.namespaceLayout: true in applicationsets/spire-app.yaml)
+# — split from spire-server so the privileged, node-wide agent/CSI pods are fenced
+# away from the (non-privileged) control-plane server namespace.
+#
+# pod-security: PRIVILEGED. The CSI driver node plugin needs hostPath (to publish
+# the Workload API socket dir into other pods' mount namespaces) and runs as root;
+# the spire-agent DaemonSet reads the kubelet's local (non-secure or verified) API
+# and a hostPath UDS dir. Same justification/pattern as rook-ceph's namespace
+# (platform-services/rook-ceph/namespace.yaml) — platform-operator-owned, not a
+# tenant-facing namespace, so privileged here is scoped to the node agent, not an
+# escape hatch for tenant workloads.
+#
+# Namespace objects are shipped HERE (not by the chart): global.spire.namespaces.create
+# defaults to false in the upstream chart (Application-owned namespace creation is
+# the established convention in this repo — see vault/, external-secrets/, harbor/).
+# Ships via the platform-services directory generator -> Application `platform-svc-spire`.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: spire-system
+  labels:
+    platform.capstone/component: platform
+    # Recommend-only (Off) — the agent/CSI DaemonSets are node-pinned singletons;
+    # never auto-evicted. Label = sizing visibility only (same convention as vault).
+    goldilocks.fairwinds.com/enabled: "true"
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: privileged
+    pod-security.kubernetes.io/audit: privileged
