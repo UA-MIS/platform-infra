@@ -42,6 +42,7 @@ nav:
       - Operations & handoff: OPERATIONS-AND-HANDOFF.md
       - Phase 4 (Talos bring-up): phase-4-runbook.md
       - Cilium CNI runbook: cilium-cni-runbook.md
+      - Service mesh mTLS (Cilium mutual auth): service-mesh-mtls.md
       - DB tier: db-tier-runbook.md
       - Phase 1 golden path: phase-1-golden-path.md
 
