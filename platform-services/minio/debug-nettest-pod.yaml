@@ -22,7 +22,7 @@ spec:
     runAsNonRoot: false   # netshoot needs root for some tools
   containers:
     - name: nettest
-      image: nicolaka/netshoot:latest
+      image: nicolaka/netshoot:v0.13
       command: ["/bin/bash", "-c"]
       args:
         - |
