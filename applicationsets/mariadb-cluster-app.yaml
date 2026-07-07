@@ -82,7 +82,7 @@ spec:
           # into Crossplane (config/providerconfig-sql.yaml still points at
           # ua-mis-db-1) — see the runbook §4 for the repoint + the netpol
           # follow-up this tradeoff calls for.
-          - name: crossplane_provisioner
+          - name: crossplane-provisioner
             passwordSecretKeyRef:
               name: mariadb-crossplane-provisioner-credentials
               key: password
@@ -117,7 +117,7 @@ spec:
               - CREATE USER
             database: "*"
             table: "*"
-            username: crossplane_provisioner
+            username: crossplane-provisioner
             grantOption: true
             host: "%"
             cleanupPolicy: Skip
