@@ -49,7 +49,7 @@ outbound-only) to in-cluster **Traefik**.
 | Observability | **kube-prometheus-stack + Loki** | Prom v3.12.0 / Loki 3.6.7 | Metrics, logs, Grafana dashboards, alerts |
 | Ingress | **Traefik** | bundled | Host-routing for `*.capstone.uamishub.com` |
 | Public edge | **cloudflared** | — | Cloudflare Tunnel, outbound-only (no inbound ports) |
-| Data tier | **Postgres 17 + MariaDB** on `ua-mis-db-1` | — | **Off-cluster** shared multi-tenant DB host (Tailscale-reachable) |
+| Data tier | **Postgres 17 + MariaDB** on `ua-mis-db-1` | — | **Off-cluster** shared multi-tenant DB host (Tailscale-reachable) — still the system of record; an **in-cluster CNPG (PG17) + mariadb-operator (11.8) tier** is deployed (`db-tier` ns) but not yet cut over → [in-cluster-db-tier-runbook.md](in-cluster-db-tier-runbook.md) |
 
 Architecture diagram + rationale: [`docs/index.md`](../index.md). Deeper component
 runbooks: the [`docs/operator/`](.) directory (linked per-operation below).
@@ -180,5 +180,6 @@ These are **live-verified** weak spots a successor should close:
 | [observability.md](observability.md) | Prometheus/Loki/Grafana + alerts |
 | [resource-governance.md](resource-governance.md) | VPA/Goldilocks + per-tenant quotas |
 | [db-tier-runbook.md](../db-tier-runbook.md) · [db-tier-provisioner-setup.md](db-tier-provisioner-setup.md) | Off-cluster Postgres/MariaDB tier |
+| [in-cluster-db-tier-runbook.md](in-cluster-db-tier-runbook.md) | The in-cluster CNPG/MariaDB tier — Vault wiring + the pg_dump/mysqldump cutover from `ua-mis-db-1` and the bundled per-app subcharts |
 | [vm-path-harbor-provisioner.md](vm-path-harbor-provisioner.md) | KubeVirt VM scaffolder wiring |
 | [gotchas-and-lessons.md](gotchas-and-lessons.md) | Process-layer war stories |

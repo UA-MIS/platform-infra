@@ -1,0 +1,43 @@
+# mariadb-operator CRDs Application (db-setup task (b)). A separate chart from
+# the operator itself (mariadb-operator's own install docs: install the CRDs
+# chart, THEN the operator chart) — sync-wave -1 so the `MariaDB`/`Database`/
+# `User`/`Grant`/`Backup`/`PhysicalBackup` CRDs are registered before the operator
+# controller (wave 0) starts, and well before the MariaDB CR itself (wave 1,
+# mariadb-cluster-app.yaml).
+#
+# Chart: mariadb-operator-crds 26.6.0 — official chart repo
+# (https://mariadb-operator.github.io/mariadb-operator, index confirmed live).
+# Version-matched to the operator chart (mariadb-operator-app.yaml, same version).
+# Pin; bump deliberately.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-mariadb-operator-crds
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"   # CRDs before the operator controller (wave 0)
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://mariadb-operator.github.io/mariadb-operator
+    chart: mariadb-operator-crds
+    targetRevision: 26.6.0
+    helm:
+      releaseName: mariadb-operator-crds
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: mariadb-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false      # mariadb-system ns ships via platform-services/mariadb-system
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

@@ -1,0 +1,39 @@
+# Barman Cloud Plugin for CloudNativePG (db-setup task). Installs the CNPG-i
+# sidecar plugin that CNPG's Barman-Cloud-backed backups now require — as of
+# CNPG v1.26, the in-tree `Cluster.spec.backup.barmanObjectStore` path is
+# DEPRECATED in favor of this plugin (verified against the CNPG docs: "native
+# integration with Barman Cloud for object store backups via
+# `.spec.backup.barmanObjectStore` was supported, it is deprecated since v1.26").
+# Since this is a greenfield DB tier, wire it up the CURRENT way from day one
+# rather than start deprecated.
+#
+# Pinned upstream release manifest, SAME pattern as cert-manager
+# (platform-services/cert-manager/kustomization.yaml — a local kustomization
+# referencing a pinned upstream URL as a remote base; kustomize fetches + renders
+# it at ArgoCD sync time, no vendoring needed). Pin: v0.13.0 (latest at authoring
+# time — bump deliberately, not :latest).
+#
+# Prereq: cert-manager (platform-services/cert-manager) MUST be live — the plugin
+# manifest ships its OWN self-signed Issuer + two Certificates (client/server mTLS
+# between the CNPG operator and the plugin sidecar) via cert-manager.io CRDs.
+# cert-manager has been live in this cluster since P2/T4, well before this PR.
+#
+# Deploys entirely into `cnpg-system` (verified in the manifest: ServiceAccount,
+# RBAC, Secret, Service, Deployment, Certificates, Issuer all target that ns) — the
+# SAME namespace as the CNPG operator (platform-services/cnpg-system/namespace.yaml).
+#
+# sync-wave 0 (applicationsets/cnpg-barman-plugin-app.yaml) — parallel to the CNPG
+# operator app (also wave 0); the two installs are independent of each other. The
+# CNPG Cluster CR + the ObjectStore CR that references this plugin
+# (platform-services/cnpg/cluster/) land at wave 1, AFTER both wave-0 apps —
+# by then the `objectstores.barmancloud.cnpg.io` CRD this manifest installs exists.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - https://github.com/cloudnative-pg/plugin-barman-cloud/releases/download/v0.13.0/manifest.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false

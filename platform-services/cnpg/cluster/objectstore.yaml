@@ -1,0 +1,33 @@
+# Barman Cloud `ObjectStore` — the S3-compatible backup target for `capstone-pg`
+# (db-setup task (a), "scheduled backups to MinIO"). Points at the in-cluster
+# MinIO instance (applicationsets/minio-backups-app.yaml, ns db-tier). Plain HTTP
+# (no TLS): MinIO is ClusterIP-only, never Ingress-exposed, reachable only from
+# inside the cluster network — same "TLS terminates at the edge, internal traffic
+# is same-cluster-trust" posture as Harbor's internal Traefik path. Revisit if a
+# security review wants in-cluster mTLS everywhere.
+#
+# 30-day retention (spec.retentionPolicy, NOT the deprecated
+# Cluster.spec.backup.retentionPolicy — the plugin owns retention now).
+apiVersion: barmancloud.cnpg.io/v1
+kind: ObjectStore
+metadata:
+  name: capstone-pg-backup-store
+  namespace: db-tier
+  labels:
+    platform.capstone/component: platform
+spec:
+  retentionPolicy: "30d"
+  configuration:
+    destinationPath: s3://postgres-backups/
+    endpointURL: http://minio.db-tier.svc.cluster.local:9000
+    s3Credentials:
+      accessKeyId:
+        name: minio-cnpg-backup-credentials   # platform-services/db-tier/externalsecrets.yaml
+        key: ACCESS_KEY_ID
+      secretAccessKey:
+        name: minio-cnpg-backup-credentials
+        key: ACCESS_SECRET_KEY
+    wal:
+      compression: gzip
+    data:
+      compression: gzip

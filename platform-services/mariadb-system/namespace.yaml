@@ -1,0 +1,19 @@
+# mariadb-operator namespace (db-setup task). Hosts the mariadb-operator
+# controller + its CRDs' controller-manager (applicationsets/mariadb-operator-crds-app.yaml
+# wave -1, applicationsets/mariadb-operator-app.yaml wave 0). The MariaDB CR (the
+# actual Galera cluster) lives in the separate `db-tier` namespace
+# (platform-services/db-tier/namespace.yaml), same operator-ns/workload-ns split as
+# cnpg-system / db-tier.
+#
+# No privileged PSA needed: the operator pod is a regular non-root controller.
+#
+# Ships via the platform-services directory generator (platform-services-appset) →
+# Application `platform-svc-mariadb-system`. The two Helm chart sources are
+# SEPARATE Applications and do not render through here.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mariadb-system
+  labels:
+    platform.capstone/component: platform
+    goldilocks.fairwinds.com/enabled: "true"

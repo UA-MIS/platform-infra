@@ -1,0 +1,36 @@
+# In-cluster DB tier namespace (db-setup task). Hosts the workload-facing pieces of
+# the new in-cluster database tier: the CNPG `Cluster` CR (Postgres 17, HA),
+# the `MariaDB` CR (11.8, Galera HA), and the MinIO instance that both back their
+# scheduled backups up to. This is the in-cluster successor to the off-cluster
+# `ua-mis-db-1` box (docs/db-tier-runbook.md) — see
+# docs/operator/in-cluster-db-tier-runbook.md for the full picture and the cutover
+# procedure (NOT executed by this namespace/PR — setup only).
+#
+# Deliberately separate from the operator namespaces (cnpg-system, mariadb-system):
+# this is the "data plane" namespace an operator/security review scopes network
+# policy and RBAC around independently of the two controllers.
+#
+# No privileged PSA needed: CNPG/MariaDB/MinIO all use regular Ceph-RBD-backed
+# PVCs (no hostPath, no raw block devices) — the cluster's default PSA level is
+# sufficient (unlike rook-ceph, which owns the raw disks).
+#
+# Ships via the platform-services directory generator (platform-services-appset) →
+# Application `platform-svc-db-tier`. This flat dir ALSO ships the ExternalSecrets
+# the DB-tier's own Helm/CR Applications consume (externalsecrets.yaml) — same
+# split as Harbor/Vault/ESO (flat dir = ns + secrets; the Helm/CR Application
+# itself is a SEPARATE Application and does not render through here). The three
+# dedicated Applications that target this namespace
+# (applicationsets/cnpg-cluster-app.yaml wave 1, applicationsets/mariadb-cluster-app.yaml
+# wave 1, applicationsets/minio-backups-app.yaml wave 0) all assume this namespace
+# already exists (CreateNamespace=false) — same assumption rook-ceph-operator/
+# -cluster make about the flat `rook-ceph` namespace app.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: db-tier
+  labels:
+    platform.capstone/component: platform
+    # Recommend-only (Off) — these are stateful DB/backup workloads, never Auto
+    # (an eviction would fail over or corrupt an in-flight backup). Sizing
+    # visibility only, same posture as rook-ceph/vault.
+    goldilocks.fairwinds.com/enabled: "true"

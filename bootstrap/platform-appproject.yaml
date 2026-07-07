@@ -109,6 +109,28 @@ spec:
     # GitOps-reconciled) or platform-vpa / platform-goldilocks will InvalidSpecError
     # "repo not permitted".
     - https://charts.fairwinds.com/stable                  # VPA + Goldilocks (platform-vpa / platform-goldilocks Applications)
+    # In-cluster DB tier (db-setup task, docs/operator/in-cluster-db-tier-runbook.md):
+    # the CloudNativePG operator chart repo (platform-cnpg-operator @ cloudnative-pg
+    # 0.29.0) and the mariadb-operator project's repo, which serves THREE charts —
+    # mariadb-operator-crds, mariadb-operator, and mariadb-cluster (all @ 26.6.0,
+    # version-matched) — used by platform-mariadb-operator-crds /
+    # platform-mariadb-operator / platform-mariadb-cluster. TWO named sources, chart
+    # versions pinned in the Applications. ⚠ INSTALL-OWNED (same as every Helm-source
+    # add above): reaches the live `platform` AppProject only via `make bootstrap`/
+    # `make bootstrap-reapply` + VERIFY (the AppProject is bootstrap-managed, not
+    # GitOps-reconciled) or the platform-cnpg-* / platform-mariadb-* Applications will
+    # InvalidSpecError "repo not permitted". (The Barman Cloud plugin
+    # (platform-cnpg-barman-plugin) and the CNPG Cluster CRs are git-sourced from THIS
+    # repo, not a new external source — no additional allowlist entry needed for them.)
+    - https://cloudnative-pg.github.io/charts             # CloudNativePG operator (platform-cnpg-operator Application)
+    - https://mariadb-operator.github.io/mariadb-operator  # mariadb-operator-crds / mariadb-operator / mariadb-cluster (platform-mariadb-* Applications)
+    # MinIO (db-setup task): the official min.io Helm chart repo — the in-cluster
+    # S3-compatible backup target for the CNPG + MariaDB scheduled backups
+    # (platform-minio-backups @ minio 5.4.0). ONE named source, chart version pinned
+    # in the Application. ⚠ INSTALL-OWNED (same as every add above): reaches the live
+    # `platform` AppProject only via `make bootstrap`/`make bootstrap-reapply` +
+    # VERIFY or platform-minio-backups will InvalidSpecError "repo not permitted".
+    - https://charts.min.io                                # MinIO (platform-minio-backups Application)
 
   # Platform services are cluster-wide; allow any namespace on the in-cluster API.
   destinations:
