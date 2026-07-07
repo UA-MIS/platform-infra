@@ -77,7 +77,10 @@ spec:
     # Intra-namespace: the minio-provision Job (minio-provision-job.yaml) calls
     # the MinIO API to create the velero bucket + scoped IAM user at deploy time.
     - from:
-        - podSelector: {}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: minio
+          podSelector: {}
       ports:
         - protocol: TCP
           port: 9000
