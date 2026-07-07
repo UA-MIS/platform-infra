@@ -38,6 +38,8 @@ spec:
         platform.capstone/component: platform
     spec:
       restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: mac-debian-01
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
