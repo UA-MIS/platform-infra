@@ -26,35 +26,16 @@ spec:
       command: ["/bin/bash", "-c"]
       args:
         - |
-          set -x
-          echo "====== NODE INFO ======"
-          echo "Running on: $(hostname) on node $(cat /etc/hostname 2>/dev/null)"
-          ip route show
+          echo "====== ALL NODE IPs FROM KUBERNETES API ======"
+          TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+          CACERT=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+          curl -s --max-time 10 \
+            -H "Authorization: Bearer $TOKEN" \
+            --cacert $CACERT \
+            https://kubernetes.default.svc.cluster.local/api/v1/nodes \
+            | grep -E '"type"|"address"' \
+            | paste - -
           echo ""
-
-          echo "====== NMAP mac-debian-01 Tailscale IP ======"
-          echo "Scanning 100.69.204.106 for open ports ..."
-          nmap -sT -p 22,9000,8472,10250 --open -T4 100.69.204.106 2>&1 || echo "nmap Tailscale IP done"
-          echo ""
-
-          echo "====== NMAP MinIO pod IP ======"
-          echo "Scanning 10.244.3.244 ..."
-          nmap -sT -p 9000 -T4 10.244.3.244 2>&1 || echo "nmap pod IP done"
-          echo ""
-
-          echo "====== ARP / neighbour table ======"
-          ip neigh show
-          echo ""
-
-          echo "====== WHAT IP does mac-debian-01 hostname resolve to? ======"
-          nslookup mac-debian-01 2>&1 || echo "no DNS for mac-debian-01"
-          nslookup mac-debian-01.minio.svc.cluster.local 2>&1 || true
-          echo ""
-
-          echo "====== CILIUM NODE IPs (from kube-dns) ======"
-          nslookup kubernetes.default.svc.cluster.local
-          echo ""
-
           echo "====== DONE ======"
           sleep 3600
       resources:
