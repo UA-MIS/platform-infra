@@ -33,6 +33,7 @@ Six failure modes this platform has actually hit, routed to Alertmanager:
 | Alert | Fires when | Severity | Signal source |
 | --- | --- | --- | --- |
 | `VaultSealedOrDown` | vault StatefulSet 0 ready replicas (sealed/down) 5m | critical | kube-state-metrics |
+| `VaultHADegraded` | vault StatefulSet <3 of 3 ready replicas (Raft HA, one pod down) 10m | warning | kube-state-metrics |
 | `ExternalSecretSyncError` | an ExternalSecret Ready=False 10m | warning | ESO /metrics |
 | `ClusterSecretStoreNotReady` | the ClusterSecretStore Ready=False 10m | critical | ESO /metrics |
 | `SecretStoreNotReady` | a namespaced SecretStore Ready=False 10m | warning | ESO /metrics |

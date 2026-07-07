@@ -12,17 +12,25 @@
 # ⚠⚠⚠  TWO DECISIONS THE HUMAN MUST READ  ⚠⚠⚠  (full writeup: vault/README.md §A, §B)
 # =============================================================================
 #
-# (B) TOPOLOGY — SINGLE-NODE RAFT (ha.replicas: 1) is configured here.
-#   WHY: a homelab student-capstone platform optimizing for "works + low operating
-#   burden" (Finish-functional-before-polish). Single-node Raft still gives the
-#   Raft storage engine (real snapshots/restore, the supported path), persists to a
-#   replica-3 Ceph RBD PVC (survives a NODE loss — the data is on Ceph, not the
-#   node's local disk), and needs only ONE pod unsealed after a restart instead of
-#   three. TRADEOFF: no Vault-process HA — if the single Vault pod is down, secret
-#   SYNC pauses (ESO keeps serving already-materialized k8s Secrets, so running apps
-#   are NOT impacted; only NEW/refreshed secrets wait). To go 3-node HA later: set
-#   ha.replicas: 3, re-init is NOT needed (add raft peers via `vault operator raft
-#   join`), and unseal all three. Flagged for the human in vault/README.md §B.
+# (B) TOPOLOGY — 3-NODE RAFT HA (ha.replicas: 3) is configured here (upgraded from
+#   the prior single-node topology; see git history for the old ha.replicas: 1
+#   rationale). WHY: single-node Raft had NO Vault-process HA — a single pod down
+#   paused secret sync platform-wide until it rescheduled. 3-node Raft gives real
+#   quorum: the cluster tolerates ONE node/pod loss (of 3 control-plane OptiPlex
+#   nodes) with zero interruption to secret sync (an active leader is always
+#   reachable via the `vault-active` Service, ESO/Backstage/Crossplane never see a
+#   gap). Each replica still persists to its OWN replica-3 Ceph RBD PVC (a node
+#   loss is doubly survivable — Raft quorum on the other two AND the PVC
+#   reattaches if the pod reschedules). Hard pod anti-affinity (`server.affinity`
+#   below) pins one Vault pod per node — required so a single node loss can never
+#   take out 2-of-3 (which would lose quorum).
+#   TRADEOFF vs single-node: 3x the pods/PVCs/unseal actions (transit auto-unseal
+#   still means NO manual Shamir typing per pod — see decision A — but the
+#   operator DOES do a one-time `vault operator raft join` per new follower; see
+#   the ROLLOUT runbook, artifacts/design/vault-dr-runbook.md §G). Re-init is NOT
+#   needed for this change — it is a pure scale-up of the existing single-node
+#   Raft cluster (vault-0 keeps its data; vault-1/vault-2 join it empty and
+#   replicate from it). Flagged for the human in vault/README.md §B.
 #
 # (A) UNSEAL STRATEGY — TRANSIT AUTO-UNSEAL (now WIRED, Track-2 DR). Vault boots
 #   SEALED and re-seals on every pod restart (reboot, image bump, node drain, OOM).
@@ -42,6 +50,15 @@
 #     4. you are ready to run the one-time `vault operator unseal -migrate` (Shamir
 #        -> Transit) ceremony immediately after the sync.
 #   FULL keyboard runbook: artifacts/design/vault-dr-runbook.md.
+#
+#   ⚠⚠⚠ SEPARATE ORDERING — the 3-NODE HA rollout (decision B, this PR) is its own
+#   sequenced runbook (artifacts/design/vault-dr-runbook.md §G): sync this change,
+#   then `vault operator raft join` vault-1 and vault-2 (in that order) against
+#   vault-0, verify each auto-unseals via transit (no Shamir typing needed for the
+#   MAIN Vault — only the unsealer stays manual, decision A), then confirm 3/3
+#   voters via `vault operator raft list-peers`. Do this ONLY after decision A is
+#   already live (transit auto-unseal proven working on the single node) — do not
+#   combine the Shamir->Transit migration and the HA scale-up in the same sync.
 # =============================================================================
 apiVersion: argoproj.io/v1alpha1
 kind: Application
@@ -124,18 +141,25 @@ spec:
               secretName: vault-transit-unseal-token
               secretKey: token
 
-          # --- HA Raft, SINGLE node (decision B above). Raft storage engine, one
-          #     replica. setNodeId gives a stable raft node id. The Pod still gets a
-          #     Ceph PVC, so node loss is survivable (re-schedules + reuses the RBD).
+          # --- HA Raft, 3-NODE (decision B above). Raft storage engine, 3
+          #     replicas/voters — tolerates one node/pod loss with zero secret-sync
+          #     interruption. setNodeId gives each pod a stable raft node id
+          #     (vault-0/vault-1/vault-2). Each pod still gets its OWN Ceph PVC
+          #     (dataStorage above is per-replica via the StatefulSet volumeClaim
+          #     template), so a node loss is doubly survivable (Raft quorum on the
+          #     other two AND the PVC reattaches if the pod reschedules).
+          #     NOTE: no `retry_join` stanza — new followers join the cluster via a
+          #     one-time, operator-run `vault operator raft join` (manual, matching
+          #     the existing snapshot/policy runbooks' style: explicit + auditable
+          #     over auto-discovery magic). See the ROLLOUT runbook,
+          #     artifacts/design/vault-dr-runbook.md §G, for the join order.
           ha:
             enabled: true
-            replicas: 1
+            replicas: 3
             raft:
               enabled: true
               setNodeId: true
               # TLS listener (tls on). cluster_address = raft peer port (8201).
-              # To go 3-node HA later, bump ha.replicas to 3 (see README §B) — the
-              # retry_join block becomes relevant then; single-node ignores it.
               config: |
                 ui = true
 
@@ -167,6 +191,52 @@ spec:
                   tls_ca_cert     = "/vault/userconfig/vault-unsealer-ca/ca.crt"
                   tls_skip_verify = "false"
                 }
+
+          # --- ANTI-AFFINITY (decision B): HARD requirement — one Vault server pod
+          #     per node. There are exactly 3 control-plane OptiPlex nodes and 3
+          #     replicas; without this, the scheduler could legally stack 2 (or 3)
+          #     Vault pods on the SAME node, so a single node loss could take out a
+          #     raft QUORUM majority instead of just one voter. This is also the
+          #     chart's own default `server.affinity` — made EXPLICIT here (rather
+          #     than relying on the chart default) so the anti-affinity guarantee is
+          #     visible in git and survives a future chart default change.
+          affinity: |
+            podAntiAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels:
+                      app.kubernetes.io/name: vault
+                      app.kubernetes.io/instance: vault
+                      component: server
+                  topologyKey: kubernetes.io/hostname
+
+          # --- HA/active service topology (decision B). The chart's defaults are
+          #     already what we want (service.enabled + active.enabled +
+          #     standby.enabled default true) — set EXPLICITLY here for auditability:
+          #       * `vault`        (this app's releaseName svc, all 3 pods) — what
+          #                        ESO/Backstage/Crossplane/the operator already
+          #                        target (clustersecretstore.yaml etc., unchanged
+          #                        by this PR). Normal Vault API requests (KV
+          #                        reads/writes, auth logins) are transparently
+          #                        FORWARDED from a standby to the leader, so
+          #                        hitting any of the 3 pods works.
+          #       * `vault-active` — ONLY the current raft leader (label
+          #                        vault-active="true", chart-managed, re-points on
+          #                        failover). Required for the small set of
+          #                        raft-local ops that do NOT forward — this PR
+          #                        repoints the raft-snapshot CronJob's VAULT_ADDR
+          #                        at it (see raft-snapshot.yaml).
+          #       * `vault-standby` — the two non-leader voters (diagnostics only).
+          #       * `vault-internal` (headless, always-on) — raft peer addresses
+          #                        (vault-0/1/2.vault-internal), used by
+          #                        `vault operator raft join` (see the ROLLOUT
+          #                        runbook §G).
+          service:
+            enabled: true
+            active:
+              enabled: true
+            standby:
+              enabled: true
 
         # --- UI enabled, ClusterIP only (D-043 — NO LoadBalancer on Talos). The
         #     human reaches the UI via `kubectl -n vault port-forward svc/vault 8200`.

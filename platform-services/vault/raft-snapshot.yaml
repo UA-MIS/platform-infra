@@ -20,6 +20,14 @@
 # RESTORE: `vault operator raft snapshot restore <file>` against a running, unsealed
 # Vault — see the runbook §E. RETENTION: the job keeps the newest $RETAIN snapshots
 # (default 14 daily) and prunes older ones from the PVC.
+#
+# VAULT_ADDR (3-node HA note): points at the `vault-active` Service, NOT the
+# generic `vault` Service. `vault` round-robins across all 3 pods (leader +
+# standbys); `vault-active` always resolves to the current raft leader (the
+# chart labels it `vault-active: "true"` and re-points the Service on failover).
+# `snapshot save`/`restore` are raft-local operations, not part of Vault's normal
+# request-forwarding path — running them against a standby fails, so target the
+# leader explicitly rather than relying on round-robin luck.
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -83,7 +91,7 @@ spec:
               imagePullPolicy: IfNotPresent
               env:
                 - name: VAULT_ADDR
-                  value: "https://vault.vault.svc:8200"
+                  value: "https://vault-active.vault.svc:8200"
                 - name: VAULT_CACERT
                   value: "/vault/tls/ca.crt"     # CA that signed the server cert (from vault-server-tls)
                 - name: VAULT_ROLE
