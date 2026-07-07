@@ -168,6 +168,14 @@ spec:
     # + VERIFY (the AppProject is bootstrap-managed, not GitOps-reconciled) or
     # platform-spire-crds / platform-spire will InvalidSpecError "repo not permitted".
     - https://spiffe.github.io/helm-charts-hardened/        # SPIRE (platform-spire-crds / platform-spire Applications)
+    # Progressive delivery: the official Argo Helm chart repo, which serves the
+    # argo-rollouts chart (the Rollout CRD + controller, platform-argo-rollouts
+    # Application @ argo-rollouts 2.41.0). ONE named source, chart version pinned in
+    # the Application. ⚠ INSTALL-OWNED (same as every add above): reaches the live
+    # `platform` AppProject only via `make bootstrap`/`make bootstrap-reapply` +
+    # VERIFY (the AppProject is bootstrap-managed, not GitOps-reconciled) or
+    # platform-argo-rollouts will InvalidSpecError "repo not permitted".
+    - https://argoproj.github.io/argo-helm                  # Argo Rollouts (platform-argo-rollouts Application)
 
   # Platform services are cluster-wide; allow any namespace on the in-cluster API.
   destinations:

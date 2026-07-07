@@ -183,6 +183,15 @@ export function createComposeProjectAction(deps: ComposeProjectDeps) {
           z.string({ description: 'category/id of the mobile fragment (projectType mobile).' }).optional(),
         database: z =>
           z.enum(['host-mysql', 'host-postgres', 'bring-your-own', 'none']),
+        progressiveDelivery: z =>
+          z.boolean({
+            description:
+              'Opt-in (single-component "web" projects only — see docs/operator/' +
+              'progressive-delivery.md). When true, the shared contract renders the one ' +
+              'workload as an Argo Rollouts `Rollout` (simple canary) instead of a plain ' +
+              '`Deployment`. Ignored (treated as false) for frontend-backend/mobile layouts, ' +
+              'which always render plain Deployments — see values.single below.',
+          }).optional(),
         appName: z => z.string(),
         team: z => z.string(),
         semester: z => z.string({ description: 'YYYY-(spring|summer|fall).' }),
@@ -248,6 +257,11 @@ export function createComposeProjectAction(deps: ComposeProjectDeps) {
         database: plan.database,
         dbWired: plan.dbWired,
         single: plan.single,
+        // Only meaningful (and only ever rendered) for a single-component web project —
+        // the shared contract's deployments.yaml gates on `values.single AND
+        // values.progressiveDelivery` together, so this being true on a frontend-backend/
+        // mobile plan is harmless (never read).
+        progressiveDelivery: i.progressiveDelivery ?? false,
       };
 
       let fileCount = 0;

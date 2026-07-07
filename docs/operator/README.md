@@ -202,6 +202,7 @@ These are **live-verified** weak spots a successor should close:
 | [argocd-gitops.md](argocd-gitops.md) | GitOps model, bootstrap, the `argocd-cm` SSA-wipe gotcha |
 | [observability.md](observability.md) | Prometheus/Loki/Grafana + alerts |
 | [resource-governance.md](resource-governance.md) | VPA/Goldilocks + per-tenant quotas |
+| [progressive-delivery.md](progressive-delivery.md) | Argo Rollouts controller + opt-in canary scaffolder toggle |
 | [db-tier-runbook.md](../db-tier-runbook.md) · [db-tier-provisioner-setup.md](db-tier-provisioner-setup.md) | Off-cluster Postgres/MariaDB tier |
 | [vm-path-harbor-provisioner.md](vm-path-harbor-provisioner.md) | KubeVirt VM scaffolder wiring |
 | [multi-cluster.md](multi-cluster.md) | Multi-cluster scaffolding (ApplicationSet cluster generator, inert until a 2nd cluster is registered) |

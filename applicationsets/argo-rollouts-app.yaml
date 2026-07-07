@@ -1,0 +1,83 @@
+# Argo Rollouts Application (progressive delivery) — installs the Rollout CRD +
+# controller that lets a workload progressively shift traffic to a new version
+# (canary/blue-green) instead of the all-at-once `kind: Deployment` RollingUpdate.
+# This is PLATFORM PLUMBING ONLY: installing the controller changes nothing for any
+# existing workload (Rollout is an opt-in CRD a workload's manifest must explicitly
+# adopt — plain Deployments are completely unaffected, watched or not). See the live
+# "New Project" wizard's shared contract (platform-services/backstage/templates/
+# _fragments/_contract/.devops/chart/base/deployments.yaml — the "Progressive delivery
+# (canary)" toggle) for the one workload converted as a demo, and
+# docs/operator/progressive-delivery.md for how any OTHER tenant opts in.
+#
+# Deploy method A (D-022/D-028, same pattern as Harbor/ARC/Rook/VPA/Crossplane): the
+# official Argo Helm chart, pinned + its repo added to the `platform` AppProject
+# sourceRepos allowlist (bootstrap/platform-appproject.yaml in this PR). ⚠
+# INSTALL-OWNED — reaches the live AppProject only via `make bootstrap`/`make
+# bootstrap-reapply` + VERIFY (the AppProject is bootstrap-managed, not
+# GitOps-reconciled), or this app will InvalidSpecError "repo not permitted".
+#
+# ── the CRDs ────────────────────────────────────────────────────────────────
+# The chart installs the Rollout/AnalysisTemplate/ClusterAnalysisTemplate/
+# AnalysisRun/Experiment CRDs (installCRDs: true, chart default — left as-is). Sync
+# wave 0 (same wave as platform-vpa/platform-crossplane-core) so the CRDs exist
+# before any Application in a later wave (or a tenant's own sync) tries to create a
+# Rollout object.
+#
+# ── single instance (homelab-sized, same call as VPA/Goldilocks) ─────────────
+# The chart defaults to 2 controller replicas (leader-election HA). One instance is
+# enough for the 3-node cluster and matches the platform's existing single-replica
+# calls for non-data-path controllers (VPA recommender/updater, Goldilocks). The
+# controller is not on any request's hot path — a brief restart just pauses rollout
+# reconciliation, it does not drop traffic (the Rollout's ReplicaSets/Service keep
+# serving whatever weights were last applied).
+#
+# ── dashboard left off ────────────────────────────────────────────────────────
+# `dashboard.enabled` stays at the chart default (false) — same call as Goldilocks:
+# no extra always-on web UI + ingress to secure for a homelab demo. Rollout status is
+# inspectable with `kubectl argo rollouts get rollout <name> -n <ns> --watch` (the
+# kubectl-argo-rollouts plugin) or `kubectl get rollout` directly; wiring the
+# dashboard behind Traefik+OIDC is a documented follow-up, not blocking.
+#
+# Chart: argo-rollouts 2.41.0 (app v1.9.0), pinned. Bump deliberately.
+# Root-app recurses applicationsets/, so this Application is registered.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-argo-rollouts
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"   # CRDs + controller before any tenant/demo Rollout object
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://argoproj.github.io/argo-helm   # PINNED chart repo (sourceRepos allowlist)
+    chart: argo-rollouts
+    targetRevision: 2.41.0                          # pinned chart version (app v1.9.0); no ^/~/latest
+    helm:
+      releaseName: argo-rollouts
+      values: |
+        # Single instance is enough for the 3-node homelab (see header). The
+        # controller is not on the request hot path — a restart only pauses rollout
+        # reconciliation, it never drops traffic.
+        controller:
+          replicas: 1
+        # No dashboard (chart default) — see header "dashboard left off".
+        dashboard:
+          enabled: false
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argo-rollouts
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true    # dedicated `argo-rollouts` namespace
+      - ServerSideApply=true    # the Rollout CRD schema is large — SSA avoids the last-applied-config 256KB annotation limit
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }
