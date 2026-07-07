@@ -1,8 +1,9 @@
 # ============================================================================
 # tenant-build.yaml — the CENTRAL, reusable tenant CI pipeline (P2.3, D-032;
 # ADR-031 §8). `on: workflow_call`. STAGED: prepare -> (scan + checks) ->
-# build-and-push -> bump-dev, as SEPARATE jobs wired with `needs:` (ease +
-# reliability over speed — a failed gate stops everything downstream).
+# build-and-push -> bump-dev / bump-staging, as SEPARATE jobs wired with
+# `needs:` (ease + reliability over speed — a failed gate stops everything
+# downstream).
 #
 # WHY THIS FILE EXISTS (the retro's #1 fix — stop copying).
 #   The whole pipeline was COPIED verbatim into every tenant repo, the scaffolder
@@ -26,6 +27,10 @@
 #   4. build-and-push — per-component Kaniko build+push. `needs: [scan, checks]`,
 #                       so a failed gate never reaches the registry.
 #   5. bump-dev       — the GitOps dev-overlay image bump (push-to-main only).
+#   6. bump-staging   — the GitOps staging-overlay image bump (vX.Y.Z tag push
+#                       only; promotion.yaml: environments.staging.trigger =
+#                       tag:v*). Prod stays the human gate — see promote-to-prod.yaml
+#                       (workflow_dispatch, #209) — untouched by this pipeline.
 #
 # MULTI-COMPONENT (FE+BE in ONE repo) — consumes the multicomp COMPONENT MODEL.
 #   The component model (`.devops/components.yaml`: per-component name / build
@@ -85,9 +90,10 @@ on:
         default: ua-mis-kaniko
 
 # Least-privilege DEFAULT. `contents: read` is all the build/scan/checks jobs need.
-# bump-dev RE-DECLARES `contents: write` for itself. NOTE: a reusable workflow can
-# only DOWNGRADE the caller's grant, so the caller's calling job MUST grant
-# `permissions: contents: write` for bump-dev to keep its write scope.
+# bump-dev and bump-staging RE-DECLARE `contents: write` for themselves. NOTE: a
+# reusable workflow can only DOWNGRADE the caller's grant, so the caller's calling
+# job MUST grant `permissions: contents: write` for bump-dev/bump-staging to keep
+# their write scope.
 permissions:
   contents: read
 
@@ -435,4 +441,85 @@ jobs:
           # "[skip ci]" message (so this push does NOT re-trigger build), and marks
           # the workspace a safe.directory (CI checks out as a different uid).
           COMMIT=1 sh .devops/ci/bump-image.sh dev "${TAG}"
+          git push origin HEAD:main
+
+  # ============================================================================
+  # 6) bump-staging — the GitOps image-bump for staging (promotion.yaml:
+  # environments.staging.trigger = tag:v*, gate:auto — mirrors bump-dev, but on a
+  # vX.Y.Z semver TAG push instead of a push-to-main). A pushed `vX.Y.Z` tag builds
+  # ONE immutable `:X.Y.Z` image (prepare/resolve-image.sh resolves ENV=prod for a
+  # tag push, but only to read the SHARED registry/app/semver tagConvention — see
+  # resolve-image.sh's header note); that same image+tag is what BOTH staging and
+  # prod overlays pin. This job auto-promotes staging to it; prod stays the human
+  # gate (promote-to-prod.yaml, workflow_dispatch, #209) — untouched by this job.
+  #
+  # SECURITY (least privilege — SEPARATE job, same shape as bump-dev):
+  #   - `if:` restricts to a real push of a vX.Y.Z tag. NEVER runs on pull_request
+  #     or a plain branch push, so untrusted PR code / a bare main push can't reach
+  #     the write token or touch staging's overlay.
+  #   - job-scoped `permissions: contents: write` (build/scan/checks keep read).
+  #     Reusable-workflow caveat: the caller's calling job MUST grant
+  #     contents: write (already required for bump-dev) or this downgrades to read.
+  #   - loop guard: bump-image.sh's commit message carries `[skip ci]` so the bump
+  #     commit does NOT re-trigger the caller's build (no infinite loop). A tag push
+  #     never re-triggers itself anyway (the commit doesn't create a new tag), but
+  #     the guard is harmless/consistent with bump-dev.
+  #
+  # BRANCH PROTECTION (Option A, D-030): same as bump-dev — main requires PRs; the
+  # platform allowlists `github-actions[bot]` in main's bypass-pull-request-allowances
+  # so this job's GITHUB_TOKEN can push the overlay-tag commit. If the bypass isn't
+  # configured the push fails LOUD (set -e) — never a silent no-deploy.
+  # ============================================================================
+  bump-staging:
+    needs: [prepare, build-and-push]
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.prepare.outputs.PUSH == 'true' }}
+    runs-on: ${{ inputs.runner }}
+    # FULL node image (NOT -slim): bump-image.sh git-commits the overlay and this
+    # job `git push`es it to main; actions/checkout needs git for a real .git +
+    # persist-credentials. -slim ships neither git nor curl. Same reasoning as
+    # bump-dev.
+    container:
+      image: node:24-trixie
+    permissions:
+      contents: write
+    steps:
+      - name: Install yq (pinned + checksum-verified; bump-image.sh needs it)
+        env:
+          YQ_VERSION: v4.44.3
+          YQ_SHA256: a2c097180dd884a8d50c956ee16a9cec070f30a7947cf4ebf87d5f36213e9ed7
+        run: |
+          set -eu
+          curl -fsSL -o /usr/local/bin/yq \
+            "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+          echo "${YQ_SHA256}  /usr/local/bin/yq" | sha256sum -c -
+          chmod +x /usr/local/bin/yq
+          yq --version
+      - name: Checkout main (writable; full history for a clean commit base)
+        # The tagged commit may not be on main's tip HEAD (a tag can point anywhere),
+        # so this checks out main itself (like bump-dev) — the overlay bump is a
+        # commit to main's GitOps state, not to the tag/release ref.
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Install canonical CI scripts (central @v1 — overrides per-repo copies)
+        # Same central bump-image.sh every tenant runs (the component-aware version that
+        # bumps EVERY overlay images[] entry; single-component = the one entry).
+        uses: UA-MIS/platform-infra/.github/actions/tenant-ci-scripts@v1
+
+      - name: Bump staging overlay newTag -> built (tagged) semver + commit + push
+        env:
+          TAG: ${{ needs.prepare.outputs.TAG }}
+          GIT_AUTHOR_NAME: ua-mis-ci
+          GIT_AUTHOR_EMAIL: ci@capstone.uamishub.com
+          GIT_COMMITTER_NAME: ua-mis-ci
+          GIT_COMMITTER_EMAIL: ci@capstone.uamishub.com
+        run: |
+          set -eu
+          # CONSUME prepare's TAG (the bare semver resolve-image.sh stripped from the
+          # pushed vX.Y.Z tag; no recompute). bump-image.sh (COMMIT=1) rewrites the
+          # staging overlay newTag(s) + git-commits with a "[skip ci]" message.
+          COMMIT=1 sh .devops/ci/bump-image.sh staging "${TAG}"
           git push origin HEAD:main

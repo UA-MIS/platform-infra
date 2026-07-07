@@ -35,9 +35,11 @@ endif
 CLUSTER_NAME ?= capstone
 
 # kube-context the cluster-acting targets use (bootstrap/reapply + harbor-* onboarding).
-# Defaults to the k3d context (k3d-<cluster>, unchanged for local runs). For the real
-# Talos cluster the context is `admin@capstone`, so override on the CLI together with
-# the Talos kubeconfig, e.g.
+# Defaults to the real Talos cluster's context (`admin@capstone`) — k3d is dead, so
+# defaulting to a k3d-* context here was a footgun: bootstrap-reapply would silently
+# try to reach a nonexistent 127.0.0.1 k3d apiserver instead of failing loud. Local
+# k3d runs (if ever needed again) override explicitly on the CLI together with the
+# Talos kubeconfig, e.g.
 #   make bootstrap TARGET=real-talos KUBE_CONTEXT=admin@capstone \
 #     KUBECONFIG=clusters/real-talos/talos-kubeconfig
 #   make harbor-push-robot NAME=backstage KUBE_CONTEXT=admin@capstone \
