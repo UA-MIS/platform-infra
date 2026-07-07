@@ -1,0 +1,131 @@
+# MinIO StatefulSet (dr-backup) — single-node, single-drive "standalone" mode
+# (NOT MinIO's distributed/erasure-coded mode, which needs >=4 drives and would be
+# gold-plating for a homelab DR target). A plain pinned manifest, not a Helm
+# chart: MinIO's community Helm chart repo (charts.min.io) is no longer actively
+# maintained upstream (superseded by the Operator+Tenant CRD model, which is a
+# heavier install than this single-node use case justifies) — hand-rolled
+# manifests match the existing raw-manifest platform-services pattern used by
+# Dex/cloudflared/vault-unsealer.
+#
+# Image: quay.io/minio/minio (NOT docker.io — sidesteps the documented Docker Hub
+# anonymous-pull rate-limit gotcha, same reasoning as the Ceph image pin). Pinned
+# to a confirmed-current stable RELEASE tag; bump deliberately.
+#
+# StatefulSet (not Deployment) gives it a stable network identity
+# (minio-0.minio.minio.svc) even though replicas is fixed at 1 — matches the
+# explicit ask and leaves room to move to distributed mode later without a
+# workload-kind migration.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: minio
+  namespace: minio
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: minio
+spec:
+  serviceName: minio
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: minio
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        platform.capstone/component: platform
+        app.kubernetes.io/name: minio
+    spec:
+      # Belt-and-suspenders alongside the PV's own nodeAffinity (pv-local.yaml) +
+      # the StorageClass's WaitForFirstConsumer binding mode: even if either of
+      # those were ever loosened, this pod still only schedules onto the node that
+      # actually has /var/lib/minio-dr-backup.
+      nodeSelector:
+        kubernetes.io/hostname: mac-debian-01
+      securityContext:
+        # MinIO's official container guidance for Kubernetes: run as uid/gid 1000
+        # ("minio"), fsGroup 1000 so the kubelet chowns the hostPath mount (works
+        # for hostPath the same way it does for a CSI PVC) to a directory the
+        # non-root process can write.
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: minio
+          image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+          imagePullPolicy: IfNotPresent
+          args:
+            - server
+            - /data
+            - --console-address
+            - ":9001"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          envFrom:
+            - secretRef:
+                name: minio-admin   # MINIO_ROOT_USER / MINIO_ROOT_PASSWORD
+          ports:
+            - name: api
+              containerPort: 9000
+            - name: console
+              containerPort: 9001
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          livenessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: api
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: api
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: minio-data
+---
+# ClusterIP only — no ingress. This store holds DR backup data (and, via its
+# admin creds, control of that data), so it is deliberately kept off any public
+# or OIDC-fronted route for now. Reach the console the same way Goldilocks is
+# reached (docs/operator/dr-backup.md):
+#   kubectl -n minio port-forward svc/minio 9001:9001
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: minio
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: minio
+spec:
+  selector:
+    app.kubernetes.io/name: minio
+  ports:
+    - name: api
+      port: 9000
+      targetPort: api
+    - name: console
+      port: 9001
+      targetPort: console

@@ -25,6 +25,7 @@ nav:
       - Talos node onboarding: operator/talos-node-onboarding.md
       - Debian Mac-Mini workers: operator/debian-worker-onboarding.md
       - Vault & DR: operator/vault-and-dr.md
+      - Platform backups (MinIO + Velero): operator/dr-backup.md
       - ArgoCD & GitOps: operator/argocd-gitops.md
       - Tenant on/off switch: operator/tenant-on-off-switch.md
       - Harbor registry: operator/harbor.md

@@ -50,6 +50,7 @@ outbound-only) to in-cluster **Traefik**.
 | Ingress | **Traefik** | bundled | Host-routing for `*.capstone.uamishub.com` |
 | Public edge | **cloudflared** | — | Cloudflare Tunnel, outbound-only (no inbound ports) |
 | Data tier | **Postgres 17 + MariaDB** on `ua-mis-db-1` | — | **Off-cluster** shared multi-tenant DB host (Tailscale-reachable) |
+| Backups | **Velero + MinIO** | Velero 1.18.1 / MinIO `RELEASE.2025-09-07` | Nightly all-namespace + PV backup into node-local (non-Ceph) object storage |
 
 Architecture diagram + rationale: [`docs/index.md`](../index.md). Deeper component
 runbooks: the [`docs/operator/`](.) directory (linked per-operation below).
@@ -139,12 +140,26 @@ install-owned and **not** GitOps-reconciled — after a PR touching `bootstrap/`
 [OPERATIONS §4](../OPERATIONS-AND-HANDOFF.md#4-day-2-operations). "Synced/Healthy" is
 **not** proof it works — assert pods actually reach `Running`.
 
+### 4.7 Platform backups
+
+**Velero** backs up every namespace's objects + PV data (file-system backup, not
+CSI snapshots) nightly into a dedicated **MinIO** instance pinned to a mac-debian
+node's local disk — deliberately **outside** the Rook-Ceph data path, so a
+Ceph-level or cluster-wide failure doesn't take the backups down with it. →
+**[dr-backup.md](dr-backup.md)** (architecture, day-2 checks, and the **tested-restore
+drill an operator must run** to actually prove this works).
+
 ---
 
 ## 5. Known DR gaps & risks (read before you rely on it)
 
 These are **live-verified** weak spots a successor should close:
 
+- **Platform-wide backup exists but is not proven** — Velero + MinIO are deployed
+  (this PR), but the tested-restore drill in [dr-backup.md](dr-backup.md) has **not
+  yet been run by an operator**. Treat DR as unverified until it has. Also: the MinIO
+  store lives on the SAME site as the cluster (not true off-site) — see that doc's
+  residual-risk note.
 - **Vault is single-node** (`vault-0`, Raft) and the **Raft-snapshot CronJob is
   currently failing** (snapshot pods in `Error`). Vault holds every tenant runtime
   secret — losing the node without a good snapshot loses them. Fix the snapshot job and
@@ -175,6 +190,7 @@ These are **live-verified** weak spots a successor should close:
 | [crossplane-onboarding.md](crossplane-onboarding.md) | Zero-touch tenant onboarding internals |
 | [tenant-on-off-switch.md](tenant-on-off-switch.md) | Reversibly pause/restore a tenant |
 | [secrets-eso.md](secrets-eso.md) · [vault-and-dr.md](vault-and-dr.md) | Runtime secrets (ESO) + Vault DR |
+| [dr-backup.md](dr-backup.md) | Platform-wide backups (MinIO on node-local disk + Velero) + tested-restore drill |
 | [harbor.md](harbor.md) | Harbor registry ops (projects, robots, OIDC) |
 | [argocd-gitops.md](argocd-gitops.md) | GitOps model, bootstrap, the `argocd-cm` SSA-wipe gotcha |
 | [observability.md](observability.md) | Prometheus/Loki/Grafana + alerts |

@@ -109,6 +109,17 @@ spec:
     # GitOps-reconciled) or platform-vpa / platform-goldilocks will InvalidSpecError
     # "repo not permitted".
     - https://charts.fairwinds.com/stable                  # VPA + Goldilocks (platform-vpa / platform-goldilocks Applications)
+    # Disaster recovery (dr-backup): the official Velero Helm chart repo —
+    # scheduled backup of all namespaces + PVs into the platform's own node-local
+    # MinIO. ONE named source, chart version pinned in the Application
+    # (velero @ 12.1.0). MinIO itself is NOT a Helm-source Application (plain
+    # pinned manifests, platform-services/minio — see its statefulset.yaml header
+    # for why), so it needs no sourceRepos entry. ⚠ INSTALL-OWNED (same as every
+    # add above): reaches the live `platform` AppProject only via `make
+    # bootstrap`/`make bootstrap-reapply` + VERIFY (the AppProject is
+    # bootstrap-managed, not GitOps-reconciled) or platform-velero will
+    # InvalidSpecError "repo not permitted".
+    - https://vmware-tanzu.github.io/helm-charts            # Velero (platform-velero Application)
 
   # Platform services are cluster-wide; allow any namespace on the in-cluster API.
   destinations:

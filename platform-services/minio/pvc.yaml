@@ -1,0 +1,18 @@
+# PVC for MinIO's data directory — binds ONLY to pv-local.yaml via an explicit
+# `volumeName` (not label/size matching), so a future second local-hostpath PV
+# (e.g. on another mac node) can never be mis-bound here by accident.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minio-data
+  namespace: minio
+  labels:
+    platform.capstone/component: platform
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-hostpath
+  volumeName: minio-dr-local-pv
+  resources:
+    requests:
+      storage: 200Gi
