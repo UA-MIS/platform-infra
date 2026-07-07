@@ -44,7 +44,7 @@ CLUSTER_NAME ?= capstone
 #     KUBECONFIG=clusters/real-talos/talos-kubeconfig > harbor-push-sealed.yaml
 # (Talos is provisioned out-of-band, so the k3d cluster-up/down targets don't apply
 # there — only the cluster-acting targets take this override.)
-KUBE_CONTEXT ?= k3d-$(CLUSTER_NAME)
+KUBE_CONTEXT ?= admin@capstone
 
 # ---- container runtime auto-detection (Docker or rootless Podman) -----------
 # If a real Docker daemon answers, use it. Otherwise (rootless Podman, detected
