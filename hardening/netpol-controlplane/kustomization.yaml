@@ -22,8 +22,21 @@ resources:
   - vault-unsealer-netpol.yaml  # Track-2 DR: default-deny + vault-ns-only ingress for the unsealer ns
   - vault-cnp.yaml              # SEC-B1: Cilium apiserver/cluster egress by entity for vault+unsealer (ipBlock can't — flannel->Cilium gap)
   - crossplane-db-cnp.yaml      # ADR-033: Cilium egress for provider-sql -> off-cluster DB tier (tailnet:3306) + its apiserver/DNS surface
-  - mtls-vault-cnp.yaml            # service-mesh: Cilium mutual-auth (SPIFFE/SPIRE) required for ESO/provider-vault/Backstage -> vault:8200
-  - mtls-harbor-provider-cnp.yaml  # service-mesh: Cilium mutual-auth + L7 HTTP path scoping for provider-harbor -> harbor-core:8080
+  # NOTE: the service-mesh mutual-auth CNPs (mtls-vault-cnp.yaml,
+  # mtls-harbor-provider-cnp.yaml) deliberately do NOT live here. Cilium
+  # v1.17.4 (pinned, see clusters/real-talos/cilium-mtls-values.yaml) fails
+  # CLOSED — drops the flow — when `authentication.mode: required` can't
+  # complete a handshake (fail-open only lands in Cilium 1.19+). This
+  # directory is swept by the manual-sync `platform-netpol-controlplane`
+  # Application (see applicationsets/netpol-controlplane-app.yaml) alongside
+  # routine, SPIRE-independent netpol changes, so a routine
+  # `argocd app sync platform-netpol-controlplane` run before SPIRE is live
+  # would drop ESO/Backstage/provider-vault -> Vault and
+  # provider-harbor -> Harbor traffic. Those two manifests live in
+  # `hardening/service-mesh-mtls/` instead — a directory with NO ArgoCD
+  # Application wired to it (auto or manual) — and are applied only by an
+  # operator running `kubectl apply -k hardening/service-mesh-mtls/` by hand,
+  # after confirming SPIRE is live (docs/cilium-cni-runbook.md Step 5).
 
 labels:
   - pairs:

@@ -187,23 +187,37 @@ itself: mutual auth is opt-in **per CiliumNetworkPolicy rule**
 (`authentication.mode: "required"`) — flows with no such rule keep behaving
 exactly as they do today. The two opt-in policies shipped in this PR:
 
-- `hardening/netpol-controlplane/mtls-vault-cnp.yaml` — requires mTLS for
+- `hardening/service-mesh-mtls/mtls-vault-cnp.yaml` — requires mTLS for
   ESO / provider-vault / Backstage → Vault:8200 (Vault is TLS end-to-end
   already, so this is mutual-auth ONLY, no L7 — see the file header for why).
-- `hardening/netpol-controlplane/mtls-harbor-provider-cnp.yaml` — requires
+- `hardening/service-mesh-mtls/mtls-harbor-provider-cnp.yaml` — requires
   mTLS **and** restricts to the Harbor `/api/v2.0/projects*` +
   `/api/v2.0/robots*` paths for provider-harbor → harbor-core:8080 (this path
   is plaintext HTTP in-cluster, so Cilium's L7 proxy can actually parse it —
   see the file header for a known Cilium gotcha to verify before trusting the
   L7 narrowing).
 
-Both live in `hardening/netpol-controlplane/` and therefore inherit the
-**MANUAL-SYNC** `platform-netpol-controlplane` Application (SEC-011 discipline)
-— merging this PR only lands the manifests; nothing is enforced until the
-deliberate, watched:
+**⚠ These do NOT live in `hardening/netpol-controlplane/` and are NOT synced
+by `platform-netpol-controlplane`.** Cilium v1.17.4 (pinned) **fails CLOSED**
+on `authentication.mode: required` — it DROPS the flow if the mTLS handshake
+can't complete, it does not fall back to unauthenticated (fail-open on an
+incomplete handshake only lands in Cilium 1.19+). `platform-netpol-
+controlplane`'s manual sync is used for routine, SPIRE-independent netpol
+changes; if these policies lived in that directory, a routine sync run before
+SPIRE is live would immediately drop ESO/Backstage/provider-vault → Vault and
+provider-harbor → Harbor traffic. So instead these two manifests live in
+`hardening/service-mesh-mtls/` — a directory with **no ArgoCD Application
+wired to it at all** — and are applied ONLY by a human, in this exact order:
 
 ```fish
-argocd app sync platform-netpol-controlplane
+# 1. SPIRE must already be installed and healthy (the helm upgrade above) with
+#    a registered entry for every participating identity — verify FIRST:
+kubectl -n cilium-spire get pods
+kubectl exec -n cilium-spire spire-server-0 -c spire-server -- \
+  /opt/spire/bin/spire-server entry show -selector cilium:mutual-auth
+
+# 2. Only then apply the required-auth policies (never via ArgoCD sync):
+kubectl apply -k hardening/service-mesh-mtls/
 ```
 
 **Validate:**
@@ -233,7 +247,7 @@ kubectl -n kube-system exec ds/cilium -c cilium-agent -- cilium-dbg status --all
 ESO/Backstage/provider-vault, or Harbor onboarding from provider-harbor) and
 the fix isn't obvious quickly:
 ```fish
-argocd app delete-resource ... # or: kubectl delete -f hardening/netpol-controlplane/mtls-vault-cnp.yaml -f hardening/netpol-controlplane/mtls-harbor-provider-cnp.yaml
+kubectl delete -k hardening/service-mesh-mtls/
 # and/or fully disable the feature cluster-wide:
 helm upgrade cilium cilium/cilium --version 1.17.4 --namespace kube-system \
   --reuse-values --set authentication.enabled=false

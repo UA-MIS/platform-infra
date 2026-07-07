@@ -34,8 +34,23 @@ the cluster is completely unchanged.
 
 | Path | Mutual auth (mTLS) | L7 HTTP scoping | File |
 |---|---|---|---|
-| ESO / provider-vault / Backstage → Vault:8200 | ✅ required | — (Vault is TLS end-to-end already; Cilium's L7 proxy can't see inside it without a separate TLS-interception project) | `hardening/netpol-controlplane/mtls-vault-cnp.yaml` |
-| provider-harbor → harbor-core:8080 | ✅ required | ✅ `/api/v2.0/projects*` + `/api/v2.0/robots*` only (GET/POST/PUT/DELETE) | `hardening/netpol-controlplane/mtls-harbor-provider-cnp.yaml` |
+| ESO / provider-vault / Backstage → Vault:8200 | ✅ required | — (Vault is TLS end-to-end already; Cilium's L7 proxy can't see inside it without a separate TLS-interception project) | `hardening/service-mesh-mtls/mtls-vault-cnp.yaml` |
+| provider-harbor → harbor-core:8080 | ✅ required | ✅ `/api/v2.0/projects*` + `/api/v2.0/robots*` only (GET/POST/PUT/DELETE) | `hardening/service-mesh-mtls/mtls-harbor-provider-cnp.yaml` |
+
+**⚠ Cilium v1.17.4 (pinned) fails CLOSED, not open.** `authentication.mode:
+required` DROPS a flow if the mTLS handshake can't complete (e.g. SPIRE not
+yet live) — it does not fall back to unauthenticated. Fail-open on an
+incomplete handshake only lands in Cilium 1.19+. That is why these two
+manifests deliberately live in `hardening/service-mesh-mtls/`, a directory
+with **no ArgoCD Application wired to it** (auto or manual-sync) — NOT in
+`hardening/netpol-controlplane/`, whose manual-sync `platform-netpol-
+controlplane` Application is used for routine, SPIRE-independent netpol
+changes. Applying either policy before SPIRE is live and has registered
+entries for every participating identity would drop ESO/Backstage/
+provider-vault → Vault or provider-harbor → Harbor traffic. They are applied
+only via a deliberate, human-run `kubectl apply -k hardening/service-mesh-mtls/`
+after SPIRE is confirmed healthy — see `cilium-cni-runbook.md` Step 5 for the
+exact order and verification.
 
 Both are **additive**: they sit alongside the existing L3/L4 allows
 (`vault-netpol.yaml`, `harbor-netpol.yaml`, `vault-cnp.yaml`) and only add a
@@ -92,8 +107,11 @@ interface).
   in scope for this PR).
 - **Not a replacement for Vault's own TLS** or Harbor's OIDC/RBAC — this is a
   network-identity layer underneath those, not a substitute.
-- **Not yet enforced.** See the runbook: manual-sync, watched rollout, same
-  SEC-011 discipline as every other control-plane netpol change in this repo.
+- **Not yet enforced, and deliberately NOT wired to any ArgoCD Application**
+  (unlike the rest of `hardening/`). See the runbook: applied only by a human
+  running `kubectl apply -k hardening/service-mesh-mtls/` after SPIRE is
+  confirmed live — never via the `platform-netpol-controlplane` manual-sync
+  path, since Cilium v1.17.4 fails closed on these rules pre-SPIRE.
 
 ## Follow-ups (not in this PR)
 

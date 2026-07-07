@@ -52,12 +52,22 @@
 # `kubectl -n crossplane-system get pods --show-labels | grep provider-harbor` —
 # and adjust the selectors below if the installed chart/provider versions differ.
 #
-# PREREQUISITE: the `authentication.mode: required` rule is INERT until SPIRE is
-# installed (clusters/real-talos/cilium-mtls-values.yaml, docs/cilium-cni-runbook.md
-# Step 5) — fails safe (today's behavior), not closed. ADDITIVE alongside
-# harbor-netpol.yaml + apiserver-cnp.yaml. MANUAL-SYNC via platform-netpol-
-# controlplane (SEC-011 discipline) — merging lands the manifest only; enforcement
-# is the deliberate `argocd app sync` + the verification above.
+# PREREQUISITE — READ BEFORE APPLYING: Cilium v1.17.4 (the pinned version)
+# FAILS CLOSED on this rule, not open. `authentication.mode: required` DROPS
+# the connection if the mTLS handshake can't complete (e.g. SPIRE not yet
+# installed or the peer's identity isn't registered) — it does NOT fall back
+# to "authentication not required." (Fail-open on an incomplete handshake only
+# lands in Cilium 1.19+.) Applying this manifest before SPIRE is live and has
+# registered an entry for provider-harbor would immediately DROP its traffic
+# to harbor-core, breaking all tenant onboarding (Project/RobotAccount
+# provisioning). ADDITIVE alongside harbor-netpol.yaml + apiserver-cnp.yaml,
+# but this file deliberately does NOT live in hardening/netpol-controlplane/
+# (the manual-sync platform-netpol-controlplane path used for routine,
+# SPIRE-independent netpol changes) — see
+# hardening/service-mesh-mtls/kustomization.yaml for the required apply order.
+# Apply only by a human running `kubectl apply -k hardening/service-mesh-mtls/`
+# after confirming SPIRE is up (clusters/real-talos/cilium-mtls-values.yaml,
+# docs/cilium-cni-runbook.md Step 5) — never via ArgoCD auto or manual sync.
 ---
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
