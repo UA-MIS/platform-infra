@@ -50,6 +50,16 @@ spec:
             exclude: true
           - path: platform-services/cdi
             exclude: true
+          # EXCLUDE kyverno-policies/ (supply-chain hardening): its ClusterPolicy
+          # objects need the Kyverno CRDs (platform-kyverno, wave 0) to exist FIRST,
+          # so it is a dedicated, sync-wave-1 Application
+          # (applicationsets/kyverno-policies-app.yaml) — NOT this generic glob,
+          # which sets no sync-wave and would risk the CRD race. Also avoids this
+          # directory being managed by TWO Applications at once (the
+          # platform-services/vpa-policies precedent left that double-management
+          # unaddressed; not repeated here).
+          - path: platform-services/kyverno-policies
+            exclude: true
           # NOTE (P5/M1, D-046): platform-services/backstage IS generated as
           # `platform-svc-backstage` (ns + the REAL sealed secrets: backstage-process-secrets
           # / backstage-postgresql / harbor-pull) — the prereqs the dedicated chart app

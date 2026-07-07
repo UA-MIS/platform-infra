@@ -1,0 +1,11 @@
+# Kyverno ClusterPolicy objects (supply-chain hardening). Directory-source
+# ArgoCD app (applicationsets/kyverno-policies-app.yaml, sync-wave 1 — AFTER the
+# Kyverno CRDs from applicationsets/kyverno-app.yaml, wave 0). Excluded from the
+# generic platform-services ApplicationSet glob (see its exclude list) so this
+# directory is managed by exactly ONE Application, not two.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - verify-image-signature.yaml
+  - disallow-latest-tag.yaml
+  - require-limits.yaml

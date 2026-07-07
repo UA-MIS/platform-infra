@@ -84,7 +84,9 @@ on:
 
 # Least privilege for the workflow token. `contents: read` is all actions/checkout
 # needs. The registry push is authenticated by the Harbor `harbor-push` robot —
-# NOT GITHUB_TOKEN (no packages/registry scope is granted).
+# NOT GITHUB_TOKEN (no packages/registry scope is granted). build-and-push
+# RE-DECLARES `id-token: write` for itself (cosign keyless signing, supply-chain
+# hardening, same as tenant-build.yaml's build-and-push job).
 permissions:
   contents: read
 
@@ -119,11 +121,19 @@ jobs:
     outputs:
       PUSH: ${{ steps.resolve.outputs.PUSH }}
       SHORT_SHA: ${{ steps.resolve.outputs.SHORT_SHA }}
-    # REQUIRED by containerMode:kubernetes (see header). Small node image: node for
-    # actions/checkout + a shell for the resolve step. The Kaniko build runs in its
-    # OWN pod via the `uses: docker://` step, so this image does NOT need Kaniko/git.
+    # REQUIRED by containerMode:kubernetes (see header). FULL node image (NOT
+    # -slim): besides node + a shell for the resolve step, the post-push
+    # supply-chain-verify composite action needs curl + tar + sha256sum + a real
+    # /etc/ssl/certs/ca-certificates.crt bundle (see that action's header) — -slim
+    # ships none of these. The Kaniko build still runs in its OWN pod via the
+    # `uses: docker://` step, so this image does NOT need Kaniko itself.
     container:
-      image: node:24-trixie-slim
+      image: node:24-trixie
+    # cosign keyless signing needs the OIDC ID-token this grants (workflow default
+    # permissions above is contents:read only).
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Checkout (build context = the Backstage monorepo)
         uses: actions/checkout@v4
@@ -203,7 +213,8 @@ jobs:
                     --verbosity=info";
             if [ "${PUSH}" = "true" ]; then
               echo "==> building + pushing ${IMAGE} (layer cache: ${CACHE_REPO})";
-              /kaniko/executor $COMMON --cache=true --cache-repo="${CACHE_REPO}";
+              /kaniko/executor $COMMON --cache=true --cache-repo="${CACHE_REPO}" \
+                --image-name-with-digest-file=${GITHUB_WORKSPACE}/.image-digest;
             else
               echo "==> PR build-only validation for ${IMAGE} (no push, no cache write)";
               /kaniko/executor $COMMON --no-push --tar-path=/tmp/image.tar;
@@ -215,6 +226,38 @@ jobs:
           DOCKER_CONFIG_DIR: ${{ env.DOCKER_CONFIG_DIR }}
           # Kaniko layer-cache repo (see top-level env). Only consumed on push builds.
           CACHE_REPO: ${{ env.CACHE_REPO }}
+
+      # --- post-push supply chain: Trivy gate + cosign sign + syft SBOM ---------
+      # PUSH-only (nothing to verify for a --no-push PR validation build). Shared
+      # composite action with tenant-build.yaml's build-and-push job — a
+      # threshold/version bump ships to both at once via @v1.
+      - name: Capture built image digest
+        if: ${{ steps.resolve.outputs.PUSH == 'true' }}
+        id: digest
+        run: |
+          set -eu
+          DIGEST_FILE="${GITHUB_WORKSPACE}/.image-digest"
+          [ -s "${DIGEST_FILE}" ] || {
+            echo "ERROR: kaniko did not write a digest file at ${DIGEST_FILE} (expected" \
+                 "--image-name-with-digest-file to run on the push path)." >&2
+            exit 1
+          }
+          IMAGE_REF="$(cat "${DIGEST_FILE}")"
+          echo "built image ref: ${IMAGE_REF}"
+          echo "IMAGE_REF=${IMAGE_REF}" >> "$GITHUB_OUTPUT"
+
+      - name: Supply-chain verify (Harbor Trivy gate + cosign sign + syft SBOM)
+        if: ${{ steps.resolve.outputs.PUSH == 'true' }}
+        uses: UA-MIS/platform-infra/.github/actions/supply-chain-verify@v1
+        with:
+          image-ref: ${{ steps.digest.outputs.IMAGE_REF }}
+          # Dedicated `backstage` Harbor project (D-046); repo leaf `backstage-process`
+          # (see IMAGE_REPO, top-level env) — static, unlike the tenant workflow which
+          # derives the project per-team.
+          harbor-project: backstage
+          harbor-repo: backstage-process
+          docker-config-dir: ${{ env.DOCKER_CONFIG_DIR }}
+          sbom-artifact-name: sbom-backstage-process-${{ github.run_id }}-${{ github.run_attempt }}
 
   # ============================================================================
   # bump-portal — the GitOps deploy-bump for The Process portal (mirrors the

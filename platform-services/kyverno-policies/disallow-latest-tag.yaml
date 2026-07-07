@@ -1,0 +1,96 @@
+# disallow-latest-tag — every container image must carry an explicit, non-latest
+# tag (or digest). A floating `:latest` breaks GitOps' whole premise (git is the
+# source of truth for WHAT is running) and defeats the verify-image-signature
+# policy alongside it — cosign verifies a specific digest/tag, so a mutable tag
+# undermines the guarantee that policy is meant to provide.
+#
+# Adapted from the Kyverno community policy of the same name (kyverno/policies,
+# best-practices/disallow-latest-tag) — two rules: (1) require SOME tag segment
+# is present, (2) reject the literal `latest` tag specifically.
+#
+# CRITICAL SAFETY (see verify-image-signature.yaml for the full rationale, shared
+# across all three policies in this dir):
+#   - failurePolicy: Ignore — a down Kyverno webhook fails OPEN, never blocking
+#     scheduling.
+#   - exclude kube-system / argocd / vault / rook-ceph / cert-manager (+ kyverno
+#     itself) — the control plane, GitOps engine, secrets store, storage layer,
+#     cert issuer, and the policy engine's own pods are never gated by policies
+#     that engine itself runs.
+#
+# ⚠ OPERATOR REVIEW: `validationFailureAction: Enforce` BLOCKS a `:latest` (or
+# tagless) image at admission, cluster-wide except the excluded namespaces above.
+# Most platform Helm charts pin explicit versions already, but confirm no
+# in-cluster workload outside the excluded namespaces currently floats on
+# `:latest` before this syncs live — it will be rejected on its next reschedule.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-latest-tag
+  annotations:
+    policies.kyverno.io/title: Disallow Latest Tag
+    policies.kyverno.io/category: Best Practices
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/subject: Pod
+    policies.kyverno.io/description: >-
+      Requires every container image to specify an explicit, non-latest tag.
+spec:
+  validationFailureAction: Enforce
+  failurePolicy: Ignore   # CRITICAL SAFETY — see header. A down webhook fails OPEN.
+  background: true
+  rules:
+    - name: require-image-tag
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - argocd
+                - vault
+                - rook-ceph
+                - cert-manager
+                - kyverno
+      validate:
+        message: "An image tag is required."
+        foreach:
+          - list: "request.object.spec.containers"
+            pattern:
+              image: "*:*"
+          - list: "request.object.spec.initContainers"
+            pattern:
+              image: "*:*"
+          - list: "request.object.spec.ephemeralContainers"
+            pattern:
+              image: "*:*"
+    - name: validate-image-tag
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - argocd
+                - vault
+                - rook-ceph
+                - cert-manager
+                - kyverno
+      validate:
+        message: "Using a mutable image tag e.g. 'latest' is not allowed."
+        foreach:
+          - list: "request.object.spec.containers"
+            pattern:
+              image: "!*:latest"
+          - list: "request.object.spec.initContainers"
+            pattern:
+              image: "!*:latest"
+          - list: "request.object.spec.ephemeralContainers"
+            pattern:
+              image: "!*:latest"
