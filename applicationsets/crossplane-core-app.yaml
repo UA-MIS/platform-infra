@@ -65,6 +65,16 @@ spec:
     server: https://kubernetes.default.svc
     namespace: crossplane-system
   syncPolicy:
+    managedNamespaceMetadata:
+      labels:
+        platform.capstone/component: platform
+        # Resource-reclaim (task follow-up): crossplane-system runs the control
+        # plane + rbac-manager + every installed provider/function pod (9
+        # Deployments live) but was entirely invisible to Goldilocks —
+        # CreateNamespace=true ships no labels. Recommend-only (Off mode); no
+        # Auto policy here (provider Deployment names carry a content-hash
+        # suffix that churns on package bumps, unsafe as a stable Auto target).
+        goldilocks.fairwinds.com/enabled: "true"
     automated:
       prune: true
       selfHeal: true

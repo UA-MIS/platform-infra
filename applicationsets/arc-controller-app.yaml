@@ -39,6 +39,13 @@ spec:
         # The controller watches AutoscalingRunnerSets cluster-wide (multi-tenant
         # later); flags/SA come from the chart defaults. Pin the runner image +
         # resources at the SCALE-SET level (arc-runner-scaleset-app.yaml), not here.
+        # Resource-reclaim (VPA-driven, task follow-up): chart ships no requests at
+        # all. Actual usage (`kubectl top`) is ~1m cpu / ~60Mi mem — the 15m/100Mi
+        # VPA target is the recommender's short-history floor, so this uses actual
+        # + ~15% headroom instead.
+        resources:
+          requests: { cpu: 20m, memory: 80Mi }
+          limits: { cpu: 200m, memory: 160Mi }
   destination:
     server: https://kubernetes.default.svc
     namespace: arc-system

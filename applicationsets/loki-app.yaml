@@ -71,9 +71,13 @@ spec:
             storageClass: ceph-block        # replica-3 Ceph RBD (survives node loss)
             accessModes: ["ReadWriteOnce"]
             size: 10Gi
+          # Resource-reclaim (VPA-driven, task follow-up): live VPA target for the
+          # `loki` container is cpu 63m / mem ~309Mi (+15% headroom below). Memory
+          # was UNDER-provisioned (actual usage already at the old 256Mi request);
+          # cpu comes down (real, non-floor signal).
           resources:
-            requests: { cpu: 100m, memory: 256Mi }
-            limits: { memory: 512Mi }
+            requests: { cpu: 80m, memory: 368Mi }
+            limits: { memory: 576Mi }
 
         # ── Zero out every distributed target + the optional sidecars/caches/store ──
         # so the chart renders ONLY the single-binary StatefulSet (no surprise pods).

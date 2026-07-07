@@ -69,10 +69,29 @@ spec:
         controller:
           rbac:
             create: true
+          # Resource-reclaim (VPA-driven, task follow-up): chart default is a flat
+          # 25m/256Mi for BOTH the controller and the dashboard regardless of real
+          # footprint. Live VPA target + ~15% headroom over observed usage
+          # (`kubectl top` in goldilocks ns: controller ~38Mi, dashboard 9-63Mi) —
+          # the chart default was ~4-5x oversized on memory for this workload.
+          resources:
+            requests: { cpu: 30m, memory: 64Mi }
+            limits: { memory: 128Mi }
+        dashboard:
+          resources:
+            requests: { cpu: 20m, memory: 160Mi }
+            limits: { memory: 320Mi }
   destination:
     server: https://kubernetes.default.svc
     namespace: goldilocks
   syncPolicy:
+    managedNamespaceMetadata:
+      labels:
+        platform.capstone/component: platform
+        # Resource-reclaim (task follow-up): let Goldilocks watch its own
+        # namespace too (CreateNamespace=true ships no labels by default) — the
+        # governance layer right-sizes its own controller + dashboard.
+        goldilocks.fairwinds.com/enabled: "true"
     automated:
       prune: true
       selfHeal: true

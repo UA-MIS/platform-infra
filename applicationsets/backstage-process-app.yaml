@@ -77,13 +77,15 @@ spec:
             # NAME=backstage ENV=...` — same robot pattern as team workloads, see README).
             pullSecrets:
               - harbor-pull
-          # Modest requests for the 3-OptiPlex converged cluster (resource-governance
-          # backlog: small requests). Limits give headroom for the Node backend +
-          # plugin migrations without starving the box.
+          # Resource-reclaim (VPA-driven, task follow-up): live VPA target is cpu
+          # 49m / mem ~488Mi (+15% headroom below) — memory was UNDER-provisioned
+          # (actual usage `kubectl top` ~333Mi, already 30% over the old 256Mi
+          # request). cpu comes down (real signal, actual usage ~23m). Limit
+          # unchanged — still comfortable headroom above the new request.
           resources:
             requests:
-              cpu: 100m
-              memory: 256Mi
+              cpu: 64m
+              memory: 576Mi
             limits:
               cpu: "1"
               memory: 1Gi
@@ -331,13 +333,17 @@ spec:
               enabled: true
               storageClass: ceph-block
               size: 8Gi
+            # Resource-reclaim (VPA-driven, task follow-up): live VPA target for
+            # backstage-postgresql is cpu 35m / mem ~194Mi (+15% headroom below) —
+            # actual usage (`kubectl top`) ~156Mi, comfortably inside the new
+            # request. cpu + limits come down (real signal; actual usage ~23m).
             resources:
               requests:
-                cpu: 100m
-                memory: 256Mi
+                cpu: 48m
+                memory: 224Mi
               limits:
-                cpu: "1"
-                memory: 1Gi
+                cpu: 500m
+                memory: 512Mi
   destination:
     server: https://kubernetes.default.svc
     namespace: backstage

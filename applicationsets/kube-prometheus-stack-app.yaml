@@ -88,9 +88,12 @@ spec:
           create: true
 
         prometheusOperator:
+          # Resource-reclaim (VPA-driven, task follow-up): live VPA target is the
+          # recommender's short-history floor (15m/100Mi); actual usage
+          # (`kubectl top`) is ~3m cpu / ~76Mi mem — using actual + ~15% headroom.
           resources:
-            requests: { cpu: 50m, memory: 128Mi }
-            limits: { memory: 256Mi }
+            requests: { cpu: 20m, memory: 96Mi }
+            limits: { memory: 192Mi }
 
         # ── RAM-governance trim (chore/ram-governance) ─────────────────────────
         # Cluster was under RAM pressure (nodes ~77% used, requests 70-76%).
@@ -116,18 +119,18 @@ spec:
             podMonitorSelectorNilUsesHelmValues: false
             probeSelectorNilUsesHelmValues: false
             ruleSelectorNilUsesHelmValues: false
-            # Tighter than the old 512Mi/2Gi: request 400Mi frees scheduling
-            # headroom; limit 1800Mi is STAGED just above current live RSS (~1826Mi
-            # is the pre-trim reading; note this limit auto-applies on merge via
-            # selfHeal BEFORE the 60s-scrape/7d-retention RSS drop takes full effect,
-            # so 1800Mi must sit above today's usage or the pod OOMKills on first
-            # reconcile). Once the operator confirms RSS has settled lower over ~24h,
-            # step this ceiling down further (toward 1500Mi). If Prometheus ever
-            # OOMKills (watch restarts / the KubePodCrashLooping alert), raise it back
-            # toward 2Gi — the limit is the safe knob to loosen.
+            # Resource-reclaim (VPA-driven, task follow-up) — the 400Mi/1800Mi staged
+            # above did NOT land: live RSS is ~1729Mi (`kubectl top`), 96% of the
+            # 1800Mi limit and 4.3x the 400Mi request — an active OOMKill risk, not
+            # over-provisioning. (Goldilocks/VPA itself can't see this StatefulSet:
+            # it's owned by the `Prometheus` CRD, which VPA's controller-fetcher
+            # reports ConfigUnsupported/NoPodsMatched for — a genuine platform gap,
+            # not fixable by a namespace label; `kubectl top` is ground truth here.)
+            # Raise BOTH request (to actual + ~15% headroom) and the limit ceiling
+            # (to give burst room above the new request) rather than trimming.
             resources:
-              requests: { cpu: 200m, memory: 400Mi }
-              limits: { memory: 1800Mi }
+              requests: { cpu: 128m, memory: 2048Mi }
+              limits: { memory: 2560Mi }
             # TSDB on a Ceph RBD PVC (replica-3, survives node loss; same SC as
             # Harbor/Vault). 20Gi holds ~15d of platform-scale metrics comfortably.
             storageSpec:
@@ -150,9 +153,14 @@ spec:
             # (platform-services/monitoring/README.md).
             secrets:
               - alertmanager-webhook
+            # Resource-reclaim (VPA-driven, task follow-up): actual usage (`kubectl
+            # top`) is ~2m cpu / ~40Mi mem — using actual + ~15% headroom. (Same
+            # ConfigUnsupported/NoPodsMatched VPA gap as Prometheus above — this
+            # Alertmanager StatefulSet is Operator-CRD-owned too — so `kubectl top`
+            # is the source of truth, not a VPA target.)
             resources:
-              requests: { cpu: 25m, memory: 64Mi }
-              limits: { memory: 128Mi }
+              requests: { cpu: 20m, memory: 48Mi }
+              limits: { memory: 96Mi }
             storage:
               volumeClaimTemplate:
                 spec:
@@ -215,9 +223,20 @@ spec:
             storageClassName: ceph-block
             accessModes: ["ReadWriteOnce"]
             size: 5Gi
+          # Resource-reclaim (VPA-driven, task follow-up): live VPA target for the
+          # `grafana` container is cpu 11m / mem ~259Mi (+15% headroom below) —
+          # memory was UNDER-provisioned (old 128Mi request vs. actual pod usage
+          # already at ~380Mi total across grafana + both sidecars).
           resources:
-            requests: { cpu: 100m, memory: 128Mi }
-            limits: { memory: 256Mi }
+            requests: { cpu: 20m, memory: 320Mi }
+            limits: { memory: 384Mi }
+          # sidecar.resources is shared by BOTH the dashboard- and datasource-sync
+          # sidecar containers (chart limitation, one knob for both). Sized for the
+          # larger of the two VPA targets (grafana-sc-dashboard ~121Mi) + headroom.
+          sidecar:
+            resources:
+              requests: { cpu: 16m, memory: 144Mi }
+              limits: { memory: 192Mi }
           # Traefik ingress, wildcard TLS via the default TLSStore (no secretName) —
           # identical pattern to harbor/process/argocd/dex.
           ingress:
@@ -237,14 +256,21 @@ spec:
               url: http://loki.monitoring.svc.cluster.local:3100
 
         kube-state-metrics:
+          # Resource-reclaim (VPA-driven, task follow-up): actual usage (`kubectl
+          # top`) is ~1m cpu / ~75Mi mem, already brushing the old 64Mi request —
+          # bumping memory to actual + ~15% headroom; cpu comes down.
           resources:
-            requests: { cpu: 25m, memory: 64Mi }
-            limits: { memory: 128Mi }
+            requests: { cpu: 20m, memory: 96Mi }
+            limits: { memory: 192Mi }
 
         prometheus-node-exporter:
+          # Resource-reclaim (VPA-driven, task follow-up): actual usage across all 6
+          # node pods is ~25-33Mi (`kubectl top`) — the 100Mi VPA target is the
+          # recommender's short-history floor, not real signal; small headroom bump
+          # over observed max, cpu comes down.
           resources:
-            requests: { cpu: 25m, memory: 32Mi }
-            limits: { memory: 64Mi }
+            requests: { cpu: 20m, memory: 40Mi }
+            limits: { memory: 80Mi }
   destination:
     server: https://kubernetes.default.svc
     namespace: monitoring

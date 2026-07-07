@@ -93,12 +93,18 @@ spec:
               port: 5558
             initialDelaySeconds: 10
             periodSeconds: 15
+          # Resource-reclaim (VPA-driven, task follow-up): Goldilocks/VPA target ~15m
+          # cpu / actual usage ~40Mi (`kubectl top`, dex ns); the 100Mi VPA memory
+          # target is the recommender's short-history floor (identical across many
+          # unrelated low-traffic controllers), so this uses observed actual + ~15%
+          # headroom instead of the raw target. Not on a VPA Auto policy — see
+          # platform-services/vpa-policies/ for the curated allowlist.
           resources:
             requests:
-              cpu: 25m
-              memory: 64Mi
+              cpu: 20m
+              memory: 48Mi
             limits:
-              memory: 128Mi
+              memory: 96Mi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
