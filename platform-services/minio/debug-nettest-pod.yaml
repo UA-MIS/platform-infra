@@ -8,7 +8,7 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: nettest-node-reader
+  name: nettest-lan-node-reader
   labels:
     platform.capstone/component: platform
 rules:
@@ -19,13 +19,13 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: nettest-node-reader
+  name: nettest-lan-node-reader
   labels:
     platform.capstone/component: platform
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: nettest-node-reader
+  name: nettest-lan-node-reader
 subjects:
   - kind: ServiceAccount
     name: default
@@ -34,7 +34,7 @@ subjects:
 apiVersion: v1
 kind: Pod
 metadata:
-  name: nettest
+  name: nettest-lan
   namespace: minio
   labels:
     platform.capstone/component: platform
@@ -52,16 +52,8 @@ spec:
       command: ["/bin/bash", "-c"]
       args:
         - |
-          echo "====== ALL NODE IPs FROM KUBERNETES API ======"
-          TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
-          CACERT=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
-          curl -s --max-time 10 \
-            -H "Authorization: Bearer $TOKEN" \
-            --cacert $CACERT \
-            https://kubernetes.default.svc.cluster.local/api/v1/nodes \
-            | grep -E '"type"|"address"' \
-            | paste - -
-          echo ""
+          echo "====== NMAP LAN SUBNET 10.237.171.0/24 ======"
+          nmap -p22 --open -oG - 10.237.171.0/24
           echo "====== DONE ======"
           sleep 3600
       resources:
