@@ -63,3 +63,23 @@ labels:
   - pairs:
       platform.capstone/component: platform
     includeSelectors: false
+
+# UA-MIS UI theme (THEME, matching the ArgoCD pattern in
+# platform-services/argocd-config/kustomization.yaml): the favicon + apple-touch-icon
+# PNGs (generated from the committed .svg sources in grafana-theme/) are packed into a
+# ConfigMap here, in the SAME namespace (monitoring) the separate
+# platform-kube-prometheus-stack Helm Application (applicationsets/kube-prometheus-
+# stack-app.yaml) deploys Grafana into. That Application's `grafana.extraConfigmapMounts`
+# value references this ConfigMap BY NAME to overlay Grafana's default fav32.png /
+# apple-touch-icon.png (see that file for the exact mount paths + the Grafana-source
+# citation for those paths). A STABLE name (disableNameSuffixHash) is required because
+# the Helm values' extraConfigmapMounts reference is a fixed string, same reasoning as
+# argocd-ui-theme-cm.
+configMapGenerator:
+  - name: grafana-ua-mis-theme-cm
+    namespace: monitoring
+    files:
+      - grafana-theme/fav32.png
+      - grafana-theme/apple-touch-icon.png
+generatorOptions:
+  disableNameSuffixHash: true
