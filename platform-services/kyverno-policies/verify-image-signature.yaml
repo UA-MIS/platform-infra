@@ -34,18 +34,24 @@
 #     engine itself enforces — a self-inflicted deadlock during recovery (or a
 #     bricked CI pipeline) would be exactly the outage this platform cannot risk.
 #
-# ⚠ OPERATOR REVIEW (post-review widened exclude list): `failureAction: Enforce`
-# below BLOCKS an unsigned/unverified Harbor image at admission. The exclude
-# list was widened (blocking review finding on the sibling require-limits
-# policy) to also cover arc-system/arc-runners/harbor/traefik/monitoring/
-# backstage/external-secrets so no platform or CI pod can ever be blocked here
-# either — Kaniko builder pods and Harbor's own sub-components in particular
-# must never be gated by this rule. Before this policy syncs live, confirm every
-# currently-running Harbor-sourced workload outside the excluded namespaces
-# (tenant apps) was already built by a supply-chain-verify-enabled pipeline —
-# anything built before this PR merged has no signature and will be rejected on
-# its next reschedule. Add more `exclude.any[].resources.namespaces` entries
+# ⚠ OPERATOR REVIEW (post-review widened exclude list): the exclude list was
+# widened (blocking review finding on the sibling require-limits policy) to
+# also cover arc-system/arc-runners/harbor/traefik/monitoring/backstage/
+# external-secrets so no platform or CI pod can ever be blocked here either —
+# Kaniko builder pods and Harbor's own sub-components in particular must never
+# be gated by this rule. Add more `exclude.any[].resources.namespaces` entries
 # here if a namespace needs a grace period.
+#
+# ⚠ AUDIT-ONLY LANDMINE FIX: the verifyImages rule below carries its OWN
+# `failureAction`, which does NOT inherit the ClusterPolicy's top-level
+# `validationFailureAction`. #250 set the top-level field to Audit believing
+# that covered this rule; it didn't, so `failureAction: Enforce` here still
+# BLOCKED admission of every tenant image (none of which are cosign-signed
+# yet) in every namespace not in the exclude list above — i.e. all tenant
+# namespaces. Set to `failureAction: Audit` (+ `mutateDigest: false`, which
+# Kyverno requires to be false whenever failureAction is Audit) until tenant
+# images adopt cosign signing; flip both back to Enforce/true together once
+# they do.
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
@@ -90,7 +96,10 @@ spec:
       verifyImages:
         - imageReferences:
             - "harbor.capstone.uamishub.com/*"
-          failureAction: Enforce
+          # Audit-only until tenants adopt cosign signing; flip to Enforce
+          # (+ mutateDigest: true) once tenant images are signed.
+          failureAction: Audit
+          mutateDigest: false
           attestors:
             - entries:
                 - keyless:
