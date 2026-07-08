@@ -13,6 +13,8 @@ resources:
   - pvc.yaml
   - sealedsecret-admin.yaml
   - sealedsecret-velero-user.yaml
+  - sealedsecret-thanos-user.yaml
+  - netpol.yaml
   - statefulset.yaml
   - minio-provision-job.yaml
 

@@ -99,15 +99,23 @@ sensitive than almost anything else on the platform. Treat it accordingly:
   Kopia/restic backup-repository password) so the backup **contents** are encrypted
   at rest with something other than Velero's well-known upstream default password.
   See "THE MINIO DISK IS THE CROWN JEWELS" above.
-- **Network access:** restricted to the `velero` namespace only, via
-  `hardening/netpol-controlplane/minio-netpol.yaml` (MANUAL-SYNC — see "THE MINIO
-  DISK IS THE CROWN JEWELS" above and that dir's header for the sync/rollback
-  procedure).
-- **Reused bucket, future observability:** this MinIO instance is intended to also
-  back Thanos long-term metrics storage and Tempo traces later (both currently
-  **not deployed** — anti-gold-plate, per the retro). When they land, add their own
-  buckets + scoped IAM users in `minio-provision-job.yaml` (a commented placeholder
-  is already there) rather than provisioning a second MinIO.
+- **Network access:** Velero (`velero` ns) and Thanos (`monitoring` ns) reach the S3
+  API via `hardening/netpol-controlplane/minio-netpol.yaml` (MANUAL-SYNC — see "THE
+  MINIO DISK IS THE CROWN JEWELS" above and that dir's header for the sync/rollback
+  procedure). The provisioning Job's own intra-namespace path (this Job -> the MinIO
+  server, on both :9000 and :9001) is additionally codified as a CiliumNetworkPolicy
+  in `platform-services/minio/netpol.yaml` (auto-synced, additive-only — see that
+  file's header for why it's split out from the MANUAL-SYNC policy).
+- **Reused bucket, observability:** this MinIO instance also backs Thanos long-term
+  metrics storage (`platform-services/monitoring/thanos.yaml`) — the `dr-backup`
+  bucket + a dedicated, least-privilege `thanos` IAM user (`thanos-rw` policy,
+  scoped to only that bucket) are provisioned by the same `minio-provision-job.yaml`
+  as the `velero` bucket/user, same least-privilege shape. ⚠ the `thanos` user's
+  `SECRET_KEY` (`platform-services/minio/sealedsecret-thanos-user.yaml`) and
+  `thanos-objstore-config`'s `secret_key` (`platform-services/monitoring/
+  thanos.yaml`) are the SAME plaintext value sealed twice — see the former file's
+  header for the full coupling explanation and the required rotate-together
+  operator procedure. Tempo traces are a separate follow-up (not deployed).
 
 ### ⚠ Residual risk: this is not truly *off-site*
 
