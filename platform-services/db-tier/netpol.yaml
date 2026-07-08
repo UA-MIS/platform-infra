@@ -116,21 +116,6 @@ spec:
       ports:
         - protocol: TCP
           port: 5432
-    # ns `db-admin` (tenant-db-access design §5) -> BOTH engine ports — the
-    # platform-admin Adminer reads CNPG (Backstage/Harbor/crossplane_provisioner
-    # roles) AND MariaDB (root/crossplane-provisioner). It does NOT carry
-    # `platform.capstone/team` (it's a platform namespace, not a tenant one) so it is
-    # NOT covered by the allow-ingress-tenant-namespaces rule below and needs this
-    # explicit by-name admit, same pattern as the `backstage` rule above.
-    - from:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: db-admin
-      ports:
-        - protocol: TCP
-          port: 5432
-        - protocol: TCP
-          port: 3306
     # Intra-namespace: CNPG replication, Galera SST/replication, and the backup
     # paths (barman-cloud sidecar + mariadb PhysicalBackup Job) reaching the MinIO
     # pod — all same-namespace today.
@@ -219,34 +204,26 @@ spec:
         - kube-apiserver
         - cluster
 ---
-# --- INGRESS (tenant-db-access, artifacts/research/tenant-db-access.md §6.3): admits
-# every tenant namespace's own DB console + app workloads. ONE-TIME, platform-owned
-# edit (not per-tenant) — the label-EXISTENCE namespaceSelector matches ANY namespace
-# carrying `platform.capstone/team` (every tenant namespace, container or VM, already
-# carries this label per tenants/_template/namespaces/*.yaml and the Composition's
-# rendered namespaces), so new tenants automatically match the moment Crossplane
-# creates their labeled namespace — this rule is written once and never needs a
-# per-team edit (avoids reintroducing the shared-object dual-owner problem the
-# per-team Dex-client option was rejected for, §3.2).
+# --- INGRESS (generalized): any TENANT namespace -> MariaDB (3306) / Postgres
+#     (5432) -- codifies, as a REUSABLE pattern, the hand-applied CiliumNetworkPolicy
+#     `allow-swami-to-mariadb` from the 2026-07-07/08 overnight bring-up (see this
+#     file's header CORRECTION for the incident writeup). That hotfix hardcoded
+#     swami-dev/staging/prod by namespace NAME; it would not have covered the next
+#     onboarded team and would not survive a DR/restore since it was never
+#     committed. This replaces it with a namespace-LABEL match so every current
+#     and future tenant namespace is covered without a per-team edit here.
 #
-# Was the ONLY closed door blocking ANY tenant DB client (container app OR the new
-# Adminer console) from reaching db-tier at all — confirmed already-known/expected by
-# docs/operator/in-cluster-db-tier-runbook.md §3 ("db-tier's ingress allow-list needs
-# a companion edit... deliberately NOT pre-opened since none of those are live DB
-# clients yet"). Tenants ARE live DB clients now (ADR-033 auto-provisioning +
-# this PR's DB console), so this closes that gap. Port-scoped exactly like the
-# operator/backstage rules above (5432 CNPG, 3306 MariaDB) — NOT a blanket namespace
-# admit.
-#
-# Consolidates the hand-applied CiliumNetworkPolicy `allow-swami-to-mariadb` from the
-# 2026-07-07/08 overnight bring-up (see this file's header CORRECTION for the
-# incident writeup — that hotfix hardcoded swami-dev/staging/prod by namespace NAME
-# and was never committed) with this PR's tenant-db-access work: both landed the same
-# `platform.capstone/team` label-EXISTENCE ingress rule independently; this is the one
-# committed, GitOps-permanent version. `platform.capstone/semester` would work equally
-# well as the selector (same universality on every tenant namespace); `team` was kept
-# as the more literally tenant-defining label. `operator: Exists` (not matchLabels
-# equality) needs no enumeration of team names — onboarding a new team requires ZERO
+# Selector choice: `platform.capstone/team` is the marker unique to tenant
+# namespaces -- verified live (`kubectl get ns -o custom-columns=...`) that it is
+# present ONLY on swami-dev/staging/prod and absent from every platform/operator
+# namespace (db-tier, cnpg-system, mariadb-system, argocd, kube-system, ...), and
+# it is stamped on every tenant namespace by both onboarding paths: the manual
+# tenants/_template/namespaces/*.yaml bundle AND the Crossplane CapstoneTenant
+# Composition (platform-services/crossplane/apis/composition.yaml, the Namespace
+# object rendered per env). `platform.capstone/semester` would work equally well
+# (same universality); `team` was picked as the more literally tenant-defining
+# label. Matched with `operator: Exists` (not matchLabels equality) so no
+# enumeration of team names is needed -- onboarding a new team requires ZERO
 # edits here.
 #
 # This is a plain k8s NetworkPolicy, not a CiliumNetworkPolicy: unlike the
@@ -260,7 +237,7 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-ingress-tenant-namespaces
+  name: allow-tenant-db-access
   namespace: db-tier
   labels:
     platform.capstone/component: platform
@@ -276,6 +253,6 @@ spec:
                 operator: Exists
       ports:
         - protocol: TCP
-          port: 5432   # CNPG (postgres tenants + the Adminer console's postgres DSN)
+          port: 3306
         - protocol: TCP
-          port: 3306   # MariaDB (mysql tenants + the Adminer console's mysql DSN)
+          port: 5432

@@ -107,27 +107,6 @@ data:
         redirectURIs:
           # Backstage OIDC callback (baseUrl + /api/auth/oidc/handler/frame).
           - https://process.capstone.uamishub.com/api/auth/oidc/handler/frame
-      # DB console auth (tenant-db-access design, artifacts/research/tenant-db-access.md
-      # §3.2 option D) — ONE shared oauth2-proxy fronts EVERY per-(team,env) Adminer
-      # console + the platform-admin Adminer, so Dex needs only ONE static client with
-      # ONE fixed redirect URI (Dex has no wildcard redirectURIs; a per-team client
-      # would mean editing this ConfigMap at every onboarding — the exact dual-owner
-      # anti-pattern the Composition itself forbids elsewhere). Per-(team,env) gating
-      # happens downstream at the Traefik forwardAuth Middleware
-      # (`?allowed_groups=UA-MIS:<team>`), NOT here — see
-      # platform-services/db-console-auth/README.md for the oauth2-proxy side and
-      # platform-services/crossplane/apis/composition.yaml's ADMINER CONSOLE blocks
-      # for the per-team Middleware.
-      # ⚠ The DB_CONSOLE_CLIENT_SECRET env (deployment.yaml) needs a
-      #   `db-console-client-secret` key added to the dex-github SealedSecret —
-      #   RE-SEAL before go-live (same procedure as PROCESS_CLIENT_SECRET, README).
-      - id: db-console
-        name: DB Console
-        secretEnv: DB_CONSOLE_CLIENT_SECRET
-        redirectURIs:
-          # oauth2-proxy's own OIDC callback (single shared instance, fixed host —
-          # NOT any of the per-team console hosts, which never talk to Dex directly).
-          - https://db-auth.capstone.uamishub.com/oauth2/callback
 
     oauth2:
       # Skip the per-login "approve this app" screen — these are first-party

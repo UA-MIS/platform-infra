@@ -77,17 +77,6 @@ spec:
                   name: dex-github
                   key: process-client-secret
                   optional: true
-            # DB console (tenant-db-access) shared oauth2-proxy static-client secret.
-            # Same optional-until-sealed pattern as PROCESS_CLIENT_SECRET above — the
-            # `db-console-client-secret` key must be ADDED to the dex-github SealedSecret
-            # (re-seal — see README). Until then this key is absent and Dex keeps serving
-            # every other client; flip to required (drop `optional`) once sealed in.
-            - name: DB_CONSOLE_CLIENT_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: dex-github
-                  key: db-console-client-secret
-                  optional: true
           volumeMounts:
             - name: config
               mountPath: /etc/dex

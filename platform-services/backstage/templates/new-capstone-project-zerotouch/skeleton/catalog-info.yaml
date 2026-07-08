@@ -27,19 +27,6 @@ metadata:
     # placeholder fails catalog:register's URL policy check).
     - title: App (dev)
       url: https://${{ values.appName }}.dev.capstone.uamishub.com
-{%- if values.database != 'none' %}
-    # DB console (tenant-db-access design, artifacts/research/tenant-db-access.md §4.2)
-    # — SSO-gated Adminer, one per env, rendered by the CapstoneTenant Composition.
-    # No password ever typed (server-side preset from Vault). Gated on the SAME
-    # `database` choice as the DATABASE_URL ExternalSecret above (only rendered when
-    # an auto-DB engine was chosen).
-    - title: DB Console (dev)
-      url: https://${{ values.team }}-dev-db.capstone.uamishub.com
-    - title: DB Console (staging)
-      url: https://${{ values.team }}-staging-db.capstone.uamishub.com
-    - title: DB Console (prod)
-      url: https://${{ values.team }}-prod-db.capstone.uamishub.com
-{%- endif %}
 spec:
   type: service
   lifecycle: experimental
