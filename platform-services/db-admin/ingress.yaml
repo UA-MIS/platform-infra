@@ -6,7 +6,11 @@ metadata:
   labels:
     platform.capstone/component: platform
   annotations:
-    traefik.ingress.kubernetes.io/router.middlewares: db-admin-db-admin-console-auth@kubernetescrd
+    # Chain order matters: `errors` (outermost) must precede the forwardAuth
+    # middleware (innermost) so it can catch the 401 and rewrite it to a 302 login
+    # redirect. Cross-namespace ref requires providers.kubernetesCRD.
+    # allowCrossNamespace (applicationsets/traefik-app.yaml).
+    traefik.ingress.kubernetes.io/router.middlewares: db-console-auth-oauth2-proxy-errors@kubernetescrd,db-admin-db-admin-console-auth@kubernetescrd
 spec:
   rules:
     - host: db-admin.capstone.uamishub.com

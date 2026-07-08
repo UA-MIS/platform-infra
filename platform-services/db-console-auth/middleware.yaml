@@ -1,0 +1,51 @@
+# Traefik `errors` Middleware — rewrites the forwardAuth check's bare 401 into a 302
+# redirect to oauth2-proxy's sign-in flow, so a browser hitting an unauthenticated
+# console gets bounced through Dex/GitHub automatically instead of seeing a dead
+# "401 Unauthorized" page. ONE shared instance (this namespace), referenced
+# cross-namespace (`db-console-auth-oauth2-proxy-errors@kubernetescrd`) by every
+# per-(team,env) console Ingress (rendered by the CapstoneTenant Composition) AND
+# db-admin's Ingress — mirrors the ONE-shared-oauth2-proxy pattern already used for
+# the forwardAuth Middleware itself. Requires
+# `providers.kubernetesCRD.allowCrossNamespace: true` on the Traefik Application
+# (applicationsets/traefik-app.yaml) — Traefik CRD provider refuses cross-namespace
+# Middleware/Service references without it.
+#
+# Standard oauth2-proxy + Traefik forwardAuth integration
+# (https://oauth2-proxy.github.io/oauth2-proxy/configuration/integrations/traefik/):
+#   - `status: ["401"]` — ONLY 401 (unauthenticated). Deliberately NOT 403: a 403 here
+#     means an AUTHENTICATED user failing the per-route `allowed_groups` check (wrong
+#     team, or not UA-MIS:labmx for db-admin) — redirecting THAT to sign-in would
+#     re-authenticate the same already-known-bad-group session and loop forever.
+#     A real 403 is the correct terminal response for that case.
+#   - `query: "/oauth2/sign_in?rd={url}"` — oauth2-proxy is started with
+#     `--skip-provider-button=true` (deployment.yaml) and exactly one provider (Dex),
+#     so `/oauth2/sign_in` immediately kicks off the OIDC flow (no button click) and
+#     `rd={url}` (Traefik's escaped-original-request-URL variable) carries the
+#     student back to the console they actually asked for once login completes.
+#     `--whitelist-domain=.capstone.uamishub.com` (deployment.yaml) is what allows
+#     `rd` to point at any `*.capstone.uamishub.com` console host, not just
+#     db-auth itself.
+#   - `statusRewrites: {"401": "302"}` — REQUIRED, not cosmetic: without it Traefik
+#     serves the sign-in service's response body under the ORIGINAL 401 status code,
+#     and a 401 is not a browser-followed redirect status — the browser renders the
+#     literal "Found." redirect-page text instead of navigating. Rewriting the
+#     status to 302 makes the browser follow the Location header oauth2-proxy set,
+#     same as any normal redirect.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: oauth2-proxy-errors
+  namespace: db-console-auth
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: oauth2-proxy
+spec:
+  errors:
+    status:
+      - "401"
+    query: "/oauth2/sign_in?rd={url}"
+    service:
+      name: oauth2-proxy
+      port: 4180
+    statusRewrites:
+      "401": "302"

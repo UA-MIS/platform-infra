@@ -1410,6 +1410,14 @@ spec:
             # /srv/adminer-plugins/ at container start, which a read-only root fs would
             # break — PSA `restricted` does not require readOnlyRootFilesystem, only the
             # fields actually set below.
+            # ⚠ RUNTIME FIX (verified against the live crash): /srv/adminer-plugins/ is
+            # baked into the image root:root 0755 — even with a writable root fs, UID
+            # 1000 still can't `cp` into it (CrashLoopBackOff: "Permission denied").
+            # `entrypoint.sh` only ever COPIES INTO this dir (source is the read-only
+            # /srv/plugins-available/, left untouched), so shadowing it with an emptyDir
+            # is safe and loses no baked-in content (confirmed empty upstream). fsGroup
+            # 1000 below makes the kubelet-provisioned emptyDir group-owned+writable by
+            # UID 1000's supplemental group, so the `cp` now succeeds.
             apiVersion: kubernetes.crossplane.io/v1alpha1
             kind: Object
             metadata:
@@ -1481,6 +1489,12 @@ spec:
                                 drop: ["ALL"]
                               seccompProfile:
                                 type: RuntimeDefault
+                            volumeMounts:
+                              - name: adminer-plugins
+                                mountPath: /srv/adminer-plugins
+                        volumes:
+                          - name: adminer-plugins
+                            emptyDir: {}
                         securityContext:
                           fsGroup: 1000
             ---
@@ -1573,7 +1587,13 @@ spec:
                       platform.capstone/team: {{ $team | quote }}
                       platform.capstone/env: {{ $e.name | quote }}
                     annotations:
-                      traefik.ingress.kubernetes.io/router.middlewares: {{ printf "%s-db-console-auth@kubernetescrd" $ns | quote }}
+                      # Chain order matters: Traefik applies middlewares in list order,
+                      # each wrapping the next, so the `errors` middleware (outermost)
+                      # must be listed BEFORE the forwardAuth middleware (innermost) to
+                      # catch the 401 it returns and rewrite it to a 302 login redirect.
+                      # Cross-namespace ref requires providers.kubernetesCRD.
+                      # allowCrossNamespace (applicationsets/traefik-app.yaml).
+                      traefik.ingress.kubernetes.io/router.middlewares: {{ printf "db-console-auth-oauth2-proxy-errors@kubernetescrd,%s-db-console-auth@kubernetescrd" $ns | quote }}
                   spec:
                     rules:
                       - host: {{ printf "%s-%s-db.%s" $team $e.name $domain | quote }}
@@ -1822,6 +1842,11 @@ spec:
                           key: {{ printf "tenants/%s/%s/database" $team $e.name | quote }}
                           property: port
             ---
+            # ⚠ RUNTIME FIX (same as the MySQL block above): /srv/adminer-plugins/ is
+            # baked into the image root:root 0755 — even with a writable root fs, UID
+            # 1000 can't `cp` into it. entrypoint.sh only ever COPIES INTO this dir (the
+            # source, /srv/plugins-available/, is untouched), so an emptyDir here is
+            # safe. fsGroup 1000 below makes it group-writable by UID 1000.
             apiVersion: kubernetes.crossplane.io/v1alpha1
             kind: Object
             metadata:
@@ -1893,6 +1918,12 @@ spec:
                                 drop: ["ALL"]
                               seccompProfile:
                                 type: RuntimeDefault
+                            volumeMounts:
+                              - name: adminer-plugins
+                                mountPath: /srv/adminer-plugins
+                        volumes:
+                          - name: adminer-plugins
+                            emptyDir: {}
                         securityContext:
                           fsGroup: 1000
             ---
@@ -1970,7 +2001,13 @@ spec:
                       platform.capstone/team: {{ $team | quote }}
                       platform.capstone/env: {{ $e.name | quote }}
                     annotations:
-                      traefik.ingress.kubernetes.io/router.middlewares: {{ printf "%s-db-console-auth@kubernetescrd" $ns | quote }}
+                      # Chain order matters: Traefik applies middlewares in list order,
+                      # each wrapping the next, so the `errors` middleware (outermost)
+                      # must be listed BEFORE the forwardAuth middleware (innermost) to
+                      # catch the 401 it returns and rewrite it to a 302 login redirect.
+                      # Cross-namespace ref requires providers.kubernetesCRD.
+                      # allowCrossNamespace (applicationsets/traefik-app.yaml).
+                      traefik.ingress.kubernetes.io/router.middlewares: {{ printf "db-console-auth-oauth2-proxy-errors@kubernetescrd,%s-db-console-auth@kubernetescrd" $ns | quote }}
                   spec:
                     rules:
                       - host: {{ printf "%s-%s-db.%s" $team $e.name $domain | quote }}

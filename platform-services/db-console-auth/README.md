@@ -26,10 +26,13 @@ N tools" model as ArgoCD/Harbor/Backstage. Full design:
    team's Adminer pod, which auto-logs the student into their team's DB (no typed
    password, ESO/Vault-sourced preset — see the Composition's ADMINER CONSOLE
    comments).
-4. If unauthenticated or not in the group, oauth2-proxy returns 401/403. See the
-   "known UX gap" note in `deployment.yaml`'s header — first-ever login needs a
-   manual visit to `/oauth2/start?rd=<console-url>` (or opening any other Dex-SSO'd
-   tool first); this is documented, not silently broken.
+4. If unauthenticated, oauth2-proxy returns 401 — Traefik's shared `errors`
+   Middleware (`middleware.yaml`, `oauth2-proxy-errors`, chained in front of the
+   forwardAuth Middleware on every console Ingress) rewrites that into a 302
+   redirect through `/oauth2/sign_in?rd=<console-url>`, so the browser lands on
+   Dex/GitHub login automatically — no manual visit to `/oauth2/start` needed. If
+   authenticated but not in the required group, oauth2-proxy returns a real 403
+   (deliberately NOT redirected — see `middleware.yaml`'s header comment for why).
 
 ## Operator activation (one-time, human-reviewed, like Dex/ArgoCD/Harbor)
 
