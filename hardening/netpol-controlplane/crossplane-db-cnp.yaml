@@ -1,15 +1,33 @@
-# Cilium egress allow — provider-sql -> off-cluster DB tier (CiliumNetworkPolicy)
-#   — ADR-033 automatic per-tenant database provisioning. Companion to the
-#   crossplane runtime stack (platform-services/crossplane/, PR #146).
+# Cilium egress allow — provider-sql -> DB tier (CiliumNetworkPolicy) — ADR-033
+#   automatic per-tenant database provisioning. Companion to the crossplane runtime
+#   stack (platform-services/crossplane/, PR #146).
+#
+# CUTOVER (docs/operator/in-cluster-db-tier-runbook.md §4c, live incident
+# 2026-07-08): provider-sql's admin ProviderConfig was repointed from the
+# off-cluster `ua-mis-db-1` to the IN-CLUSTER MariaDB
+# (capstone-mariadb-mariadb-cluster-primary.db-tier.svc.cluster.local:3306). The
+# original tailnet-only egress allow below left the repoint DEAD (`observe failed:
+# cannot select user: dial tcp <db-tier ClusterIP>:3306: i/o timeout` — the
+# provider-sql pod had no egress to db-tier's ClusterIP once this CNP selected it,
+# same class of gap as the CORRECTION note in platform-services/db-tier/netpol.yaml:
+# Cilium matches in-cluster destinations by IDENTITY, not CIDR, so a plain toCIDR
+# rule for the service/pod CIDR would not have worked either — `toEntities:
+# [cluster]` is the proven idiom (same one db-tier's own allow-egress-apiserver CNP
+# uses). The `allow-ingress-operators-and-intra-ns` rule in db-tier's netpol.yaml
+# admits crossplane-system -> db-tier:3306 on the ingress side; this is the
+# matching egress-side fix. The tailnet toCIDR rule below is left in place
+# (ua-mis-db-1 stays warm as a fallback per the runbook's decommission timeline —
+# not removed by this change).
 #
 # WHY THIS EXISTS:
-# provider-sql (crossplane-system) is the ONLY crossplane component that talks to the
-# off-cluster DB tier `ua-mis-db-1` (MariaDB 11.8 + PG17). It reaches it on TCP/3306
-# (MySQL) and TCP/5432 (Postgres, ADR-033 parity) at the tailnet address in the
-# `db-tier-mysql-admin` / `db-tier-postgres-admin` ProviderConfig secret (endpoint = a
-# 100.64.0.0/10 Tailscale IP; the Talos nodes are Tailscale-everywhere, Phase-4 build
-# kit). ADR-033's negative-consequences + Phase-0 list both require a crossplane-system
-# egress policy that permits TCP/3306 to the tailnet CIDR once Cilium enforces (SEC-011).
+# provider-sql (crossplane-system) talks to BOTH the in-cluster db-tier (now the
+# live target for new/existing tenant provisioning) and — until decommission —
+# the off-cluster DB tier `ua-mis-db-1` (MariaDB 11.8 + PG17) it originally
+# pointed at, reachable on TCP/3306 (MySQL) and TCP/5432 (Postgres, ADR-033
+# parity) at the tailnet address (100.64.0.0/10; the Talos nodes are
+# Tailscale-everywhere, Phase-4 build kit). ADR-033's negative-consequences +
+# Phase-0 list both require a crossplane-system egress policy that permits
+# TCP/3306 to the tailnet CIDR once Cilium enforces (SEC-011).
 #
 # WHY IT IS SCOPED TO THE provider-sql POD (endpointSelector), NOT namespace-wide:
 # crossplane-system has NO default-deny today (default-allow egress). In Cilium, the
@@ -88,9 +106,25 @@ spec:
               protocol: TCP
     # The off-cluster DB tier (ua-mis-db-1) over the Tailscale overlay — MariaDB 11.8 on
     # TCP/3306 AND PG17 on TCP/5432 (ADR-033 postgres parity; same provider-sql pod, same
-    # box, so both ports are enumerated on this one endpoint's egress allow-list).
+    # box, so both ports are enumerated on this one endpoint's egress allow-list). Kept
+    # warm as the runbook's fallback/decommission path even though the mysql admin
+    # ProviderConfig no longer points here (see the CUTOVER note above).
     - toCIDR:
         - 100.64.0.0/10
+      toPorts:
+        - ports:
+            - port: "3306"
+              protocol: TCP
+            - port: "5432"
+              protocol: TCP
+    # The IN-CLUSTER db-tier (capstone-mariadb-mariadb-cluster-primary /
+    # capstone-pg-rw, ns db-tier) — the CUTOVER target. `toEntities: cluster`
+    # (identity-based, matches ALL in-cluster endpoints) because a CIDR/ipBlock
+    # rule for the db-tier Service ClusterIP does NOT match on Cilium (see the
+    # CUTOVER note above); port-scoped to exactly what provider-sql needs so this
+    # stays as tightly enumerated as the rest of this pod's egress allow-list.
+    - toEntities:
+        - cluster
       toPorts:
         - ports:
             - port: "3306"

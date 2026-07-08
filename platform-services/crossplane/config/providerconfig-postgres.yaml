@@ -1,22 +1,31 @@
 # ProviderConfig for provider-sql — POSTGRES tier (ADR-033). Sibling of
 # providerconfig-sql.yaml (MariaDB/MySQL). provider-sql is ONE provider that speaks
 # mysql + postgresql; this second ProviderConfig lets a CapstoneTenant pick
-# `database: postgres` and be provisioned on the SAME off-cluster DB tier box
-# (ua-mis-db-1) which runs PG17 alongside MariaDB 11.8.
+# `database: postgres` and be provisioned on the in-cluster CNPG cluster
+# (capstone-pg-rw.db-tier.svc.cluster.local, PG17).
 #
 # Connects using a SCOPED admin credential — NOT the Postgres `postgres` superuser.
-# The provisioner role only needs CREATEDB + CREATEROLE (create/drop tenant databases
-# and login roles, and — because CREATEROLE makes it a member of the roles it creates —
-# assign per-tenant database ownership + delegate schema privileges). It is NOT a
-# superuser (no SUPERUSER/REPLICATION/BYPASSRLS). See docs/operator/
-# db-tier-provisioner-setup.md §6 for the exact `CREATE ROLE ... CREATEDB CREATEROLE`
-# and the pg_hba.conf/listen_addresses tailnet binding that mints this login.
+# The provisioner role (`crossplane_provisioner`, the CNPG DatabaseRole in
+# platform-services/cnpg/cluster/roles.yaml) only has CREATEDB + CREATEROLE
+# (create/drop tenant databases and login roles, and — because CREATEROLE makes it
+# a member of the roles it creates — assign per-tenant database ownership +
+# delegate schema privileges). It is NOT a superuser (no SUPERUSER/REPLICATION/
+# BYPASSRLS) — verified live against capstone-pg.
 #
-# The referenced Secret `db-tier-postgres-admin` is materialized from the PLACEHOLDER
+# STATUS: resealed against the in-cluster tier (docs/operator/
+# in-cluster-db-tier-runbook.md §4c) alongside the mysql ProviderConfig's cutover,
+# but there is no live Postgres tenant yet (zero postgresql.sql.crossplane.io
+# Database/Role/Grant claims), so this activates reconciliation for the first
+# time with no existing state to disturb. `platform-services/db-tier/netpol.yaml`
+# does NOT yet admit crossplane-system -> db-tier:5432 — add that ingress rule
+# (same pattern as the mysql:3306 rule) at the point a real Postgres tenant is
+# first provisioned.
+#
+# The referenced Secret `db-tier-postgres-admin` is materialized from the
 # SealedSecret in creds/postgres-admin-creds-sealed.yaml. provider-sql's
 # `PostgreSQLConnectionSecret` source reads four FIXED keys from it —
-# endpoint/port/username/password — exactly what the placeholder SealedSecret carries
-# (see creds/README.md; the SRE audits those keys there).
+# endpoint/port/username/password (see creds/README.md; the SRE audits those keys
+# there).
 #
 # ⚠ NOTE (v0.15.0 schema): as with the mysql ProviderConfig, we do NOT declare
 # `spec.credentials.secretKeyMapping` — on the installed provider-sql v0.15.0 the four
@@ -28,12 +37,12 @@
 # opens its admin session against `defaultDatabase` to run CREATE DATABASE/ROLE; the
 # maintenance DB `postgres` always exists on PG17, so we point there.
 #
-# sslMode: `disable` — PG17 on ua-mis-db-1 is reached over the trusted Tailscale overlay
-# (the SAME transport-security boundary as the MariaDB path; the tailnet IS the boundary,
-# DB-tier runbook §2/§6) and is NOT fronted by TLS. provider-sql's postgres default is
-# `verify-full`, which would FAIL against a non-TLS listener — so we set `disable`
-# explicitly. ⚠ If TLS is later enabled on db1's Postgres, switch to `verify-full` and
-# supply the CA via the provider's runtime config (mirror the MariaDB TLS note).
+# sslMode: `disable` — capstone-pg is reached over the in-cluster Service network
+# (no Tailscale hop anymore; NetworkPolicy is the transport boundary here, same as
+# every other in-cluster db-tier consumer) and is not fronted by TLS. provider-sql's
+# postgres default is `verify-full`, which would FAIL against a non-TLS listener —
+# so we keep `disable` explicitly. ⚠ If TLS is later enabled on capstone-pg, switch
+# to `verify-full` and supply the CA via the provider's runtime config.
 apiVersion: postgresql.sql.crossplane.io/v1alpha1
 kind: ProviderConfig
 metadata:
