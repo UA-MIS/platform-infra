@@ -7,14 +7,19 @@ credentials in the whole onboarding stack and they live **only** in
 `crossplane-system` (never in Backstage, never with humans), per ADR-031 §6.
 `mysql-admin-creds-sealed.yaml` is the ADR-033 addition (the DB-tier provisioner).
 
-> **⚠ SECURITY FLAG (for the one-time SRE review, ADR-031 constraint #4).** The
-> ciphertext committed here is a **PLACEHOLDER** (the same pattern as PR #120's
-> ArgoCD repo-creds). It will NOT decrypt. Before go-live the operator must reseal
-> each with the REAL scoped credential against the live cluster's sealed-secrets
-> controller. **Until then the providers will sit unauthenticated (not reconciling)
-> — which is the safe failure mode.** Agents cannot reach the cluster to seal; this
-> is the operator's keyboard (matches the platform's "agents can't do cluster
-> writes" classifier gate).
+> **⚠ SECURITY FLAG (for the one-time SRE review, ADR-031 constraint #4).**
+> `github-app-creds-sealed.yaml`, `harbor-provisioner-creds-sealed.yaml`, and
+> `vault-provisioner-creds-sealed.yaml` still carry **PLACEHOLDER** ciphertext (the
+> same pattern as PR #120's ArgoCD repo-creds) — they will NOT decrypt, and the
+> providers they configure sit unauthenticated (not reconciling — the safe failure
+> mode) until the operator reseals each with a REAL scoped credential against the
+> live cluster's sealed-secrets controller. `mysql-admin-creds-sealed.yaml` and
+> `postgres-admin-creds-sealed.yaml` **are now resealed with real in-cluster
+> credentials** (docs/operator/in-cluster-db-tier-runbook.md §4c) — see their rows
+> below for the current target. Agents cannot reach the cluster to seal on their
+> own initiative; this is normally the operator's keyboard (matches the platform's
+> "agents can't do cluster writes" classifier gate) — the DB-tier reseal above was
+> done under explicit operator-supplied live-access instructions for this cutover.
 
 ## What each one is (and the least-privilege scope to grant)
 
@@ -23,8 +28,8 @@ credentials in the whole onboarding stack and they live **only** in
 | `github-app-creds-sealed.yaml` | `github-provider-creds` | the EXISTING `ua-mis-backstage` GitHub App (App ID 4097147, install 141394298). JSON: `{"app_auth":[{"id":"4097147","installation_id":"141394298","pem_file":"<PEM \n-escaped>"}],"owner":"UA-MIS"}` |
 | `harbor-provisioner-creds-sealed.yaml` | `harbor-provider-creds` | a Harbor PROVISIONER ROBOT — project + robot + member admin ONLY (derive from harbor-admin; do NOT use harbor-admin itself). JSON: `{"url":"https://harbor-core.harbor.svc","username":"robot$provisioner","password":"<token>"}` |
 | `vault-provisioner-creds-sealed.yaml` | `vault-provider-creds` | a Vault token with a `tenant-provisioner` policy: write `sys/policies/acl/tenant-*` + `auth/kubernetes/role/tenant-*`, plus `auth/token/create` (provider-vault mints a short-lived child token per call — see below). JSON: `{"token":"<token>","address":"https://vault.vault.svc.cluster.local:8200"}` |
-| `mysql-admin-creds-sealed.yaml` (ADR-033) | `db-tier-mysql-admin` | a DB-tier MariaDB PROVISIONER LOGIN — **NOT** `root`. CREATE/DROP DATABASE + CREATE/DROP USER + GRANT OPTION on `<team>_<env>` ONLY. **Four keys** (NOT a JSON blob): `endpoint`=`<ua-mis-db-1 tailnet addr>:`, `port`=`3306`, `username`=`crossplane_provisioner`, `password`=`<token>`. provider-sql reads these via `MySQLConnectionSecret` (config/providerconfig-sql.yaml). |
-| `postgres-admin-creds-sealed.yaml` (ADR-033) | `db-tier-postgres-admin` | a DB-tier **PG17** PROVISIONER ROLE — **NOT** `postgres` superuser. `LOGIN CREATEDB CREATEROLE` ONLY (no `SUPERUSER`/`REPLICATION`/`BYPASSRLS`). **Four keys**: `endpoint`=`<ua-mis-db-1 tailnet addr>`, `port`=`5432`, `username`=`crossplane_provisioner`, `password`=`<token>`. provider-sql reads these via `PostgreSQLConnectionSecret` (config/providerconfig-postgres.yaml). Reseal: `docs/operator/db-tier-provisioner-setup.md` §6. |
+| `mysql-admin-creds-sealed.yaml` (ADR-033) | `db-tier-mysql-admin` | **RESEALED — IN-CLUSTER (docs/operator/in-cluster-db-tier-runbook.md §4c).** A DB-tier MariaDB PROVISIONER LOGIN — **NOT** `root`. The in-cluster `crossplane-provisioner` mariadb-operator User/Grant (`applicationsets/mariadb-cluster-app.yaml`) — same least-privilege grant list as the retired off-box login (excludes SUPER/FILE/PROCESS/RELOAD/SHUTDOWN). **Four keys** (NOT a JSON blob): `endpoint`=`capstone-mariadb-mariadb-cluster-primary.db-tier.svc.cluster.local`, `port`=`3306`, `username`=`crossplane-provisioner`, `password`=`<token, matches secret db-tier/mariadb-crossplane-provisioner-credentials>`. provider-sql reads these via `MySQLConnectionSecret` (config/providerconfig-sql.yaml). |
+| `postgres-admin-creds-sealed.yaml` (ADR-033) | `db-tier-postgres-admin` | **RESEALED — IN-CLUSTER (docs/operator/in-cluster-db-tier-runbook.md §4c).** A DB-tier **PG17** PROVISIONER ROLE — **NOT** `postgres` superuser. The in-cluster `crossplane_provisioner` CNPG DatabaseRole (`platform-services/cnpg/cluster/roles.yaml`) — `LOGIN CREATEDB CREATEROLE` ONLY (no `SUPERUSER`/`REPLICATION`/`BYPASSRLS`). **Four keys**: `endpoint`=`capstone-pg-rw.db-tier.svc.cluster.local`, `port`=`5432`, `username`=`crossplane_provisioner`, `password`=`<token, matches secret db-tier/cnpg-crossplane-provisioner-credentials>`. provider-sql reads these via `PostgreSQLConnectionSecret` (config/providerconfig-postgres.yaml). No live Postgres tenant exists yet — this reseal activates reconciliation for the first time with no prior state. |
 
 ## Resealing the real values (operator, at go-live)
 

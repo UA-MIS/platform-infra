@@ -1,25 +1,36 @@
-# ProviderConfig for provider-sql (ADR-033). Connects to the off-cluster DB tier
-# (ua-mis-db-1, MariaDB 11.8) using a SCOPED admin credential — NOT the MariaDB
-# `root` account. The provisioner only needs CREATE/DROP DATABASE, CREATE/DROP USER,
-# and GRANT on the tenant `<team>_<env>` namespace (see creds/README.md for the exact
-# SQL grants to mint that login). This mirrors the harbor/vault provisioner-robot
-# pattern: the powerful credential lives ONLY in crossplane-system, never in Backstage,
-# never with humans, and is the focal point of the one-time SRE review (ADR-031 §6).
+# ProviderConfig for provider-sql (ADR-033). Connects to the IN-CLUSTER DB tier
+# (capstone-mariadb-mariadb-cluster-primary.db-tier.svc.cluster.local, MariaDB 11.8
+# Galera) using a SCOPED admin credential — NOT the MariaDB `root` account. The
+# provisioner (`crossplane-provisioner`, the mariadb-operator User/Grant CRs in
+# applicationsets/mariadb-cluster-app.yaml) only has CREATE/DROP DATABASE,
+# CREATE/DROP USER, and GRANT-delegable schema privileges — explicitly excludes
+# SUPER/FILE/PROCESS/RELOAD/SHUTDOWN (see creds/README.md for the exact grant
+# list). This mirrors the harbor/vault provisioner-robot pattern: the powerful
+# credential lives ONLY in crossplane-system, never in Backstage, never with
+# humans, and is the focal point of the one-time SRE review (ADR-031 §6).
 #
-# The referenced Secret `db-tier-mysql-admin` is materialized from the PLACEHOLDER
-# SealedSecret in creds/mysql-admin-creds-sealed.yaml. provider-sql's
-# `MySQLConnectionSecret` source reads four FIXED keys from it —
-# endpoint/port/username/password — which is exactly what the placeholder
-# SealedSecret carries (see creds/README.md; the SRE audits those keys there).
+# CUTOVER (docs/operator/in-cluster-db-tier-runbook.md §4c): this ProviderConfig
+# was repointed from the off-cluster ua-mis-db-1 box to the in-cluster MariaDB
+# tier. Existing tenant `User`/`Database`/`Grant` MRs (e.g. swami_dev/staging/
+# prod) reconcile against this new target using their EXISTING passwords — the
+# underlying data was migrated to the in-cluster cluster ahead of this repoint
+# (see Vault `secret/tenants/<team>/<env>/database`), so no tenant password was
+# reset by this change. `platform-services/db-tier/netpol.yaml` admits
+# `crossplane-system` -> db-tier:3306 for provider-sql's admin session.
+#
+# The referenced Secret `db-tier-mysql-admin` is materialized from the SealedSecret
+# in creds/mysql-admin-creds-sealed.yaml. provider-sql's `MySQLConnectionSecret`
+# source reads four FIXED keys from it — endpoint/port/username/password (see
+# creds/README.md; the SRE audits those keys there).
 #
 # ⚠ NOTE (v0.15.0 schema): the installed provider-sql v0.15.0 ProviderConfig CRD
 # does NOT expose a `spec.credentials.secretKeyMapping` field (verified against the
 # live CRD + Context7 crossplane-contrib/provider-sql). secretKeyMapping is a
 # master-branch/unreleased addition; on v0.15.0 the four secret key names are
 # hardcoded to endpoint/port/username/password, so no mapping is declared here.
-# TLS: MariaDB on ua-mis-db-1 is reachable over the trusted Tailscale overlay; if TLS
-# is later enabled on the DB, add the CA via the provider's runtime config (the tailnet
-# is the current transport-security boundary — DB-tier runbook §4).
+# TLS: the in-cluster MariaDB Service is reached over the cluster network (no
+# Tailscale hop anymore); NetworkPolicy (not TLS) is the transport boundary here,
+# matching every other in-cluster db-tier consumer.
 apiVersion: mysql.sql.crossplane.io/v1alpha1
 kind: ProviderConfig
 metadata:

@@ -116,6 +116,23 @@ spec:
       ports:
         - protocol: TCP
           port: 5432
+    # ns `crossplane-system` -> MariaDB (3306) — the Crossplane repoint cutover
+    # (docs/operator/in-cluster-db-tier-runbook.md §4c): provider-sql now runs its
+    # admin session (config/providerconfig-sql.yaml, secret db-tier-mysql-admin)
+    # against capstone-mariadb-mariadb-cluster-primary in this namespace instead of
+    # the off-box ua-mis-db-1, so its pod (ns crossplane-system) needs to actually
+    # reach 3306 here — this file's header/§3 flagged this as the deliberately
+    # deferred companion edit for "at their own cutover"; this is that cutover.
+    # Postgres (5432) is NOT added here yet — providerconfig-postgres.yaml's admin
+    # secret is still an unsealed placeholder (no live Postgres tenant), see that
+    # ProviderConfig's own comments; add this same rule at its cutover.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: crossplane-system
+      ports:
+        - protocol: TCP
+          port: 3306
     # ns `db-admin` (tenant-db-access design §5) -> BOTH engine ports — the
     # platform-admin Adminer reads CNPG (Backstage/Harbor/crossplane_provisioner
     # roles) AND MariaDB (root/crossplane-provisioner). It does NOT carry
