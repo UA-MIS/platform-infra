@@ -17,21 +17,13 @@
 # student already SSO'd into ArgoCD/Harbor/Backstage doesn't see a second login
 # screen for a DB console (same Dex session, shared cookie domain).
 #
-# ⚠ KNOWN UX GAP (flagged, not a blocker): this Deployment does NOT chain a Traefik
-# `errors` middleware to convert a 401 from `/oauth2/auth` into a redirect to
-# `/oauth2/start` — research's design (§3.2 option D) specifies exactly ONE Middleware
-# per (team,env) (the forwardAuth check), and adding the redirect chain would need
-# either a second per-team Middleware referencing this Service cross-namespace (the
-# Traefik chart does not currently set `providers.kubernetesCRD.allowCrossNamespace`,
-# applicationsets/traefik-app.yaml) or a duplicated per-namespace ExternalName Service
-# — both are a bigger, separately-reviewable change than this PR's scope. Net effect:
-# the VERY FIRST unauthenticated hit to a console (no oauth2-proxy cookie yet, and the
-# student hasn't visited any other Dex-SSO'd tool this session) sees oauth2-proxy's
-# plain 401 instead of an automatic redirect to GitHub login. Workaround: visit
-# https://db-auth.capstone.uamishub.com/oauth2/start?rd=<console-url> once, or simply
-# open ArgoCD/Harbor/Backstage first (shared cookie-domain session then covers every
-# console silently). Follow-up: enable `allowCrossNamespace` + add the official
-# oauth2-proxy `errors` middleware chain (oauth2-proxy Traefik integration docs).
+# SSO REDIRECT: a bare 401 from `/oauth2/auth` (no session cookie yet) is converted
+# into a 302 redirect to Dex/GitHub login by the shared `errors` Middleware
+# (middleware.yaml, `oauth2-proxy-errors`) chained in front of every console's
+# forwardAuth Middleware — see that file's header comment for the full mechanism.
+# Requires `providers.kubernetesCRD.allowCrossNamespace: true`
+# (applicationsets/traefik-app.yaml), since every consumer lives in a different
+# namespace than this one.
 #
 # ⚠ TLS TO DEX: id.capstone.uamishub.com's in-cluster split-horizon rewrite
 # (platform-services/coredns-custom/coredns-custom.yaml) is a documented NO-OP on

@@ -39,5 +39,7 @@ This dir's Application (`platform-svc-db-admin`) syncs cleanly as soon as it mer
 ```bash
 kubectl -n db-admin get pods
 curl -sk https://db-admin.capstone.uamishub.com/ -o /dev/null -w '%{http_code}\n'
-# -> 302/401 (oauth2-proxy gate) until a UA-MIS:labmx member is signed in
+# -> 302 (oauth2-proxy's shared `errors` Middleware redirects an unauthenticated hit
+# to Dex/GitHub login; see platform-services/db-console-auth/middleware.yaml) until a
+# UA-MIS:labmx member is signed in
 ```

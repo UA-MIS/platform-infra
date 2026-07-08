@@ -4,9 +4,16 @@
 # console lists presets from both engines at once). ADMINER_PLUGIN_SERVER_LIST (not
 # autologin) — a dropdown of every platform DB with an Auto Sign-In button.
 #
-# Same non-root-UID + PORT-off-80 + writable-root-fs-for-plugin-copy posture as the
-# per-tenant consoles (platform-services/crossplane/apis/composition.yaml's ADMINER
-# CONSOLE blocks) — see those comments for the full rationale.
+# Same non-root-UID + PORT-off-80 posture as the per-tenant consoles
+# (platform-services/crossplane/apis/composition.yaml's ADMINER CONSOLE blocks) — see
+# those comments for the full rationale.
+#
+# ⚠ RUNTIME FIX: /srv/adminer-plugins/ is baked into the dockette/adminer image
+# root:root 0755 — entrypoint.sh's `cp .../adminer-server-list.php /srv/adminer-plugins/`
+# fails Permission Denied under UID 1000 even with a writable root fs. The source dir
+# (/srv/plugins-available/) is untouched by this mount, so shadowing the (empty)
+# target dir with an emptyDir is safe. fsGroup 1000 below makes the kubelet-owned
+# emptyDir group-writable by UID 1000's supplemental group.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -83,5 +90,11 @@ spec:
               drop: ["ALL"]
             seccompProfile:
               type: RuntimeDefault
+          volumeMounts:
+            - name: adminer-plugins
+              mountPath: /srv/adminer-plugins
+      volumes:
+        - name: adminer-plugins
+          emptyDir: {}
       securityContext:
         fsGroup: 1000
