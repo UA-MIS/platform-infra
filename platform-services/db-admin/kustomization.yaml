@@ -14,6 +14,20 @@ resources:
   - middleware.yaml
   - ingress.yaml
 
+# UA-MIS theme (same design as the per-team consoles, platform-services/crossplane/
+# apis/composition.yaml's ADMINER CONSOLE blocks — see adminer.css's own header for
+# the full rationale: crimson/charcoal chrome + a light-grey/black SQL editor and
+# result tables). A STABLE name (disableNameSuffixHash) is required because
+# deployment.yaml's volume reference is a fixed string, same pattern as
+# platform-services/argocd-config/kustomization.yaml's argocd-ui-theme-cm.
+configMapGenerator:
+  - name: db-admin-adminer-css
+    namespace: db-admin
+    files:
+      - adminer.css
+generatorOptions:
+  disableNameSuffixHash: true
+
 labels:
   - pairs:
       platform.capstone/component: platform
