@@ -1,0 +1,19 @@
+# oauth2-proxy Service. Consumed two ways:
+#  1) Traefik forwardAuth (every per-(team,env) console's Middleware, rendered by the
+#     CapstoneTenant Composition) -> http://oauth2-proxy.db-console-auth.svc.cluster.local:4180/oauth2/auth
+#  2) The Ingress below (login/callback UI paths, /oauth2/start, /oauth2/sign_in).
+apiVersion: v1
+kind: Service
+metadata:
+  name: oauth2-proxy
+  namespace: db-console-auth
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: oauth2-proxy
+spec:
+  selector:
+    app.kubernetes.io/name: oauth2-proxy
+  ports:
+    - name: http
+      port: 4180
+      targetPort: 4180
