@@ -487,6 +487,25 @@ spec:
                           - { protocol: TCP, port: 53 }
                       - to:
                           - podSelector: {}
+                      # DB tier — MariaDB (3306) / Postgres (5432), scoped to the
+                      # db-tier namespace by name. Codifies the tenant side of the
+                      # CiliumNetworkPolicy hand-applied live for swami-dev/staging/
+                      # prod on 2026-07-07/08 (the matching platform.capstone/team-
+                      # keyed ingress lives in platform-services/db-tier/netpol.yaml)
+                      # as a REUSABLE default rendered for every tenant/env, so a new
+                      # team never needs a hand-applied CNP to reach a managed DB.
+                      # Opening the path does not by itself grant access — actual
+                      # credentials/grants below are still gated on `$database`
+                      # (mysql/postgres); this rule is UNCONDITIONAL (no template
+                      # `if` guard) so switching a claim's `database` field later
+                      # needs no netpol edit, mirroring tenants/_template/namespaces/*.yaml.
+                      - to:
+                          - namespaceSelector:
+                              matchLabels:
+                                kubernetes.io/metadata.name: db-tier
+                        ports:
+                          - { protocol: TCP, port: 3306 }
+                          - { protocol: TCP, port: 5432 }
             ---
             # Developer RBAC (CXP-2): a namespaced RoleBinding to the pre-reviewed
             # ClusterRole capstone-tenant-developer (rbac/capstone-tenant-developer-

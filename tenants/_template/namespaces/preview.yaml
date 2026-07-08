@@ -157,6 +157,24 @@ spec:
     # Intra-namespace egress so the app's own components can reach each other.
     - to:
         - podSelector: {}
+    # DB tier — MariaDB (3306) / Postgres (5432), scoped to the db-tier namespace
+    # by name. Codifies the tenant side of the CiliumNetworkPolicy hand-applied
+    # live for swami-dev/staging/prod on 2026-07-07/08 (platform.capstone/team-
+    # keyed ingress lives in platform-services/db-tier/netpol.yaml) as a REUSABLE
+    # default: every tenant namespace gets the network PATH to db-tier, so a new
+    # team never needs a hand-applied CNP to reach a managed DB. Opening the path
+    # does not by itself grant access — actual credentials/grants are provisioned
+    # only when the tenant claim sets spec.database (mysql/postgres); see
+    # platform-services/crossplane/apis/composition.yaml.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: db-tier
+      ports:
+        - protocol: TCP
+          port: 3306
+        - protocol: TCP
+          port: 5432
 ---
 # Team Role — namespaced, workload-scoped (§3.3). Read + limited write on the
 # kinds a student debugs/deploys. NEVER: Secrets (raw), Nodes, RBAC, Quota,

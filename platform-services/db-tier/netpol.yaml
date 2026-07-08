@@ -203,3 +203,56 @@ spec:
     - toEntities:
         - kube-apiserver
         - cluster
+---
+# --- INGRESS (generalized): any TENANT namespace -> MariaDB (3306) / Postgres
+#     (5432) -- codifies, as a REUSABLE pattern, the hand-applied CiliumNetworkPolicy
+#     `allow-swami-to-mariadb` from the 2026-07-07/08 overnight bring-up (see this
+#     file's header CORRECTION for the incident writeup). That hotfix hardcoded
+#     swami-dev/staging/prod by namespace NAME; it would not have covered the next
+#     onboarded team and would not survive a DR/restore since it was never
+#     committed. This replaces it with a namespace-LABEL match so every current
+#     and future tenant namespace is covered without a per-team edit here.
+#
+# Selector choice: `platform.capstone/team` is the marker unique to tenant
+# namespaces -- verified live (`kubectl get ns -o custom-columns=...`) that it is
+# present ONLY on swami-dev/staging/prod and absent from every platform/operator
+# namespace (db-tier, cnpg-system, mariadb-system, argocd, kube-system, ...), and
+# it is stamped on every tenant namespace by both onboarding paths: the manual
+# tenants/_template/namespaces/*.yaml bundle AND the Crossplane CapstoneTenant
+# Composition (platform-services/crossplane/apis/composition.yaml, the Namespace
+# object rendered per env). `platform.capstone/semester` would work equally well
+# (same universality); `team` was picked as the more literally tenant-defining
+# label. Matched with `operator: Exists` (not matchLabels equality) so no
+# enumeration of team names is needed -- onboarding a new team requires ZERO
+# edits here.
+#
+# This is a plain k8s NetworkPolicy, not a CiliumNetworkPolicy: unlike the
+# apiserver/cluster identity gap this file's CNP above works around, standard
+# `namespaceSelector` (including `matchExpressions`) is core NetworkPolicy API
+# surface that Cilium implements natively -- proven already by the
+# `allow-ingress-operators-and-intra-ns` policy above, whose cnpg-system/
+# mariadb-system namespaceSelector rules are live and working. CNP + k8s
+# NetworkPolicy on the same endpoint/direction are additive (OR), so this can
+# only ADD allowed ingress on top of the default-deny + existing scoped-allow.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-tenant-db-access
+  namespace: db-tier
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: platform.capstone/team
+                operator: Exists
+      ports:
+        - protocol: TCP
+          port: 3306
+        - protocol: TCP
+          port: 5432
