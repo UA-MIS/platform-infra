@@ -101,6 +101,20 @@ spec:
           port: 3306
         - protocol: TCP
           port: 5555
+    # harbor namespace -> the CNPG RW service (capstone-pg-rw:5432) only — Harbor's
+    # DB migration off its own bundled Postgres onto the in-cluster CNPG `harbor`
+    # database/role (applicationsets/harbor-app.yaml database.external, PG17 cutover
+    # PR). Plain k8s NetworkPolicy namespaceSelector ingress rules resolve to
+    # per-pod Cilium identity (not CIDR), so — unlike the egress gaps this file's
+    # CORRECTION note above documents — this ingress-side rule works without a
+    # companion CiliumNetworkPolicy.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: harbor
+      ports:
+        - protocol: TCP
+          port: 5432
     # Intra-namespace: CNPG replication, Galera SST/replication, and the backup
     # paths (barman-cloud sidecar + mariadb PhysicalBackup Job) reaching the MinIO
     # pod — all same-namespace today.

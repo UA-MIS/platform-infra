@@ -66,9 +66,10 @@ spec:
             registry:   { storageClass: ceph-block, size: 20Gi }
             jobservice:
               jobLog:   { storageClass: ceph-block, size: 1Gi }
-            database:   { storageClass: ceph-block, size: 2Gi }
             redis:      { storageClass: ceph-block, size: 1Gi }
             trivy:      { storageClass: ceph-block, size: 5Gi }
+            # (no `database` entry: database.type is external below, so the chart
+            # never renders the bundled-postgres StatefulSet/PVC — see database:.)
 
         # --- Trivy vulnerability scanning ENABLED (scan-on-push set at project
         #     level post-install; enforce-block strength is a D-022 should-decide —
@@ -141,11 +142,53 @@ spec:
               requests: { cpu: 20m, memory: 64Mi }
               limits: { cpu: 100m, memory: 128Mi }
 
+        # --- Database: EXTERNAL, the in-cluster CNPG cluster `capstone-pg` (ns
+        #     db-tier, PostgreSQL 17 via the CloudNativePG operator) — replaces the
+        #     chart's bundled internal Postgres StatefulSet (PG 15.17). CNPG already
+        #     has a `harbor` role + `harbor` database provisioned (Database CR
+        #     capstone-pg-harbor, owner `harbor` — platform-services/cnpg/cluster/
+        #     databases.yaml). The RW service is only reachable in-cluster
+        #     (capstone-pg-rw.db-tier.svc.cluster.local:5432); db-tier's default-deny
+        #     NetworkPolicy needed an explicit ingress allow for the harbor namespace
+        #     on 5432 (platform-services/db-tier/netpol.yaml, same PR).
+        #
+        #     ⚠ PG17 COMPATIBILITY: Harbor 2.15.x (this chart's app version) only
+        #     OFFICIALLY SUPPORTS PostgreSQL 15.x for its external-DB target
+        #     (goharbor/harbor maintainer confirmation, Oct 2025:
+        #     https://github.com/goharbor/harbor/issues/22456 — "PG17 not officially
+        #     support yet"). A user on Harbor chart 1.17.0/app 2.13.0 against a PG17-
+        #     family server hit a real GC-job failure (SQLSTATE 22007, "invalid value
+        #     ... for MON" — a date-format function whose overload resolution changed
+        #     between PG15 and PG17: same issue thread, 2026-04-23 comment). This is
+        #     UNSUPPORTED/AT-RISK, not just untested — verify GC + core CRUD paths
+        #     immediately after cutover, and be ready to revert database.type to
+        #     `internal` if GC (or any core.*database* path) errors.
+        #
+        #     coreDatabase is "harbor" (the actual database name CNPG created), NOT
+        #     the chart's own "registry" default — that default is just the name the
+        #     bundled Postgres happens to init with, Harbor itself has no hardcoded
+        #     dependency on the literal string "registry". Only ONE database is
+        #     needed: Harbor dropped Notary years ago (no notary_server/
+        #     notary_signer values exist anywhere in this chart), and the live
+        #     internal DB confirms a single `registry` database (no others).
         database:
-          internal:
-            resources:
-              requests: { cpu: 30m, memory: 128Mi }
-              limits: { cpu: 200m, memory: 256Mi }
+          type: external
+          external:
+            host: "capstone-pg-rw.db-tier.svc.cluster.local"
+            port: "5432"
+            username: "harbor"
+            coreDatabase: "harbor"
+            # existingSecret must live in the `harbor` namespace with key "password"
+            # (chart requirement) — sourced from Vault platform/db/cnpg/harbor via a
+            # namespace-local ExternalSecret (platform-services/harbor/
+            # externalsecret-database.yaml), NOT the db-tier ExternalSecret directly
+            # (Secret refs don't cross namespaces).
+            existingSecret: "harbor-database-credentials"
+            # CNPG issues in-cluster server TLS certs by default; "require" gets
+            # encryption-in-transit without needing to distribute/trust a CA bundle
+            # (verify-ca/verify-full would need that). No prior in-cluster CNPG
+            # consumer to match a convention against (harbor is the first cutover).
+            sslmode: "require"
 
         redis:
           internal:

@@ -4,8 +4,13 @@
 # the Helm chart itself is a SEPARATE Application (method A) so it does NOT render
 # through this kustomize dir.
 #
-#   harbor-admin : admin password + 16-char data key (existingSecret refs in values)
-#   harbor-oidc  : the `harbor` Dex static-client secret (for OIDC auth-mode config)
+#   harbor-admin              : admin password + 16-char data key (existingSecret
+#                                refs in values)
+#   harbor-oidc               : the `harbor` Dex static-client secret (for OIDC
+#                                auth-mode config)
+#   harbor-database-credentials : ESO-sourced (Vault platform/db/cnpg/harbor) CNPG
+#                                `harbor` role password, for database.external.
+#                                existingSecret (in-cluster CNPG cutover)
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
@@ -13,6 +18,7 @@ resources:
   - namespace.yaml
   - sealedsecret-admin.yaml
   - sealedsecret-oidc.yaml
+  - externalsecret-database.yaml
 
 labels:
   - pairs:
