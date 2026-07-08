@@ -39,20 +39,6 @@ Your app will be reachable at
 `https://${{ values.appName }}.<env>.<platform-domain>` (prod drops the `<env>`
 segment: `https://${{ values.appName }}.<platform-domain>`).
 
-{%- if values.database != 'none' %}
-## Your database
-
-You chose an auto-provisioned database. Your app reads it via the `DATABASE_URL` env
-var (already wired — nothing to configure). To browse/query it yourself, use the
-**DB Console** links on this project's page in The Process (a web SQL console, one
-per environment) — no client to install, no password to type or store; just sign in
-with GitHub and pick your team's database:
-
-- Dev: https://${{ values.team }}-dev-db.capstone.uamishub.com
-- Staging: https://${{ values.team }}-staging-db.capstone.uamishub.com
-- Prod: https://${{ values.team }}-prod-db.capstone.uamishub.com
-{%- endif %}
-
 ## The app (`app/`)
 
 A standard-library-only Go service to start from:

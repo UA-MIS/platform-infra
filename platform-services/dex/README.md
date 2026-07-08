@@ -103,33 +103,6 @@ kubectl -n dex rollout restart deploy/dex
 > SealedSecret, or regenerate BOTH together (Dex's `argocd` staticClient secret
 > and the argocd-config `oidc.dex.clientSecret` must be identical).
 
-## DB console static client (tenant-db-access)
-
-`configmap.yaml` registers a `db-console` staticClient for the shared oauth2-proxy
-that fronts every per-team/env Adminer console (see
-`platform-services/db-console-auth/README.md`). Same re-seal procedure as
-`process-client-secret` above — add a `db-console-client-secret` key to the
-`dex-github` SealedSecret with the value oauth2-proxy is configured with
-(`platform-services/db-console-auth/sealedsecret.yaml`'s `client-secret` key MUST
-be the SAME value, since both sides need to agree on the shared secret):
-
-```bash
-DB_CONSOLE_CLIENT_SECRET=$(openssl rand -base64 32)
-
-# 1) Add it to dex-github (merge into the existing plaintext rebuild — see the
-#    GitHub re-seal steps above for the full recipe; add this one stringData key):
-#    db-console-client-secret: "<DB_CONSOLE_CLIENT_SECRET>"
-make seal SECRET=/tmp/dex-secret.yaml NS=dex \
-  > platform-services/dex/sealedsecret.yaml
-
-# 2) Add the SAME value to the db-console-auth SealedSecret's client-secret key
-#    (platform-services/db-console-auth/sealedsecret.yaml) — see that dir's README.
-
-# 3) Commit on a branch + PR, then after sync:
-kubectl -n dex rollout restart deploy/dex
-kubectl -n db-console-auth rollout restart deploy/oauth2-proxy
-```
-
 ## Validate
 
 ```bash
