@@ -136,12 +136,19 @@ kubectl --context admin@capstone -n db-tier exec -it deploy/minio-backups -- mc 
 
 ## 3. What this tier does NOT do yet (by design)
 
-- **Backstage / Harbor are still on their bundled per-app Postgres subcharts**
-  (`applicationsets/backstage-process-app.yaml`'s `postgresql:` block,
-  `applicationsets/harbor-app.yaml`'s bundled database). The `backstage`/`harbor`
-  `Database`/`DatabaseRole` CRs on `capstone-pg` (`platform-services/cnpg/cluster/
-  {databases,roles}.yaml`) exist **ahead of** that cutover so the tier is ready —
-  see §4.
+- **Harbor is still on its bundled per-app Postgres subchart**
+  (`applicationsets/harbor-app.yaml`'s bundled database). The `harbor`
+  `Database`/`DatabaseRole` CR on `capstone-pg` (`platform-services/cnpg/cluster/
+  {databases,roles}.yaml`) exists **ahead of** that cutover so the tier is ready —
+  see §4b. **Backstage's cutover (§4a) is done** — it now connects to
+  `capstone-pg-rw.db-tier.svc.cluster.local` / role+db `backstage`. Diverges from
+  the §4a dump/restore procedure below in one respect: no `pg_dump`/`pg_restore`
+  was run — Backstage's catalog re-ingests from GitHub on boot, so a fresh
+  `backstage` database is sufficient and the old bundled-Postgres data was left
+  untouched (rollback-safe). Also uses `pluginDivisionMode: schema` (not the
+  Backstage default `database`), since the `backstage` CNPG role deliberately has
+  no CREATEDB — see the comments in `applicationsets/backstage-process-app.yaml`'s
+  `backend.database` block.
 - **Crossplane's `provider-sql` still points at `ua-mis-db-1`**
   (`platform-services/crossplane/config/providerconfig-{postgres,sql}.yaml`,
   secrets `db-tier-postgres-admin` / `db-tier-mysql-admin`). The
@@ -155,17 +162,18 @@ kubectl --context admin@capstone -n db-tier exec -it deploy/minio-backups -- mc 
   dir — safe on day one since the namespace has no prior live traffic to sever):
   ingress is scoped to the `cnpg-system`/`mariadb-system` operator namespaces on
   their exact reconcile ports, intra-namespace (replication/SST/backup-to-MinIO),
-  and kubelet probes; egress is DNS + intra-cluster + apiserver only. `cnpg-system`
+  ns `backstage` on 5432 only (added with the §4a Backstage cutover), and kubelet
+  probes; egress is DNS + intra-cluster + apiserver only. `cnpg-system`
   and `mariadb-system` themselves (the operator/controller pods) have **no**
   NetworkPolicy yet — only their egress-side interaction with `db-tier` is fenced
-  from that side. Revisit before the Crossplane repoint in §4: the
-  `crossplane_provisioner` accounts are host-scoped `%`/any-source in-cluster (see
-  the comments in `applicationsets/mariadb-cluster-app.yaml` and
-  `platform-services/cnpg/cluster/roles.yaml`), so `db-tier`'s ingress allow-list
-  needs a companion edit (mirroring
-  `hardening/netpol-controlplane/crossplane-db-cnp.yaml`'s pattern) to admit
-  Backstage/Harbor/`crossplane-system` by namespace at that point — it is
-  deliberately NOT pre-opened here since none of those are live DB clients yet.
+  from that side. Still needed before the Harbor cutover (§4b) and the Crossplane
+  repoint (§4c): the same companion ingress-allow edit (mirroring
+  `hardening/netpol-controlplane/crossplane-db-cnp.yaml`'s pattern) admitting
+  `harbor`/`crossplane-system` by namespace — deliberately not pre-opened here
+  since neither is a live DB client of `capstone-pg` yet. Note ns `backstage`
+  itself has **no** NetworkPolicy of its own (no entry in
+  `hardening/netpol-controlplane/`), so its egress side was already unrestricted;
+  only this ingress-side allow was needed for the cutover to pass traffic.
 - **MinIO has no TLS.** ClusterIP-only, never Ingress-exposed. Fine for a
   same-cluster-trust backup path; revisit if a review wants in-cluster mTLS
   everywhere (cert-manager is already available — same self-signed-issuer pattern

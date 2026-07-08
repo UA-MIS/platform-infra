@@ -33,14 +33,19 @@ backend:
     origin: https://process.capstone.uamishub.com
     methods: [GET, HEAD, PATCH, POST, PUT, DELETE]
     credentials: true
-  # The bundled Bitnami postgresql subchart (postgresql.enabled=true). Host/user match the
-  # chart defaults in the Application values; password is env-injected from the SealedSecret.
+  # CNPG `capstone-pg` (db-tier), cut over from the bundled Bitnami postgresql subchart
+  # (docs/operator/in-cluster-db-tier-runbook.md §4a). Host/user/pluginDivisionMode MUST
+  # match applicationsets/backstage-process-app.yaml's Helm appConfig exactly — see the
+  # comments there for why pluginDivisionMode is `schema` (the CNPG `backstage` role has
+  # no CREATEDB). Password is env-injected from backstage-cnpg-db-credentials
+  # (ExternalSecret, Vault path platform/db/cnpg/backstage).
   database:
     client: pg
+    pluginDivisionMode: schema
     connection:
-      host: backstage-postgresql
+      host: capstone-pg-rw.db-tier.svc.cluster.local
       port: 5432
-      user: bn_backstage
+      user: backstage
       password: ${POSTGRES_PASSWORD}
 
 # ── SSO via the shared Dex broker (issuer id.capstone.uamishub.com) ──────────────────

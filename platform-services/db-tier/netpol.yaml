@@ -101,6 +101,21 @@ spec:
           port: 3306
         - protocol: TCP
           port: 5555
+    # ns `backstage` -> CNPG (5432 only) — the companion ingress-allow edit this
+    # file's header + docs/operator/in-cluster-db-tier-runbook.md §3 flagged as
+    # needed "at that point": Backstage is now a live DB client of capstone-pg
+    # (the CNPG cutover, applicationsets/backstage-process-app.yaml). Scoped to
+    # port 5432 only (not 3306/5555/9000) — Backstage never talks to MariaDB or
+    # MinIO. Harbor/crossplane-system are NOT added here (still on their own
+    # paths — out of scope for this change; add per the same pattern at their
+    # own cutover).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: backstage
+      ports:
+        - protocol: TCP
+          port: 5432
     # Intra-namespace: CNPG replication, Galera SST/replication, and the backup
     # paths (barman-cloud sidecar + mariadb PhysicalBackup Job) reaching the MinIO
     # pod — all same-namespace today.

@@ -8,12 +8,15 @@
 # live role + its data as a side effect of a manifest being removed — deletion is
 # a deliberate operator action, not something ArgoCD prune should ever trigger.
 ---
-# Backstage's eventual owner role (cutover target — see
-# docs/operator/in-cluster-db-tier-runbook.md §4). NOT yet consumed by the live
-# Backstage deployment (applicationsets/backstage-process-app.yaml still points at
-# its bundled Bitnami postgresql subchart) — this role + its Database
-# (databases.yaml) exist ahead of that cutover so the DB tier is ready when it
-# happens; the Helm-values switch itself is the cutover PR, out of scope here.
+# Backstage's owner role — CONSUMED since the §4a cutover
+# (docs/operator/in-cluster-db-tier-runbook.md §4a;
+# applicationsets/backstage-process-app.yaml now points here instead of its
+# bundled Bitnami postgresql subchart). Deliberately NOT granted `createdb`
+# (unlike crossplane_provisioner below) — Backstage runs with
+# `backend.database.pluginDivisionMode: schema` instead of its default
+# `database` mode specifically so this role doesn't need it (each plugin gets a
+# schema inside the one `backstage` database, which this role already owns via
+# databases.yaml — schema creation is an owner privilege, no CREATEDB required).
 apiVersion: postgresql.cnpg.io/v1
 kind: DatabaseRole
 metadata:

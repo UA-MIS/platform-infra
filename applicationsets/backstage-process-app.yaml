@@ -89,10 +89,19 @@ spec:
             limits:
               cpu: "1"
               memory: 1Gi
-          # OIDC client secret + backend signing key + DB password are env-injected
-          # from the SealedSecret (platform-services/backstage/sealedsecret-oidc.yaml).
+          # OIDC client secret + backend signing key are env-injected from the
+          # SealedSecret (platform-services/backstage/sealedsecret-oidc.yaml). That
+          # Secret also still carries a legacy POSTGRES_PASSWORD key from the bundled-
+          # Postgres era — left in place (not resealed) so `git revert` of the CNPG
+          # cutover restores the old path with zero SealedSecret changes. The REAL DB
+          # password now comes from backstage-cnpg-db-credentials (ExternalSecret,
+          # platform-services/backstage/externalsecret-cnpg-db.yaml, Vault path
+          # platform/db/cnpg/backstage) — listed SECOND so its POSTGRES_PASSWORD wins
+          # the envFrom key collision (Kubernetes: last envFrom source wins on
+          # duplicate keys).
           extraEnvVarsSecrets:
             - backstage-process-secrets
+            - backstage-cnpg-db-credentials
           # ── Vault WRITE path for the secrets-UX (#108, ADR-030 B1) ──────────────
           # The backend writes tenant secret VALUES to Vault over KV-v2 (role
           # `backstage-writer`, see external-secrets/vault-policies/backstage-role.sh).
@@ -169,11 +178,27 @@ spec:
                   - secret: ${BACKEND_SECRET}
               database:
                 client: pg
+                # PLUGIN-DB MODE: `schema` (not the Backstage default `database`) —
+                # deliberate, matches the CNPG role: `backstage` (platform-services/
+                # cnpg/cluster/roles.yaml) is NOT granted CREATEDB (unlike the
+                # crossplane_provisioner role, which explicitly IS — least-privilege
+                # by design). In `database` mode Backstage CREATEs a database per
+                # plugin at startup (backstage_plugin_catalog, _auth, _scaffolder, ...
+                # — 13 on the old bundled instance) and would fail closed against a
+                # role without CREATEDB. `schema` mode gives each plugin its own
+                # SCHEMA inside the single `backstage` database instead — no CREATEDB
+                # needed, since the `backstage` role already OWNS that database
+                # (databases.yaml) and schema creation is an owner privilege. This is
+                # also the Backstage-docs-recommended mode for a single managed DB
+                # instance. No data migration: the catalog re-ingests from GitHub on
+                # first boot, so a fresh `backstage` database is sufficient (the old
+                # bundled-Postgres data is left untouched for rollback).
+                pluginDivisionMode: schema
                 connection:
-                  host: backstage-postgresql # the bundled Postgres Service
+                  host: capstone-pg-rw.db-tier.svc.cluster.local # CNPG capstone-pg RW service (db-tier)
                   port: 5432
-                  user: bn_backstage # Bitnami app user
-                  password: ${POSTGRES_PASSWORD}
+                  user: backstage # CNPG DatabaseRole (roles.yaml), owns db `backstage` (databases.yaml)
+                  password: ${POSTGRES_PASSWORD} # from backstage-cnpg-db-credentials (see extraEnvVarsSecrets above)
             # ── SSO via the shared Dex broker ──────────────────────────────────────
             # The auth block MUST live HERE in the Helm appConfig: the chart launches the
             # backend with ONLY `--config /app/app-config-from-configmap.yaml` (this
@@ -307,12 +332,18 @@ spec:
           type: ClusterIP
           ports:
             backend: 7007
-        # ── Bundled Postgres on ceph-block (Phase-4 Rook RBD, cluster default SC) ─
-        # Same storage decision as Harbor: ceph-block is replica-3 RWO RBD (survives a
-        # node loss); local-path does NOT exist on Talos. External DB (ua-mis-db-1 PG17)
-        # is a later optimization — the bundled subchart is correct for the proof.
+        # ── Bundled Postgres — DISABLED, cut over to CNPG (docs/operator/
+        # in-cluster-db-tier-runbook.md §4a; backend.database.connection above now
+        # points at capstone-pg-rw.db-tier.svc.cluster.local). `enabled: false` stops
+        # ArgoCD from rendering/reconciling the subchart's StatefulSet+Service (they
+        # get pruned by the automated syncPolicy below), but the StatefulSet's
+        # volumeClaimTemplate-backed PVC is NOT owned by those manifests, so the old
+        # data is NOT deleted — it survives untouched for rollback. The rest of this
+        # block is INTENTIONALLY left in place (not deleted) so reverting this PR
+        # (`enabled: true`) instantly restores the exact prior bundled-Postgres config
+        # with no reconstruction needed.
         postgresql:
-          enabled: true
+          enabled: false
           auth:
             username: bn_backstage
             database: backstage
