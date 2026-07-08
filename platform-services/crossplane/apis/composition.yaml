@@ -1416,14 +1416,18 @@ spec:
               name: {{ printf "xp-%s-%s-dbconsole-deploy" $team $e.name | quote }}
               annotations:
                 {{ setResourceNameAnnotation (printf "dbconsole-deploy-%s" $e.name) }}
+            spec:
+              providerConfigRef:
+                name: default
+              # provider-kubernetes Object has no `.metadata.references` field (server
+              # dry-run rejects it — this is the #281/#283 bug); dependsOn belongs under
+              # `spec.references`, same as every other cross-Object dependency in this
+              # file (see e.g. the k8s-appset-envs / harborpush-es patterns above).
               references:
                 - dependsOn:
                     apiVersion: kubernetes.crossplane.io/v1alpha1
                     kind: Object
                     name: {{ printf "xp-%s-%s-dbconsole-es" $team $e.name | quote }}
-            spec:
-              providerConfigRef:
-                name: default
               forProvider:
                 manifest:
                   apiVersion: apps/v1
@@ -1824,14 +1828,18 @@ spec:
               name: {{ printf "xp-%s-%s-dbconsole-deploy" $team $e.name | quote }}
               annotations:
                 {{ setResourceNameAnnotation (printf "dbconsole-deploy-%s" $e.name) }}
+            spec:
+              providerConfigRef:
+                name: default
+              # provider-kubernetes Object has no `.metadata.references` field (server
+              # dry-run rejects it — this is the #281/#283 bug); dependsOn belongs under
+              # `spec.references`, same as every other cross-Object dependency in this
+              # file (see e.g. the k8s-appset-envs / harborpush-es patterns above).
               references:
                 - dependsOn:
                     apiVersion: kubernetes.crossplane.io/v1alpha1
                     kind: Object
                     name: {{ printf "xp-%s-%s-dbconsole-es" $team $e.name | quote }}
-            spec:
-              providerConfigRef:
-                name: default
               forProvider:
                 manifest:
                   apiVersion: apps/v1
