@@ -256,6 +256,21 @@ spec:
             storageClassName: ceph-block
             accessModes: ["ReadWriteOnce"]
             size: 5Gi
+          # Single replica + a ReadWriteOnce Ceph RBD PVC needs Recreate, not the
+          # chart default RollingUpdate: RollingUpdate schedules the replacement pod
+          # (which can land on a different node — this cluster now spans the
+          # Talos control-plane nodes AND the Mac fleet workers) BEFORE tearing down
+          # the old one, and Ceph RBD can only attach an RWO volume to one node at a
+          # time. The new pod then wedges forever at Init:0/1 (init-chown-data can't
+          # start — FailedAttachVolume: "Multi-Attach error ... already used by
+          # pod(s) <old-pod>"), while the old pod keeps serving (so it isn't
+          # obviously broken from the Grafana-availability side). Hit for the first
+          # time on the #248 resource-request bump, which was simply the first spec
+          # change to this Deployment since the Mac nodes joined — any future spec
+          # change would trigger the same wedge without this. Recreate makes k8s
+          # terminate (and detach) the old pod before scheduling the new one.
+          deploymentStrategy:
+            type: Recreate
           # Resource-reclaim (VPA-driven, task follow-up): live VPA target for the
           # `grafana` container is cpu 11m / mem ~259Mi (+15% headroom below) —
           # memory was UNDER-provisioned (old 128Mi request vs. actual pod usage

@@ -87,6 +87,25 @@ spec:
               organization: UA-MIS Capstone
               commonName: capstone.internal
 
+          # Disables the chart's Helm "autofix" hook Jobs (pre-upgrade + spire-server's
+          # post-install/post-upgrade, plus spike-nexus's bootstrap hook, unused here).
+          # These Jobs only make sense under a REAL `helm install`/`helm upgrade`
+          # lifecycle — the chart's own README says as much: "should be disabled when
+          # using `helm template`" (global.installAndUpgradeHooks.enabled). ArgoCD
+          # renders Helm sources via `helm template`, then maps the helm.sh/hook
+          # annotations onto its OWN PreSync/PostSync lifecycle — and it does not
+          # distinguish pre-install from pre-upgrade (both -> PreSync). So on a FRESH
+          # install, the pre-upgrade hook's Job still fires as a PreSync resource,
+          # before the main sync-wave has created the ValidatingWebhookConfiguration
+          # it `kubectl patch`es — the patch target doesn't exist yet, the Job fails,
+          # and the whole sync is marked SyncFailed ("nothing for a pre-upgrade hook
+          # to validate" on an install that never had a prior release). See
+          # controllerManager.installAndUpgradeHook.enabled below for the other half
+          # of this (the webhook's failurePolicy no longer depends on a hook to fix it
+          # up after the fact).
+          installAndUpgradeHooks:
+            enabled: false
+
         spire-server:
           controllerManager:
             enabled: true   # the Kubernetes Workload Registrar (reconciles ClusterSPIFFEID CRs)
@@ -97,6 +116,23 @@ spec:
             # (watchClassless defaults false) — demo-clusterspiffeid.yaml sets
             # this SAME className so it actually gets reconciled.
             className: capstone
+            # Companion to global.installAndUpgradeHooks.enabled=false above: without
+            # this, the ValidatingWebhookConfiguration below still hardcodes
+            # `failurePolicy: Ignore` on the vclusterfederatedtrustdomain.kb.io webhook
+            # ("Actual value to be set by post install/upgrade hooks" — hooks we just
+            # disabled, so it would never get fixed up). Setting this to false makes
+            # the chart render validatingWebhookConfiguration.failurePolicy directly
+            # instead. Verified via `helm template` against the pinned 0.29.0 chart.
+            installAndUpgradeHook:
+              enabled: false
+            validatingWebhookConfiguration:
+              failurePolicy: Fail   # chart default; explicit here since it's now load-bearing
+              # NOTE (upstream chart quirk, not introduced by this change): the sibling
+              # vclusterspiffeid.kb.io webhook rule in this same chart version hardcodes
+              # `failurePolicy: Ignore` unconditionally, with no values toggle at all —
+              # so ClusterSPIFFEID admission validation stays soft-fail-open regardless
+              # of this setting. Harmless (fails open, doesn't block sync) but flagged
+              # for whoever next touches this chart version.
 
         # SPIFFE OIDC Discovery Provider OFF (see header "ISOLATION") — this baseline
         # does not federate SPIRE identities into Vault or anywhere else yet.
