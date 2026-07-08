@@ -487,25 +487,38 @@ spec:
                           - { protocol: TCP, port: 53 }
                       - to:
                           - podSelector: {}
-                      # DB tier — MariaDB (3306) / Postgres (5432), scoped to the
-                      # db-tier namespace by name. Codifies the tenant side of the
-                      # CiliumNetworkPolicy hand-applied live for swami-dev/staging/
-                      # prod on 2026-07-07/08 (the matching platform.capstone/team-
-                      # keyed ingress lives in platform-services/db-tier/netpol.yaml)
-                      # as a REUSABLE default rendered for every tenant/env, so a new
-                      # team never needs a hand-applied CNP to reach a managed DB.
-                      # Opening the path does not by itself grant access — actual
-                      # credentials/grants below are still gated on `$database`
-                      # (mysql/postgres); this rule is UNCONDITIONAL (no template
-                      # `if` guard) so switching a claim's `database` field later
-                      # needs no netpol edit, mirroring tenants/_template/namespaces/*.yaml.
+                      # DB tier — MariaDB (3306) / Postgres (5432), scoped to the db-tier
+                      # namespace by name. Codifies the tenant side of the
+                      # CiliumNetworkPolicy hand-applied live for swami-dev/staging/prod on
+                      # 2026-07-07/08 (the matching platform.capstone/team-keyed ingress
+                      # lives in platform-services/db-tier/netpol.yaml, rule
+                      # allow-ingress-tenant-namespaces — the other half of this door) as a
+                      # REUSABLE default rendered for every tenant/env, so a new team never
+                      # needs a hand-applied CNP to reach a managed DB.
+                      #
+                      # tenant-db-access (§6.3): gated on the SAME $database field the
+                      # DATABASE blocks below use — a DB-less team's netpol is untouched,
+                      # and the one team already live (swami, database != "none") keeps
+                      # exactly the access the 2026-07-07/08 hotfix granted it. Port-scoped
+                      # to the ONE engine chosen (mutually exclusive, XRD enum is a single
+                      # value) — not a blanket db-tier admit. Opening the path does not by
+                      # itself grant access — actual credentials/grants below are still
+                      # gated on `$database` (mysql/postgres). Supersedes an earlier
+                      # unconditional (no `if` guard) variant of this same rule that opened
+                      # both ports regardless of `$database`: since the Composition
+                      # re-renders on every claim update, there is no need to pre-open the
+                      # door for a `database` field that hasn't been set yet, and the
+                      # conditional form avoids granting DB-tier egress to teams that have
+                      # no database at all.
+                      {{- if ne $database "none" }}
                       - to:
                           - namespaceSelector:
                               matchLabels:
                                 kubernetes.io/metadata.name: db-tier
                         ports:
-                          - { protocol: TCP, port: 3306 }
-                          - { protocol: TCP, port: 5432 }
+                          - protocol: TCP
+                            port: {{ if eq $database "postgres" }}5432{{ else }}3306{{ end }}
+                      {{- end }}
             ---
             # Developer RBAC (CXP-2): a namespaced RoleBinding to the pre-reviewed
             # ClusterRole capstone-tenant-developer (rbac/capstone-tenant-developer-
@@ -1304,6 +1317,278 @@ spec:
                           remoteRef:
                             remoteKey: {{ printf "tenants/%s/%s/database" $team $e.name | quote }}
                             property: port
+            {{- /* =====================================================================
+                   ADMINER CONSOLE (MySQL) — self-service SQL access, tenant-db-access
+                   design (artifacts/research/tenant-db-access.md §3/§4/§7). ONE Adminer
+                   pod per (team,env), living IN the team's own namespace, SSO-gated via
+                   the shared oauth2-proxy (platform-services/db-console-auth/) + a
+                   per-(team,env) Traefik Middleware carrying `?allowed_groups=UA-MIS:<team>`.
+                   No password ever typed: dockette/adminer's Autologin plugin
+                   (ADMINER_PLUGIN_AUTOLOGIN=1 + ADMINER_AUTOLOGIN_SERVER=<dsn>) reads a
+                   server-side-only DSN assembled from the SAME Vault leaf the app's
+                   DATABASE_URL ExternalSecret reads (tenants/<team>/<env>/database) —
+                   the console is a SECOND consumer of that leaf, not a new producer (no
+                   dual-owner risk). DSN driver token is `server` for MySQL/MariaDB (per
+                   the Adminer plugin's own doc comment: "the driver for MySQL is called
+                   'server'" — verified against vrana/adminer's login-servers.php AND
+                   dockette/adminer's shipped autologin plugin source).
+                   ⚠ Same un-escaped-DSN-interpolation posture as the existing
+                   DATABASE_URL assembly (_fragments/_contract/.../database.externalsecret.yaml)
+                   — a generated password containing `@`/`:`/`/` would break the DSN
+                   parse. Accepted as the SAME pre-existing platform-wide risk class (ESO
+                   templates have no bundled URL-encode function; provider-sql's
+                   generated passwords are the same ones the app's own DATABASE_URL
+                   already assembles this way), not a new one introduced here.
+                   ===================================================================== */}}
+            {{- $ns := printf "%s-%s" $team $e.name }}
+            ---
+            # ExternalSecret: assembles ADMINER_AUTOLOGIN_SERVER from the SAME Vault leaf
+            # the app's DATABASE_URL ExternalSecret reads. Depends on the db-push Object
+            # above so it doesn't spin on a not-yet-populated Vault leaf on first apply
+            # (provision-before-deploy, same pattern as the ARC push ExternalSecret).
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              name: {{ printf "xp-%s-%s-dbconsole-es" $team $e.name | quote }}
+              annotations:
+                {{ setResourceNameAnnotation (printf "dbconsole-es-%s" $e.name) }}
+            spec:
+              providerConfigRef:
+                name: default
+              references:
+                - dependsOn:
+                    apiVersion: kubernetes.crossplane.io/v1alpha1
+                    kind: Object
+                    name: {{ printf "xp-%s-%s-db-push" $team $e.name | quote }}
+              forProvider:
+                manifest:
+                  apiVersion: external-secrets.io/v1
+                  kind: ExternalSecret
+                  metadata:
+                    name: db-console
+                    namespace: {{ $ns | quote }}
+                    labels:
+                      platform.capstone/component: tenant
+                      platform.capstone/team: {{ $team | quote }}
+                      platform.capstone/env: {{ $e.name | quote }}
+                  spec:
+                    refreshInterval: "1h"
+                    secretStoreRef:
+                      name: vault-tenant
+                      kind: SecretStore
+                    target:
+                      name: db-console
+                      creationPolicy: Owner
+                      deletionPolicy: Delete
+                      template:
+                        engineVersion: v2
+                        data:
+                          ADMINER_AUTOLOGIN_SERVER: "server://{{ `{{ .username }}` }}:{{ `{{ .password }}` }}@{{ `{{ .host }}` }}:{{ `{{ .port }}` }}/{{ $dbName }}"
+                    data:
+                      - secretKey: username
+                        remoteRef:
+                          key: {{ printf "tenants/%s/%s/database" $team $e.name | quote }}
+                          property: username
+                      - secretKey: password
+                        remoteRef:
+                          key: {{ printf "tenants/%s/%s/database" $team $e.name | quote }}
+                          property: password
+                      - secretKey: host
+                        remoteRef:
+                          key: {{ printf "tenants/%s/%s/database" $team $e.name | quote }}
+                          property: host
+                      - secretKey: port
+                        remoteRef:
+                          key: {{ printf "tenants/%s/%s/database" $team $e.name | quote }}
+                          property: port
+            ---
+            # Deployment: dockette/adminer:mysql (9MB, MySQL/MariaDB-only variant — no
+            # dead weight from the other engines). No USER in the upstream Dockerfile
+            # (runs root by default) -> pinned to a non-root UID here; PORT overridden off
+            # 80 (privileged) since the pod runs non-root. readOnlyRootFilesystem is
+            # DELIBERATELY NOT set: entrypoint.sh `cp`s the activated plugin into
+            # /srv/adminer-plugins/ at container start, which a read-only root fs would
+            # break — PSA `restricted` does not require readOnlyRootFilesystem, only the
+            # fields actually set below.
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              name: {{ printf "xp-%s-%s-dbconsole-deploy" $team $e.name | quote }}
+              annotations:
+                {{ setResourceNameAnnotation (printf "dbconsole-deploy-%s" $e.name) }}
+            spec:
+              providerConfigRef:
+                name: default
+              # provider-kubernetes Object has no `.metadata.references` field (server
+              # dry-run rejects it — this is the #281/#283 bug); dependsOn belongs under
+              # `spec.references`, same as every other cross-Object dependency in this
+              # file (see e.g. the k8s-appset-envs / harborpush-es patterns above).
+              references:
+                - dependsOn:
+                    apiVersion: kubernetes.crossplane.io/v1alpha1
+                    kind: Object
+                    name: {{ printf "xp-%s-%s-dbconsole-es" $team $e.name | quote }}
+              forProvider:
+                manifest:
+                  apiVersion: apps/v1
+                  kind: Deployment
+                  metadata:
+                    name: db-console
+                    namespace: {{ $ns | quote }}
+                    labels:
+                      platform.capstone/component: tenant
+                      platform.capstone/team: {{ $team | quote }}
+                      platform.capstone/env: {{ $e.name | quote }}
+                      app.kubernetes.io/name: db-console
+                  spec:
+                    replicas: 1
+                    selector:
+                      matchLabels:
+                        app.kubernetes.io/name: db-console
+                    template:
+                      metadata:
+                        labels:
+                          app.kubernetes.io/name: db-console
+                          platform.capstone/team: {{ $team | quote }}
+                          platform.capstone/env: {{ $e.name | quote }}
+                      spec:
+                        containers:
+                          - name: adminer
+                            image: dockette/adminer:mysql
+                            imagePullPolicy: IfNotPresent
+                            env:
+                              - name: ADMINER_PLUGIN_AUTOLOGIN
+                                value: "1"
+                              - name: PORT
+                                value: "8080"
+                              - name: ADMINER_BANNER
+                                value: "0"
+                              - name: ADMINER_AUTOLOGIN_SERVER
+                                valueFrom:
+                                  secretKeyRef:
+                                    name: db-console
+                                    key: ADMINER_AUTOLOGIN_SERVER
+                            ports:
+                              - containerPort: 8080
+                            resources:
+                              requests: { cpu: "10m", memory: "32Mi" }
+                              limits: { memory: "64Mi" }
+                            securityContext:
+                              allowPrivilegeEscalation: false
+                              runAsNonRoot: true
+                              runAsUser: 1000
+                              capabilities:
+                                drop: ["ALL"]
+                              seccompProfile:
+                                type: RuntimeDefault
+                        securityContext:
+                          fsGroup: 1000
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation (printf "dbconsole-svc-%s" $e.name) }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: v1
+                  kind: Service
+                  metadata:
+                    name: db-console
+                    namespace: {{ $ns | quote }}
+                    labels:
+                      platform.capstone/component: tenant
+                      platform.capstone/team: {{ $team | quote }}
+                      platform.capstone/env: {{ $e.name | quote }}
+                  spec:
+                    selector:
+                      app.kubernetes.io/name: db-console
+                    ports:
+                      - port: 80
+                        targetPort: 8080
+            ---
+            # Traefik forwardAuth Middleware — the ONLY per-(team,env) object in the whole
+            # auth chain (§3.2 option D). Calls the ONE shared oauth2-proxy's /oauth2/auth
+            # with THIS team's allowed_groups, so no shared config (Dex, oauth2-proxy) is
+            # ever touched at onboarding.
+            # ⚠ NOT added to the AppProject's namespaceResourceWhitelist above: that
+            # whitelist gates what the TEAM'S OWN ArgoCD Application (their app repo's
+            # .devops/chart overlay) may create — it does NOT gate this Object, which
+            # provider-kubernetes applies directly (a separate control plane, its own
+            # ProviderConfig, no ArgoCD sync involved). Same reasoning already applies to
+            # every other Crossplane-only kind here that was NEVER whitelisted (RoleBinding,
+            # NetworkPolicy, the vault-ca ConfigMap, the eso-tenant ServiceAccount,
+            # vault-tenant SecretStore) — the ESO kinds ARE whitelisted above for a
+            # DIFFERENT reason (the app's OWN .devops/chart overlay also renders an
+            # ExternalSecret/SecretStore — that copy IS ArgoCD-synced under this
+            # AppProject, unlike this one).
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation (printf "dbconsole-mw-%s" $e.name) }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: traefik.io/v1alpha1
+                  kind: Middleware
+                  metadata:
+                    name: db-console-auth
+                    namespace: {{ $ns | quote }}
+                    labels:
+                      platform.capstone/component: tenant
+                      platform.capstone/team: {{ $team | quote }}
+                      platform.capstone/env: {{ $e.name | quote }}
+                  spec:
+                    forwardAuth:
+                      address: {{ printf "http://oauth2-proxy.db-console-auth.svc.cluster.local:4180/oauth2/auth?allowed_groups=UA-MIS:%s" $team | quote }}
+                      trustForwardHeader: true
+                      authResponseHeaders:
+                        - X-Auth-Request-User
+                        - X-Auth-Request-Email
+                        - X-Auth-Request-Groups
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation (printf "dbconsole-ing-%s" $e.name) }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: networking.k8s.io/v1
+                  kind: Ingress
+                  metadata:
+                    name: db-console
+                    namespace: {{ $ns | quote }}
+                    labels:
+                      platform.capstone/component: tenant
+                      platform.capstone/team: {{ $team | quote }}
+                      platform.capstone/env: {{ $e.name | quote }}
+                    annotations:
+                      traefik.ingress.kubernetes.io/router.middlewares: {{ printf "%s-db-console-auth@kubernetescrd" $ns | quote }}
+                  spec:
+                    rules:
+                      - host: {{ printf "%s-%s-db.%s" $team $e.name $domain | quote }}
+                        http:
+                          paths:
+                            - path: /
+                              pathType: Prefix
+                              backend:
+                                service:
+                                  name: db-console
+                                  port:
+                                    number: 80
+                    tls:
+                      - hosts:
+                          - {{ printf "%s-%s-db.%s" $team $e.name $domain | quote }}
             {{- end }}
             {{- end }}
 
@@ -1471,6 +1756,236 @@ spec:
                           remoteRef:
                             remoteKey: {{ printf "tenants/%s/%s/database" $team $e.name | quote }}
                             property: port
+            {{- /* =====================================================================
+                   ADMINER CONSOLE (Postgres) — structural mirror of the MySQL block
+                   above (see its header comment for the full design rationale). Driver
+                   token is `pgsql` (not `postgres`/`postgresql`) — the Adminer plugin's
+                   own DSN convention (dockette/adminer's shipped autologin plugin
+                   examples: `pgsql://postgres:pwd@pg:5432/app`). Image is
+                   dockette/adminer:pgsql (8MB, Postgres-only variant).
+                   ===================================================================== */}}
+            {{- $ns := printf "%s-%s" $team $e.name }}
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              name: {{ printf "xp-%s-%s-dbconsole-es" $team $e.name | quote }}
+              annotations:
+                {{ setResourceNameAnnotation (printf "dbconsole-es-%s" $e.name) }}
+            spec:
+              providerConfigRef:
+                name: default
+              references:
+                - dependsOn:
+                    apiVersion: kubernetes.crossplane.io/v1alpha1
+                    kind: Object
+                    name: {{ printf "xp-%s-%s-db-push" $team $e.name | quote }}
+              forProvider:
+                manifest:
+                  apiVersion: external-secrets.io/v1
+                  kind: ExternalSecret
+                  metadata:
+                    name: db-console
+                    namespace: {{ $ns | quote }}
+                    labels:
+                      platform.capstone/component: tenant
+                      platform.capstone/team: {{ $team | quote }}
+                      platform.capstone/env: {{ $e.name | quote }}
+                  spec:
+                    refreshInterval: "1h"
+                    secretStoreRef:
+                      name: vault-tenant
+                      kind: SecretStore
+                    target:
+                      name: db-console
+                      creationPolicy: Owner
+                      deletionPolicy: Delete
+                      template:
+                        engineVersion: v2
+                        data:
+                          ADMINER_AUTOLOGIN_SERVER: "pgsql://{{ `{{ .username }}` }}:{{ `{{ .password }}` }}@{{ `{{ .host }}` }}:{{ `{{ .port }}` }}/{{ $dbName }}"
+                    data:
+                      - secretKey: username
+                        remoteRef:
+                          key: {{ printf "tenants/%s/%s/database" $team $e.name | quote }}
+                          property: username
+                      - secretKey: password
+                        remoteRef:
+                          key: {{ printf "tenants/%s/%s/database" $team $e.name | quote }}
+                          property: password
+                      - secretKey: host
+                        remoteRef:
+                          key: {{ printf "tenants/%s/%s/database" $team $e.name | quote }}
+                          property: host
+                      - secretKey: port
+                        remoteRef:
+                          key: {{ printf "tenants/%s/%s/database" $team $e.name | quote }}
+                          property: port
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              name: {{ printf "xp-%s-%s-dbconsole-deploy" $team $e.name | quote }}
+              annotations:
+                {{ setResourceNameAnnotation (printf "dbconsole-deploy-%s" $e.name) }}
+            spec:
+              providerConfigRef:
+                name: default
+              # provider-kubernetes Object has no `.metadata.references` field (server
+              # dry-run rejects it — this is the #281/#283 bug); dependsOn belongs under
+              # `spec.references`, same as every other cross-Object dependency in this
+              # file (see e.g. the k8s-appset-envs / harborpush-es patterns above).
+              references:
+                - dependsOn:
+                    apiVersion: kubernetes.crossplane.io/v1alpha1
+                    kind: Object
+                    name: {{ printf "xp-%s-%s-dbconsole-es" $team $e.name | quote }}
+              forProvider:
+                manifest:
+                  apiVersion: apps/v1
+                  kind: Deployment
+                  metadata:
+                    name: db-console
+                    namespace: {{ $ns | quote }}
+                    labels:
+                      platform.capstone/component: tenant
+                      platform.capstone/team: {{ $team | quote }}
+                      platform.capstone/env: {{ $e.name | quote }}
+                      app.kubernetes.io/name: db-console
+                  spec:
+                    replicas: 1
+                    selector:
+                      matchLabels:
+                        app.kubernetes.io/name: db-console
+                    template:
+                      metadata:
+                        labels:
+                          app.kubernetes.io/name: db-console
+                          platform.capstone/team: {{ $team | quote }}
+                          platform.capstone/env: {{ $e.name | quote }}
+                      spec:
+                        containers:
+                          - name: adminer
+                            image: dockette/adminer:pgsql
+                            imagePullPolicy: IfNotPresent
+                            env:
+                              - name: ADMINER_PLUGIN_AUTOLOGIN
+                                value: "1"
+                              - name: PORT
+                                value: "8080"
+                              - name: ADMINER_BANNER
+                                value: "0"
+                              - name: ADMINER_AUTOLOGIN_SERVER
+                                valueFrom:
+                                  secretKeyRef:
+                                    name: db-console
+                                    key: ADMINER_AUTOLOGIN_SERVER
+                            ports:
+                              - containerPort: 8080
+                            resources:
+                              requests: { cpu: "10m", memory: "32Mi" }
+                              limits: { memory: "64Mi" }
+                            securityContext:
+                              allowPrivilegeEscalation: false
+                              runAsNonRoot: true
+                              runAsUser: 1000
+                              capabilities:
+                                drop: ["ALL"]
+                              seccompProfile:
+                                type: RuntimeDefault
+                        securityContext:
+                          fsGroup: 1000
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation (printf "dbconsole-svc-%s" $e.name) }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: v1
+                  kind: Service
+                  metadata:
+                    name: db-console
+                    namespace: {{ $ns | quote }}
+                    labels:
+                      platform.capstone/component: tenant
+                      platform.capstone/team: {{ $team | quote }}
+                      platform.capstone/env: {{ $e.name | quote }}
+                  spec:
+                    selector:
+                      app.kubernetes.io/name: db-console
+                    ports:
+                      - port: 80
+                        targetPort: 8080
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation (printf "dbconsole-mw-%s" $e.name) }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: traefik.io/v1alpha1
+                  kind: Middleware
+                  metadata:
+                    name: db-console-auth
+                    namespace: {{ $ns | quote }}
+                    labels:
+                      platform.capstone/component: tenant
+                      platform.capstone/team: {{ $team | quote }}
+                      platform.capstone/env: {{ $e.name | quote }}
+                  spec:
+                    forwardAuth:
+                      address: {{ printf "http://oauth2-proxy.db-console-auth.svc.cluster.local:4180/oauth2/auth?allowed_groups=UA-MIS:%s" $team | quote }}
+                      trustForwardHeader: true
+                      authResponseHeaders:
+                        - X-Auth-Request-User
+                        - X-Auth-Request-Email
+                        - X-Auth-Request-Groups
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation (printf "dbconsole-ing-%s" $e.name) }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: networking.k8s.io/v1
+                  kind: Ingress
+                  metadata:
+                    name: db-console
+                    namespace: {{ $ns | quote }}
+                    labels:
+                      platform.capstone/component: tenant
+                      platform.capstone/team: {{ $team | quote }}
+                      platform.capstone/env: {{ $e.name | quote }}
+                    annotations:
+                      traefik.ingress.kubernetes.io/router.middlewares: {{ printf "%s-db-console-auth@kubernetescrd" $ns | quote }}
+                  spec:
+                    rules:
+                      - host: {{ printf "%s-%s-db.%s" $team $e.name $domain | quote }}
+                        http:
+                          paths:
+                            - path: /
+                              pathType: Prefix
+                              backend:
+                                service:
+                                  name: db-console
+                                  port:
+                                    number: 80
+                    tls:
+                      - hosts:
+                          - {{ printf "%s-%s-db.%s" $team $e.name $domain | quote }}
             {{- end }}
             {{- end }}
 
@@ -1483,6 +1998,7 @@ spec:
             status:
               repoUrl: {{ $repoUrl | quote }}
               harborProject: {{ $team | quote }}
+              dbConsoleUrl: {{ if ne $database "none" }}{{ printf "https://%s-dev-db.%s" $team $domain | quote }}{{ else }}""{{ end }}
     # ------------------------------------------------------------------------
     - step: ready
       functionRef:

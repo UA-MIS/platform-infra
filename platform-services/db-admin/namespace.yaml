@@ -1,0 +1,21 @@
+# db-admin namespace (tenant-db-access design §5) — a SECOND, platform-owned Adminer
+# instance giving the platform operator (UA-MIS:labmx) visibility into every
+# NON-tenant platform DB (Backstage/Harbor's CNPG roles, the MariaDB root +
+# crossplane-provisioner logins) — the SAME tool as the tenant consoles, but reading
+# a DIFFERENT (broader) Vault tree (secret/platform/db/*, not tenants/<team>/*) and
+# gated to a DISJOINT group (labmx, not any UA-MIS:<team>). Deliberately its OWN
+# namespace (not db-tier, not a tenant namespace) so its RBAC/quota/PSA posture is
+# reviewed independently of the DB tier's own operator-only Applications.
+#
+# Ships via the platform-services directory generator (platform-services-appset) ->
+# Application `platform-svc-db-admin`.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: db-admin
+  labels:
+    platform.capstone/component: platform
+    goldilocks.fairwinds.com/enabled: "true"
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
