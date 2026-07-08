@@ -1243,8 +1243,23 @@ spec:
               providerConfigRef:
                 name: db-tier-mariadb
             ---
-            # ALL privileges on the tenant's own schema (the team owns its DB). user +
-            # database reference the DB-level names (the external-names pinned above).
+            # Explicit privilege list on the tenant's own schema (the team owns its
+            # DB) -- NOT literal `ALL`. crossplane-provisioner (the db-tier-mariadb
+            # ProviderConfig admin, in-cluster MariaDB) holds a broad-but-SPECIFIC
+            # privilege set WITH GRANT OPTION, not MariaDB's literal ALL PRIVILEGES
+            # bundle (confirmed live: SHOW GRANTS FOR 'crossplane-provisioner'@'%' --
+            # see docs/db-tier-runbook.md). MariaDB 1044s ("Access denied ... to
+            # database") on `GRANT ALL` from a grantor that doesn't itself hold ALL
+            # PRIVILEGES -- you can't grant what you don't hold. swami's 3 existing
+            # per-env Grants happen to be Synced=True only because they were created
+            # 2026-07-03, BEFORE #289 repointed this ProviderConfig at the current
+            # restricted-list admin; any NEW tenant onboarded now (or a re-provision)
+            # would hit the 1044 with `ALL`. This explicit list mirrors
+            # crossplane-provisioner's held set 1:1 (database-scoped subset -- CREATE
+            # USER is global-only in MariaDB and cannot appear in a database-level
+            # GRANT, so it is excluded even though the grantor holds it) and is
+            # functionally equivalent to ALL at the db.* level for an app.
+            # user + database reference the DB-level names (the external-names above).
             apiVersion: mysql.sql.crossplane.io/v1alpha1
             kind: Grant
             metadata:
@@ -1255,7 +1270,24 @@ spec:
                 user: {{ $dbName | quote }}
                 database: {{ $dbName | quote }}
                 privileges:
-                  - ALL
+                  - SELECT
+                  - INSERT
+                  - UPDATE
+                  - DELETE
+                  - CREATE
+                  - DROP
+                  - REFERENCES
+                  - INDEX
+                  - ALTER
+                  - CREATE TEMPORARY TABLES
+                  - LOCK TABLES
+                  - EXECUTE
+                  - CREATE VIEW
+                  - SHOW VIEW
+                  - CREATE ROUTINE
+                  - ALTER ROUTINE
+                  - EVENT
+                  - TRIGGER
               providerConfigRef:
                 name: db-tier-mariadb
             ---
