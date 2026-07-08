@@ -14,6 +14,18 @@
 # (/srv/plugins-available/) is untouched by this mount, so shadowing the (empty)
 # target dir with an emptyDir is safe. fsGroup 1000 below makes the kubelet-owned
 # emptyDir group-writable by UID 1000's supplemental group.
+#
+# UA-MIS THEME: Adminer's own css() helper (index.php) does file_exists("adminer.css")
+# relative to its cwd (/srv) and links it in if present — no ADMINER_THEME env/
+# entrypoint cooperation needed. A single-file ConfigMap subPath mount straight to
+# /srv/adminer.css sidesteps the SAME /srv root:root 0755 permission wall as the
+# adminer-plugins fix above WITHOUT needing a writable /srv: the kubelet creates the
+# bind mount as root at container-create time, before the UID-1000 process ever
+# starts, so the parent dir's permissions are irrelevant (verified: this is a
+# different mechanism than entrypoint.sh's in-container `cp`, which IS blocked by
+# them). ADMINER_THEME (image-bundled /srv/designs/<name>/) was considered and
+# rejected — none of the bundled themes are UA-MIS branded, and using it would still
+# hit the same in-container-cp permission wall.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -93,8 +105,15 @@ spec:
           volumeMounts:
             - name: adminer-plugins
               mountPath: /srv/adminer-plugins
+            - name: adminer-css
+              mountPath: /srv/adminer.css
+              subPath: adminer.css
+              readOnly: true
       volumes:
         - name: adminer-plugins
           emptyDir: {}
+        - name: adminer-css
+          configMap:
+            name: db-admin-adminer-css
       securityContext:
         fsGroup: 1000
