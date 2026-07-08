@@ -16,10 +16,28 @@
 # only via the in-cluster Service, boundary enforced here, not by the DB login's
 # host string.
 #
-# Cilium enforces standard `networking.k8s.io/v1` NetworkPolicy (no CNP needed —
-# this doesn't touch entity-based apiserver matching or the flannel->Cilium CIDR
-# gap that apiserver-cnp.yaml/vault-cnp.yaml work around). CNP and k8s
-# NetworkPolicy on the same endpoint/direction are ADDITIVE (OR).
+# CORRECTION (live incident, 2026-07-07/08 — see the CiliumNetworkPolicy at the
+# bottom of this file): the claim above ("no CNP needed") was WRONG for two of
+# this tier's egress paths, for exactly the reason apiserver-cnp.yaml/
+# vault-cnp.yaml already document elsewhere: Cilium identifies in-cluster
+# traffic by IDENTITY (`reserved:kube-apiserver`, per-pod identities), NOT by
+# IP, so a plain k8s NetworkPolicy `ipBlock` CIDR rule does NOT match it, even
+# though the CIDR numerically covers the destination:
+#   - CNPG's initdb reaches the apiserver VIP at 10.96.0.1:443 — covered
+#     numerically by the `allow-egress-scoped` service-CIDR ipBlock below, but
+#     NOT matched, so it i/o-timed-out until fixed.
+#   - Galera group-communication (WSREP) between db-tier pods on TCP
+#     4567/4568/4444 + UDP 4567 — covered numerically by that same rule's pod-
+#     CIDR ipBlock, but NOT matched either (node-1's WSREP gcomm-timeout
+#     crashloop). The INGRESS side already works (the intra-ns rule below uses
+#     a label `podSelector`, which Cilium resolves to per-pod identity, not
+#     CIDR) — only the EGRESS side needed the identity-based fix.
+# Both are fixed by the `allow-egress-apiserver` CiliumNetworkPolicy at the
+# bottom of this file, using `toEntities: [kube-apiserver, cluster]` — the same
+# two-entity idiom apiserver-cnp.yaml/vault-cnp.yaml use for the identical
+# class of gap in argocd/dex/harbor/vault. `cluster` matches ALL in-cluster
+# endpoints, so it covers Galera's peer ports without enumerating them.
+# CNP and k8s NetworkPolicy on the same endpoint/direction are ADDITIVE (OR).
 #
 # Talos/Cilium CIDRs (see hardening/netpol-controlplane/*-netpol.yaml headers):
 # pods 10.244.0.0/16, services 10.96.0.0/12, nodes 10.237.168.0/22
@@ -137,3 +155,36 @@ spec:
       ports:
         - protocol: TCP
           port: 6443
+---
+# Cilium intra-cluster + apiserver egress allow (CiliumNetworkPolicy) — db-tier.
+# Companion to hardening/netpol-controlplane/apiserver-cnp.yaml / vault-cnp.yaml
+# (same fix, same two-entity idiom); see this file's header CORRECTION note for
+# the full incident writeup. Codifies two CiliumNetworkPolicies that were
+# applied LIVE by hand (kubectl, context admin@capstone) during the overnight
+# bring-up on 2026-07-07/08 and are being made GitOps-permanent here:
+#   `allow-db-tier-apiserver-dns` (toEntities: kube-apiserver + kube-dns:53)
+#   `allow-db-tier-galera`        (intra-db-tier TCP 4567/4568/4444 + UDP 4567)
+# Both are subsumed by the single `toEntities: [kube-apiserver, cluster]` rule
+# below — `cluster` is a superset of the exact Galera ports (it matches ALL
+# in-cluster endpoints on ALL ports), so one CNP replaces both hotfixes without
+# hardcoding the WSREP port list. DNS is NOT repeated here — it's already
+# covered by the `allow-egress-scoped` k8s NetworkPolicy above.
+#
+# Safe to ship through the normal AUTOMATED platform-services-appset sync
+# (unlike hardening/netpol-controlplane's MANUAL-SYNC gate): this CNP is
+# purely additive (CNP + k8s NetworkPolicy on the same endpoint/direction are
+# OR'd, never AND'd), so it can only ADD allowed egress — it cannot narrow or
+# break the default-deny / existing scoped-allow that's already live.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-egress-apiserver
+  namespace: db-tier
+  labels:
+    platform.capstone/component: platform
+spec:
+  endpointSelector: {}
+  egress:
+    - toEntities:
+        - kube-apiserver
+        - cluster

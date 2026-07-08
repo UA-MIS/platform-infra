@@ -1,0 +1,79 @@
+# CiliumNetworkPolicy — minio intra-namespace provisioning (dr-backup live
+# hotfix, now codified). Companion to
+# hardening/netpol-controlplane/minio-netpol.yaml, which owns minio's
+# default-deny + broad k8s NetworkPolicy allows (velero, monitoring/Thanos,
+# intra-ns on :9000, kubelet probes) — that file is MANUAL-SYNC (see its own
+# header) because minio was already LIVE with real backup traffic when it
+# shipped, so a fresh default-deny rollout needs a deliberate watched sync.
+#
+# WHY A SEPARATE FILE, HERE, INSTEAD OF EDITING THAT FILE:
+# this CNP only ADDS allowed traffic (CNP + k8s NetworkPolicy on the same
+# endpoint/direction are additive/OR'd, same reasoning
+# platform-services/db-tier/netpol.yaml's own CNP addition uses) — it can
+# never break the already-Synced+Healthy default-deny or narrow any existing
+# allow. That makes it safe to ship through the normal AUTOMATED
+# platform-services-appset sync, rather than waiting on the next manual
+# `argocd app sync platform-netpol-controlplane`.
+#
+# INCIDENT THIS CODIFIES: the minio-provision Job (minio-provision-job.yaml)
+# i/o-timed-out reaching the MinIO server from ITS OWN namespace during the
+# overnight bring-up, even though hardening/netpol-controlplane/
+# minio-netpol.yaml already has an intra-ns ingress allow — that existing rule
+# only covers TCP/9000 (the S3 API), not TCP/9001 (console). Applied live by
+# hand as CiliumNetworkPolicy `allow-minio-intra-ns-provision` (kubectl,
+# context admin@capstone, 2026-07-08); this manifest reproduces it verbatim
+# so a fresh cluster / DR-restore doesn't regress.
+#
+# Deliberately scoped to intra-minio-namespace only (fromEndpoints/toEndpoints
+# matchLabels namespace=minio) — NOT namespace-wide `cluster` like the
+# trusted-control-plane CNPs (argocd/dex/harbor/vault/db-tier): MinIO here
+# holds a copy of every namespace's Secrets via Velero backups (see
+# hardening/netpol-controlplane/minio-netpol.yaml's "crown jewels" note), so
+# its allow-list stays as narrow as the live traffic actually requires.
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-minio-intra-ns-provision
+  namespace: minio
+  labels:
+    platform.capstone/component: platform
+spec:
+  endpointSelector: {}
+  ingress:
+    # Intra-namespace: the minio-provision Job -> the MinIO server, on both
+    # the S3 API (:9000) and console (:9001) ports.
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: minio
+      toPorts:
+        - ports:
+            - port: "9000"
+              protocol: TCP
+            - port: "9001"
+              protocol: TCP
+  egress:
+    # Intra-namespace, mirrored (the provision Job's outbound side).
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: minio
+      toPorts:
+        - ports:
+            - port: "9000"
+              protocol: TCP
+            - port: "9001"
+              protocol: TCP
+    # DNS (redundant with hardening/netpol-controlplane/minio-netpol.yaml's
+    # own DNS egress rule — kept to reproduce the live hotfix verbatim and so
+    # this file is self-sufficient even if the hardening netpol is ever rolled
+    # back).
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s:k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP

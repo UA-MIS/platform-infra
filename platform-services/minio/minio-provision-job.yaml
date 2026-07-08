@@ -17,6 +17,18 @@
 # `mc admin user add` and `mc admin policy attach` are both convERGENT (re-running
 # with the same access key / policy name is a no-op-equivalent), matching the
 # harbor-oidc-config Job's idempotency contract.
+#
+# THANOS USER (added to close a real gap found live 2026-07-07/08): this Job
+# already created the `dr-backup` bucket for Thanos (below) but never created
+# the matching IAM user — platform-services/monitoring/thanos.yaml's
+# `thanos-objstore-config` secret authenticates as access_key `thanos`, and
+# that MinIO user was created BY HAND (`mc admin user add`, live) during the
+# overnight bring-up because this script never did it. That is now fixed here,
+# mirroring the velero user exactly (same `mc admin user add` / `policy
+# create` / `policy attach` shape, least-privilege to ONLY the `dr-backup`
+# bucket). See sealedsecret-thanos-user.yaml's header for the important
+# secret_key COUPLING to thanos.yaml's `thanos-objstore-config` — they must be
+# rotated together, never independently.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -50,8 +62,11 @@ spec:
           image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
           imagePullPolicy: IfNotPresent
           resources:
-            requests: { cpu: 10m, memory: 32Mi }
-            limits: { cpu: 100m, memory: 64Mi }
+            # Bumped 32Mi/64Mi -> 128Mi/256Mi (live incident, 2026-07-07/08):
+            # `mc` OOMKilled at 64Mi partway through the provisioning script
+            # (after creating the bucket, before finishing user/policy setup).
+            requests: { cpu: 10m, memory: 128Mi }
+            limits: { cpu: 100m, memory: 256Mi }
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -79,6 +94,16 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: minio-velero-user
+                  key: SECRET_KEY
+            - name: THANOS_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-thanos-user
+                  key: ACCESS_KEY
+            - name: THANOS_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-thanos-user
                   key: SECRET_KEY
           volumeMounts:
             - name: tmp
@@ -124,6 +149,28 @@ spec:
               echo "==> ensuring the scoped 'velero' IAM user exists + is attached ..."
               mc admin user add local "$VELERO_ACCESS_KEY" "$VELERO_SECRET_KEY"
               mc admin policy attach local velero-rw --user="$VELERO_ACCESS_KEY"
+
+              echo "==> writing least-privilege policy (thanos-rw: only the dr-backup bucket) ..."
+              cat > /tmp/thanos-rw-policy.json <<'EOF'
+              {
+                "Version": "2012-10-17",
+                "Statement": [
+                  {
+                    "Effect": "Allow",
+                    "Action": ["s3:*"],
+                    "Resource": [
+                      "arn:aws:s3:::dr-backup",
+                      "arn:aws:s3:::dr-backup/*"
+                    ]
+                  }
+                ]
+              }
+              EOF
+              mc admin policy create local thanos-rw /tmp/thanos-rw-policy.json
+
+              echo "==> ensuring the scoped 'thanos' IAM user exists + is attached ..."
+              mc admin user add local "$THANOS_ACCESS_KEY" "$THANOS_SECRET_KEY"
+              mc admin policy attach local thanos-rw --user="$THANOS_ACCESS_KEY"
 
               echo "==> done. buckets:"; mc ls local
       volumes:
