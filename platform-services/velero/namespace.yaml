@@ -7,6 +7,13 @@
 #
 # Recommend-only (Off) Goldilocks label only — Velero backup/restore runs are
 # periodic batch jobs, not a service that should ever be auto-evicted mid-backup.
+#
+# PodSecurity: the node-agent DaemonSet legitimately needs the `host-pods` and
+# `host-plugins` hostPath volumes to perform filesystem-level PV backups (this
+# is Velero's documented node-agent requirement, not a workaround). Without an
+# explicit `enforce: privileged` label the namespace defaults to `baseline`,
+# which forbids hostPath and makes the DaemonSet fail to create pods
+# (FailedCreate), breaking all PV backups.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -14,3 +21,6 @@ metadata:
   labels:
     platform.capstone/component: platform
     goldilocks.fairwinds.com/enabled: "true"
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged
