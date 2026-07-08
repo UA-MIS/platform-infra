@@ -1,0 +1,71 @@
+# Default-deny + scoped-allow for db-admin (same posture as every other new platform
+# namespace in this fleet — cloudflared, dex, db-tier — NetworkPolicy is opt-in
+# per-namespace here, not a cluster-wide implicit deny, so a brand-new namespace gets
+# its own explicit policy).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: zz-default-deny
+  namespace: db-admin
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# Ingress: Traefik (kube-system) only — this console is never reached any other way.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-traefik
+  namespace: db-admin
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+---
+# Egress: DNS + db-tier (both engine ports — this console reads both CNPG and
+# MariaDB). Companion admit rule for db-tier's own ingress netpol
+# (platform-services/db-tier/netpol.yaml's allow-ingress-db-admin — db-admin does NOT
+# carry `platform.capstone/team`, so it is NOT covered by the tenant-namespaces rule
+# and needs its own explicit by-name admit, same pattern as the existing `backstage`
+# rule there).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-dns-and-db-tier
+  namespace: db-admin
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: db-tier
+      ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 3306

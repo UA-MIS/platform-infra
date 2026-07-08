@@ -1,0 +1,19 @@
+# db-console-auth (tenant-db-access design) — the shared oauth2-proxy that gates
+# every DB console. Managed by the platform-services-appset (kustomize directory
+# generator over platform-services/*; this dir produces app
+# `platform-svc-db-console-auth`).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - netpol.yaml
+  - sealedsecret.yaml
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false

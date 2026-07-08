@@ -1,0 +1,72 @@
+# Default-deny + scoped-allow for db-console-auth (same posture as every other new
+# platform namespace in this fleet — NetworkPolicy is opt-in per-namespace, not a
+# cluster-wide implicit deny).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: zz-default-deny
+  namespace: db-console-auth
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# Ingress: Traefik (kube-system) — both the Ingress (login/callback UI) AND every
+# per-(team,env)/db-admin Middleware's forwardAuth sub-request arrive via Traefik
+# (Traefik makes the forwardAuth call itself, server-side; the browser never talks to
+# oauth2-proxy's Service directly except through Traefik).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-traefik
+  namespace: db-console-auth
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+---
+# Egress: DNS + external HTTPS (:443 only). oauth2-proxy talks to Dex's OIDC
+# discovery/token/userinfo endpoints at id.capstone.uamishub.com — per
+# platform-services/coredns-custom/coredns-custom.yaml, that in-cluster split-horizon
+# rewrite is a documented NO-OP on Talos today, so this traffic actually egresses via
+# public DNS to Cloudflare's edge and back through the tunnel (same path
+# ArgoCD/Backstage's own OIDC discovery already takes). Scoped to :443 only — same
+# "external egress is :443-only" posture already used for the ARC runners
+# (platform-services/arc/, SEC-014 port-scope), not a blanket internet-egress allow.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-dns-and-https
+  namespace: db-console-auth
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
