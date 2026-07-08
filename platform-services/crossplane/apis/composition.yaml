@@ -1338,9 +1338,10 @@ spec:
                    covers this pod). status.dbConsoleUrl (bottom of this template)
                    reflects the same <team>-db host.
 
-                   Console user: `<teamDb>_console`, granted the SAME privilege level the
-                   per-env app users/roles already hold, on EVERY per-env schema (see the
-                   Grant loop below). Password Vault leaf: tenants/<team>/console/database
+                   Console user: `<teamDb>_console`, granted an EXPLICIT privilege list
+                   (functionally equivalent to the per-env app users' ALL, NOT the
+                   literal keyword -- see the Grant loop below for why) on EVERY per-env
+                   schema. Password Vault leaf: tenants/<team>/console/database
                    (SAME shape/properties as the per-env tenants/<team>/<env>/database
                    leaves, just a `console` slot instead of dev/staging/prod, so it reuses
                    the SAME ExternalSecret/PushSecret pattern verbatim).
@@ -1367,10 +1368,24 @@ spec:
                 name: db-tier-mariadb
             {{- range $e := $envs }}
             ---
-            # ALL privileges on EVERY per-env schema -- the same grant the per-env app
-            # user for that env already holds (mirrors the Grant in the per-env loop
-            # above), just issued to the shared console user too so Adminer's database
-            # dropdown enumerates all three.
+            # Explicit privilege list on EVERY per-env schema -- NOT literal `ALL`.
+            # crossplane-provisioner (the db-tier-mariadb ProviderConfig admin) holds a
+            # broad-but-SPECIFIC privilege set WITH GRANT OPTION, not MariaDB's literal
+            # ALL PRIVILEGES bundle (confirmed live: SHOW GRANTS FOR
+            # 'crossplane-provisioner'@'%' -- see docs/db-tier-runbook.md). MariaDB 1044s
+            # ("Access denied ... to database") on `GRANT ALL` from a grantor that
+            # doesn't itself hold ALL PRIVILEGES -- you can't grant what you don't hold.
+            # (The per-env app-user Grant above still says `ALL` and is Synced=True, but
+            # only because those 3 Grants were created 2026-07-03, before #289 repointed
+            # this ProviderConfig at the current restricted-list admin; they're stable
+            # existing state, not proof `ALL` still works for a *new* Grant today -- a
+            # new tenant's per-env Grant would hit this same 1044. Out of scope here;
+            # tracked as a follow-up.) This list mirrors crossplane-provisioner's held
+            # set 1:1 (database-scoped subset -- CREATE USER is global-only in MariaDB
+            # and cannot appear in a database-level GRANT, so it is intentionally
+            # excluded even though the grantor holds it). It is also correct
+            # least-privilege for a console/admin-tool user, so this is not merely a
+            # workaround.
             apiVersion: mysql.sql.crossplane.io/v1alpha1
             kind: Grant
             metadata:
@@ -1381,7 +1396,24 @@ spec:
                 user: {{ $consoleUser | quote }}
                 database: {{ printf "%s_%s" $teamDb $e.name | quote }}
                 privileges:
-                  - ALL
+                  - SELECT
+                  - INSERT
+                  - UPDATE
+                  - DELETE
+                  - CREATE
+                  - DROP
+                  - REFERENCES
+                  - INDEX
+                  - ALTER
+                  - CREATE TEMPORARY TABLES
+                  - LOCK TABLES
+                  - EXECUTE
+                  - CREATE VIEW
+                  - SHOW VIEW
+                  - CREATE ROUTINE
+                  - ALTER ROUTINE
+                  - EVENT
+                  - TRIGGER
               providerConfigRef:
                 name: db-tier-mariadb
             {{- end }}
