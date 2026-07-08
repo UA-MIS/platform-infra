@@ -40,6 +40,42 @@ speculative scale-up. Scale further only if volume ever actually demands it.
   Gateway/Compactor stay ClusterIP-only; nothing outside the cluster needs to reach
   them.
 
+## UA-MIS UI theme (Grafana)
+
+Grafana carries the same UA-MIS crimson (`#9E1B32`) identity already applied to
+ArgoCD (`platform-services/argocd-config/`), scoped to what's achievable on Grafana
+**OSS** (no Enterprise license): real white-labeling — `app_title`/`login_logo`/
+`menu_logo`/`fav_icon` under `grafana.ini`'s `[white_labeling]` — is Enterprise-gated
+and silently ignored on OSS, so it is NOT used here. Two things are applied instead,
+via `grafana:` values in `applicationsets/kube-prometheus-stack-app.yaml`:
+
+- `"grafana.ini": { users: { default_theme: dark } }` — a genuine OSS `[users]` key,
+  matching the charcoal-dark sidebar aesthetic already on ArgoCD.
+- `extraConfigmapMounts` overlays the two UNHASHED static icon files Grafana's OSS
+  `index.html` template reads directly off disk — `public/build/img/fav32.png` and
+  `public/build/img/apple-touch-icon.png` (verified against `grafana/grafana`
+  `pkg/api/index.go`, where `FavIcon`/`AppleTouchIcon` default to exactly those
+  paths absent an Enterprise license). The UA-MIS crimson PNGs are generated from
+  the committed `.svg` sources in `grafana-theme/` and packed into the
+  `grafana-ua-mis-theme-cm` ConfigMap by this dir's `kustomization.yaml` (same
+  stable-name pattern as ArgoCD's `argocd-ui-theme-cm`) — a pure file overlay, so a
+  future chart bump that moves the asset path just makes the mount a no-op rather
+  than breaking Grafana.
+
+**Not themed (out of scope for this PR, needs a bigger change):**
+- **Harbor** has no Helm-value or REST-API branding hook — its look-and-feel
+  (`setting.json`: header color, login background, product name/logo) is a
+  **build-time** Angular asset baked into the `goharbor/harbor-portal` image
+  (`goharbor.io/docs/.../customize-look-feel`: "you need to rebuild your product to
+  apply the changes"). Theming it means building + hosting a custom portal image, a
+  code-level change tracked separately.
+- **Goldilocks** and **OpenCost** dashboards ship with no ingress (cluster-internal,
+  port-forward only) and neither chart exposes a branding/logo/CSS value — nothing
+  to hook here.
+- **ntfy**'s web app (`server.yml`) has no branding/theme config option either.
+- **Backstage** already excluded per its own theme being application code, not
+  config (see PR description) — unaffected by this change.
+
 ## Alerts (`alerts.yaml`)
 
 Nine failure modes this platform has actually hit, routed to Alertmanager (now to

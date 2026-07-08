@@ -251,6 +251,43 @@ spec:
             existingSecret: grafana-admin
             userKey: admin-user
             passwordKey: admin-password
+          # --- University of Alabama MIS UI theme (THEME, matching the ArgoCD pattern
+          #     in platform-services/argocd-config/) ---
+          # Grafana OSS gates real white-labeling (app_title/login_logo/menu_logo/
+          # fav_icon under grafana.ini's [white_labeling] section) behind an Enterprise
+          # license — those ini keys are silently ignored without one (confirmed via
+          # the Grafana docs: "Enterprise only"). Two things ARE safe + free on OSS:
+          #   1. default_theme: dark — a genuine [users] grafana.ini key, no license
+          #      gate. Matches the charcoal-dark aesthetic already applied to ArgoCD's
+          #      sidebar.
+          #   2. Overlaying the two UNHASHED static icon files Grafana's OSS index.html
+          #      template references directly off disk — `public/build/img/fav32.png`
+          #      and `public/build/img/apple-touch-icon.png` (verified against
+          #      grafana/grafana `pkg/api/index.go`, where FavIcon/AppleTouchIcon
+          #      default to exactly those paths when no Enterprise branding is
+          #      configured, and `public/views/index.html`, which references them via
+          #      plain `<link>` tags). This is a file overlay, NOT a grafana.ini
+          #      setting, so it needs no license and cannot fail Grafana's startup —
+          #      worst case (an upstream chart bump moves the asset path) the mount is
+          #      simply a no-op and Grafana falls back to its own default icon.
+          # The ConfigMap (grafana-ua-mis-theme-cm) is generated from the committed
+          # UA-MIS crimson PNGs in platform-services/monitoring/grafana-theme/ by the
+          # platform-svc-monitoring app (platform-services/monitoring/kustomization.yaml)
+          # — same namespace (monitoring), referenced here by its STABLE name.
+          "grafana.ini":
+            users:
+              default_theme: dark
+          extraConfigmapMounts:
+            - name: ua-mis-favicon
+              configMap: grafana-ua-mis-theme-cm
+              mountPath: /usr/share/grafana/public/build/img/fav32.png
+              subPath: fav32.png
+              readOnly: true
+            - name: ua-mis-apple-touch-icon
+              configMap: grafana-ua-mis-theme-cm
+              mountPath: /usr/share/grafana/public/build/img/apple-touch-icon.png
+              subPath: apple-touch-icon.png
+              readOnly: true
           persistence:
             enabled: true
             storageClassName: ceph-block
