@@ -142,3 +142,12 @@ spec:
                 harborProject:
                   type: string
                   description: The created Harbor project name (set by the Composition).
+                dbConsoleUrl:
+                  type: string
+                  description: >-
+                    The team's dev-env DB console URL (Adminer, SSO-gated), set by the
+                    Composition ONLY when spec.database != "none" (tenant-db-access
+                    design). Operator-facing visibility (`kubectl get capstonetenant
+                    <name> -o jsonpath='{.status.dbConsoleUrl}'`) — the student-facing
+                    channel is the scaffolder-emitted catalog-info.yaml `links:` entry,
+                    not this field. Absent (empty string) for database == "none".
