@@ -6,10 +6,16 @@ app:
   packages: all
 
   extensions:
-    # Configure the catalog index page to be the root page, this is normally mounted on /catalog
-    - page:catalog:
+    # The Process homepage (packages/app/src/modules/home) is the root page — a how-to
+    # landing for the golden path, not the catalog. Catalog keeps its normal /catalog path.
+    - page:home:
         config:
           path: /
+    # UA-MIS crimson/charcoal theme (packages/app/src/theme) is the only theme on offer —
+    # disable the stock Backstage light/dark themes so ours is the (only, hence default)
+    # choice for each variant.
+    - theme:app/light: false
+    - theme:app/dark: false
 
 organization:
   name: UA-MIS
