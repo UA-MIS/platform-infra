@@ -5,9 +5,16 @@
 # chart itself is a SEPARATE Application (deploy method A, like Harbor) so it does
 # NOT render through this kustomize dir.
 #
-#   backstage-process-secrets : OIDC client id/secret + backend signing key + DB
-#                             password (env-injected into the custom Backstage image)
-#   backstage-postgresql    : the bundled Postgres credentials (Bitnami key names)
+#   backstage-process-secrets : OIDC client id/secret + backend signing key + legacy
+#                             (now superseded) DB password (env-injected into the
+#                             custom Backstage image)
+#   backstage-postgresql    : the bundled Postgres credentials (Bitnami key names) —
+#                             UNUSED since the CNPG cutover (kept for rollback; the
+#                             bundled subchart is postgresql.enabled:false in
+#                             applicationsets/backstage-process-app.yaml)
+#   backstage-cnpg-db-credentials : ExternalSecret, the LIVE DB password source since
+#                             the CNPG cutover (docs/operator/in-cluster-db-tier-
+#                             runbook.md §4a) — reads Vault platform/db/cnpg/backstage
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
@@ -16,6 +23,7 @@ resources:
   - sealedsecret-oidc.yaml
   - sealedsecret-postgresql.yaml
   - sealedsecret-harbor-pull.yaml
+  - externalsecret-cnpg-db.yaml
 labels:
   - pairs:
       platform.capstone/component: platform

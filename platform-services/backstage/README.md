@@ -11,8 +11,11 @@ app repo pre-wired to the platform contract. Human SSO is via the **shared Dex b
 - Chart: `backstage` **2.8.2** (OCI: `oci://ghcr.io/backstage/charts`), pinned,
   Helm-source Application `applicationsets/backstage-process-app.yaml` (deploy method A —
   same precedent as Harbor/ARC/Rook/metrics-server, D-022/D-028).
-- Storage: bundled Postgres (Bitnami subchart) on **`ceph-block`** (Phase-4 Rook RBD,
-  replica-3, the cluster default SC). External DB (`ua-mis-db-1` PG17) is a later optimization.
+- Storage: in-cluster CNPG (`capstone-pg`, ns `db-tier`, role+db `backstage`,
+  `pluginDivisionMode: schema`) — cut over from the bundled Postgres (Bitnami)
+  subchart per docs/operator/in-cluster-db-tier-runbook.md §4a. The bundled
+  subchart is `postgresql.enabled: false` in the Application but left in the
+  values for rollback; its PVC/data on `ceph-block` are untouched.
 - Prereqs (namespace + SealedSecrets) sync via the platform-services-appset (this dir,
   `platform-svc-backstage`); the chart installs into the `backstage` namespace as a
   SEPARATE Application — same split as Harbor.
