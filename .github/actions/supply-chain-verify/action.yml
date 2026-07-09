@@ -61,9 +61,15 @@
 #   - the calling JOB must grant `permissions: id-token: write` (step 3 above).
 #   - the Harbor push-robot credential must already be mounted at
 #     `docker-config-dir`/config.json (the arc-hook-template Option-C injection)
-#     and that robot must carry `{"resource":"scan","action":"read"}` in
-#     addition to repository pull/push (Makefile `harbor-push-robot` target;
-#     already-onboarded teams must re-mint — docs/operator/harbor.md).
+#     and that robot must carry `{"resource":"artifact","action":"read"}` (step 4's
+#     with_scan_overview poll) and `{"resource":"artifact-addition","action":"read"}`
+#     (step 4's additions/vulnerabilities read) in addition to repository pull/push
+#     (Makefile `harbor-push-robot` target — see docs/operator/harbor.md for how to
+#     grant this to an already-onboarded team's robot WITHOUT rotating its secret).
+#     NOTE: `{"resource":"scan","action":"read"}` does NOT satisfy either call —
+#     verified against goharbor/harbor's RBAC source (GetArtifact checks
+#     ResourceArtifact, GetVulnerabilitiesAddition checks ResourceArtifactAddition);
+#     an earlier revision of this comment/the Makefile target got this wrong.
 #   - only call this AFTER a successful PUSH (skip entirely for --no-push /
 #     build-only PR validation — there is nothing in the registry to verify).
 # ============================================================================
