@@ -265,6 +265,25 @@ spec:
                     initialDelay: {seconds: 30}
                     frequency: {hours: 1}
                     timeout: {minutes: 10}
+                # Tenant Component discovery — MIRROR of app-config.production.yaml's
+                # catalog.providers.github block (same "chart loads ONLY this overlay" seam
+                # as auth/catalog/integrations above). Scans every UA-MIS repo for a root
+                # catalog-info.yaml and registers/refreshes it as a Component Location on a
+                # schedule — this is what (re)populates the Secrets page (/my-projects),
+                # which lists Components the signed-in user owns and is EMPTY without it.
+                # Self-heals: unlike the scaffolder's one-off catalog:register step, a
+                # catalog-DB rebuild (e.g. the CNPG migration) can't silently drop these
+                # again. Auth = the SAME GitHub App as githubOrg (integrations.github below).
+                github:
+                  tenants:
+                    organization: 'UA-MIS'
+                    catalogPath: '/catalog-info.yaml'
+                    filters:
+                      branch: 'main'
+                    schedule:
+                      initialDelay: {seconds: 45}
+                      frequency: {hours: 1}
+                      timeout: {minutes: 10}
             # ── Permission framework (M2: THE SPINE) ─────────────────────────────────
             # Turn enforcement ON so the custom CapstoneTeamPermissionPolicy filters the
             # catalog per-team. WITHOUT this the framework no-ops and serves everything

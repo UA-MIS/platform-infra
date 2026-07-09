@@ -48,6 +48,15 @@ backend.add(
 // app-config. This is what populates the ownership data the permission policy filters on.
 backend.add(import('@backstage/plugin-catalog-backend-module-github-org'));
 
+// Tenant Component discovery — scans every UA-MIS repo for a root catalog-info.yaml and
+// registers/refreshes it as a catalog Location on a schedule, driven by
+// catalog.providers.github in app-config. This is what (re)populates the Component
+// entities the Secrets page (/my-projects) lists per owner — a one-off `catalog:register`
+// at onboarding time does NOT survive a catalog DB rebuild; this scheduled provider
+// self-heals instead. Distinct from the githubOrg module above (that one is Users/Groups
+// only, not Components).
+backend.add(import('@backstage/plugin-catalog-backend-module-github'));
+
 // See https://backstage.io/docs/features/software-catalog/configuration#subscribing-to-catalog-errors
 backend.add(import('@backstage/plugin-catalog-backend-module-logs'));
 

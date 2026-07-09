@@ -103,6 +103,26 @@ catalog:
         initialDelay: { seconds: 30 }
         frequency: { hours: 1 }
         timeout: { minutes: 10 }
+    # GitHub Component discovery: scans every repo in the UA-MIS org for a root
+    # catalog-info.yaml (the scaffolder templates all ship one at repo root, e.g. this
+    # repo's own ./catalog-info.yaml and every tenant repo's, github.com/UA-MIS/<appName>)
+    # and registers/refreshes each as a catalog Location on a schedule. This is the DURABLE
+    # fix for Component entities silently disappearing (they were previously registered
+    # once via the scaffolder's catalog:register step and were lost outright in the CNPG
+    # catalog-DB re-ingestion — a scheduled discovery provider self-heals instead of relying
+    # on a one-off write). Auth is the SAME GitHub App as githubOrg above (integrations.github
+    # — Contents:Read is already granted for the scaffolder's repo-create/commit flows, so no
+    # new App permission is required). filters.branch pins to the templates' default branch.
+    github:
+      tenants:
+        organization: 'UA-MIS'
+        catalogPath: '/catalog-info.yaml'
+        filters:
+          branch: 'main'
+        schedule:
+          initialDelay: { seconds: 45 }
+          frequency: { hours: 1 }
+          timeout: { minutes: 10 }
 
 # GitHub integration: authenticates as the UA-MIS GitHub App (ua-mis-backstage). M2 uses it
 # for org ingestion (Organization: Members = Read); M4's Scaffolder reuses it for repo
