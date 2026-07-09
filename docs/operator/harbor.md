@@ -122,12 +122,29 @@ registry-side "prevent vulnerable images from running" setting above; it is a
 second, independent check gating whether the pipeline *deploys* the image, not
 whether Harbor lets it be *pulled*.
 
-That poll needs the push-robot to hold `{"resource":"scan","action":"read"}` in
-addition to its existing `repository` pull/push — added to the
-`make harbor-push-robot` target. **Every already-onboarded team's push robot
-must be re-minted** (`make harbor-push-robot NAME=<team> ... > harbor-push-sealed.yaml`,
-re-commit the refreshed SealedSecret) or its Trivy-gate step 403s with a
-clear error until then.
+That gate makes two Harbor API calls as the push-robot, each gated by its own
+RBAC resource (verified against goharbor/harbor's RBAC source, `rbac/const.go`
++ `server/v2.0/handler/artifact.go` — **not** `{"resource":"scan","action":"read"}`,
+which satisfies neither call and was an earlier, incorrect fix attempt):
+
+- `GET .../artifacts/<ref>?with_scan_overview=true` (the poll loop) needs
+  `{"resource":"artifact","action":"read"}`.
+- `GET .../artifacts/<ref>/additions/vulnerabilities` (the full finding list)
+  needs `{"resource":"artifact-addition","action":"read"}`.
+
+The `make harbor-push-robot` target grants both (plus `repository` read/list)
+in addition to the existing `repository` pull/push. **Every already-onboarded
+team's push robot needs the same grant**, but re-minting
+(`make harbor-push-robot NAME=<team> ...`) rotates the robot's secret, which
+breaks the already-sealed CI docker config until re-sealed too. To add the
+permission WITHOUT rotating the secret: `GET /api/v2.0/robots/{id}` for the
+team's push robot, append the four new access entries (repository read+list,
+artifact read+list, artifact-addition read) to its existing `permissions`
+under `kind:project,namespace:<team>`, then `PUT /api/v2.0/robots/{id}` with
+the full permissions array plus its unchanged `description`/`disable`/
+`duration`/`level`/`name` (Harbor 400s if `level` or `name` differ from the
+existing robot). Until either path runs, the Trivy-gate step 403s on the
+`additions/vulnerabilities` call with a clear error.
 
 ---
 
