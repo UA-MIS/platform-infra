@@ -26,6 +26,16 @@
 #
 # Each generated App is pinned to the TEAM AppProject (project: __TEAM__) — the
 # tenancy fence (§2.1) — so a team App can never escape its own project.
+#
+# NON-PROD SSO GATE (non-prod-sso-gate PR, STAGED — see that PR's body for the
+# runbook): templatePatch ALSO forwardAuth-gates this env's Ingress behind the
+# shared oauth2-proxy (any authenticated UA-MIS org member, ALL paths) whenever
+# env != prod — see the templatePatch block below. Reuses the SAME Middleware the
+# portal's /internal route uses (platform-services/portal/middleware.yaml,
+# `portal-internal-auth`, PR #302), not a new one — see
+# platform-services/db-console-auth/README.md "Consumers". This is `env`-gated,
+# NOT `gate`-gated — promotion.yaml's `gate` (auto/manual) controls sync policy
+# only and must not be conflated with auth.
 # ============================================================================
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
@@ -78,8 +88,28 @@ spec:
   # block => the production gate (§4). `auto` => prune+selfHeal.
   templatePatch: |
     {{- $gate := (index .environments .env).gate }}
-    {{- if eq $gate "auto" }}
+    {{- $nonProd := ne .env "prod" }}
     spec:
+    {{- if $nonProd }}
+      # non-prod-sso-gate PR: $nonProd (env != prod) is the ONLY gate here — prod
+      # stays public unconditionally, regardless of $gate above (sync policy, not
+      # auth). Strategic merge (not JSON6902), safe whether or not the app's own
+      # Ingress already carries other annotations.
+      source:
+        kustomize:
+          patches:
+            - target:
+                kind: Ingress
+                name: __APPNAME__
+              patch: |-
+                apiVersion: networking.k8s.io/v1
+                kind: Ingress
+                metadata:
+                  name: __APPNAME__
+                  annotations:
+                    traefik.ingress.kubernetes.io/router.middlewares: db-console-auth-oauth2-proxy-errors@kubernetescrd,portal-portal-internal-auth@kubernetescrd
+    {{- end }}
+    {{- if eq $gate "auto" }}
       syncPolicy:
         automated:
           prune: true
@@ -93,7 +123,6 @@ spec:
             factor: 2
             maxDuration: 3m
     {{- else }}
-    spec:
       syncPolicy:
         syncOptions:
           - CreateNamespace=false

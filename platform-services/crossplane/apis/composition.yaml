@@ -787,13 +787,41 @@ spec:
                           namespace: '{{ $team }}-{{ `{{.env}}` }}'
                     templatePatch: |
                       {{ `{{- $gate := (index .environments .env).gate }}` }}
-                      {{ `{{- if eq $gate "auto" }}` }}
+                      {{ `{{- $nonProd := ne .env "prod" }}` }}
                       spec:
+                      {{ `{{- if $nonProd }}` }}
+                        # non-prod-sso-gate PR (STAGED — see that PR's body for the
+                        # runbook): forwardAuth-gate this env's Ingress behind the
+                        # shared oauth2-proxy (any authenticated UA-MIS org member,
+                        # ALL paths — reuses the SAME "any UA-MIS member" Middleware
+                        # the portal's /internal route uses (portal/middleware.yaml,
+                        # `portal-internal-auth`, PR #302), not a new one — see
+                        # db-console-auth/README.md "Consumers".
+                        # $nonProd (env != prod) is the ONLY gate — prod stays public,
+                        # unconditionally, regardless of promotion.yaml's `gate` value
+                        # below (that field controls auto-sync, not auth). Strategic
+                        # merge (not JSON6902) so this is safe whether or not the
+                        # app's own Ingress (backstage/templates/*/skeleton/.devops/
+                        # chart/base/ingress.yaml) already carries other annotations.
+                        source:
+                          kustomize:
+                            patches:
+                              - target:
+                                  kind: Ingress
+                                  name: {{ $app | quote }}
+                                patch: |-
+                                  apiVersion: networking.k8s.io/v1
+                                  kind: Ingress
+                                  metadata:
+                                    name: {{ $app | quote }}
+                                    annotations:
+                                      traefik.ingress.kubernetes.io/router.middlewares: db-console-auth-oauth2-proxy-errors@kubernetescrd,portal-portal-internal-auth@kubernetescrd
+                      {{ `{{- end }}` }}
+                      {{ `{{- if eq $gate "auto" }}` }}
                         syncPolicy:
                           automated: { prune: true, selfHeal: true }
                           syncOptions: ["CreateNamespace=false"]
                       {{ `{{- else }}` }}
-                      spec:
                         syncPolicy:
                           syncOptions: ["CreateNamespace=false"]
                       {{ `{{- end }}` }}
@@ -873,6 +901,29 @@ spec:
                             # here would assume ONE image and break multi-component previews —
                             # so it is intentionally omitted. Single-component stays correct
                             # (its one overlay image is tagged the same way).
+                            #
+                            # non-prod-sso-gate PR: previews are ALWAYS non-prod (no
+                            # conditional needed, unlike the env ApplicationSet's prod
+                            # exclusion above) — forwardAuth-gate the SAME single
+                            # per-component-routing Ingress ($app-named, one host, N
+                            # paths — see the MULTI-COMPONENT note above) behind the
+                            # shared oauth2-proxy. Doubly appropriate here: this whole
+                            # generator is still gated behind $preview and flagged
+                            # "DO NOT MERGE WITHOUT SECURITY REVIEW" (header) precisely
+                            # because untrusted PR code deploys unauthenticated today —
+                            # this patch is a real reduction of that exposure, not just
+                            # symmetry with dev/staging.
+                            patches:
+                              - target:
+                                  kind: Ingress
+                                  name: {{ $app | quote }}
+                                patch: |-
+                                  apiVersion: networking.k8s.io/v1
+                                  kind: Ingress
+                                  metadata:
+                                    name: {{ $app | quote }}
+                                    annotations:
+                                      traefik.ingress.kubernetes.io/router.middlewares: db-console-auth-oauth2-proxy-errors@kubernetescrd,portal-portal-internal-auth@kubernetescrd
                         destination:
                           server: https://kubernetes.default.svc
                           namespace: '{{ $team }}-pr-{{ `{{.number}}` }}'

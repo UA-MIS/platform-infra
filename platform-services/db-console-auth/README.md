@@ -1,4 +1,4 @@
-# db-console-auth — shared SSO gate for the DB consoles
+# db-console-auth — shared SSO gate for the DB consoles (and beyond)
 
 The ONE oauth2-proxy instance that fronts every per-(team,env) Adminer console
 (rendered by the `CapstoneTenant` Composition) and the platform-admin Adminer
@@ -13,6 +13,27 @@ N tools" model as ArgoCD/Harbor/Backstage. Full design:
   console's Traefik `Middleware` calls `/oauth2/auth` on this Service.
 - Image: `quay.io/oauth2-proxy/oauth2-proxy:v7.15.3` (pinned).
 - Managed by the `platform-services-appset` (one Application per dir).
+- Replicas: 2 (bumped from 1 by the non-prod-sso-gate PR — see deployment.yaml).
+
+## Consumers
+
+This Service backs THREE different forwardAuth Middlewares, each with a
+different `allowed_groups` scope, all defined OUTSIDE this directory (in the
+namespace of whatever they gate — Traefik cross-namespace refs, see
+`applicationsets/traefik-app.yaml`'s `allowCrossNamespace`):
+
+| Middleware | Namespace | Scope | Gates |
+|---|---|---|---|
+| `db-admin-console-auth` | `db-admin` | `UA-MIS:labmx` only | the platform-admin Adminer |
+| per-team Adminer Middleware (Composition-rendered) | `<team>-<env>` | `UA-MIS:<team>` only | each tenant's DB console |
+| `portal-internal-auth` | `portal` | any UA-MIS member (no `allowed_groups`) | the portal's `/internal` route (PR #302) AND, since the non-prod-sso-gate PR, every non-prod tenant app URL (dev/staging/preview — see `platform-services/crossplane/apis/composition.yaml`'s env/preview ApplicationSet `templatePatch`/`kustomize.patches` and `tenants/_template/applicationset-envs.yaml` / `applicationset-preview.yaml`) |
+
+`portal-internal-auth` is intentionally REUSED for the tenant-app gate rather
+than standing up a near-duplicate Middleware in this directory — it already does
+exactly what's needed (unscoped forwardAuth against this same oauth2-proxy) and
+one shared resource is easier to reason about than two. Its name is a historical
+artifact of being added first for the portal (PR #302); despite the name, it is
+NOT portal-exclusive as of the non-prod-sso-gate PR.
 
 ## How the gate works (per console)
 
