@@ -213,8 +213,7 @@ jobs:
                     --verbosity=info";
             if [ "${PUSH}" = "true" ]; then
               echo "==> building + pushing ${IMAGE} (layer cache: ${CACHE_REPO})";
-              /kaniko/executor $COMMON --cache=true --cache-repo="${CACHE_REPO}" \
-                --image-name-with-digest-file=${GITHUB_WORKSPACE}/.image-digest;
+              /kaniko/executor $COMMON --cache=true --cache-repo="${CACHE_REPO}" --image-name-with-digest-file=${GITHUB_WORKSPACE}/.image-digest;
             else
               echo "==> PR build-only validation for ${IMAGE} (no push, no cache write)";
               /kaniko/executor $COMMON --no-push --tar-path=/tmp/image.tar;
