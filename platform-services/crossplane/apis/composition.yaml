@@ -126,7 +126,14 @@ spec:
               providerConfigRef:
                 name: default
             ---
-            # Per-team PUSH robot (CI). pull+push on the team project. Token → connection
+            # Per-team PUSH robot (CI). pull+push on the team project, plus scan:read
+            # (supply-chain hardening — mirrors `make harbor-push-robot`: the reusable
+            # CI's Trivy gate (supply-chain-verify composite action) polls Harbor's own
+            # scan-on-push result via GET .../artifacts/<ref>?with_scan_overview=true and
+            # fails the build on any CRITICAL finding — that read needs the
+            # project-scoped "scan" resource "read" action, NOT covered by repository
+            # pull/push. Without it the scan-gate 403s, fails closed, and the build
+            # (and its downstream GitOps bump) never completes. Token → connection
             # secret <team>-harbor-push in crossplane-system → PushSecret → Vault.
             apiVersion: robotaccount.harbor.crossplane.io/v1alpha1
             kind: RobotAccount
@@ -147,6 +154,8 @@ spec:
                         resource: repository
                       - action: pull
                         resource: repository
+                      - action: read
+                        resource: scan
               writeConnectionSecretToRef:
                 namespace: crossplane-system
                 name: {{ printf "%s-harbor-push" $team | quote }}
