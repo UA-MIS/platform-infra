@@ -279,6 +279,104 @@ describe('authorizeTeamOwnership (SEC-020 access control)', () => {
   });
 });
 
+// ── authorizeTeamOwnership against a REALISTIC catalog (filter semantics actually evaluated) ──
+//
+// Regression coverage for the SAME live-data bug fixed in sealCore.ts/teardownCore.ts (see
+// their test files): the GitHub-org provider writes Group.spec.members as `<namespace>/<login>`
+// (e.g. "default/ccsmith33") — NOT the bare login that resolveActorOwnership's `spec.members`
+// clause here used to check. The `mockCatalog` helper above ignores the filter argument
+// entirely (it just returns actorGroups verbatim), so it could not catch this; these tests
+// implement a small real filter evaluator (OR across filter objects, AND within one) instead,
+// so a regression back to the bare-login-only clause shape fails the test.
+function matchesClause(entity: any, clause: Record<string, unknown>): boolean {
+  return Object.entries(clause).every(([key, val]) => {
+    if (key === 'kind') return entity.kind === val;
+    if (key === 'relations.hasMember') {
+      return (entity.relations ?? []).some(
+        (r: any) => r.type === 'hasMember' && r.targetRef === val,
+      );
+    }
+    if (key === 'spec.members') {
+      return (entity.spec?.members ?? []).includes(val);
+    }
+    return false;
+  });
+}
+
+function realisticCatalog(entities: any[]): any {
+  return {
+    getEntities: jest.fn(async (query: any) => {
+      const clauses: any[] = Array.isArray(query.filter) ? query.filter : [query.filter];
+      return {
+        items: entities.filter(e => clauses.some(c => matchesClause(e, c))),
+      };
+    }),
+  };
+}
+
+describe('authorizeTeamOwnership (realistic catalog filter evaluation)', () => {
+  it("REGRESSION: recognizes team ownership via spec.members in its live `default/<login>` shape, with relations.hasMember not yet stitched", async () => {
+    // No `relations` entry at all: the ONLY way to find alice's membership is the
+    // spec.members clause, in its ACTUAL live shape ("default/alice"). This is the same
+    // relation-stitching-lag window sealCore.ts's resolveActorOwnership comment describes;
+    // before the fix this threw NotAllowedError here even for the legitimate team owner.
+    const catalog = realisticCatalog([
+      {
+        kind: 'Group',
+        metadata: { name: 'team-acme', namespace: 'default' },
+        spec: { members: ['default/alice'] },
+        relations: [],
+      },
+    ]);
+    await expect(
+      authorizeTeamOwnership({
+        catalog,
+        auth: mockAuth,
+        credentials: ALICE_CREDS,
+        team: 'team-acme',
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('REGRESSION: recognizes a labmx admin via spec.members in its live `default/<login>` shape', async () => {
+    const catalog = realisticCatalog([
+      {
+        kind: 'Group',
+        metadata: { name: 'labmx', namespace: 'default' },
+        spec: { members: ['default/alice'] },
+        relations: [],
+      },
+    ]);
+    await expect(
+      authorizeTeamOwnership({
+        catalog,
+        auth: mockAuth,
+        credentials: ALICE_CREDS,
+        team: 'team-rival',
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('still DENIES a non-member when spec.members lists other logins (fails closed)', async () => {
+    const catalog = realisticCatalog([
+      {
+        kind: 'Group',
+        metadata: { name: 'team-rival', namespace: 'default' },
+        spec: { members: ['default/bob'] },
+        relations: [],
+      },
+    ]);
+    await expect(
+      authorizeTeamOwnership({
+        catalog,
+        auth: mockAuth,
+        credentials: ALICE_CREDS,
+        team: 'team-rival',
+      }),
+    ).rejects.toThrow(/not a member of team 'team-rival'/i);
+  });
+});
+
 describe('capstone:harbor-onboard action', () => {
   function mockConfig(): any {
     return {
