@@ -2029,6 +2029,87 @@ spec:
                         #content { margin-left: 0 !important; padding-left: 16px !important; }
                         #menu { min-height: 0 !important; }
                       }
+
+                      /* ==========================================================================
+                       * 13. LOGIN FORM — hide the dead-end driver/server/username rows on these
+                       *     auto-login consoles. Belt-and-suspenders for the AdminerHideLoginFields
+                       *     plugin (db-console-plugin ConfigMap below, mounted at
+                       *     /srv/adminer-plugins/adminer-hide-login-fields.php in the Deployment) --
+                       *     if that plugin ever fails to load, this still hides the same three rows.
+                       *     Scoping: these `name="auth[...]"` attributes are emitted only by Adminer's
+                       *     core loginForm() (adminer.inc.php) and appear nowhere else in the app, so
+                       *     :has() can't accidentally hide an unrelated row elsewhere. Password and
+                       *     Database stay visible/usable either way — only System/Server/Username are
+                       *     dead ends here (every other engine/server on the platform is unreachable
+                       *     from this console; ADMINER_AUTOLOGIN_SERVER below pins all three).
+                       * ========================================================================== */
+                      tr:has(select[name="auth[driver]"]),
+                      tr:has(input[name="auth[server]"]),
+                      tr:has(input[name="auth[username]"]) {
+                        display: none !important;
+                      }
+            ---
+            # Adminer login-form plugin ConfigMap: hides the driver ("System"), server, and
+            # username rows on the login form of these auto-login consoles.
+            # ADMINER_AUTOLOGIN_SERVER (ExternalSecret below) already pins all three — and
+            # every other engine/server on the platform is unreachable from here anyway — so
+            # leaving them editable is a dead end that only confuses a team ("what do I put
+            # here?"), not a real choice. Mounted into /srv/adminer-plugins/ alongside the
+            # entrypoint-copied adminer-autologin.php (dbconsole-deploy below, same directory,
+            # different file); Adminer 5's own plugin loader glob()s every *.php file it finds
+            # there and auto-instantiates any class extending Adminer\Plugin (confirmed against
+            # the live dockette/adminer:5.4.2 index.php: `Plugins::__construct` does
+            # `foreach(glob("adminer-plugins/*.php") as $p) $this->includeOnce($p)`, then
+            # `get_declared_classes()` picks up subclasses of Adminer\Plugin) — no extra wiring
+            # needed beyond the volume mount below.
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              name: {{ printf "xp-%s-dbconsole-plugin" $team | quote }}
+              annotations:
+                {{ setResourceNameAnnotation "dbconsole-plugin-cm" }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: v1
+                  kind: ConfigMap
+                  metadata:
+                    name: db-console-plugin
+                    namespace: {{ $consoleNs | quote }}
+                    labels:
+                      platform.capstone/component: tenant
+                      platform.capstone/team: {{ $team | quote }}
+                  data:
+                    adminer-hide-login-fields.php: |
+                      <?php
+
+                      /**
+                       * UA-MIS DB console — hide the unusable login-form fields on these auto-login
+                       * consoles. System (driver), Server, and Username are all pinned by
+                       * ADMINER_AUTOLOGIN_SERVER (adminer-autologin.php, same
+                       * /srv/adminer-plugins/ directory) — there is nowhere else for a team to
+                       * point them, so an editable field is a dead end, not a real choice.
+                       * Returning '' from loginFormField() suppresses that row entirely
+                       * (Adminer's Plugins::__call gives the first non-null hook result priority,
+                       * short-circuiting the built-in row for that field name); returning null
+                       * (the implicit default below for password/db) leaves Adminer's normal row
+                       * untouched, so Password and Database keep working exactly as before.
+                       *
+                       * Belt-and-suspenders: adminer.css (db-console-css ConfigMap, section 13)
+                       * hides these same rows by selector too, in case this plugin ever fails to
+                       * load.
+                       *
+                       * @link https://www.adminer.org/en/plugins/#use
+                       */
+                      class AdminerHideLoginFields extends Adminer\Plugin {
+                        function loginFormField($name, $heading, $value) {
+                          if (in_array($name, array('driver', 'server', 'username'))) {
+                            return '';
+                          }
+                        }
+                      }
             ---
             # ExternalSecret: assembles ADMINER_AUTOLOGIN_SERVER from the console leaf --
             # NO db path in the DSN, so Adminer's autologin plugin logs into the SERVER
@@ -2115,6 +2196,10 @@ spec:
                     apiVersion: kubernetes.crossplane.io/v1alpha1
                     kind: Object
                     name: {{ printf "xp-%s-dbconsole-css" $team | quote }}
+                - dependsOn:
+                    apiVersion: kubernetes.crossplane.io/v1alpha1
+                    kind: Object
+                    name: {{ printf "xp-%s-dbconsole-plugin" $team | quote }}
               forProvider:
                 manifest:
                   apiVersion: apps/v1
@@ -2169,6 +2254,10 @@ spec:
                             volumeMounts:
                               - name: adminer-plugins
                                 mountPath: /srv/adminer-plugins
+                              - name: adminer-plugin-hide-login
+                                mountPath: /srv/adminer-plugins/adminer-hide-login-fields.php
+                                subPath: adminer-hide-login-fields.php
+                                readOnly: true
                               - name: adminer-css
                                 mountPath: /srv/adminer.css
                                 subPath: adminer.css
@@ -2176,6 +2265,9 @@ spec:
                         volumes:
                           - name: adminer-plugins
                             emptyDir: {}
+                          - name: adminer-plugin-hide-login
+                            configMap:
+                              name: db-console-plugin
                           - name: adminer-css
                             configMap:
                               name: db-console-css
@@ -3087,6 +3179,87 @@ spec:
                         #content { margin-left: 0 !important; padding-left: 16px !important; }
                         #menu { min-height: 0 !important; }
                       }
+
+                      /* ==========================================================================
+                       * 13. LOGIN FORM — hide the dead-end driver/server/username rows on these
+                       *     auto-login consoles. Belt-and-suspenders for the AdminerHideLoginFields
+                       *     plugin (db-console-plugin ConfigMap below, mounted at
+                       *     /srv/adminer-plugins/adminer-hide-login-fields.php in the Deployment) --
+                       *     if that plugin ever fails to load, this still hides the same three rows.
+                       *     Scoping: these `name="auth[...]"` attributes are emitted only by Adminer's
+                       *     core loginForm() (adminer.inc.php) and appear nowhere else in the app, so
+                       *     :has() can't accidentally hide an unrelated row elsewhere. Password and
+                       *     Database stay visible/usable either way — only System/Server/Username are
+                       *     dead ends here (every other engine/server on the platform is unreachable
+                       *     from this console; ADMINER_AUTOLOGIN_SERVER below pins all three).
+                       * ========================================================================== */
+                      tr:has(select[name="auth[driver]"]),
+                      tr:has(input[name="auth[server]"]),
+                      tr:has(input[name="auth[username]"]) {
+                        display: none !important;
+                      }
+            ---
+            # Adminer login-form plugin ConfigMap: hides the driver ("System"), server, and
+            # username rows on the login form of these auto-login consoles.
+            # ADMINER_AUTOLOGIN_SERVER (ExternalSecret below) already pins all three — and
+            # every other engine/server on the platform is unreachable from here anyway — so
+            # leaving them editable is a dead end that only confuses a team ("what do I put
+            # here?"), not a real choice. Mounted into /srv/adminer-plugins/ alongside the
+            # entrypoint-copied adminer-autologin.php (dbconsole-deploy below, same directory,
+            # different file); Adminer 5's own plugin loader glob()s every *.php file it finds
+            # there and auto-instantiates any class extending Adminer\Plugin (confirmed against
+            # the live dockette/adminer:5.4.2 index.php: `Plugins::__construct` does
+            # `foreach(glob("adminer-plugins/*.php") as $p) $this->includeOnce($p)`, then
+            # `get_declared_classes()` picks up subclasses of Adminer\Plugin) — no extra wiring
+            # needed beyond the volume mount below.
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              name: {{ printf "xp-%s-dbconsole-plugin" $team | quote }}
+              annotations:
+                {{ setResourceNameAnnotation "dbconsole-plugin-cm" }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: v1
+                  kind: ConfigMap
+                  metadata:
+                    name: db-console-plugin
+                    namespace: {{ $consoleNs | quote }}
+                    labels:
+                      platform.capstone/component: tenant
+                      platform.capstone/team: {{ $team | quote }}
+                  data:
+                    adminer-hide-login-fields.php: |
+                      <?php
+
+                      /**
+                       * UA-MIS DB console — hide the unusable login-form fields on these auto-login
+                       * consoles. System (driver), Server, and Username are all pinned by
+                       * ADMINER_AUTOLOGIN_SERVER (adminer-autologin.php, same
+                       * /srv/adminer-plugins/ directory) — there is nowhere else for a team to
+                       * point them, so an editable field is a dead end, not a real choice.
+                       * Returning '' from loginFormField() suppresses that row entirely
+                       * (Adminer's Plugins::__call gives the first non-null hook result priority,
+                       * short-circuiting the built-in row for that field name); returning null
+                       * (the implicit default below for password/db) leaves Adminer's normal row
+                       * untouched, so Password and Database keep working exactly as before.
+                       *
+                       * Belt-and-suspenders: adminer.css (db-console-css ConfigMap, section 13)
+                       * hides these same rows by selector too, in case this plugin ever fails to
+                       * load.
+                       *
+                       * @link https://www.adminer.org/en/plugins/#use
+                       */
+                      class AdminerHideLoginFields extends Adminer\Plugin {
+                        function loginFormField($name, $heading, $value) {
+                          if (in_array($name, array('driver', 'server', 'username'))) {
+                            return '';
+                          }
+                        }
+                      }
             ---
             # ExternalSecret: assembles ADMINER_AUTOLOGIN_SERVER from the console leaf --
             # NO db path in the DSN, so Adminer's autologin plugin logs into the SERVER
@@ -3173,6 +3346,10 @@ spec:
                     apiVersion: kubernetes.crossplane.io/v1alpha1
                     kind: Object
                     name: {{ printf "xp-%s-dbconsole-css" $team | quote }}
+                - dependsOn:
+                    apiVersion: kubernetes.crossplane.io/v1alpha1
+                    kind: Object
+                    name: {{ printf "xp-%s-dbconsole-plugin" $team | quote }}
               forProvider:
                 manifest:
                   apiVersion: apps/v1
@@ -3227,6 +3404,10 @@ spec:
                             volumeMounts:
                               - name: adminer-plugins
                                 mountPath: /srv/adminer-plugins
+                              - name: adminer-plugin-hide-login
+                                mountPath: /srv/adminer-plugins/adminer-hide-login-fields.php
+                                subPath: adminer-hide-login-fields.php
+                                readOnly: true
                               - name: adminer-css
                                 mountPath: /srv/adminer.css
                                 subPath: adminer.css
@@ -3234,6 +3415,9 @@ spec:
                         volumes:
                           - name: adminer-plugins
                             emptyDir: {}
+                          - name: adminer-plugin-hide-login
+                            configMap:
+                              name: db-console-plugin
                           - name: adminer-css
                             configMap:
                               name: db-console-css
