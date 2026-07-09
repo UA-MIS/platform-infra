@@ -53,6 +53,7 @@
 name: backstage-process-build-push
 
 on:
+  workflow_dispatch: {}   # manual trigger (added so a rebuild does not require an app/** change)
   push:
     branches: [main]
     # Only rebuild when something that actually lands in the runtime image changes.
