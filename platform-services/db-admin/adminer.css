@@ -1,571 +1,489 @@
 /*
  * University of Alabama MIS — Adminer theme (tenant DB console + db-admin console).
+ * ONE committed LIGHT theme. Crimson #9E1B32 accents, warm-white surfaces, dark
+ * readable text, a light-grey / black-mono SQL editor + result grid.
  *
- * Loaded automatically by Adminer: index.php's css() helper does
- * file_exists("adminer.css") relative to its own cwd (the docroot, /srv in the
- * dockette/adminer image) and, if found, links it in AFTER the built-in
- * default.css — so an unconditional (non-media-scoped) rule here always wins the
- * cascade over Adminer's own light/dark defaults on tie specificity, including its
- * `prefers-color-scheme: dark` block (the "dark-blue-on-dark" bug this theme
- * fixes). No adminer-dark.css companion is shipped, so Adminer tags this sheet
- * 'light' and never offers the OS an auto-dark alternative — deliberate: a single,
- * consistent, always-legible look regardless of the visitor's OS theme.
+ * ============================================================================
+ * WHY THERE IS NO DARK VARIANT / NO OS-ADAPTIVE STYLING (read before editing)
+ * ============================================================================
+ * Adminer's loader (index.php `css()`) scans this file's TEXT and, if it finds
+ * the token that spells the CSS dark-scheme media feature, flips this sheet from
+ * "light" to "adaptive" AND ALSO links Adminer's OWN built-in dark stylesheet
+ * gated to the visitor's OS dark setting. A previous revision of this theme had
+ * that exact token sitting harmlessly in a code comment — which made Adminer pull
+ * in its dark sheet for anyone whose OS was in dark mode, and THAT sheet (not this
+ * one) painted the broken dark-navy action bar / dark panels over our light theme.
  *
- * DOM verified against the LIVE dockette/adminer:mysql image (Adminer 5.4.2,
- * `kubectl exec ... grep -oE 'class=...' /srv/index.php`) — not guessed from old
- * theme packs. Real structure:
- *   <div id='content'>  h1, #breadcrumb, .message/.error, tables, forms/fieldsets
- *   <div id='foot' class='foot'><div id='menu'>  #dbs (the DB switcher select),
- *     #tables/#views/#logins nav lists, .logout
- *   <div id='lang'>  standalone language-switcher form
- *   <textarea class='sqlarea jush-sql'>  the SQL editor — a PLAIN textarea, no
- *     CodeMirror/JS overlay in this build, so styling the element IS styling the
- *     editor.
+ * So this file DELIBERATELY contains that token NOWHERE — not in a rule, not in a
+ * comment, not in a media query. We force a single light look for every visitor
+ * regardless of OS via the variable overrides below + `color-scheme: light`. If
+ * you ever add an OS-dark media block here you will silently re-arm that trap.
  *
- * Brand: UA crimson #9E1B32 (dark #7A1426) — the SAME palette as
- * platform-services/argocd-config/ua-mis.css (ArgoCD) and the Grafana theme, for a
- * cohesive "platform tool" look. Sidebar goes charcoal (matching ArgoCD's
- * de-blued sidebar) with crimson as the one accent, not a wash of crimson.
+ * ============================================================================
+ * HOW IT WORKS — override Adminer's OWN design tokens, don't fight each element.
+ * ============================================================================
+ * Adminer 5.4.2's default.css drives nearly everything from four CSS variables on
+ * <html>:  --bg (surfaces), --fg (text), --dim (th / secondary surfaces),
+ * --lit (thead + selected-row + :target highlight). Re-defining those four (with
+ * !important, and since this sheet loads AFTER default.css) recolors the bulk of
+ * the UI coherently in one place. We then layer crimson accents + an editor/grid
+ * polish on top, and otherwise WORK WITH Adminer's native layout (a ~19em
+ * absolute left #menu, #content offset 21em, an absolute #breadcrumb) rather than
+ * re-positioning it — the prior fixed-position surgery is what produced the
+ * partial-width header strip and the empty full-height sidebar column.
+ *
+ * DOM verified against the LIVE dockette/adminer:mysql image (Adminer 5.4.2):
+ *   #menu (left nav, holds #dbs the DB switcher + table lists), #content (h1,
+ *   #breadcrumb, tables, forms), .footer > fieldset (the bulk "Selected (N)"
+ *   action bar), textarea.sqlarea.jush-sql (the SQL editor — a PLAIN textarea,
+ *   no JS overlay). CSS is auto-loaded by Adminer via file_exists("adminer.css")
+ *   relative to its docroot (/srv), linked after default.css.
  */
 
+/* ==========================================================================
+ * 1. DESIGN TOKENS
+ *    (a) Override Adminer's four native variables -> light palette.
+ *    (b) Our own namespaced palette for the accent layer.
+ * ========================================================================== */
+html {
+  /* Adminer's own tokens — the single biggest lever. */
+  --bg:  #ffffff !important;   /* primary surfaces */
+  --fg:  #1a1c20 !important;   /* body text — near-black, high contrast */
+  --dim: #f0eeea !important;   /* th / secondary surfaces — warm light grey */
+  --lit: #f7e5e9 !important;   /* thead + selected-row + :target — crimson tint */
+  color-scheme: light;         /* keep UA form controls / scrollbars light on dark OS */
+}
+
 :root {
-  --crimson: #9E1B32;
-  --crimson-dark: #7A1426;
-  --crimson-tint: rgba(158, 27, 50, 0.08);
-  --crimson-tint-strong: rgba(158, 27, 50, 0.16);
+  --ua-crimson:      #9E1B32;
+  --ua-crimson-dark: #7A1426;
+  --ua-tint:         rgba(158, 27, 50, 0.08);
+  --ua-tint-strong:  rgba(158, 27, 50, 0.16);
 
-  --charcoal: #1F2023;
-  --charcoal-raised: #2A2C30;
-  --charcoal-border: #3A3C40;
+  --ua-ink:      #1A1C20;
+  --ua-ink-soft: #4A4642;
+  --ua-muted:    #79736D;
 
-  --ink: #1F2023;
-  --ink-soft: #4A4642;
-  --muted: #79736D;          /* warm grey, not a flat #888 */
+  --ua-page:     #ffffff;
+  --ua-sidebar:  #F5F3F0;     /* barely-grey sidebar surface */
+  --ua-border:   #E4E1DB;
+  --ua-border-strong: #D3CFC8;
 
-  --page-bg: #F6F5F3;        /* warm off-white page background */
-  --panel-bg: #FFFFFF;
-  --border: #E2DFDA;
-  --border-strong: #D3CFC8;
+  --ua-editor-bg: #F5F5F5;    /* light-grey code surface */
+  --ua-editor-fg: #14161A;    /* black-ish mono text */
 
-  --editor-bg: #F5F5F5;      /* explicit ask: light grey/white, black text */
-  --editor-fg: #14161A;
+  --ua-ok:    #1C7C4A;
+  --ua-ok-bg: #EAF6EF;
+  --ua-err:   #B3261E;
+  --ua-err-bg:#FCEBEA;
 
-  --ok: #1C7C4A;
-  --ok-bg: #EAF6EF;
-  --err: #B3261E;
-  --err-bg: #FCEBEA;
-
-  --radius: 8px;
-  --radius-sm: 6px;
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", Roboto,
-    Helvetica, Arial, sans-serif;
-  --font-mono: "SFMono-Regular", "SF Mono", Menlo, Consolas,
-    "Liberation Mono", monospace;
+  --ua-radius:    8px;
+  --ua-radius-sm: 6px;
+  --ua-font: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, Helvetica, Arial, sans-serif;
+  --ua-mono: "SFMono-Regular", "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 }
 
 /* ==========================================================================
- * RESET / BASE
+ * 2. BASE
  * ========================================================================== */
-html {
-  box-sizing: border-box;
-}
-*, *:before, *:after {
-  box-sizing: inherit;
-}
+html { box-sizing: border-box; }
+*, *:before, *:after { box-sizing: inherit; }
 
 body {
-  background: var(--page-bg) !important;
-  color: var(--ink) !important;
-  font-family: var(--font-sans) !important;
+  background: var(--ua-page) !important;
+  color: var(--ua-ink) !important;
+  font-family: var(--ua-font) !important;
   font-size: 14px;
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
 }
 
-a {
-  color: var(--crimson);
-  text-decoration: none;
-}
-a:hover {
-  color: var(--crimson-dark);
-  text-decoration: underline;
-}
+a { color: var(--ua-crimson); text-decoration: none; }
+a:hover { color: var(--ua-crimson-dark); text-decoration: underline; }
 
 /* ==========================================================================
- * LAYOUT — sidebar fixed left (#foot/#menu), content offset right.
+ * 3. LEFT SIDEBAR (#menu) — native Adminer position (absolute, ~19em, left:0).
+ *    We give it a light surface, a clear right border, a min-height so it reads
+ *    as a real column even when its content is short, and the UA-MIS wordmark.
  * ========================================================================== */
-#content {
-  margin: 0 0 0 272px !important;
-  padding: 40px 48px 64px !important;
-  max-width: 1180px;
-  background: transparent;
-}
-
-/* #breadcrumb doubles as our header bar — crimson, matching the ArgoCD/Grafana
-   top nav exactly (same --crimson, same "platform tool" chrome). */
-#breadcrumb {
-  background: var(--crimson) !important;
-  color: #FFFFFF !important;
-  margin: -40px -48px 32px -48px !important;
-  padding: 0 48px !important;
-  height: 52px;
-  line-height: 52px !important;
-  font-size: 13px;
-  font-weight: 500;
-  letter-spacing: .01em;
-  border-radius: 0;
-}
-#breadcrumb a {
-  color: #FFFFFF !important;
-  opacity: .92;
-}
-#breadcrumb a:hover {
-  opacity: 1;
-  text-decoration: underline;
-}
-
-/* Sidebar shell */
-#foot.foot {
-  position: fixed;
-  top: 0;
-  left: 0;
-  bottom: 0;
-  width: 272px;
-  margin: 0 !important;
-  padding: 0 !important;
-  background: var(--charcoal) !important;
-  border: none !important;
-  overflow-y: auto;
-  z-index: 20;
-}
 #menu {
-  position: static !important;
-  width: auto !important;
-  height: auto !important;
+  background: var(--ua-sidebar) !important;
+  border-right: 1px solid var(--ua-border) !important;
+  min-height: calc(100vh - 2em) !important;
+  padding: 16px 16px 32px !important;
   margin: 0 !important;
-  padding: 20px 18px 32px !important;
-  background: transparent !important;
-  border: none !important;
-  color: #E6E6E6;
+  top: 0 !important;               /* start at the very top so the wordmark aligns */
 }
 
-/* UA-MIS wordmark at the top of the sidebar (same crimson lockup treatment as
-   the ArgoCD login page — inline SVG data-URI, no external asset host). */
+/* UA-MIS wordmark at the top of the sidebar (inline SVG data-URI — no external
+   asset host, offline-safe). */
 #menu:before {
   content: "";
   display: block;
-  height: 40px;
-  margin: 0 0 20px;
+  height: 34px;
+  margin: 0 0 16px 2px;
   background: url("data:image/svg+xml;utf8,\
-<svg xmlns='http://www.w3.org/2000/svg' width='210' height='40' viewBox='0 0 210 40'>\
-<rect width='40' height='40' rx='6' fill='%239E1B32'/>\
-<text x='20' y='27' text-anchor='middle' font-family='Georgia, serif' font-size='22' font-weight='700' fill='%23FFFFFF'>A</text>\
-<text x='50' y='26' font-family='-apple-system, Helvetica, Arial, sans-serif' font-size='15' font-weight='700' fill='%23F2F2F2' letter-spacing='.5'>UA-MIS DB Console</text>\
+<svg xmlns='http://www.w3.org/2000/svg' width='210' height='34' viewBox='0 0 210 34'>\
+<rect width='34' height='34' rx='6' fill='%239E1B32'/>\
+<text x='17' y='24' text-anchor='middle' font-family='Georgia, serif' font-size='19' font-weight='700' fill='%23FFFFFF'>A</text>\
+<text x='44' y='16' font-family='-apple-system, Helvetica, Arial, sans-serif' font-size='13' font-weight='700' fill='%231A1C20' letter-spacing='.3'>UA-MIS</text>\
+<text x='44' y='29' font-family='-apple-system, Helvetica, Arial, sans-serif' font-size='10' font-weight='500' fill='%2379736D' letter-spacing='.3'>DB Console</text>\
 </svg>") no-repeat left center;
   background-size: contain;
 }
 
-#menu, #menu p, #menu div {
-  color: #C9C6C2;
-}
-#menu a {
-  color: #D8D5D1 !important;
-  display: block;
-  padding: 5px 10px;
-  margin: 0 -10px;
-  border-radius: var(--radius-sm);
-  border: none !important;
-}
-#menu a:hover {
-  background: var(--charcoal-raised) !important;
-  color: #FFFFFF !important;
-  text-decoration: none;
-  box-shadow: inset 3px 0 0 0 var(--crimson);
-}
-
-/* Section labels inside the sidebar (Tables / Views / Routines headings render
-   as plain text/links ahead of their lists — calm them to a muted eyebrow). */
+/* Nav section headings (Tables / Views / …) rendered as <p> in the menu. */
 #menu p {
   font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: .06em;
-  color: var(--muted);
-  margin: 18px 0 6px !important;
-  padding: 0 !important;
+  letter-spacing: .05em;
+  color: var(--ua-muted);
+  margin: 16px 0 6px !important;
+  border: none !important;
+  background: none !important;
 }
 
-/* #dbs — THE database switcher (the requested dropdown of <team>_dev /
-   <team>_staging / <team>_prod). Style the select for the dark sidebar. */
+#menu a {
+  color: var(--ua-ink) !important;
+  display: inline-block;
+  padding: 3px 8px;
+  margin: 1px 0;
+  border-radius: var(--ua-radius-sm);
+  border: none !important;
+  text-transform: none;   /* nav/table links stay normal-case; only the <p> section headings are uppercased */
+}
+#menu a:hover {
+  background: var(--ua-tint) !important;
+  color: var(--ua-crimson-dark) !important;
+  text-decoration: none;
+  box-shadow: inset 2px 0 0 0 var(--ua-crimson);
+}
+#menu a.active,
+#menu a:active {
+  background: var(--ua-tint-strong) !important;
+  color: var(--ua-crimson-dark) !important;
+  box-shadow: inset 3px 0 0 0 var(--ua-crimson);
+}
+
+/* #dbs — the database switcher (the dropdown listing <team>_dev/staging/prod). */
 #dbs {
-  margin: 0 0 16px !important;
+  margin: 0 0 12px !important;
   padding: 0 !important;
   border: none !important;
 }
-#dbs label {
-  display: block;
-  font-size: 11px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: .06em;
-  color: var(--muted);
-  margin-bottom: 6px;
-}
+#dbs label { font-weight: 600; color: var(--ua-ink-soft); }
 
-/* Language switcher — tucked away, small, unobtrusive (declutter). */
-#lang {
-  position: fixed;
-  left: 0;
-  bottom: 0;
-  width: 272px;
-  padding: 10px 18px !important;
-  background: var(--charcoal-raised) !important;
-  border-top: 1px solid var(--charcoal-border) !important;
-  z-index: 21;
-}
-#lang label {
-  font-size: 11px;
-  color: var(--muted);
-}
-#lang select {
-  background: var(--charcoal);
-  border-color: var(--charcoal-border);
-  color: #D8D5D1;
-}
-#lang input[type=submit].hidden {
-  display: none;
-}
-
-/* Logout — small ghost button at the foot of the nav list. */
-.logout {
-  display: inline-block;
-  margin-top: 12px !important;
-  padding: 6px 12px !important;
-  background: transparent !important;
-  color: #D8D5D1 !important;
-  border: 1px solid var(--charcoal-border) !important;
-  border-radius: var(--radius-sm);
-  box-shadow: none !important;
-  font-size: 12px;
-  cursor: pointer;
-}
-.logout:hover {
-  border-color: var(--crimson) !important;
-  color: #FFFFFF !important;
-}
+/* Sidebar toggle handle */
+#menuopen { color: var(--ua-muted); }
 
 /* ==========================================================================
- * TYPOGRAPHY / PAGE CHROME
+ * 4. CONTENT + BREADCRUMB
+ *    #breadcrumb is natively position:absolute with NO width, so ANY colored
+ *    background would render as a short partial strip. We keep it text-only
+ *    (transparent) — no strip, nothing can look "cut off".
+ * ========================================================================== */
+#content {
+  padding: 8px 32px 48px 28px !important;
+  max-width: 1180px;
+}
+
+#breadcrumb {
+  background: transparent !important;
+  box-shadow: none !important;
+  border: none !important;
+  height: auto !important;
+  line-height: 1.6 !important;
+  padding: 6px 0 !important;
+  margin: 0 0 4px -6px !important;
+  font-size: 12px;
+  color: var(--ua-muted);
+}
+#breadcrumb a { color: var(--ua-crimson); }
+#breadcrumb a:hover { color: var(--ua-crimson-dark); }
+
+/* ==========================================================================
+ * 5. TYPOGRAPHY
  * ========================================================================== */
 h1 {
-  font-size: 22px;
+  font-size: 21px;
   font-weight: 700;
-  color: var(--ink);
+  color: var(--ua-ink);
   background: none !important;
   border: none !important;
-  padding: 0 0 4px !important;
-  margin: 0 0 20px !important;
+  border-bottom: 2px solid var(--ua-tint-strong) !important;
+  padding: 0 0 10px !important;
+  margin: 4px 0 20px !important;
 }
-/* De-clutter: hide the "5.4.2 / donate / permanent login" chrome bolted onto
-   h1 — keep only the product name readable. */
-h1 .version {
-  font-size: 11px;
-  font-weight: 400;
-  color: var(--muted);
-  opacity: .7;
-}
-h1 a[href*="adminer.org"] {
-  display: none !important;
-}
+h1 .version { font-size: 11px; font-weight: 400; color: var(--ua-muted); opacity: .7; }
+h1 a[href*="adminer.org"] { display: none !important; }   /* hide upstream donate/version chrome */
 
 h2 {
   font-size: 16px;
   font-weight: 600;
-  color: var(--ink);
-  background: none !important;
+  color: var(--ua-ink);
+  background: none !important;   /* was --lit; keep clean, use a border accent instead */
   border: none !important;
-  border-bottom: 2px solid var(--crimson-tint-strong);
+  border-bottom: 2px solid var(--ua-tint-strong) !important;
   padding: 0 0 8px !important;
-  margin: 28px 0 14px !important;
+  margin: 26px 0 14px !important;
 }
+h3 { font-size: 14px; font-weight: 600; color: var(--ua-ink-soft); margin: 16px 0 8px; }
 
-h3 {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--ink-soft);
-  margin: 18px 0 8px;
-}
-
-p {
-  color: var(--ink-soft);
-}
+p { color: var(--ua-ink-soft); }
 
 /* ==========================================================================
- * MESSAGES / ALERTS
+ * 6. MESSAGES / ALERTS
  * ========================================================================== */
 .message, .error {
   display: block;
-  border-radius: var(--radius);
+  border-radius: var(--ua-radius);
   padding: 10px 14px !important;
   margin: 0 0 16px !important;
   font-weight: 500;
   background-image: none !important;
+  box-shadow: none !important;
 }
-.message {
-  background: var(--ok-bg) !important;
-  color: var(--ok) !important;
-  border: 1px solid rgba(28, 124, 74, .25);
-}
-.error {
-  background: var(--err-bg) !important;
-  color: var(--err) !important;
-  border: 1px solid rgba(179, 38, 30, .25);
-}
+.message { background: var(--ua-ok-bg) !important;  color: var(--ua-ok) !important;  border: 1px solid rgba(28,124,74,.25); }
+.error   { background: var(--ua-err-bg) !important; color: var(--ua-err) !important; border: 1px solid rgba(179,38,30,.25); }
 
 /* ==========================================================================
- * FORMS — inputs / selects / buttons in the MAIN content area.
+ * 7. FORMS — inputs / selects / buttons
  * ========================================================================== */
 fieldset {
-  border: 1px solid var(--border) !important;
-  border-radius: var(--radius);
-  padding: 14px 16px !important;
-  margin: 0 0 16px !important;
-  background: var(--panel-bg);
+  border: 1px solid var(--ua-border) !important;
+  border-radius: var(--ua-radius);
+  padding: 12px 14px !important;
+  margin: 0 0 14px !important;
+  background: #FCFBFA !important;
+  box-shadow: none !important;
 }
 legend {
-  color: var(--ink-soft);
+  color: var(--ua-ink-soft);
   font-weight: 600;
   padding: 0 6px;
 }
 
-#content input[type=text],
-#content input[type=password],
-#content input[type=number],
-#content input[type=search],
-#content input[type=email],
-#content select,
-#content textarea {
-  font-family: var(--font-sans);
+input[type=text], input[type=password], input[type=number],
+input[type=search], input[type=email], input:not([type]), select, textarea {
+  font-family: var(--ua-font);
   font-size: 13px;
-  color: var(--ink);
-  background: var(--panel-bg);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  padding: 6px 10px;
+  color: var(--ua-ink);
+  background: #ffffff;
+  border: 1px solid var(--ua-border-strong);
+  border-radius: var(--ua-radius-sm);
+  padding: 6px 9px;
   transition: border-color .12s ease, box-shadow .12s ease;
 }
-#content input[type=text]:focus,
-#content input[type=password]:focus,
-#content input[type=number]:focus,
-#content input[type=search]:focus,
-#content input[type=email]:focus,
-#content select:focus,
-#content textarea:focus {
+input[type=text]:focus, input[type=password]:focus, input[type=number]:focus,
+input[type=search]:focus, input[type=email]:focus, input:not([type]):focus,
+select:focus, textarea:focus {
   outline: none;
-  border-color: var(--crimson);
-  box-shadow: 0 0 0 3px var(--crimson-tint);
+  border-color: var(--ua-crimson);
+  box-shadow: 0 0 0 3px var(--ua-tint);
 }
 
-/* Buttons — crimson primary, matching ArgoCD's .argo-button--base treatment. */
-#content input[type=submit],
-#content input[type=button],
-.links a.button {
-  display: inline-block;
-  font-family: var(--font-sans);
+/* Primary submit buttons — crimson (matches ArgoCD/Grafana). */
+input[type=submit], input[type=button], button {
+  font-family: var(--ua-font);
   font-size: 13px;
   font-weight: 600;
-  color: #FFFFFF !important;
-  background: var(--crimson) !important;
-  border: 1px solid var(--crimson) !important;
-  border-radius: var(--radius-sm);
-  padding: 7px 16px;
+  color: #ffffff !important;
+  background: var(--ua-crimson) !important;
+  border: 1px solid var(--ua-crimson) !important;
+  border-radius: var(--ua-radius-sm);
+  padding: 6px 15px;
   cursor: pointer;
   transition: background-color .12s ease, border-color .12s ease;
 }
-#content input[type=submit]:hover,
-#content input[type=button]:hover {
-  background: var(--crimson-dark) !important;
-  border-color: var(--crimson-dark) !important;
+input[type=submit]:hover, input[type=button]:hover, button:hover {
+  background: var(--ua-crimson-dark) !important;
+  border-color: var(--ua-crimson-dark) !important;
 }
 
-/* Secondary/destructive inline actions (delete, drop) — quiet ghost style, red
-   text only on hover so the page isn't a wall of crimson buttons. */
-input[name=delete], input[name=drop], input[name=cancel] {
-  background: transparent !important;
-  color: var(--muted) !important;
-  border: 1px solid var(--border-strong) !important;
+/* Destructive actions (drop / delete) — quiet GHOST style, never a bold crimson
+   button, so they don't invite a click. Red only on hover. (DB-level drop is
+   hidden entirely below.) */
+input[name=drop], input[name=delete], input[name=truncate], input[value=Drop], input[value=Delete] {
+  color: var(--ua-err) !important;
+  background: #ffffff !important;
+  border: 1px solid var(--ua-border-strong) !important;
+  font-weight: 500;
 }
-input[name=delete]:hover, input[name=drop]:hover {
-  background: var(--err-bg) !important;
-  color: var(--err) !important;
-  border-color: var(--err) !important;
+input[name=drop]:hover, input[name=delete]:hover, input[name=truncate]:hover,
+input[value=Drop]:hover, input[value=Delete]:hover {
+  background: var(--ua-err-bg) !important;
+  border-color: var(--ua-err) !important;
 }
 
-.icon {
-  border-radius: 4px;
-}
+.icon { border-radius: 4px; }
 
 /* ==========================================================================
- * SQL EDITOR — the centerpiece. Plain <textarea class="sqlarea jush-sql">,
- * no JS/CodeMirror overlay in this image, so this rule IS the editor's look:
- * near-white background, near-black text, comfortable monospace, a soft inner
- * shadow, and a crimson focus ring — reads like a modern code editor, not a
- * default HTML textarea.
+ * 8. SQL EDITOR — plain textarea, styled to read like a code editor:
+ *    light-grey surface, black mono text, soft inset, crimson focus ring.
  * ========================================================================== */
-textarea.sqlarea,
-textarea.jush-sql,
-.jush-sql {
-  font-family: var(--font-mono) !important;
+textarea, .sqlarea, textarea.sqlarea, textarea.jush-sql, .jush-sql {
+  font-family: var(--ua-mono) !important;
   font-size: 13.5px !important;
   line-height: 1.65 !important;
-  color: var(--editor-fg) !important;
-  background: var(--editor-bg) !important;
-  border: 1px solid var(--border-strong) !important;
-  border-radius: var(--radius) !important;
-  padding: 14px 16px !important;
-  box-shadow: inset 0 1px 3px rgba(20, 22, 26, .05) !important;
+  color: var(--ua-editor-fg) !important;
+  background: var(--ua-editor-bg) !important;
+  border: 1px solid var(--ua-border-strong) !important;
+  border-radius: var(--ua-radius) !important;
+  padding: 13px 15px !important;
+  box-shadow: inset 0 1px 3px rgba(20,22,26,.05) !important;
   tab-size: 2;
-  resize: vertical;
 }
-textarea.sqlarea:focus {
-  border-color: var(--crimson) !important;
-  box-shadow: inset 0 1px 3px rgba(20, 22, 26, .05), 0 0 0 3px var(--crimson-tint) !important;
-}
-
-/* Any other textarea in the content flow (comments, defaults, JSON fields)
-   gets the same calm, legible editor treatment for consistency. */
-#content textarea {
-  font-family: var(--font-mono);
-  background: var(--editor-bg);
-  color: var(--editor-fg);
+textarea:focus, textarea.sqlarea:focus, .sqlarea:focus {
+  border-color: var(--ua-crimson) !important;
+  box-shadow: inset 0 1px 3px rgba(20,22,26,.05), 0 0 0 3px var(--ua-tint) !important;
 }
 
-/* Inline <code> (jush syntax spans, query history) */
 code, .jush-js {
-  font-family: var(--font-mono);
-  background: var(--editor-bg);
-  color: var(--editor-fg);
+  font-family: var(--ua-mono);
+  background: var(--ua-editor-bg);
+  color: var(--ua-editor-fg);
   border-radius: 4px;
   padding: 1px 5px;
 }
-
-.sql-footer {
-  margin-top: 10px;
-}
+.sql-footer { margin-top: 10px; }
 
 /* ==========================================================================
- * TABLES — schema lists AND query result grids. Explicit ask: light grey/
- * white background, BLACK text (was unreadable dark-blue-on-dark).
+ * 9. TABLES — schema lists AND result grids: light surface, BLACK text.
  * ========================================================================== */
 table {
   border-collapse: collapse;
-  width: 100%;
-  margin: 4px 0 20px;
-  background: var(--panel-bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+  margin: 6px 0 20px;
+  background: #ffffff;
+  border: 1px solid var(--ua-border);
+  border-radius: var(--ua-radius);
   overflow: hidden;
   font-size: 13px;
-  color: var(--editor-fg) !important;
+  color: var(--ua-editor-fg) !important;
 }
 
 thead th, thead td {
-  background: var(--editor-bg) !important;
-  color: var(--ink) !important;
+  background: #F7E5E9 !important;   /* crimson tint */
+  color: var(--ua-ink) !important;
   font-weight: 600;
   text-align: left;
-  padding: 9px 12px !important;
-  border-bottom: 2px solid var(--crimson-tint-strong) !important;
+  padding: 8px 11px !important;
+  border-bottom: 2px solid var(--ua-tint-strong) !important;
   white-space: nowrap;
 }
-thead th a, thead td a {
-  color: var(--ink) !important;
-}
+thead th a, thead td a { color: var(--ua-ink) !important; }
 
 tbody th, tbody td {
-  padding: 8px 12px !important;
-  border-bottom: 1px solid var(--border) !important;
-  color: var(--editor-fg) !important;
-  background: var(--panel-bg) !important;
+  padding: 7px 11px !important;
+  border-bottom: 1px solid var(--ua-border) !important;
+  color: var(--ua-editor-fg) !important;
+  background: #ffffff !important;
   vertical-align: top;
 }
-
-/* Zebra striping (.odds — Adminer's own class for the alternating class) */
 .odds tbody tr:nth-child(2n) td,
-.odds tbody tr:nth-child(2n) th {
-  background: var(--editor-bg) !important;
-}
+.odds tbody tr:nth-child(2n) th { background: #FAF9F7 !important; }
 
-tbody tr:hover td, tbody tr:hover th {
-  background: var(--crimson-tint) !important;
-}
+tbody tr:hover td, tbody tr:hover th { background: var(--ua-tint) !important; }
 
-/* Selected/checked rows (Adminer's JS row-select) */
 .js .checked td, .js .checked th,
-.js .checkable .checked td, .js .checkable .checked th {
-  background: var(--crimson-tint-strong) !important;
-}
+.js .checkable .checked td, .js .checkable .checked th { background: var(--ua-tint-strong) !important; }
 
-table code {
-  background: transparent;
-  padding: 0;
-}
+table code { background: transparent; padding: 0; }
 
 /* Pagination */
-.pages {
-  border: none !important;
-  box-shadow: none !important;
-  padding: 4px 0;
-}
+.pages { border: none !important; box-shadow: none !important; padding: 4px 0; }
 .pages a {
   display: inline-block;
-  padding: 4px 10px;
-  margin: 0 2px 0 0;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  color: var(--ink-soft);
+  padding: 3px 9px; margin: 0 2px 0 0;
+  border: 1px solid var(--ua-border-strong);
+  border-radius: var(--ua-radius-sm);
+  color: var(--ua-ink-soft);
 }
-.pages a:hover {
-  border-color: var(--crimson);
-  color: var(--crimson);
-  text-decoration: none;
+.pages a:hover { border-color: var(--ua-crimson); color: var(--ua-crimson); text-decoration: none; }
+
+/* ==========================================================================
+ * 10. FOOTER ACTION BAR (.footer) — Adminer's sticky bulk-action bar. Native
+ *     default.css gives it a `box-shadow: 0 -5px 10px 10px var(--bg)` glow;
+ *     neutralize it so it's a clean inline row, never a floating dark/glowing
+ *     panel.
+ * ========================================================================== */
+.footer {
+  position: static !important;   /* was sticky (default.css) — pin it inline so it's a clean action row, never a floating overlay */
+  box-shadow: none !important;
+  background: transparent !important;
+  border: none !important;
+  margin: 16px 0 0 !important;
+}
+.footer > div {
+  background: transparent !important;
+  box-shadow: none !important;
+  padding: 0 !important;
+}
+.footer fieldset {
+  display: inline-block;
+  background: #FCFBFA !important;
+  border: 1px solid var(--ua-border) !important;
+  box-shadow: none !important;
 }
 
 /* ==========================================================================
- * MISC DECLUTTER
+ * 11. SAFETY — hide the DATABASE-level bulk "Drop" button.
+ *     Rationale: on the "Select database" page one bulk click drops an entire
+ *     provisioned tenant database. DROP is a single MySQL/PG privilege covering
+ *     both tables AND databases, so it can't be revoked at the grant level
+ *     without losing table-drop too — so we remove the accidental one-click
+ *     PATH instead. A deliberate `DROP DATABASE` typed in the SQL box still
+ *     works (intentional); table-level drop stays fully usable.
+ *
+ *     Scoping: the databases-list page is the ONLY page whose <form> contains
+ *     database checkboxes named `db[]` (verified in index.php: checkbox("db[]",…)
+ *     on the databases listing; the tables page uses `tables[]`/`check[]`). So
+ *     :has() targets exactly that form's Drop submit and nothing else. :has() is
+ *     Baseline-supported in current browsers; if it ever isn't, the button simply
+ *     reverts to visible (fail-safe, no breakage).
  * ========================================================================== */
-.footer {
-  background: transparent !important;
-  border: none !important;
+form:has(input[name="db[]"]) input[name="drop"],
+form:has(input[name="db[]"]) input[value="Drop"] {
+  display: none !important;
+}
+/* Also drop the now-purposeless bulk "Selected" fieldset on that page so the
+   databases view doesn't show an empty action bar. */
+form:has(input[name="db[]"]) .footer fieldset { display: none !important; }
+
+/* ==========================================================================
+ * 12. MISC
+ * ========================================================================== */
+/* Quiet ghost logout. Selector carries an extra class over `input[type=submit]`
+   so it out-specifies the crimson primary-button rule (which would otherwise win
+   and paint logout a heavy crimson block). */
+.logout,
+input[type=submit].logout,
+input[type=button].logout {
+  display: inline-block;
+  padding: 5px 12px !important;
+  background: #ffffff !important;
+  color: var(--ua-ink-soft) !important;
+  border: 1px solid var(--ua-border-strong) !important;
+  border-radius: var(--ua-radius-sm);
+  box-shadow: none !important;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.logout:hover,
+input[type=submit].logout:hover {
+  background: #ffffff !important;
+  border-color: var(--ua-crimson) !important;
+  color: var(--ua-crimson) !important;
 }
 
-.links {
-  margin: 10px 0;
-}
+#lang { color: var(--ua-muted); font-size: 12px; }
+hr { border: none; border-top: 1px solid var(--ua-border); margin: 18px 0; }
 
-hr {
-  border: none;
-  border-top: 1px solid var(--border);
-  margin: 20px 0;
-}
-
-/* Small screens: collapse the fixed sidebar back to in-flow (the shipped
-   #menuopen JS toggle still works — this just stops content from being
-   crushed under a 272px fixed rail on narrow viewports). */
-@media (max-width: 860px) {
-  #content {
-    margin-left: 0 !important;
-  }
-  #breadcrumb {
-    margin-left: 0 !important;
-  }
-  #foot.foot {
-    position: static;
-    width: auto;
-    height: auto;
-  }
-  #lang {
-    position: static;
-    width: auto;
-  }
+/* Narrow screens: let the native layout collapse gracefully (Adminer's own
+   #menuopen toggle still applies). max-width query only — contains no OS-scheme
+   token, so the dark-sheet trap stays disarmed. */
+@media (max-width: 800px) {
+  #content { margin-left: 0 !important; padding-left: 16px !important; }
+  #menu { min-height: 0 !important; }
 }
