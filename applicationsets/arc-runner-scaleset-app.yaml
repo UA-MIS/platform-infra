@@ -78,16 +78,21 @@ spec:
         #     restricted posture via the controller.) ---
         template:
           spec:
-            # --- Node placement for the RUNNER pod (CI-fast, #237) ---
-            # The runner pod itself (listener/job orchestration) also prefers the beefier
-            # control-plane OptiPlexes over the 2-core Macs. The 3 control-plane nodes
-            # carry taint `capstone.io/control-plane=true:PreferNoSchedule`; the toleration
-            # makes them eligible and the preferred nodeAffinity pulls the runner onto
-            # them, falling back to the Macs under load. NOTE: the actual Kaniko BUILD
-            # runs in a separate step pod (containerMode:kubernetes) whose placement is
-            # set in platform-services/arc/hook-template.yaml — the SAME toleration +
-            # affinity are mirrored there (that is what makes the slow build land on an
-            # OptiPlex). Both are needed; this one only moves the lightweight runner pod.
+            # --- Node placement for the RUNNER pod (CI-fast, #237; db1 CI-build node) ---
+            # `ua-mis-db-1` joined the cluster labeled `capstone.io/ci-build=true`
+            # (~7.5GiB allocatable) specifically to host CI builds that need more memory
+            # than the control-plane OptiPlexes comfortably spare. nodeSelector is a HARD
+            # constraint, so the runner pod now schedules ONLY on db1 — this supersedes
+            # the softer control-plane toleration/affinity below (still harmless: db1
+            # carries neither the control-plane taint nor label, so those blocks are
+            # no-ops against the single nodeSelector-matched candidate). NOTE: the actual
+            # Kaniko BUILD runs in a separate step pod (containerMode:kubernetes) whose
+            # placement is set in platform-services/arc/hook-template.yaml — the SAME
+            # nodeSelector is mirrored there (that is what makes the memory-hungry build
+            # land on db1 too). Both are needed; this one only moves the lightweight
+            # runner pod.
+            nodeSelector:
+              capstone.io/ci-build: "true"
             tolerations:
               - key: capstone.io/control-plane
                 operator: Equal
@@ -136,9 +141,27 @@ spec:
                     mountPath: /home/runner/pod-templates
                     readOnly: true
                 resources:
-                  # RESOURCE KNOB — caps a Kaniko-build burst from OOMing the box.
+                  # RESOURCE KNOB — LIMIT raised 2Gi -> 6Gi to match the Kaniko WORKLOAD
+                  # step-pod ceiling (platform-services/arc/hook-template.yaml), so
+                  # nothing on this scaleset is capped below the ~6Gi a Backstage yarn
+                  # build needs. REQUEST deliberately left low (not raised to ~4Gi):
+                  # this listener/orchestration pod's real usage is a few hundred Mi, and
+                  # nodeSelector now pins EVERY pod this scaleset creates — this runner
+                  # pod, the job-container pod (checkout/resolve, containerMode:
+                  # kubernetes' `container:` — see workflow), AND the Kaniko step-pod
+                  # (hook-template.yaml's "$job" resources apply to BOTH job-container
+                  # AND step pods per runner-container-hooks' mergeContainerWithOptions,
+                  # confirmed against actions/runner-container-hooks source) — onto the
+                  # SAME single db1 node (~7.5Gi allocatable). All 3 can be co-resident
+                  # for most of a build. Requesting ~4Gi on each would sum to ~12Gi of
+                  # scheduler-admission requests on a ~7.5Gi node -> the step-pod would
+                  # Pend forever (insufficient memory), defeating the fix. Keeping
+                  # requests low + limits high (burstable) lets the Kaniko step-pod
+                  # actually USE up to 6Gi at runtime (fixing the OOM, which was caused
+                  # by NO limit at all, not by an under-provisioned request) without
+                  # over-committing db1's scheduling budget.
                   requests: { cpu: "250m", memory: "512Mi" }
-                  limits:   { cpu: "2",    memory: "2Gi" }
+                  limits:   { cpu: "2",    memory: "6Gi" }
             volumes:
               # The hook template (arc-hook-template ConfigMap, key `content`) the
               # runner passes to the k8s container hook for every job-step pod.

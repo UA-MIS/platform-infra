@@ -23,9 +23,15 @@
 #     push (D-028) — no Trivy step here (no dup).
 #
 # TAG / PUSH POLICY (M1):
-#   - push to main touching the app   -> :<short-sha>  (mutable dev image, PUSHED)
-#   - pull_request touching the app   -> BUILD ONLY (--no-push). PR code is
-#                                        untrusted; validated, never pushed.
+#   - push to main touching the app        -> :<short-sha>  (mutable dev image, PUSHED)
+#   - workflow_dispatch on main             -> :<short-sha>  (mutable dev image, PUSHED)
+#                                              manual rebuild — e.g. to pick up a
+#                                              platform-side change (runner resources,
+#                                              base image) without a throwaway app/**
+#                                              commit. workflow_dispatch on any OTHER
+#                                              ref is build-only (never pushes).
+#   - pull_request touching the app         -> BUILD ONLY (--no-push). PR code is
+#                                              untrusted; validated, never pushed.
 #   The deploy is NOT auto-bumped: a human flips the Application's image.tag to
 #   the built <short-sha> at go-live (the deploy-enable batch). No Image Updater.
 #
@@ -147,8 +153,14 @@ jobs:
           # Application to this exact tag at go-live).
           SHORT_SHA="$(echo "${GITHUB_SHA}" | cut -c1-12)"
           IMAGE="${IMAGE_REPO}:${SHORT_SHA}"
-          # Push on real pushes to main; PR builds validate only (untrusted code).
+          # Push on real pushes to main, OR a manual workflow_dispatch run against
+          # main (a deliberate human-triggered rebuild — e.g. to pick up a
+          # platform-side change like runner resources without a throwaway app/**
+          # commit). A workflow_dispatch run against any OTHER ref, and every
+          # pull_request (untrusted code), stay build-only.
           if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            PUSH=true
+          elif [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${GITHUB_REF}" = "refs/heads/main" ]; then
             PUSH=true
           else
             PUSH=false
