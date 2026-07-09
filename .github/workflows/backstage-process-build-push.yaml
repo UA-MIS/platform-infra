@@ -201,6 +201,23 @@ jobs:
       #                               new-run removes those RUN snapshots entirely.
       # --reproducible is kept (deterministic timestamps); its memory cost is at
       # finalize, after the peak-snapshot memory is freed.
+      #
+      # KANIKO MEMORY (OOM fix #2 — PUSH phase): the snapshot-time fixes above
+      # cleared the mid-build OOM, but the pod then started dying during the PUSH
+      # itself — the build ran clean through the final CMD instruction (all layers
+      # produced), then went silent for ~39s with no Kaniko error before the
+      # container-hook reported "job has failed / Executing the custom container
+      # implementation failed" (classic OOM-kill signature, not a Kaniko-logged
+      # failure). The runner is pinned to node db1 (~7.7GiB total, cannot just raise
+      # the 6Gi pod limit much), so the fix has to cut Kaniko's push-time memory, not
+      # the ceiling. It's marginal/recurring, not deterministic (one build squeaked
+      # by, the next on an unchanged image OOM'd), which fits an in-memory compressed
+      # layer spiking past the limit at push time for the ~1 GiB node_modules layer.
+      #   --push-retry=3   resilience against a transient push blip riding right at
+      #                    the memory ceiling (kaniko default is 0 retries).
+      # --compressed-caching=false (above) is the primary push-memory reducer too —
+      # it already stops Kaniko holding compressed layers in RAM, which covers both
+      # the cache-repo write and the destination push on the same big layer.
       - name: Build (and push) with Kaniko
         uses: docker://gcr.io/kaniko-project/executor:v1.23.2-debug
         with:
@@ -223,6 +240,7 @@ jobs:
                     --snapshot-mode=redo
                     --compressed-caching=false
                     --use-new-run
+                    --push-retry=3
                     --verbosity=info";
             if [ "${PUSH}" = "true" ]; then
               echo "==> building + pushing ${IMAGE} (layer cache: ${CACHE_REPO})";
