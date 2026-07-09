@@ -248,7 +248,15 @@ jobs:
 
       - name: Supply-chain verify (Harbor Trivy gate + cosign sign + syft SBOM)
         if: ${{ steps.resolve.outputs.PUSH == 'true' }}
-        uses: UA-MIS/platform-infra/.github/actions/supply-chain-verify@v1
+        # LOCAL ref (not the remote UA-MIS/platform-infra@v1 form): this job already
+        # ran `actions/checkout@v4` above (step "Checkout (build context = the
+        # Backstage monorepo)"), so ./.github/actions/... resolves against the
+        # checked-out repo — always in sync with main, no git-tag dependency. The
+        # remote @v1 ref broke every run once this action was added to main AFTER
+        # the v1 tag was cut (v1 doesn't contain .github/actions/supply-chain-verify).
+        # This workflow is NOT reusable/externally-versioned like tenant-build.yaml,
+        # so there's no reason to pin to a tag here.
+        uses: ./.github/actions/supply-chain-verify
         with:
           image-ref: ${{ steps.digest.outputs.IMAGE_REF }}
           # Dedicated `backstage` Harbor project (D-046); repo leaf `backstage-process`
