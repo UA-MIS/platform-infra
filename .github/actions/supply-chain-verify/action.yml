@@ -16,10 +16,19 @@
 #      `permissions: id-token: write`).
 #   4. GATES on Harbor's OWN scan-on-push Trivy result (D-028; auto_scan:true is
 #      already on for every project) — polls the artifact's scan_overview until
-#      the scan finishes, then fails the job if any CRITICAL finding exists. This
-#      does NOT re-scan the image client-side (no Trivy dup) — it reads the scan
-#      Harbor already ran. Gating BEFORE signing on purpose: a build this rejects
-#      never gets a cosign signature recorded in the PUBLIC, immutable Rekor log.
+#      the scan finishes, then reads the FULL per-CVE finding list (`.../artifacts/
+#      <digest>/additions/vulnerabilities`, not just the scan_overview summary
+#      COUNT) and fails the job if any CRITICAL finding's CVE ID is NOT listed in
+#      the committed `accepted-cves.txt` allowlist next to this action. This is
+#      CVE-ID-aware on purpose: Harbor v2.15's own project-level CVE allowlist does
+#      NOT reduce the scan_overview summary count, so a plain count check can't
+#      distinguish a documented, unfixable base-image CVE from a brand-new one —
+#      accepted-cves.txt can. It stays narrow BY DESIGN (specific CVE IDs only,
+#      never a severity/package-wide bypass) and every accepted CVE still present
+#      is printed on every run, never silently dropped. This does NOT re-scan the
+#      image client-side (no Trivy dup) — it reads the scan Harbor already ran.
+#      Gating BEFORE signing on purpose: a build this rejects never gets a cosign
+#      signature recorded in the PUBLIC, immutable Rekor log.
 #   5. cosign KEYLESS-signs the pushed image (public Fulcio + Rekor, OIDC-bound
 #      to this exact GitHub Actions workflow identity — no key material anywhere).
 #   6. Generates a CycloneDX SBOM with syft and uploads it as a workflow artifact
@@ -83,7 +92,10 @@ inputs:
     description: "Name for the uploaded SBOM workflow artifact — MUST be unique across matrix legs/jobs in one run."
     required: true
   fail-on-severity:
-    description: "Harbor scan_overview summary key that fails the build if its count is > 0."
+    description: >-
+      Severity value (matches Harbor's per-finding `severity` field, e.g. Critical)
+      that fails the build if its NET count is > 0 — findings whose CVE ID is listed
+      in this action's committed accepted-cves.txt are excluded from that count.
     required: false
     default: Critical
   scan-timeout-seconds:
@@ -151,7 +163,7 @@ runs:
 
     # Gate BEFORE signing: a build this rejects never gets a signature recorded in
     # the public, immutable Rekor transparency log.
-    - name: Gate on Harbor's Trivy scan-on-push (fail on ${{ inputs.fail-on-severity }})
+    - name: Gate on Harbor's Trivy scan-on-push (fail on NET ${{ inputs.fail-on-severity }}, accepted CVEs excluded)
       shell: bash
       env:
         IMAGE_REF: ${{ inputs.image-ref }}
@@ -160,6 +172,7 @@ runs:
         DOCKER_CONFIG_DIR: ${{ inputs.docker-config-dir }}
         FAIL_SEVERITY: ${{ inputs.fail-on-severity }}
         TIMEOUT_SECONDS: ${{ inputs.scan-timeout-seconds }}
+        ACCEPTED_CVES_FILE: ${{ github.action_path }}/accepted-cves.txt
       run: |
         set -eu
         case "${IMAGE_REF}" in
@@ -213,22 +226,80 @@ runs:
           sleep 10
         done
 
-        count="$(printf '%s' "${resp}" | FAIL_SEVERITY="${FAIL_SEVERITY}" node -e '
-          let d = ""; process.stdin.on("data", c => d += c);
-          process.stdin.on("end", () => {
-            try {
-              const j = JSON.parse(d);
-              const ov = j.scan_overview || {};
-              const k = Object.keys(ov)[0];
-              const sum = (k && ov[k].summary && ov[k].summary.summary) || {};
-              process.stdout.write(String(sum[process.env.FAIL_SEVERITY] || 0));
-            } catch (e) { process.stdout.write("0"); }
-          });')"
-        echo "Harbor Trivy scan for ${IMAGE_REF}: ${count} ${FAIL_SEVERITY} finding(s)."
-        if [ "${count}" -gt 0 ]; then
-          echo "ERROR: refusing to complete the build — ${count} ${FAIL_SEVERITY}" \
-               "vulnerability finding(s) in ${IMAGE_REF}. See https://${HOST}/harbor/projects" \
-               " -> ${HARBOR_PROJECT} -> ${HARBOR_REPO} -> ${DIGEST} for the report." >&2
+        # scan_status is Success (loop above), so the FULL per-CVE finding list is
+        # ready. Read it instead of the scan_overview summary COUNT: the summary
+        # can't tell an accepted, documented, unfixable base-image CVE apart from a
+        # brand-new one, and Harbor v2.15's own project CVE-allowlist does NOT
+        # reduce that summary count (confirmed) — so it can't be used either.
+        VULN_API="https://${HOST}/api/v2.0/projects/${HARBOR_PROJECT}/repositories/${HARBOR_REPO}/artifacts/${DIGEST}/additions/vulnerabilities"
+        vresp="$(curl -sS -f -H "Authorization: Basic ${AUTH}" "${VULN_API}")" || {
+          echo "ERROR: Harbor API call to ${VULN_API} failed — scan_status was Success, so this" \
+               "is unexpected. Failing closed rather than gating without the full finding list." >&2
+          exit 1
+        }
+
+        [ -s "${ACCEPTED_CVES_FILE}" ] || {
+          echo "ERROR: accepted-CVE allowlist not found at ${ACCEPTED_CVES_FILE} — failing closed" \
+               "rather than gating with a missing/empty allowlist." >&2
+          exit 1
+        }
+
+        blocking_count="$(printf '%s' "${vresp}" | \
+          FAIL_SEVERITY="${FAIL_SEVERITY}" ACCEPTED_CVES_FILE="${ACCEPTED_CVES_FILE}" node -e '
+            const fs = require("fs");
+            let d = ""; process.stdin.on("data", c => d += c);
+            process.stdin.on("end", () => {
+              // Narrow, specific-CVE-ID allowlist — see accepted-cves.txt header.
+              // "<CVE-ID> # justification"; blank lines and full-line "#..." comments
+              // ignored. NEVER treated as a severity- or package-wide bypass: only the
+              // exact CVE ID before the first "#" is matched.
+              const accepted = new Map();
+              for (const raw of fs.readFileSync(process.env.ACCEPTED_CVES_FILE, "utf8").split("\n")) {
+                const line = raw.trim();
+                if (!line || line.startsWith("#")) continue;
+                const hashIdx = line.indexOf("#");
+                const id = (hashIdx === -1 ? line : line.slice(0, hashIdx)).trim();
+                const justification = hashIdx === -1 ? "" : line.slice(hashIdx + 1).trim();
+                if (id) accepted.set(id, justification);
+              }
+
+              let findings;
+              try {
+                const j = JSON.parse(d);
+                const k = Object.keys(j)[0];
+                findings = (k && j[k].vulnerabilities) || [];
+              } catch (e) { findings = null; }
+              if (findings === null) {
+                console.error("ERROR: could not parse the /additions/vulnerabilities response as JSON — failing closed.");
+                process.exit(1);
+              }
+
+              const sev = process.env.FAIL_SEVERITY;
+              const hits = findings.filter(v => v.severity === sev);
+              const blocking = hits.filter(v => !accepted.has(v.id));
+              const acceptedHits = hits.filter(v => accepted.has(v.id));
+
+              if (acceptedHits.length) {
+                console.error(`--- ACCEPTED ${sev} finding(s) (documented exception in accepted-cves.txt, not blocking) ---`);
+                for (const v of acceptedHits) {
+                  console.error(`  ${v.id}  ${v.package}@${v.version}  fix=${v.fix_version || "NONE"}  -- ${accepted.get(v.id) || "(no justification on file)"}`);
+                }
+              }
+              if (blocking.length) {
+                console.error(`--- BLOCKING ${sev} finding(s) (NOT in accepted-cves.txt) ---`);
+                for (const v of blocking) {
+                  console.error(`  ${v.id}  ${v.package}@${v.version}  fix=${v.fix_version || "NONE"}`);
+                }
+              }
+              console.error(`Harbor Trivy scan: ${hits.length} total ${sev} finding(s) -- ${acceptedHits.length} accepted, ${blocking.length} blocking.`);
+              process.stdout.write(String(blocking.length));
+            });
+          ')"
+        if [ "${blocking_count}" -gt 0 ]; then
+          echo "ERROR: refusing to complete the build — ${blocking_count} ${FAIL_SEVERITY}" \
+               "vulnerability finding(s) in ${IMAGE_REF} are NOT in the accepted-CVE allowlist" \
+               "(${ACCEPTED_CVES_FILE}). See https://${HOST}/harbor/projects -> ${HARBOR_PROJECT}" \
+               " -> ${HARBOR_REPO} -> ${DIGEST} for the report." >&2
           exit 1
         fi
 

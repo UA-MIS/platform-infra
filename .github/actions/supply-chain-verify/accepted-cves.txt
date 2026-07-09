@@ -1,0 +1,19 @@
+# Documented CVE exceptions for supply-chain-verify's Critical gate (see the
+# "Gate on Harbor's Trivy scan-on-push" step in action.yml). Every CVE finding
+# Harbor reports at inputs.fail-on-severity (default Critical) is checked against
+# this file BY ID — only an exact-ID match here is excluded from the NET count
+# that fails the build. Everything else still fails the gate exactly as before,
+# including a DIFFERENT CVE in the same package.
+#
+# NARROW BY DESIGN — do not turn this into a package-wide or severity-wide
+# bypass. Each entry below must be one specific CVE ID with a justification
+# covering: why it's unfixable today, why it's not reachable/exploitable here,
+# and when to revisit. Every accepted CVE still present in a scan is printed
+# (not silenced) on every run for audit visibility.
+#
+# Format: "<CVE-ID> # <justification>" — one CVE ID per line. Blank lines and
+# lines starting with "#" are ignored. Only the token before the first "#" is
+# matched against Harbor's finding IDs.
+
+CVE-2026-42496 # perl-base Essential Debian pkg (unremovable), no upstream fix as of 2026-07, perl not invoked in Node runtime — revisit when Debian ships a patched perl-base
+CVE-2026-8376 # perl-base Essential Debian pkg (unremovable), no upstream fix as of 2026-07, perl not invoked in Node runtime — revisit when Debian ships a patched perl-base
