@@ -1,0 +1,113 @@
+# Admin dashboard (Observability admin dashboards, Grafana SSO + dashboard fleet
+# PR). cert-manager certificate readiness, expiry runway, and reconcile activity.
+# Real metrics, scraped day-one via the `cert-manager` ServiceMonitor
+# (servicemonitors.yaml, already live — targets cert-manager's own metrics
+# Service, port tcp-prometheus-servicemonitor/9402).
+#
+# The days-until-expiry threshold (red < 14) matches this platform's
+# `CertManagerCertExpiringSoon` PrometheusRule (alerts.yaml: "expires < 14d").
+#
+# Auto-provisioned by the Grafana sidecar via the `grafana_dashboard: "1"` label,
+# filed into the "Platform / Infra" folder via the `grafana_folder` annotation.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-cert-manager
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: "Platform / Infra"
+data:
+  cert-manager.json: |
+    {
+      "uid": "platform-cert-manager",
+      "title": "Platform / Infra — cert-manager",
+      "tags": ["platform", "admin", "tls"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "time": { "from": "now-6h", "to": "now" },
+      "refresh": "1m",
+      "templating": {
+        "list": [
+          {
+            "name": "datasource",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": {},
+            "hide": 0
+          }
+        ]
+      },
+      "panels": [
+        { "id": 1, "type": "row", "title": "Certificate readiness + expiry", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 } },
+        {
+          "id": 2, "type": "stat", "title": "Certificates NOT Ready",
+          "gridPos": { "h": 5, "w": 6, "x": 0, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "count(certmanager_certificate_ready_status{condition=\"True\"} == 0)", "instant": true, "refId": "A" } ]
+        },
+        {
+          "id": 3, "type": "table", "title": "Days Until Expiry (per certificate, sorted ascending)",
+          "description": "Thresholds match the CertManagerCertExpiringSoon alert (alerts.yaml): red < 14d, orange < 30d.",
+          "gridPos": { "h": 10, "w": 18, "x": 6, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "d",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "red", "value": null },
+                { "color": "orange", "value": 14 },
+                { "color": "green", "value": 30 }
+              ] }
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "(certmanager_certificate_expiration_timestamp_seconds - time()) / 86400",
+              "format": "table",
+              "instant": true,
+              "refId": "A"
+            }
+          ]
+        },
+        { "id": 4, "type": "row", "title": "Renewal + controller activity", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 11 } },
+        {
+          "id": 5, "type": "table", "title": "Last Renewal Time (per certificate)",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "dateTimeAsIso" }, "overrides": [] },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "certmanager_certificate_renewal_timestamp_seconds * 1000",
+              "format": "table",
+              "instant": true,
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 6, "type": "timeseries", "title": "Controller Sync Rate",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(rate(certmanager_controller_sync_call_count[5m]))", "legendFormat": "syncs/s", "refId": "A" } ]
+        },
+        { "id": 7, "type": "row", "title": "ACME activity (only if the ClusterIssuer is ACME-backed)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 20 } },
+        {
+          "id": 8, "type": "timeseries", "title": "ACME Client Request Rate",
+          "description": "No data if the platform's ClusterIssuer is not ACME-backed (e.g. a self-signed/CA-backed issuer) — this panel is intentionally left in for whenever an ACME issuer is added.",
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 21 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(rate(certmanager_http_acme_client_request_duration_seconds_count[5m]))", "legendFormat": "acme requests/s", "refId": "A" } ]
+        }
+      ]
+    }

@@ -1,0 +1,122 @@
+# Admin dashboard (Observability admin dashboards, Grafana SSO + dashboard fleet
+# PR). CoreDNS query rate, response codes, latency, and cache effectiveness.
+# Real metrics, scraped day-one — the kube-prometheus-stack chart's `coreDns`
+# component (default enabled) already ships a ServiceMonitor
+# (`kube-prometheus-stack-coredns`) targeting the stock `kube-dns` Service in
+# kube-system on its `metrics` port (9153); confirmed live 2026-07-08
+# (`kubectl get servicemonitors -n monitoring`, `kubectl get svc -n kube-system`).
+#
+# Auto-provisioned by the Grafana sidecar via the `grafana_dashboard: "1"` label,
+# filed into the "Platform / Infra" folder via the `grafana_folder` annotation
+# (`sidecar.dashboards.folderAnnotation`, applicationsets/kube-prometheus-stack-app.yaml).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-coredns
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: "Platform / Infra"
+data:
+  coredns.json: |
+    {
+      "uid": "platform-coredns",
+      "title": "Platform / Infra — CoreDNS",
+      "tags": ["platform", "admin", "dns"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "time": { "from": "now-6h", "to": "now" },
+      "refresh": "1m",
+      "templating": {
+        "list": [
+          {
+            "name": "datasource",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": {},
+            "hide": 0
+          }
+        ]
+      },
+      "panels": [
+        { "id": 1, "type": "row", "title": "Query volume + response codes", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 } },
+        {
+          "id": 2, "type": "timeseries", "title": "DNS Query Rate (by zone/type)",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (zone, type) (rate(coredns_dns_requests_total[5m]))", "legendFormat": "{{zone}} / {{type}}", "refId": "A" } ]
+        },
+        {
+          "id": 3, "type": "timeseries", "title": "DNS Responses by Rcode (NOERROR/NXDOMAIN/SERVFAIL/...)",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "stacking": { "mode": "normal" } } }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (rcode) (rate(coredns_dns_responses_total[5m]))", "legendFormat": "{{rcode}}", "refId": "A" } ]
+        },
+        { "id": 4, "type": "row", "title": "Latency", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 } },
+        {
+          "id": 5, "type": "timeseries", "title": "Request Duration (p50 / p95 / p99)",
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 10 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.50, sum by (le) (rate(coredns_dns_request_duration_seconds_bucket[5m])))", "legendFormat": "p50", "refId": "A" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.95, sum by (le) (rate(coredns_dns_request_duration_seconds_bucket[5m])))", "legendFormat": "p95", "refId": "B" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.99, sum by (le) (rate(coredns_dns_request_duration_seconds_bucket[5m])))", "legendFormat": "p99", "refId": "C" }
+          ]
+        },
+        { "id": 6, "type": "row", "title": "Cache + forwarding + health", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 } },
+        {
+          "id": 7, "type": "stat", "title": "Cache Hit Ratio",
+          "gridPos": { "h": 6, "w": 8, "x": 0, "y": 19 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent", "min": 0, "max": 100,
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "red", "value": null },
+                { "color": "orange", "value": 50 },
+                { "color": "green", "value": 80 }
+              ] }
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "100 * sum(rate(coredns_cache_hits_total[5m])) / (sum(rate(coredns_cache_hits_total[5m])) + sum(rate(coredns_cache_misses_total[5m])))",
+              "instant": true,
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 8, "type": "timeseries", "title": "Upstream Forward Request Rate",
+          "gridPos": { "h": 6, "w": 8, "x": 8, "y": 19 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(rate(coredns_forward_requests_total[5m]))", "legendFormat": "forwarded/s", "refId": "A" } ]
+        },
+        {
+          "id": 9, "type": "stat", "title": "Panics (1h)",
+          "gridPos": { "h": 6, "w": 8, "x": 16, "y": 19 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "red", "value": 1 }
+              ] }
+            },
+            "overrides": []
+          },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(increase(coredns_panics_total[1h]))", "instant": true, "refId": "A" } ]
+        }
+      ]
+    }

@@ -52,7 +52,20 @@ spec:
         toolbox:
           enabled: true                 # `ceph` CLI pod for status/debug (ceph -s)
         monitoring:
-          enabled: false                # wire to Prometheus later (no stack yet)
+          # Wired to Prometheus (Observability — the stack referenced in the old
+          # comment here now exists, applicationsets/kube-prometheus-stack-app.yaml).
+          # Turns on the Ceph mgr `prometheus` module (ceph_* metrics on
+          # rook-ceph-mgr:9283) + has the chart create the matching ServiceMonitor
+          # itself — no manual ServiceMonitor needed in platform-services/monitoring/.
+          # Feeds "Platform / Infra — Ceph / Rook" (dashboard-ceph-rook.yaml):
+          # cluster health, OSD up/in, pool capacity, PG state, IOPS/throughput.
+          enabled: true
+          # Also ship the upstream Ceph alerting rules (a PrometheusRule CR) —
+          # real failure modes (OSD down, PG degraded, mon quorum loss, capacity
+          # near-full) this platform didn't have alerts for before. Same posture
+          # as monitoring/alerts.yaml: routes through the existing Alertmanager ->
+          # ntfy pipeline, no new wiring needed.
+          createPrometheusRules: true
 
         cephClusterSpec:
           # Pin the Ceph image (chart default is commented out → must set it).
@@ -170,6 +183,14 @@ spec:
     syncOptions:
       - CreateNamespace=false
       - ServerSideApply=true
+      # monitoring.enabled=true above makes this chart render a ServiceMonitor +
+      # PrometheusRule (kube-prometheus-stack CRDs). Even with the wave-1-after-
+      # wave-0 ordering (sync-wave annotation above), defensively skip the
+      # dry-run on those types not yet being registered — same reasoning + same
+      # fix as platform-svc-monitoring's ServiceMonitor/PodMonitor CRs
+      # (servicemonitors.yaml, #127); app-wide here since these are chart-
+      # rendered, not per-resource-annotatable. ArgoCD retry/selfHeal converges.
+      - SkipDryRunOnMissingResource=true
     retry:
       limit: 5
       backoff: { duration: 10s, factor: 2, maxDuration: 5m }

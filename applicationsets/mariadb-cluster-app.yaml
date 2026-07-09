@@ -61,6 +61,17 @@ spec:
             # One Pod per node (3 nodes, 3 replicas) — same anti-affinity intent
             # as the CNPG Cluster's `enablePodAntiAffinity`.
             antiAffinityEnabled: true
+          # Observability: real Galera/MariaDB metrics (mysqld_exporter under the
+          # hood — `mysql_global_status_wsrep_*` cluster-size/flow-control/ready,
+          # connections, queries/sec) for "Platform / Infra — MariaDB / Galera"
+          # (dashboard-mariadb-galera.yaml). `metrics.enabled: true` is the one
+          # bundled operator-native switch (verified live via `kubectl explain
+          # mariadb.spec.metrics`, 2026-07-08): it deploys the exporter sidecar,
+          # auto-generates the monitoring user/password (no username/
+          # passwordSecretKeyRef given), AND creates the ServiceMonitor —
+          # no manual ServiceMonitor needed here.
+          metrics:
+            enabled: true
           resources:
             requests:
               cpu: 100m

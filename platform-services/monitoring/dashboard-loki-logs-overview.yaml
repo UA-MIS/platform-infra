@@ -1,0 +1,94 @@
+# Admin dashboard (Observability admin dashboards, Grafana SSO + dashboard fleet
+# PR). Loki's own health (ingestion rate, stream churn, query latency — self-
+# monitoring via Prometheus) PLUS a cluster-wide log-volume/error-rate view
+# across all namespaces (via LogQL against Loki itself).
+#
+# Loki is scraped day-one (ServiceMonitor `loki` already live — the loki Helm
+# chart's own monitoring block) and already wired as a Grafana datasource named
+# "Loki" (additionalDataSources, applicationsets/kube-prometheus-stack-app.yaml).
+# Alloy's collection pipeline (applicationsets/alloy-app.yaml) attaches
+# `namespace`/`pod`/`container`/`node`/`app` labels to every log line, so LogQL
+# below can group/filter by `namespace`.
+#
+# Auto-provisioned by the Grafana sidecar via the `grafana_dashboard: "1"` label,
+# filed into the "Platform / Infra" folder via the `grafana_folder` annotation.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-loki-logs-overview
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: "Platform / Infra"
+data:
+  loki-logs-overview.json: |
+    {
+      "uid": "platform-loki-logs",
+      "title": "Platform / Infra — Loki / Logs Overview",
+      "tags": ["platform", "admin", "logs"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "time": { "from": "now-6h", "to": "now" },
+      "refresh": "1m",
+      "templating": {
+        "list": [
+          {
+            "name": "datasource",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": {},
+            "hide": 0
+          },
+          {
+            "name": "loki_datasource",
+            "type": "datasource",
+            "query": "loki",
+            "current": {},
+            "hide": 0
+          }
+        ]
+      },
+      "panels": [
+        { "id": 1, "type": "row", "title": "Loki self-monitoring", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 } },
+        {
+          "id": 2, "type": "timeseries", "title": "Ingestion Rate (bytes received)",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "Bps" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(rate(loki_distributor_bytes_received_total[5m]))", "legendFormat": "bytes/s", "refId": "A" } ]
+        },
+        {
+          "id": 3, "type": "timeseries", "title": "Stream Creation Rate (churn)",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(rate(loki_ingester_streams_created_total[5m]))", "legendFormat": "streams/s", "refId": "A" } ]
+        },
+        {
+          "id": 4, "type": "timeseries", "title": "Query Latency p95 (query endpoints)",
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 9 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.95, sum by (le) (rate(loki_request_duration_seconds_bucket{route=~\"loki_api_v1_query.*\"}[5m])))", "legendFormat": "p95", "refId": "A" } ]
+        },
+        { "id": 5, "type": "row", "title": "Cluster-wide log volume (LogQL)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 17 } },
+        {
+          "id": 6, "type": "timeseries", "title": "Log Volume by Namespace",
+          "gridPos": { "h": 9, "w": 12, "x": 0, "y": 18 },
+          "datasource": { "type": "loki", "uid": "${loki_datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "loki", "uid": "${loki_datasource}" }, "expr": "sum by (namespace) (count_over_time({namespace=~\".+\"}[$__interval]))", "legendFormat": "{{namespace}}", "refId": "A" } ]
+        },
+        {
+          "id": 7, "type": "timeseries", "title": "Error Log Rate by Namespace (case-insensitive \"error\" match)",
+          "gridPos": { "h": 9, "w": 12, "x": 12, "y": 18 },
+          "datasource": { "type": "loki", "uid": "${loki_datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "loki", "uid": "${loki_datasource}" }, "expr": "sum by (namespace) (count_over_time({namespace=~\".+\"} |~ \"(?i)error\" [$__interval]))", "legendFormat": "{{namespace}}", "refId": "A" } ]
+        }
+      ]
+    }

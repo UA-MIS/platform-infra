@@ -128,6 +128,20 @@ data:
           # oauth2-proxy's own OIDC callback (single shared instance, fixed host —
           # NOT any of the per-team console hosts, which never talk to Dex directly).
           - https://db-auth.capstone.uamishub.com/oauth2/callback
+      # Grafana (Observability SSO) — federates through the SAME broker (NO new
+      # GitHub OAuth app), same "one GitHub OAuth app, N tools" model as ArgoCD/
+      # Harbor/Backstage/DB-console. Grafana's `auth.generic_oauth` config lives in
+      # `applicationsets/kube-prometheus-stack-app.yaml` (grafana.ini); the client
+      # secret is injected via GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET from the
+      # `grafana-oauth` SealedSecret (platform-services/monitoring/
+      # sealedsecret-grafana-oauth.yaml) — the SAME value as the
+      # `grafana-client-secret` key below (both sides must agree).
+      - id: grafana
+        name: Grafana
+        secretEnv: GRAFANA_CLIENT_SECRET
+        redirectURIs:
+          # Grafana's OIDC callback (root_url + /login/generic_oauth).
+          - https://grafana.capstone.uamishub.com/login/generic_oauth
 
     oauth2:
       # Skip the per-login "approve this app" screen — these are first-party

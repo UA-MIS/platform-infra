@@ -1,0 +1,105 @@
+# Admin dashboard (Observability admin dashboards, Grafana SSO + dashboard fleet
+# PR). CloudNativePG (Postgres 17, `capstone-pg` in db-tier) replication lag,
+# connections, transaction rate, WAL, and database size.
+#
+# Becomes real once THIS SAME PR's platform-services/cnpg/cluster/cluster.yaml
+# change (`spec.monitoring.enablePodMonitor: true`) syncs — the operator creates
+# the PodMonitor itself. ArgoCD-managed, self-heals — no human step required.
+#
+# Standard CloudNativePG exporter metric names (cnpg_* prefix).
+#
+# Auto-provisioned by the Grafana sidecar via the `grafana_dashboard: "1"` label,
+# filed into the "Platform / Infra" folder via the `grafana_folder` annotation.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-cnpg-postgres
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: "Platform / Infra"
+data:
+  cnpg-postgres.json: |
+    {
+      "uid": "platform-cnpg-postgres",
+      "title": "Platform / Infra — CNPG / Postgres",
+      "description": "Real once cluster.yaml's spec.monitoring.enablePodMonitor syncs (ArgoCD-managed, self-heals — no human step).",
+      "tags": ["platform", "admin", "database"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "time": { "from": "now-6h", "to": "now" },
+      "refresh": "1m",
+      "templating": {
+        "list": [
+          {
+            "name": "datasource",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": {},
+            "hide": 0
+          }
+        ]
+      },
+      "panels": [
+        { "id": 1, "type": "row", "title": "Cluster health", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 } },
+        {
+          "id": 2, "type": "stat", "title": "Collector Up (per instance)",
+          "gridPos": { "h": 6, "w": 8, "x": 0, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] } }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "min(cnpg_collector_up)", "instant": true, "refId": "A" } ]
+        },
+        {
+          "id": 3, "type": "timeseries", "title": "Replication Lag by Instance",
+          "gridPos": { "h": 8, "w": 16, "x": 8, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "cnpg_pg_replication_lag", "legendFormat": "{{pod}}", "refId": "A" } ]
+        },
+        { "id": 4, "type": "row", "title": "Connections + transactions", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 } },
+        {
+          "id": 5, "type": "timeseries", "title": "Active Backends",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 10 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(cnpg_backends_total) by (pod)", "legendFormat": "{{pod}}", "refId": "A" } ]
+        },
+        {
+          "id": 6, "type": "timeseries", "title": "Transactions/sec (commit vs rollback)",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 10 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(rate(cnpg_pg_stat_database_xact_commit[5m]))", "legendFormat": "commit/s", "refId": "A" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(rate(cnpg_pg_stat_database_xact_rollback[5m]))", "legendFormat": "rollback/s", "refId": "B" }
+          ]
+        },
+        { "id": 7, "type": "row", "title": "Storage + WAL", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 } },
+        {
+          "id": 8, "type": "table", "title": "Database Size by Database",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 19 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "cnpg_pg_database_size_bytes",
+              "format": "table",
+              "instant": true,
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 9, "type": "timeseries", "title": "WAL File Count",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 19 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "cnpg_pg_wal_files_total", "legendFormat": "{{pod}}", "refId": "A" } ]
+        }
+      ]
+    }

@@ -42,6 +42,14 @@
 # *.capstone.uamishub.com). Prometheus + Alertmanager stay ClusterIP (port-forward
 # only) — internal ops surfaces, no need to expose.
 #
+# ── Grafana SSO (Observability SSO PR) ── Dex `auth.generic_oauth` federates to
+# the SAME broker as ArgoCD/Harbor/Backstage/DB-console (platform-services/dex/,
+# `grafana` staticClient). labmx -> GrafanaAdmin, every other UA-MIS member ->
+# Viewer; the admin/password form stays as break-glass. Full detail + the
+# `grafana-oauth` SealedSecret + folder/team-scoped-dashboard design: see
+# platform-services/monitoring/README.md "Grafana SSO (Dex)" and "Team-scoped
+# dashboards".
+#
 # ⚠ Grafana admin password: rotated OFF the chart default — creds come from the
 # grafana-admin SealedSecret via grafana.admin.existingSecret (below). Grafana IS
 # internet-reachable via the Cloudflare tunnel, so this must be a REAL seal before
@@ -274,9 +282,87 @@ spec:
           # UA-MIS crimson PNGs in platform-services/monitoring/grafana-theme/ by the
           # platform-svc-monitoring app (platform-services/monitoring/kustomization.yaml)
           # — same namespace (monitoring), referenced here by its STABLE name.
+          # --- Dex SSO (Observability SSO, mirrors ArgoCD/Harbor/Backstage/DB-console:
+          #     one GitHub OAuth app via Dex, N tools) ---
+          # `[server]` domain/root_url MUST be the public Traefik host — Grafana
+          # builds the OAuth redirect_uri from root_url, and it MUST exactly equal
+          # the `grafana` staticClient's redirectURIs entry in
+          # platform-services/dex/configmap.yaml
+          # (https://grafana.capstone.uamishub.com/login/generic_oauth) or Dex
+          # rejects the callback. Without this block Grafana defaults to
+          # http://localhost:3000, which is wrong behind Traefik.
+          #
+          # `[auth.generic_oauth]` points at Dex's standard OIDC endpoints
+          # (id.capstone.uamishub.com — same issuer ArgoCD/Harbor/Backstage/the
+          # DB-console oauth2-proxy already use). `client_secret` is deliberately
+          # NOT set here — it comes from GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET
+          # (envValueFrom below), sourced from the `grafana-oauth` SealedSecret
+          # (sealedsecret-grafana-oauth.yaml), same posture as oauth2-proxy's
+          # OAUTH2_PROXY_CLIENT_SECRET (db-console-auth/deployment.yaml).
+          #
+          # Role mapping (role_attribute_path, JMESPath over the `groups` claim —
+          # Dex's GitHub connector emits `UA-MIS:<team-slug>` entries, SEC-007):
+          #   - `UA-MIS:labmx` (the platform-admin Team, same one ArgoCD RBAC maps
+          #     to role:admin) -> Grafana `GrafanaAdmin` (org Admin + Grafana
+          #     server admin — the "labmx -> Admin" requirement). Needs
+          #     `allow_assign_grafana_admin = true`, scoped to this one role-map
+          #     branch (no other branch ever resolves to GrafanaAdmin).
+          #   - every other authenticated UA-MIS member (any other `UA-MIS:*`
+          #     team, or none) -> `Viewer` — dashboards are for CONSUMING, not
+          #     editing, per team.
+          # `disable_login_form`/`auto_login` are left false — the chart-default
+          # admin/password login form (grafana-admin SealedSecret) stays visible
+          # as the break-glass fallback alongside the "Sign in with Dex" button,
+          # never bypassed.
           "grafana.ini":
             users:
               default_theme: dark
+              # Belt-and-suspenders default for any auth path that doesn't hit
+              # role_attribute_path (e.g. the break-glass admin/password login) —
+              # the generic_oauth role_attribute_path below is what actually
+              # governs SSO logins.
+              auto_assign_org_role: Viewer
+            server:
+              domain: grafana.capstone.uamishub.com
+              root_url: "https://grafana.capstone.uamishub.com"
+            auth:
+              disable_login_form: false
+            "auth.generic_oauth":
+              enabled: true
+              name: "Dex (GitHub / UA-MIS)"
+              icon: github
+              client_id: grafana
+              scopes: "openid profile email groups"
+              auth_url: "https://id.capstone.uamishub.com/auth"
+              token_url: "https://id.capstone.uamishub.com/token"
+              api_url: "https://id.capstone.uamishub.com/userinfo"
+              use_pkce: true
+              allow_sign_up: true
+              # Explicit (not the deprecated global `[auth] oauth_auto_login`) —
+              # land on the chooser screen so the admin/password break-glass
+              # login stays reachable, never auto-redirected past.
+              auto_login: false
+              role_attribute_path: "contains(groups[*], 'UA-MIS:labmx') && 'GrafanaAdmin' || 'Viewer'"
+              role_attribute_strict: false
+              allow_assign_grafana_admin: true
+              # Inert without Grafana Enterprise (Team Sync is an Enterprise-only
+              # feature — confirmed via Grafana docs, this install is OSS). Kept
+              # set so a future Enterprise license activates team sync with zero
+              # config change; see the monitoring README "Team-scoped dashboards"
+              # for the OSS-compatible alternative actually in effect (folders +
+              # a `namespace` template variable, not IdP-driven team membership).
+              groups_attribute_path: groups
+          # GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET — the ONLY piece of the OAuth
+          # config not inlined in grafana.ini above (see the block header). Reads
+          # the `client-secret` key from the grafana-oauth SealedSecret
+          # (sealedsecret-grafana-oauth.yaml) — the SAME value as the
+          # `grafana-client-secret` key in platform-services/dex/sealedsecret.yaml
+          # (both sides of the OAuth handshake must agree).
+          envValueFrom:
+            GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET:
+              secretKeyRef:
+                name: grafana-oauth
+                key: client-secret
           extraConfigmapMounts:
             - name: ua-mis-favicon
               configMap: grafana-ua-mis-theme-cm
@@ -322,6 +408,25 @@ spec:
             resources:
               requests: { cpu: 16m, memory: 144Mi }
               limits: { memory: 192Mi }
+            dashboards:
+              # Folder-per-purpose (team-scoped UX, PART B): every dashboard
+              # ConfigMap below carries a `grafana_folder` ANNOTATION (not the
+              # `grafana_dashboard: "1"` LABEL, which stays the sidecar's pure
+              # selector) whose value is the destination folder name — the
+              # sidecar creates the folder on first sight and files the dashboard
+              # into it. Two folders ship in this PR: "Platform / Infra" (admin-
+              # facing, cross-tenant) and "Platform / Tenants" (per-app
+              # dashboards with a `namespace` template variable — the "team logs
+              # in, sees their app cleanly" default view). Dashboards with no
+              # annotation land in "General" (none do, as of this PR).
+              folderAnnotation: grafana_folder
+              # ALL (not just this release's own `monitoring` namespace): lets
+              # the sidecar also pick up the OFFICIAL dashboards baked into the
+              # cilium Helm chart itself (dashboards.enabled / operator.
+              # dashboards.enabled / hubble.metrics.dashboards.enabled —
+              # clusters/real-talos/cilium-metrics-values.yaml), which land in
+              # `kube-system` (Cilium's install namespace), not `monitoring`.
+              searchNamespace: ALL
           # Traefik ingress, wildcard TLS via the default TLSStore (no secretName) —
           # identical pattern to harbor/process/argocd/dex.
           ingress:

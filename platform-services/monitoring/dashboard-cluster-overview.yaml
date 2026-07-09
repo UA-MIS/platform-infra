@@ -13,6 +13,10 @@ metadata:
   labels:
     platform.capstone/component: platform
     grafana_dashboard: "1"
+  annotations:
+    # Folder placement (team-scoped UX) — see `sidecar.dashboards.
+    # folderAnnotation` in kube-prometheus-stack-app.yaml.
+    grafana_folder: "Platform / Infra"
 data:
   cluster-overview.json: |
     {

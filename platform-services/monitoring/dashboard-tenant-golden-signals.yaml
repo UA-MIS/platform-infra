@@ -1,0 +1,184 @@
+# Admin+tenant dashboard (Grafana SSO + dashboard fleet PR, PART C — the primary
+# "team logs in and sees their app cleanly" dashboard). Traffic / errors /
+# latency / saturation for ONE tenant app, scoped by the `$namespace` template
+# variable — the default-view UX goal from PART B (soft isolation via folders +
+# a template variable, not a hard per-team Grafana permission wall; Team Sync
+# itself is a Grafana Enterprise-only feature, not available on this OSS
+# install — see monitoring/README.md "Team-scoped dashboards").
+#
+# Traffic/Errors/Latency panels are Traefik-sourced, real once THIS SAME PR's
+# traefik-app.yaml metrics change syncs (ArgoCD-managed, self-heals). The
+# "Network (Hubble)" row needs a ONE-TIME MANUAL step — Cilium is install-owned
+# (helm CLI, not ArgoCD), see clusters/real-talos/cilium-metrics-values.yaml +
+# docs/cilium-cni-runbook.md Step 6 — and shows "No data" until a human runs
+# that `helm upgrade`. Saturation panels reuse the same ResourceQuota PromQL as
+# "Platform / Tenants — Per-Tenant Usage vs Quota" (dashboard-tenant-quota.yaml,
+# the full breakdown lives there); these two panels are a compact summary.
+#
+# Traefik service names are `<namespace>-<name>-<port>@kubernetescrd` — the
+# `service=~"$namespace-.*"` regex below is a prefix-match on that convention,
+# not an exact structural match; if a tenant's service name doesn't start with
+# their namespace this filter under-counts (flagged, not silently wrong: the
+# panel titles say "by service name prefix").
+#
+# Auto-provisioned by the Grafana sidecar via the `grafana_dashboard: "1"` label,
+# filed into the "Platform / Tenants" folder via the `grafana_folder` annotation.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-tenant-golden-signals
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: "Platform / Tenants"
+data:
+  tenant-golden-signals.json: |
+    {
+      "uid": "platform-tenant-golden-signals",
+      "title": "Platform / Tenants — App Golden Signals",
+      "description": "Traefik panels: real once traefik-app.yaml's metrics sync (self-heals). Hubble panel: needs a one-time human `helm upgrade` (cilium-metrics-values.yaml, cilium-cni-runbook.md Step 6) — shows No data until then.",
+      "tags": ["platform", "tenants", "golden-signals"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "time": { "from": "now-6h", "to": "now" },
+      "refresh": "1m",
+      "templating": {
+        "list": [
+          {
+            "name": "datasource",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": {},
+            "hide": 0
+          },
+          {
+            "name": "namespace",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "${datasource}" },
+            "query": { "query": "label_values(kube_pod_info, namespace)", "refId": "namespace" },
+            "refresh": 2,
+            "multi": false,
+            "includeAll": true,
+            "current": { "text": "All", "value": ["$__all"] },
+            "sort": 1
+          }
+        ]
+      },
+      "panels": [
+        { "id": 1, "type": "row", "title": "Traffic (Traefik, by service-name prefix)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 } },
+        {
+          "id": 2, "type": "stat", "title": "Requests This Week",
+          "gridPos": { "h": 6, "w": 6, "x": 0, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(increase(traefik_service_requests_total{service=~\"$namespace-.*\"}[7d]))", "instant": true, "refId": "A" } ]
+        },
+        {
+          "id": 3, "type": "timeseries", "title": "Request Rate",
+          "gridPos": { "h": 6, "w": 18, "x": 6, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (service) (rate(traefik_service_requests_total{service=~\"$namespace-.*\"}[5m]))", "legendFormat": "{{service}}", "refId": "A" } ]
+        },
+        { "id": 4, "type": "row", "title": "Errors", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 7 } },
+        {
+          "id": 5, "type": "timeseries", "title": "5xx Error Rate %",
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent", "min": 0,
+              "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 1 }, { "color": "red", "value": 5 } ] }
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "100 * sum(rate(traefik_service_requests_total{service=~\"$namespace-.*\", code=~\"5..\"}[5m])) / sum(rate(traefik_service_requests_total{service=~\"$namespace-.*\"}[5m]))",
+              "legendFormat": "5xx %",
+              "refId": "A"
+            }
+          ]
+        },
+        { "id": 6, "type": "row", "title": "Latency", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 16 } },
+        {
+          "id": 7, "type": "timeseries", "title": "Request Duration p95",
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 17 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(traefik_service_request_duration_seconds_bucket{service=~\"$namespace-.*\"}[5m])))",
+              "legendFormat": "p95",
+              "refId": "A"
+            }
+          ]
+        },
+        { "id": 8, "type": "row", "title": "Saturation (full breakdown: Platform / Tenants / Per-Tenant Usage vs Quota)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 25 } },
+        {
+          "id": 9, "type": "bargauge", "title": "CPU Requests Utilization %",
+          "gridPos": { "h": 7, "w": 12, "x": 0, "y": 26 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "options": { "orientation": "horizontal" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent", "min": 0, "max": 100,
+              "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 75 }, { "color": "red", "value": 90 } ] }
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "100 * kube_resourcequota{namespace=~\"$namespace\", type=\"used\", resource=\"requests.cpu\"} / on(namespace) kube_resourcequota{namespace=~\"$namespace\", type=\"hard\", resource=\"requests.cpu\"}",
+              "legendFormat": "{{namespace}}",
+              "instant": true,
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 10, "type": "bargauge", "title": "Memory Requests Utilization %",
+          "gridPos": { "h": 7, "w": 12, "x": 12, "y": 26 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "options": { "orientation": "horizontal" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent", "min": 0, "max": 100,
+              "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 75 }, { "color": "red", "value": 90 } ] }
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "100 * kube_resourcequota{namespace=~\"$namespace\", type=\"used\", resource=\"requests.memory\"} / on(namespace) kube_resourcequota{namespace=~\"$namespace\", type=\"hard\", resource=\"requests.memory\"}",
+              "legendFormat": "{{namespace}}",
+              "instant": true,
+              "refId": "A"
+            }
+          ]
+        },
+        { "id": 11, "type": "row", "title": "Network (Hubble, per-namespace — needs the human Cilium metrics step)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 33 } },
+        {
+          "id": 12, "type": "timeseries", "title": "Outbound HTTP (this namespace -> destination namespace)",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 34 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (destination) (rate(hubble_http_requests_total{source=\"$namespace\"}[5m]))", "legendFormat": "-> {{destination}}", "refId": "A" } ]
+        },
+        {
+          "id": 13, "type": "timeseries", "title": "Inbound HTTP (source namespace -> this namespace)",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 34 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (source) (rate(hubble_http_requests_total{destination=\"$namespace\"}[5m]))", "legendFormat": "{{source}} ->", "refId": "A" } ]
+        }
+      ]
+    }

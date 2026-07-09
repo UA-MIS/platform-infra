@@ -1,0 +1,101 @@
+# Cilium / Hubble Prometheus metrics — ADDITIVE Helm values overlay.
+#
+# Turns on cilium-agent, cilium-operator, and Hubble's built-in Prometheus
+# metrics (+ their ServiceMonitors) so the platform's kube-prometheus-stack
+# actually scrapes them. This is a values OVERLAY on top of the live install
+# documented in docs/cilium-cni-runbook.md (Cilium v1.17.4, kubeProxyReplacement,
+# VXLAN, bpf.hostLegacyRouting=true) and ADDITIVE to the mTLS overlay
+# (cilium-mtls-values.yaml) — it does NOT touch either of those existing values.
+# Cilium itself is INSTALL-OWNED in this repo (helm CLI, not an ArgoCD Application
+# — chicken/egg: the CNI must exist before ArgoCD's own pod networking works), so
+# this file is the pinned, reviewable record of the values a human applies via:
+#
+#   helm upgrade cilium cilium/cilium --version 1.17.4 --namespace kube-system \
+#     --reuse-values -f clusters/real-talos/cilium-mtls-values.yaml \
+#     -f clusters/real-talos/cilium-metrics-values.yaml
+#   kubectl -n kube-system rollout restart deployment/cilium-operator
+#   kubectl -n kube-system rollout restart ds/cilium
+#
+# ⚠ WHY THIS ISN'T APPLIED BY ARGOCD (unlike Traefik/rook-ceph/CNPG/MariaDB
+# metrics in this same PR): Cilium is the CNI — it must exist and be healthy
+# BEFORE ArgoCD's own pod networking works, so it can never be an ArgoCD-managed
+# Application (same chicken/egg as the base install). This one human
+# `helm upgrade` step is required to actually activate scraping; until it's run,
+# the ServiceMonitors below (already shipped, self-healing) simply match no
+# Service and Prometheus shows zero targets for these jobs — the Grafana
+# "Platform / Infra — Cilium / Hubble Network" dashboard + the "Platform /
+# Tenants — App Golden Signals" dashboard's Hubble-sourced panels will show
+# "No data" until this runs. This is flagged, not silently shipped as a broken
+# panel: real metric names, a real (if manual) activation path, self-heals once
+# applied — see monitoring/README.md "Cilium/Hubble metrics — requires a human
+# step" for the full callout.
+#
+# Full validation + rollback procedure for Cilium overlay changes in general:
+# docs/cilium-cni-runbook.md Step 5 (same pattern as the mTLS overlay).
+
+# --- cilium-agent metrics (port 9962, one per node via the cilium DaemonSet) ---
+# cilium_endpoint / cilium_drop_count_total / cilium_forward_count_total /
+# cilium_policy_* / cilium_bpf_map_pressure — general dataplane health per node.
+prometheus:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+
+# --- cilium-operator metrics (port 9963) + its official chart-bundled
+#     Grafana dashboard (files/cilium-operator/dashboards/) ---
+# operator.prometheus.enabled is already `true` at the chart DEFAULT (verified:
+# `helm show values cilium/cilium --version 1.17.4`) — only the ServiceMonitor
+# was missing.
+operator:
+  prometheus:
+    serviceMonitor:
+      enabled: true
+  dashboards:
+    enabled: true
+
+# --- Hubble flow metrics (port 9965) — THE metrics this PR's dashboards
+#     actually want: per-namespace HTTP request rate ("N requests this week to
+#     team X"), DNS, drops (with reason — powers "why was this blocked"),
+#     TCP, ICMP, and generic flow counts. `sourceContext=namespace|
+#     destinationContext=namespace` on the `http` metric is what attaches
+#     `source`/`destination` labels carrying the K8s NAMESPACE (not just pod
+#     identity) to every `hubble_http_requests_total` series — exactly what a
+#     per-tenant Grafana panel needs to group/filter by.
+#     ref: https://docs.cilium.io/en/stable/observability/metrics/#hubble-metrics
+hubble:
+  metrics:
+    enabled:
+      - dns:query;ignoreAAAA
+      - drop
+      - tcp
+      - flow
+      - icmp
+      - "http:sourceContext=namespace|destinationContext=namespace"
+    serviceMonitor:
+      enabled: true
+    # Official, chart-bundled Grafana dashboard for the above (files/hubble/
+    # dashboards/hubble-dashboard.json in the cilium chart source) — lands as a
+    # ConfigMap in `kube-system` (Cilium's own namespace), picked up by
+    # Grafana's sidecar because `grafana.sidecar.dashboards.searchNamespace:
+    # ALL` (applicationsets/kube-prometheus-stack-app.yaml). No JSON authored
+    # by hand, no internet fetch at Grafana's runtime — it ships baked into the
+    # Cilium chart tarball itself (pulled once, here, where there IS internet
+    # egress, same as every other pinned chart in this repo).
+    dashboards:
+      enabled: true
+
+# --- hubble-relay metrics (port 9966) — relay-level flow-forwarding health
+#     (separate from the per-node agent metrics above). ---
+  relay:
+    prometheus:
+      enabled: true
+      serviceMonitor:
+        enabled: true
+
+# --- Official, chart-bundled cilium-agent + cilium-operator Grafana dashboards
+#     (files/cilium-agent/dashboards, files/cilium-operator/dashboards) — same
+#     "baked into the chart, no runtime fetch" posture as the Hubble dashboard
+#     above. cilium-agent's lands in `kube-system` (top-level `dashboards:`);
+#     cilium-operator's is namespaced under `operator.dashboards`.
+dashboards:
+  enabled: true

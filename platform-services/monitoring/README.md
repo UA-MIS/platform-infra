@@ -27,11 +27,14 @@ speculative scale-up. Scale further only if volume ever actually demands it.
 - **Grafana** — `https://grafana.capstone.uamishub.com` (Traefik ingress + wildcard
   TLS, same pattern as Harbor/Backstage/ArgoCD). Prometheus, Loki, **Tempo**, and
   **Thanos** (a second, additional Prometheus-compatible datasource — see "Long-term
-  metrics" below) are pre-wired datasources. Admin creds come from the
-  **`grafana-admin` SealedSecret** (`grafana.admin.existingSecret`), NOT the chart
-  default. **⚠ it ships as a placeholder that does not decrypt — reseal real values
-  before go-live** (runbook below); until then the Grafana pod stays
-  `CreateContainerConfigError`.
+  metrics" below) are pre-wired datasources. **Sign in with Dex (GitHub / UA-MIS)**
+  is the primary login path (see "Grafana SSO (Dex)" below); the admin/password
+  form (creds from the **`grafana-admin` SealedSecret**, `grafana.admin.
+  existingSecret`) stays as a **break-glass fallback**, never removed. **⚠ the
+  grafana-admin seal ships as a placeholder that does not decrypt — reseal real
+  values before go-live** (runbook below); until then the Grafana pod stays
+  `CreateContainerConfigError`. (The OAuth client secret, `grafana-oauth`
+  SealedSecret, is a REAL seal already — no reseal needed for SSO to work.)
 - **Prometheus / Alertmanager** — ClusterIP only (internal ops). Port-forward:
   `kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090` /
   `... svc/kube-prometheus-stack-alertmanager 9093`.
@@ -76,6 +79,71 @@ via `grafana:` values in `applicationsets/kube-prometheus-stack-app.yaml`:
 - **Backstage** already excluded per its own theme being application code, not
   config (see PR description) — unaffected by this change.
 
+## Grafana SSO (Dex)
+
+Grafana federates to Dex (`platform-services/dex/`) via `auth.generic_oauth`
+(`grafana.ini` in `applicationsets/kube-prometheus-stack-app.yaml`) — the SAME
+broker, SAME "one GitHub OAuth app, N tools" model as ArgoCD/Harbor/Backstage/
+DB-console. `platform-services/dex/configmap.yaml` registers Grafana as the
+`grafana` staticClient; see that dir's README "Grafana static client" for the
+client/secret/redirect-URI details and the role-mapping table (`labmx` ->
+`GrafanaAdmin`, every other UA-MIS member -> `Viewer`).
+
+- `[server] domain` / `root_url` are set to the public Traefik host — Grafana
+  builds its OAuth `redirect_uri` from `root_url`, and it MUST exactly match
+  Dex's `grafana` staticClient `redirectURIs` entry
+  (`https://grafana.capstone.uamishub.com/login/generic_oauth`) or Dex rejects
+  the callback.
+- `client_secret` is deliberately **not** inlined in `grafana.ini` — it's
+  injected as `GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET` via `grafana.
+  envValueFrom`, sourced from the **`grafana-oauth` SealedSecret**
+  (`sealedsecret-grafana-oauth.yaml`), same posture as oauth2-proxy's
+  `OAUTH2_PROXY_CLIENT_SECRET` (`db-console-auth/deployment.yaml`). This is a
+  REAL seal (sealed live against this cluster) — no reseal needed before
+  go-live, unlike `grafana-admin`.
+- `disable_login_form: false` + `auth.generic_oauth.auto_login: false` — the
+  admin/password login form stays visible as break-glass, never auto-skipped
+  past.
+- `allow_assign_grafana_admin: true` is scoped to the ONE `role_attribute_path`
+  branch that resolves to `GrafanaAdmin` (labmx) — no other login path can
+  become a Grafana server admin through this mechanism.
+
+## Team-scoped dashboards (folders, not Team Sync)
+
+**Grafana Team Sync — automatic team membership driven by IdP groups — is a
+Grafana Enterprise / Cloud-only feature** (confirmed against current Grafana
+docs; this is Grafana **OSS**, no license). `groups_attribute_path: groups` is
+still set in `grafana.ini` so a future Enterprise license activates it with
+zero config change, but it is **inert today** — do not expect Grafana Teams to
+auto-populate from GitHub Teams.
+
+What's actually shipped instead (OSS-compatible, "soft isolation is fine" per
+the design goal — this is a UX declutter, not an access-control wall; every
+authenticated UA-MIS member is a Grafana **Viewer** and can see every folder):
+
+- **Two folders**, driven by a `grafana_folder` ANNOTATION on each dashboard
+  ConfigMap + `grafana.sidecar.dashboards.folderAnnotation: grafana_folder` —
+  **"Platform / Infra"** (admin-facing, cross-tenant infrastructure) and
+  **"Platform / Tenants"** (per-app dashboards). See "Dashboard fleet" below
+  for the full list.
+- Every "Platform / Tenants" dashboard carries a **`namespace` template
+  variable, single-select, no "All" default** — Grafana auto-picks the first
+  tenant namespace alphabetically on load, so opening the dashboard already
+  shows ONE team's traffic/logs/quota, not everyone's mixed together. A team
+  switches to their own namespace via the variable dropdown (or bookmarks
+  `?var-namespace=<their-ns>` — a real, shareable per-team URL).
+- `grafana.sidecar.dashboards.searchNamespace: ALL` (not just `monitoring`) —
+  needed so the sidecar also picks up the three OFFICIAL Cilium/Hubble
+  dashboards that ship baked into the `cilium` Helm chart itself and land in
+  `kube-system` (Cilium's own install namespace), not `monitoring` — see
+  "Cilium/Hubble metrics" below.
+
+If real per-team access control (hiding OTHER teams' dashboards, not just
+defaulting away from them) is ever required, the documented upgrade path is
+either a Grafana Enterprise license (activates the `groups_attribute_path`
+already in place) or manually creating Grafana Teams + folder permissions via
+the Grafana HTTP API (scriptable, not currently automated).
+
 ## Alerts (`alerts.yaml`)
 
 Nine failure modes this platform has actually hit, routed to Alertmanager (now to
@@ -101,23 +169,86 @@ stack, so they work day-one. The ESO/ArgoCD/cert-manager alerts need those compo
 PodMonitor for the ESO controller pod). kube-prometheus-stack's own `defaultRules` add
 broad k8s/node/kubelet/etcd/apiserver coverage on top of these.
 
-## Admin dashboards (dashboards-as-code)
+## Dashboard fleet (dashboards-as-code)
 
-Five operator-facing Grafana dashboards, each shipped as a `ConfigMap` labeled
-`grafana_dashboard: "1"` — the Grafana chart's default k8s-sidecar (`sidecar.dashboards`,
-chart default ON) watches for that label and auto-provisions the JSON, no manual
-Grafana import. Every panel's datasource is a `${datasource}` template variable
-(type `datasource`, query `prometheus`) rather than a hardcoded UID, so provisioning
-doesn't depend on the exact UID the chart generates for the built-in Prometheus
-datasource.
+Every dashboard ships as a `ConfigMap` labeled `grafana_dashboard: "1"` (the
+Grafana chart's default k8s-sidecar selector, chart default ON) with a
+`grafana_folder` ANNOTATION for folder placement (see "Team-scoped dashboards"
+above) — no manual Grafana import. Every panel's datasource is a
+`${datasource}` template variable (type `datasource`, query `prometheus` —
+or `${loki_datasource}`, query `loki`, on the two log-panel dashboards) rather
+than a hardcoded UID, so provisioning doesn't depend on the exact UID the
+chart generates for the built-in datasources.
+
+### Platform / Infra (admin-facing, cross-tenant)
 
 | Dashboard | File | Covers | Signal source |
 | --- | --- | --- | --- |
-| **Cluster Overview** | `dashboard-cluster-overview.yaml` | Node CPU/mem/disk/load/PSI pressure (3 Talos boxes), pod counts by phase/namespace | node-exporter + kube-state-metrics — real metrics, day-one |
-| **Per-Tenant Usage vs Quota** | `dashboard-tenant-quota.yaml` | CPU/memory/pods/services used vs `ResourceQuota` hard limits per tenant namespace, PVC storage usage | `kube_resourcequota` (kube-state-metrics) — real metrics, day-one. The `namespace` variable is populated FROM `kube_resourcequota` itself, so it lists tenant namespaces without needing custom labels allow-listed |
-| **Platform Health** | `dashboard-platform-health.yaml` | ArgoCD Synced/Healthy counts + apps needing attention (real); Vault/Harbor/ARC (**proxies** — pod/deployment/statefulset status via kube-state-metrics, not each component's own `/metrics`); Crossplane has a real `/metrics` PodMonitor as of this PR but the panel still reads the proxy (rewiring the panel is a follow-up) | ArgoCD + Crossplane ServiceMonitor/PodMonitor (real) + kube-state-metrics (proxy for Vault/Harbor/ARC) |
-| **Tenant CI/CD** | `dashboard-tenant-cicd.yaml` | `arc-runners` pod activity (all teams combined — real, but no per-team breakdown), tenant ArgoCD app deploy status (real); image pushes / per-team runner usage — **not shown**, see follow-ups panel in-dashboard | kube-state-metrics + ArgoCD |
-| **Cost Allocation** | `dashboard-cost-allocation.yaml` | Per-namespace CPU/RAM/storage $/hr and est. monthly cost, cluster-wide hourly/monthly totals, per-node pricing sanity check | OpenCost `/metrics` (real, day-one once `platform-opencost` is Healthy) — see "Cost allocation (OpenCost)" below |
+| **Cluster Overview** | `dashboard-cluster-overview.yaml` | Node CPU/mem/disk/load/PSI pressure (3 Talos boxes), pod counts by phase/namespace | node-exporter + kube-state-metrics — real, day-one |
+| **Platform Health** | `dashboard-platform-health.yaml` | ArgoCD Synced/Healthy counts + apps needing attention (real); Vault/Harbor/ARC (**proxies** — see "Follow-ups" below); Crossplane real `/metrics` PodMonitor as of an earlier PR but the panel still reads the proxy | ArgoCD + Crossplane (real) + kube-state-metrics (proxy) |
+| **ArgoCD (detailed)** | `dashboard-argocd.yaml` | Sync/health trend over time, reconcile duration (p95), k8s API call rate, git fetch rate/latency, tracked-object count — a deeper companion to Platform Health's at-a-glance counts | `argocd-application-controller` ServiceMonitor — real, day-one |
+| **CoreDNS** | `dashboard-coredns.yaml` | Query rate by zone/type, response codes (NOERROR/NXDOMAIN/SERVFAIL), p50/p95/p99 latency, cache hit ratio, forward rate, panics | `kube-prometheus-stack-coredns` ServiceMonitor (chart default, targets the stock `kube-dns` Service) — real, day-one |
+| **cert-manager** | `dashboard-cert-manager.yaml` | Certificates not-Ready, days-until-expiry (same 14d threshold as the `CertManagerCertExpiringSoon` alert), renewal history, controller sync rate | `cert-manager` ServiceMonitor — real, day-one |
+| **Ceph / Rook** | `dashboard-ceph-rook.yaml` | Cluster health, OSD up/in, mon quorum, PG state, pool capacity, IOPS/throughput | The Rook **operator's own dynamically-created** ServiceMonitor (verified via `helm template`: `monitoring.enabled` renders no ServiceMonitor object itself, only the RBAC — `Role`/`RoleBinding` — the chart's own docstring says lets the operator create one at reconcile time) + a chart-rendered `PrometheusRule` (`createPrometheusRules: true`, confirmed rendered). **NEW this PR**: `monitoring.enabled` was `false` ("wire to Prometheus later — no stack yet"); flipped `true` now that the stack exists (`applicationsets/rook-ceph-cluster-app.yaml`). Real once that Application syncs AND the operator reconciles (self-heals, no human step) |
+| **External Secrets Operator** | `dashboard-eso.yaml` | ExternalSecret/ClusterSecretStore/SecretStore Ready status by namespace, sync call rate + error ratio | ESO controller PodMonitor — real, day-one |
+| **CNPG / PostgreSQL** | `dashboard-cnpg-postgres.yaml` | Replication lag, connections, commit/rollback rate, database size, WAL archiving health, exporter up | `capstone-pg` Cluster's own PodMonitor — **NEW this PR**: `spec.monitoring.enablePodMonitor: true` added (`platform-services/cnpg/cluster/cluster.yaml`) — the operator chart's `monitoring.podMonitorEnabled` default was verified live to NOT create this on its own, correcting a stale comment in `cnpg-operator-app.yaml`. Real once synced (self-heals) |
+| **MariaDB / Galera** | `dashboard-mariadb-galera.yaml` | Cluster size, wsrep ready/flow-control, node state, connections, queries/sec | `capstone-mariadb`'s own exporter — **NEW this PR**: `mariadb.metrics.enabled: true` added (`applicationsets/mariadb-cluster-app.yaml`), the operator-native bundled toggle (deploys exporter + auto-generates monitoring creds + creates the ServiceMonitor). Real once synced (self-heals) |
+| **Loki / Logs Overview** | `dashboard-loki-logs-overview.yaml` | Ingestion rate, active streams, query latency, exporter memory, PLUS live log tail + per-namespace log-volume trend | Loki's own `/metrics` (`loki` ServiceMonitor, real, day-one) + LogQL against the Loki datasource |
+| **Traefik Ingress** | `dashboard-traefik-ingress.yaml` | Request rate by service (2xx/4xx/5xx), p50/p95/p99 latency, entrypoint traffic, open connections, "requests this week by service" table | `traefik` chart's own ServiceMonitor — **NEW this PR**: `metrics.prometheus.service.enabled` + `serviceMonitor.enabled` added (`applicationsets/traefik-app.yaml`) — the `:9100` metrics entrypoint was already a chart default, just never exposed via a Service. Real once synced (self-heals) |
+| **Network Traffic by Namespace (Cilium/Hubble)** | `dashboard-network-traffic-by-namespace.yaml` | Per-namespace HTTP request rate + "requests this week to team X" table, flow forwarded/dropped rate, drop reasons, DNS query rate | Hubble flow metrics — **requires a human step**, see "Cilium/Hubble metrics" below |
+| **Cilium Agent / Operator / Hubble** (3 dashboards) | not in this repo — chart-bundled | Official upstream Cilium/Hubble dashboards (dataplane health, controller reconcile, flow processing) | Ship baked into the `cilium` Helm chart itself (`dashboards.enabled` / `operator.dashboards.enabled` / `hubble.metrics.dashboards.enabled`, all three set in `clusters/real-talos/cilium-metrics-values.yaml`) — land as ConfigMaps in `kube-system`, picked up via `searchNamespace: ALL`. Same human-step gate as the namespace-traffic dashboard above |
+| **Cost Allocation** | `dashboard-cost-allocation.yaml` | Per-namespace CPU/RAM/storage $/hr and est. monthly cost, cluster-wide totals, per-node pricing sanity check | OpenCost `/metrics` — real, day-one once `platform-opencost` is Healthy — see "Cost allocation (OpenCost)" below |
+
+### Platform / Tenants (per-app, `namespace`-templated)
+
+| Dashboard | File | Covers | Signal source |
+| --- | --- | --- | --- |
+| **Per-Tenant Usage vs Quota** | `dashboard-tenant-quota.yaml` | CPU/memory/pods/services used vs `ResourceQuota` hard limits, PVC storage usage | `kube_resourcequota` (kube-state-metrics) — real, day-one |
+| **Tenant CI/CD** | `dashboard-tenant-cicd.yaml` | `arc-runners` pod activity (all teams combined — no per-team breakdown, see Follow-ups), tenant ArgoCD app deploy status | kube-state-metrics + ArgoCD |
+| **App Golden Signals** | `dashboard-tenant-golden-signals.yaml` | Traffic (Traefik + Hubble cross-check), errors (5xx rate), latency (p95), saturation (CPU/mem) — all scoped to ONE tenant namespace via the `namespace` variable; "requests this week" stat | Traefik service metrics (real once this PR's Traefik change syncs) + Hubble (human step) + cAdvisor (real, day-one) |
+| **App Logs** | `dashboard-tenant-logs.yaml` | Live log tail, log volume by pod, error/exception rate — all scoped to ONE tenant namespace | Loki, via Alloy's `namespace`/`pod`/`container` stream labels — real, day-one |
+
+**⚠ Verify the Traefik service-name regex live before trusting the App Golden
+Signals traffic/error/latency panels**: they filter on
+`traefik_service_requests_total{service=~"$namespace-.*"}`, assuming Traefik's
+chart-generated service-name prefix matches the tenant K8s namespace exactly.
+Confirm against a real tenant's traffic in Prometheus's own query browser
+(`{service=~".*"}`, look at the actual label values) once the Traefik metrics
+change (above) is live, and adjust the regex if the naming differs — flagged
+in-panel via a `description` field too.
+
+## Cilium/Hubble metrics — requires a human step
+
+Unlike every other metrics change in this PR (Traefik/Ceph/CNPG/MariaDB — all
+ArgoCD-managed, self-heal on sync), **Cilium is install-owned** (`helm` CLI
+against `kube-system`, not an ArgoCD Application — it's the CNI, so it must be
+healthy before ArgoCD's own pod networking works, the same chicken/egg that
+makes the whole install install-owned; see `docs/cilium-cni-runbook.md`).
+`clusters/real-talos/cilium-metrics-values.yaml` is a new, pinned, additive
+values overlay (same pattern as the existing `cilium-mtls-values.yaml`) that
+turns on cilium-agent/cilium-operator/Hubble/hubble-relay Prometheus metrics +
+their ServiceMonitors + the three official chart-bundled Grafana dashboards.
+
+**Until a human runs the one-time `helm upgrade`** (exact command in
+`docs/cilium-cni-runbook.md` "Step 6"), the ServiceMonitors shipped in this PR
+simply match no Service (Prometheus shows zero targets for those jobs) and the
+two Hubble-sourced dashboard panels (`dashboard-network-traffic-by-namespace.
+yaml`, plus the Hubble cross-check panel on `dashboard-tenant-golden-signals.
+yaml`) show "No data" — flagged prominently in both dashboards' descriptions,
+not shipped as a silently-broken panel. Everything else in this PR (SSO,
+folders, the other 14 dashboards) works without this step.
+
+## Follow-ups — metrics that still aren't scraped (unchanged from before this PR)
+
+Vault (no `telemetry` stanza — single-node manual-unseal, not a drive-by
+change), Harbor (`metrics.enabled: false` in the chart, turning it on also
+deploys a new `harbor-exporter` component), and ARC runner scale-set activity
+(controller runs with `--metrics-addr=0`, plus no per-team label on runner
+pods without a kube-state-metrics cardinality tradeoff) are still proxied via
+kube-state-metrics on the Platform Health / Tenant CI/CD dashboards, not real
+component metrics — see the detailed reasoning previously documented below,
+unchanged by this PR. None of these were invented into a new dashboard; the
+existing proxies are all that's shown.
 
 **Done in this PR:** Crossplane's controller-runtime `/metrics` is now scraped (a
 `PodMonitor` in `servicemonitors.yaml`, confirmed live 2026-07-02 via
@@ -128,8 +259,8 @@ on the declared `readyz` port and relabels `__address__` onto `:8080`. The Platf
 Health dashboard panel itself hasn't been rewired to the real metrics yet (still
 reads the kube-state-metrics proxy) — that's a follow-up, not this PR.
 
-**Follow-ups — metrics that aren't scraped today** (none of these were invented; the
-dashboards above show only what a real Prometheus query returns):
+Detail (none of these were invented; the dashboards above show only what a
+real Prometheus query returns):
 
 - **Vault true seal status** — `VaultSealedOrDown` and the Platform Health panel both
   use `kube_statefulset_status_replicas_ready` as a proxy (0 ready ⇒ sealed/crash-
