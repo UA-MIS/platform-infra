@@ -103,24 +103,50 @@ catalog:
         initialDelay: { seconds: 30 }
         frequency: { hours: 1 }
         timeout: { minutes: 10 }
-    # GitHub Component discovery: scans every repo in the UA-MIS org for a root
-    # catalog-info.yaml (the scaffolder templates all ship one at repo root, e.g. this
-    # repo's own ./catalog-info.yaml and every tenant repo's, github.com/UA-MIS/<appName>)
-    # and registers/refreshes each as a catalog Location on a schedule. This is the DURABLE
-    # fix for Component entities silently disappearing (they were previously registered
-    # once via the scaffolder's catalog:register step and were lost outright in the CNPG
-    # catalog-DB re-ingestion — a scheduled discovery provider self-heals instead of relying
-    # on a one-off write). Auth is the SAME GitHub App as githubOrg above (integrations.github
-    # — Contents:Read is already granted for the scaffolder's repo-create/commit flows, so no
+    # GitHub Component discovery: scans repos in the UA-MIS org for a root catalog-info.yaml
+    # (the scaffolder templates all ship one at repo root, e.g. this repo's own
+    # ./catalog-info.yaml and every tenant repo's, github.com/UA-MIS/<appName>) and
+    # registers/refreshes each as a catalog Location on a schedule. This is the DURABLE fix
+    # for Component entities silently disappearing (they were previously registered once via
+    # the scaffolder's catalog:register step and were lost outright in the CNPG catalog-DB
+    # re-ingestion — a scheduled discovery provider self-heals instead of relying on a
+    # one-off write). Auth is the SAME GitHub App as githubOrg above (integrations.github —
+    # Contents:Read is already granted for the scaffolder's repo-create/commit flows, so no
     # new App permission is required). filters.branch pins to the templates' default branch.
+    #
+    # SEC: org-wide with NO further filter would ingest a root catalog-info.yaml from ANY of
+    # the org's 363 members' repos (this org carries ~100+ old, unrelated student-capstone
+    # repos going back semesters, none topic-tagged) — catalog clutter AND an entity-spoofing
+    # vector (any member could commit a catalog-info.yaml claiming spec.owner:
+    # group:default/<someone-else>). Two scoped provider entries instead of one org-wide one:
+    #   - `tenants`: only repos carrying the `capstone-tenant` GitHub topic. All 8 scaffolder
+    #     templates' publish:github step now tags new tenant repos with this topic
+    #     (self-tagging, so this stays correct without a maintained allowlist); the 2
+    #     existing live tenants (UA-MIS/swamiapp, UA-MIS/swami-student3) were tagged directly
+    #     via `gh api repos/UA-MIS/<repo>/topics` as a one-time backfill.
+    #   - `platformInfra`: this repo specifically, matched by exact name (it isn't a
+    #     "tenant" and the scaffolder doesn't create it, so it can't self-tag; a name filter
+    #     is fine here since platform-infra never renames).
     github:
       tenants:
         organization: 'UA-MIS'
         catalogPath: '/catalog-info.yaml'
         filters:
           branch: 'main'
+          topic:
+            include: ['capstone-tenant']
         schedule:
           initialDelay: { seconds: 45 }
+          frequency: { hours: 1 }
+          timeout: { minutes: 10 }
+      platformInfra:
+        organization: 'UA-MIS'
+        catalogPath: '/catalog-info.yaml'
+        filters:
+          branch: 'main'
+          repository: '^platform-infra$'
+        schedule:
+          initialDelay: { seconds: 50 }
           frequency: { hours: 1 }
           timeout: { minutes: 10 }
 
