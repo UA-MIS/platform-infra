@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UA-MIS Capstone Platform</title>
+<meta name="description" content="A student-run Internal Developer Platform built by University of Alabama MIS capstone students.">
+<style>
+  :root {
+    --ua-crimson: #9E1B32;
+    --ua-crimson-dark: #7A1426;
+    --ua-charcoal: #1F2023;
+    --ua-tint: rgba(158, 27, 50, 0.08);
+    --bg: #FAF9F7;
+    --surface: #FFFFFF;
+    --text: #1A1C20;
+    --text-dim: #55585E;
+    --border: #E7E3DD;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+  }
+  header.band {
+    background: var(--ua-crimson);
+    color: #fff;
+    padding: 14px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .brand {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+  }
+  .brand .a {
+    font-family: Georgia, serif;
+    font-size: 1.4rem;
+  }
+  .brand .mis {
+    font-size: 1rem;
+    letter-spacing: 0.12em;
+    opacity: 0.92;
+  }
+  .signin {
+    display: inline-block;
+    background: var(--ua-charcoal);
+    color: #fff;
+    text-decoration: none;
+    padding: 9px 18px;
+    border-radius: 6px;
+    font-weight: 600;
+    font-size: 0.92rem;
+    border: 1px solid rgba(255,255,255,0.15);
+  }
+  .signin:hover { background: #2A2C30; }
+
+  main { max-width: 780px; margin: 0 auto; padding: 56px 24px 80px; }
+
+  .hero h1 {
+    font-size: 2.1rem;
+    margin: 0 0 14px;
+    color: var(--ua-charcoal);
+  }
+  .hero p {
+    font-size: 1.08rem;
+    color: var(--text-dim);
+    max-width: 62ch;
+  }
+  .hero .tag {
+    display: inline-block;
+    margin-bottom: 18px;
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ua-crimson);
+    background: var(--ua-tint);
+    padding: 4px 10px;
+    border-radius: 999px;
+  }
+
+  section.apps { margin-top: 48px; }
+  section.apps h2 {
+    font-size: 0.85rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 10px;
+    margin-bottom: 18px;
+  }
+  .app-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 14px;
+  }
+  .app-card {
+    display: block;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 18px;
+    text-decoration: none;
+    color: var(--text);
+    transition: border-color 0.15s, transform 0.15s;
+  }
+  .app-card:hover {
+    border-color: var(--ua-crimson);
+    transform: translateY(-1px);
+  }
+  .app-card .name { font-weight: 700; margin-bottom: 4px; }
+  .app-card .url { font-size: 0.85rem; color: var(--text-dim); word-break: break-all; }
+
+  .cta {
+    margin-top: 56px;
+    padding-top: 32px;
+    border-top: 1px solid var(--border);
+  }
+  .cta a.button {
+    display: inline-block;
+    background: var(--ua-crimson);
+    color: #fff;
+    text-decoration: none;
+    padding: 12px 24px;
+    border-radius: 6px;
+    font-weight: 700;
+  }
+  .cta a.button:hover { background: var(--ua-crimson-dark); }
+  .cta p { color: var(--text-dim); font-size: 0.92rem; margin-top: 12px; }
+
+  footer {
+    text-align: center;
+    padding: 24px;
+    color: var(--text-dim);
+    font-size: 0.82rem;
+  }
+  footer a { color: var(--ua-crimson); }
+</style>
+</head>
+<body>
+  <header class="band">
+    <div class="brand"><span class="a">A</span><span class="mis">MIS</span></div>
+    <a class="signin" href="/internal">Sign in</a>
+  </header>
+
+  <main>
+    <div class="hero">
+      <span class="tag">UA-MIS Capstone</span>
+      <h1>The Capstone Platform</h1>
+      <p>
+        This is a student-run <strong>Internal Developer Platform (IDP)</strong> —
+        the Kubernetes, GitOps, and CI/CD tooling that real engineering teams use,
+        designed and operated end-to-end by University of Alabama MIS capstone
+        students. It's how student teams build, ship, and run their capstone
+        projects: push code, and it lands in production behind this same domain.
+      </p>
+    </div>
+
+    <section class="apps">
+      <h2>Live on the platform</h2>
+      <div class="app-grid">
+        <a class="app-card" href="https://swamiapp.capstone.uamishub.com" target="_blank" rel="noopener">
+          <div class="name">Swami</div>
+          <div class="url">swamiapp.capstone.uamishub.com</div>
+        </a>
+        <a class="app-card" href="https://swami-student3.capstone.uamishub.com" target="_blank" rel="noopener">
+          <div class="name">Swami &mdash; Student 3</div>
+          <div class="url">swami-student3.capstone.uamishub.com</div>
+        </a>
+      </div>
+    </section>
+
+    <div class="cta">
+      <a class="button" href="/internal">Sign in with UA-MIS GitHub &rarr;</a>
+      <p>UA-MIS members: sign in to see every platform tool (Backstage, ArgoCD, Grafana, Harbor, and more) with a quick guide to each.</p>
+    </div>
+  </main>
+
+  <footer>
+    UA-MIS Capstone Platform &middot; <a href="https://github.com/UA-MIS" target="_blank" rel="noopener">github.com/UA-MIS</a>
+  </footer>
+</body>
+</html>

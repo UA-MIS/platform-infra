@@ -1,0 +1,31 @@
+# forwardAuth gate for the /internal route, reusing the ONE EXISTING shared
+# oauth2-proxy instance (platform-services/db-console-auth/) — the same "one
+# GitHub OAuth app, N tools" singleton already fronting every DB console
+# (db-admin/middleware.yaml is the direct precedent for this pattern). No new
+# Dex staticClient is needed: oauth2-proxy is already registered as Dex's
+# `db-console` staticClient and its session cookie is shared across the whole
+# `.capstone.uamishub.com` domain (--cookie-domain), so a UA-MIS member who is
+# already signed in anywhere (ArgoCD, Harbor, a DB console) hits /internal
+# already authenticated.
+#
+# DELIBERATELY no `?allowed_groups=` query param (contrast db-admin's
+# `...?allowed_groups=UA-MIS:labmx` and the per-tenant consoles'
+# `...?allowed_groups=UA-MIS:<team>`): this route is the general "any UA-MIS
+# member" tier, not scoped to one team or the platform-admin group. Org
+# membership is already enforced upstream at Dex (GitHub connector
+# `orgs: [UA-MIS]`, SEC-007) — any authenticated UA-MIS member passes.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: portal-internal-auth
+  namespace: portal
+  labels:
+    platform.capstone/component: platform
+spec:
+  forwardAuth:
+    address: http://oauth2-proxy.db-console-auth.svc.cluster.local:4180/oauth2/auth
+    trustForwardHeader: true
+    authResponseHeaders:
+      - X-Auth-Request-User
+      - X-Auth-Request-Email
+      - X-Auth-Request-Groups
