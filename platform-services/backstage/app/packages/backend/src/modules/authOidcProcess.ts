@@ -149,7 +149,13 @@ async function resolveGroupsByMembership(
         // (populated at ingestion, no relation stitching); `relations.hasMember` is the
         // computed form. Filter entries are OR'd, so we catch either representation —
         // whichever is available first — and the username-vs-ref forms members may take.
+        // CONFIRMED against the live catalog: the GitHub-org provider actually writes
+        // `spec.members` as `<namespace>/<login>` (e.g. "default/ccsmith33") — neither the
+        // bare login nor the full "user:<namespace>/<login>" ref below. Match that shape too
+        // (previously this fallback silently never matched anything and F1 rode on
+        // `relations.hasMember` alone).
         filter: [
+          { kind: 'Group', 'spec.members': `default/${login}` },
           { kind: 'Group', 'spec.members': login },
           { kind: 'Group', 'spec.members': userRef },
           { kind: 'Group', 'relations.hasMember': userRef },

@@ -140,6 +140,12 @@ function requireUserRef(credentials: BackstageCredentials): string {
 /**
  * Resolve the actor's group refs from the catalog (their team Group memberships). Mirrors how
  * sealCore derives ownership so the admin check matches the M2 policy's ownershipEntityRefs.
+ *
+ * `spec.members` matching (belt to `relations.hasMember`'s suspenders, robust to relation-
+ * stitching lag — see authOidcProcess.ts's F1 and sealCore.ts's resolveActorOwnership, which
+ * this mirrors exactly): the GitHub-org provider writes this RAW field as `<namespace>/<login>`
+ * (e.g. "default/ccsmith33"), NOT a bare login and NOT a full "user:<namespace>/<login>" ref
+ * (confirmed against the live catalog). Match all three shapes.
  */
 async function resolveActorGroups(
   deps: CapstoneTenantsDeps,
@@ -147,11 +153,14 @@ async function resolveActorGroups(
   userEntityRef: string,
 ): Promise<string[]> {
   const refs = new Set<string>([userEntityRef]);
+  const { namespace, name } = parseEntityRef(userEntityRef);
   const { items } = await deps.catalog.getEntities(
     {
       filter: [
         { kind: 'Group', 'relations.hasMember': userEntityRef },
-        { kind: 'Group', 'spec.members': parseEntityRef(userEntityRef).name },
+        { kind: 'Group', 'spec.members': `${namespace}/${name}` },
+        { kind: 'Group', 'spec.members': name },
+        { kind: 'Group', 'spec.members': userEntityRef },
       ],
       fields: ['kind', 'metadata.name', 'metadata.namespace'],
     },
