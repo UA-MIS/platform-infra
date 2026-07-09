@@ -87,6 +87,20 @@ RUN mkdir packages/backend/dist/skeleton packages/backend/dist/bundle \
     && tar xzf packages/backend/dist/skeleton.tar.gz -C packages/backend/dist/skeleton \
     && tar xzf packages/backend/dist/bundle.tar.gz -C packages/backend/dist/bundle
 
+# HARDENING (2026-07, vuln scan): produce the PRODUCTION-only node_modules HERE, in the
+# build stage, where the node-gyp toolchain is already installed above — instead of in the
+# runtime stage (see that stage's comment for why). `yarn workspaces focus --all
+# --production` prunes the EXISTING install (from `yarn install --immutable` above) down to
+# production dependencies only; it does not re-fetch or recompile anything already
+# resolved — it just removes the devDependency-only packages. That means the native addons
+# (better-sqlite3, isolated-vm) that got compiled during `yarn install --immutable` are left
+# untouched on disk, compiled binaries and all. The runtime stage below COPYs this tree
+# verbatim rather than re-running a fresh install there, which is what used to force a
+# second toolchain install (and therefore build-essential -> perl/libc6-dev) into the
+# shipped image. Both stages share the exact same NODE_IMAGE digest, so the compiled .node
+# binaries stay ABI-compatible when copied across.
+RUN yarn workspaces focus --all --production && rm -rf "$(yarn cache clean)"
+
 # Stage 2b — kubeseal binary (M3, plan §2.1). The `capstone:seal-secret` scaffolder action
 # shells out to `kubeseal` to seal team secrets OFFLINE against the exported public cert
 # (D-047 A2 — no controller egress). We bundle the OFFICIAL, version-matched binary rather
@@ -124,15 +138,26 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' \
 # Stage 3 — the runtime image: production deps + the bundle only.
 FROM ${NODE_IMAGE}
 
-# Same apt-over-HTTPS rewrite + ca-certificates bootstrap as the build stage (runner egress
-# is :443-only, SEC-014; the slim base ships no CA bundle). See the build-stage comment.
-ENV PYTHON=/usr/bin/python3
+# HARDENING (removes all 9 Critical CVEs at the root — vuln scan 2026-07-07): this stage
+# used to install the node-gyp toolchain (python3 g++ build-essential libsqlite3-dev) here
+# and re-run `yarn workspaces focus --all --production`, which recompiled better-sqlite3 and
+# isolated-vm FROM SOURCE in this slim runtime image. build-essential transitively pulls in
+# perl/libperl5.40/perl-modules-5.40 (CVE-2026-42496, CVE-2026-8376) and libc6-dev ->
+# linux-libc-dev (CVE-2026-43185) — none upstream-fixable, and none of it needed by a
+# production Backstage backend. Fix: the production node_modules — already pruned AND
+# compiled — is produced in the build stage (where the toolchain lives for the tsc/backend
+# build anyway) and COPYed in verbatim below. No toolchain, no recompile, in this stage.
+# better-sqlite3 bundles its own SQLite amalgamation, so libsqlite3-dev was never a runtime
+# need either.
+#
+# What's left here is just the apt-over-HTTPS rewrite + ca-certificates bootstrap (runner
+# egress is :443-only, SEC-014; the slim base ships no CA bundle) — the backend itself needs
+# the CA bundle at runtime for outbound HTTPS (GitHub App / OIDC / catalog calls), so this
+# part stays. See the build-stage comment for the bootstrap mechanics.
 RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' \
         /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list 2>/dev/null || true; \
     apt-get -o Acquire::https::Verify-Peer=false update && \
     apt-get -o Acquire::https::Verify-Peer=false install -y --no-install-recommends ca-certificates && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends python3 g++ build-essential libsqlite3-dev && \
     rm -rf /var/lib/apt/lists/*
 
 # M3: the version-pinned, checksum-verified kubeseal binary (from the isolated kubeseal
@@ -149,13 +174,19 @@ ENV NODE_ENV=production
 # Disable the Node snapshot so the scaffolder's isolated-vm works.
 ENV NODE_OPTIONS="--no-node-snapshot"
 
-# Copy the install skeleton (yarn.lock + root package.json + each workspace package.json),
-# then install production-only deps. The skeleton tarball holds only packages/*/package.json,
-# so yarn.lock + the root package.json must be copied alongside it for the focus install.
+# Manifests (yarn.lock + root package.json + each workspace package.json from the skeleton
+# tarball). No yarn command runs in this stage anymore (see HARDENING note above) — these
+# are kept as static files so the workspace-local node_modules symlinks copied in below
+# (node_modules/backend, node_modules/app, node_modules/@internal/*) still resolve to a real
+# package.json on disk, and so backstage.json is present for the About-page version display.
 COPY --from=build --chown=node:node /app/.yarn ./.yarn
 COPY --from=build --chown=node:node /app/.yarnrc.yml /app/backstage.json ./
 COPY --from=build --chown=node:node /app/yarn.lock /app/package.json /app/packages/backend/dist/skeleton/ ./
-RUN yarn workspaces focus --all --production && rm -rf "$(yarn cache clean)"
+
+# The production node_modules — already pruned to production-only AND already built (native
+# addons compiled) in the build stage, where the toolchain exists. Straight COPY, no
+# install/recompile here. See the HARDENING note above.
+COPY --from=build --chown=node:node /app/node_modules ./node_modules
 
 # The examples are referenced by the baked app-config catalog.locations (M1 seed data).
 COPY --from=build --chown=node:node /app/examples ./examples
