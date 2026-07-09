@@ -258,3 +258,47 @@ The `mtls-*-cnp.yaml` policies are additive on top of the existing L3/L4
 allows (`vault-netpol.yaml`, `harbor-netpol.yaml`) — deleting them (or
 disabling `authentication.enabled` entirely) returns those paths to exactly
 their pre-mTLS behavior; no other traffic is affected.
+
+## Step 6 — Prometheus metrics for cilium-agent / cilium-operator / Hubble (additive)
+
+Activates the ServiceMonitors already shipped in this platform (Grafana
+"Platform / Infra — Cilium / Hubble Network" dashboard + the Hubble-sourced
+panels on "Platform / Tenants — App Golden Signals") plus the THREE official,
+chart-bundled Grafana dashboards (cilium-agent, cilium-operator, Hubble —
+`files/{cilium-agent,cilium-operator,hubble}/dashboards/*.json` in the cilium
+chart itself, no hand-authored JSON, no internet fetch at Grafana's runtime).
+Same "install-owned, human-applied overlay" posture as Step 5's mTLS values —
+Cilium is the CNI, so it can never be an ArgoCD-managed Application:
+
+```fish
+helm upgrade cilium cilium/cilium --version 1.17.4 --namespace kube-system \
+  --reuse-values \
+  -f clusters/real-talos/cilium-mtls-values.yaml \
+  -f clusters/real-talos/cilium-metrics-values.yaml
+kubectl -n kube-system rollout restart deployment/cilium-operator
+kubectl -n kube-system rollout restart ds/cilium
+```
+
+(Include every additive overlay file that's live on the cluster in the
+`-f` list — `--reuse-values` merges with what's currently deployed, but
+being explicit here keeps this command copy-pasteable and reviewable as the
+full picture, same convention as Step 5.)
+
+**Validate:**
+```fish
+# ServiceMonitors now match a real Service (were previously orphaned):
+kubectl -n monitoring exec -it deploy/kube-prometheus-stack-operator -- true  # operator healthy
+# Prometheus targets — Status -> Targets should show cilium-agent / cilium-
+# operator / hubble / hubble-relay jobs UP:
+kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090
+# The 3 official dashboards landed (kube-system, picked up by Grafana's
+# sidecar via searchNamespace: ALL):
+kubectl -n kube-system get configmap -l grafana_dashboard=1
+```
+
+**Rollback:** fully additive — `helm upgrade cilium cilium/cilium --version
+1.17.4 --namespace kube-system --reuse-values --set prometheus.enabled=false
+--set operator.prometheus.serviceMonitor.enabled=false --set
+hubble.metrics.enabled=null --set hubble.relay.prometheus.enabled=false`
+turns scraping back off; the ServiceMonitors in-repo just go idle again
+(match nothing), no other traffic or policy is affected.

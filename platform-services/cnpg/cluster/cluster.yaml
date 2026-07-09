@@ -70,3 +70,23 @@ spec:
       isWALArchiver: true
       parameters:
         barmanObjectName: capstone-pg-backup-store   # platform-services/cnpg/cluster/objectstore.yaml
+
+  # Observability: real `cnpg_*` Postgres metrics (replication lag, connections,
+  # xact commit/rollback rate, database size, WAL, cache hit ratio) for
+  # "Platform / Infra — CNPG / Postgres" (dashboard-cnpg-postgres.yaml). The
+  # `cnpg-operator-app.yaml` comment claiming the chart's `monitoring.
+  # podMonitorEnabled` default gives this "for free" was checked live
+  # (2026-07-08) and found NOT true — no PodMonitor exists for this Cluster.
+  # `enablePodMonitor` is the definitive, documented per-Cluster switch
+  # (independent of the operator chart's global default): the operator creates
+  # a PodMonitor targeting each instance's `metrics` port itself, no manual
+  # ServiceMonitor/PodMonitor needed here.
+  # ⚠ `kubectl explain cluster.spec.monitoring.enablePodMonitor` flags this
+  # field DEPRECATED on the live CRD ("will be removed in an upcoming
+  # release... create a PodMonitor manually") — still functional as of chart
+  # 0.29.0/CNPG 1.30.0 (this pin), so left as the one-line switch for now. If a
+  # future CNPG bump removes it, fall back to a hand-written PodMonitor in
+  # servicemonitors.yaml (same pattern already used there for ESO/Crossplane)
+  # targeting the Cluster's `metrics` port.
+  monitoring:
+    enablePodMonitor: true

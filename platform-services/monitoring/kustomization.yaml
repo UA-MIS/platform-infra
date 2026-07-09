@@ -29,9 +29,12 @@ resources:
   # non-chart CRs. alertmanager-webhook → the notification destination (now a REAL
   # seal pointed at ntfy.yaml below, no longer a placeholder — see README);
   # grafana-admin → the rotated Grafana admin creds (still ships as a PLACEHOLDER,
-  # MUST be resealed before go-live, see README).
+  # MUST be resealed before go-live, see README); grafana-oauth → the Dex
+  # `grafana` staticClient secret (Observability SSO) — a REAL seal, no reseal
+  # needed before go-live (see README "Grafana SSO (Dex)").
   - sealedsecret-alertmanager-webhook.yaml
   - sealedsecret-grafana-admin.yaml
+  - sealedsecret-grafana-oauth.yaml
   # Tracing: Tempo (raw manifests — the single-binary Helm chart is upstream
   # `deprecated: true`, see the file header) + the OTel Collector Helm Application's
   # matching ConfigMap comment (applicationsets/otel-collector-app.yaml).
@@ -44,20 +47,39 @@ resources:
   # replaces the example.com placeholder). See the file header for the auth model
   # + phone-subscription path.
   - ntfy.yaml
-  # Admin observability dashboards (dashboards-as-code). Each ConfigMap carries
-  # `grafana_dashboard: "1"`; the Grafana chart's default k8s-sidecar watches for that
-  # label and auto-provisions the JSON payload — no manual Grafana import step, no
-  # dependency on the datasource's generated UID (each dashboard's `datasource`
-  # template variable resolves it at load time). See README "Admin dashboards" for
-  # what each one covers and the metrics-not-yet-scraped follow-ups.
+  # Observability dashboards (dashboards-as-code) — the Grafana fleet. Each
+  # ConfigMap carries `grafana_dashboard: "1"` (the sidecar's selector label) and
+  # a `grafana_folder` ANNOTATION (folder placement — `sidecar.dashboards.
+  # folderAnnotation` in kube-prometheus-stack-app.yaml); the Grafana chart's
+  # default k8s-sidecar watches for the label and auto-provisions the JSON
+  # payload into that folder — no manual Grafana import step, no dependency on
+  # the datasource's generated UID (each dashboard's `datasource` template
+  # variable resolves it at load time). See README "Dashboard fleet" for the
+  # full folder/dashboard table and the metrics-not-yet-scraped follow-ups.
+  #
+  # --- Platform / Infra (admin-facing, cross-tenant) ---
   - dashboard-cluster-overview.yaml
-  - dashboard-tenant-quota.yaml
   - dashboard-platform-health.yaml
-  - dashboard-tenant-cicd.yaml
+  - dashboard-argocd.yaml
+  - dashboard-coredns.yaml
+  - dashboard-cert-manager.yaml
+  - dashboard-ceph-rook.yaml
+  - dashboard-eso.yaml
+  - dashboard-cnpg-postgres.yaml
+  - dashboard-mariadb-galera.yaml
+  - dashboard-loki-logs-overview.yaml
+  - dashboard-traefik-ingress.yaml
+  - dashboard-network-traffic-by-namespace.yaml
   # Cost allocation (OpenCost, applicationsets/opencost-app.yaml): per-namespace
   # $/hr and est. monthly cost derived from OpenCost's owned-hardware custom
   # pricing. See README "Cost allocation (OpenCost)" for the pricing derivation.
   - dashboard-cost-allocation.yaml
+  # --- Platform / Tenants (per-app, `namespace`-templated — the "team logs in,
+  #     sees their app cleanly" default view, PART B) ---
+  - dashboard-tenant-quota.yaml
+  - dashboard-tenant-cicd.yaml
+  - dashboard-tenant-golden-signals.yaml
+  - dashboard-tenant-logs.yaml
 
 labels:
   - pairs:

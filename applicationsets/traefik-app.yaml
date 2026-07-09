@@ -95,6 +95,44 @@ spec:
           spec:
             type: ClusterIP
 
+        # --- Prometheus metrics (Observability — Grafana "Platform / Infra —
+        #     Traefik Ingress" dashboard, platform-services/monitoring/
+        #     dashboard-traefik-ingress.yaml). The chart's `ports.metrics`
+        #     entrypoint (:9100) is a chart DEFAULT and already listens inside the
+        #     pod today (verified: `helm show values traefik/traefik --version
+        #     40.2.0` — `metrics.prometheus` is non-null / enabled by default,
+        #     `ports.metrics.port: 9100`, `expose.default: false`, i.e. ClusterIP-
+        #     only, never on the Cloudflare tunnel path). What's MISSING is a
+        #     Service + ServiceMonitor actually scraping it — both below. This is
+        #     purely additive: a NEW dedicated metrics Service, not a change to
+        #     the existing `traefik` Service the coredns/cloudflared/netpol
+        #     contract hardcodes (see the header comment).
+        metrics:
+          prometheus:
+            service:
+              enabled: true
+            # Without this, the chart's servicemonitor.yaml template does a
+            # client-side `Capabilities.APIVersions.Has("monitoring.coreos.
+            # com/v1")` check and HARD-ERRORS the entire `helm template`
+            # render ("You have to deploy monitoring.coreos.com/v1 first") if
+            # the CRD isn't registered on the destination cluster yet —
+            # verified locally via `helm template traefik/traefik --version
+            # 40.2.0 -f <these values>`, and confirmed it's a SIBLING of
+            # `serviceMonitor:` (not nested under it) via `helm show values`.
+            # That's a template-render failure, NOT an apply-time dry-run
+            # rejection, so SkipDryRunOnMissingResource (syncOptions below)
+            # does NOT cover it — on a from-scratch bootstrap where Traefik
+            # syncs before kube-prometheus-stack's CRDs register, ArgoCD
+            # couldn't even generate a manifest to retry. disableAPICheck
+            # removes the dependency on CRD-existence-at-render-time entirely
+            # (the chart just renders the ServiceMonitor unconditionally);
+            # real clusters always have the CRD by the time this matters in
+            # practice, so this is a pure bootstrap-ordering safety net.
+            disableAPICheck: true
+            serviceMonitor:
+              enabled: true
+              interval: 30s
+
         # --- Entrypoints (carried over from the old helmchartconfig.yaml):
         #     web :80, websecure :443. cloudflared hits web:80; websecure serves
         #     in-cluster TLS consumers (the OIDC id.<domain> path, ADR §10b).
@@ -138,6 +176,17 @@ spec:
       selfHeal: true
     syncOptions:
       - ServerSideApply=true                       # the traefik.io CRDs need SSA
+      # metrics.prometheus.serviceMonitor.enabled above makes this chart render a
+      # ServiceMonitor CR — a kube-prometheus-stack CRD. On a from-scratch bootstrap
+      # Traefik (default sync-wave "0", needed early for ingress/OIDC) can sync
+      # before platform-kube-prometheus-stack installs that CRD; without this,
+      # ArgoCD's dry-run rejects the WHOLE app sync ("one or more synchronization
+      # tasks are not valid") — same class of sync-deadlock fixed for
+      # platform-svc-monitoring (#127, see servicemonitors.yaml). App-wide (not
+      # per-resource, since this is a chart-rendered object) is fine here: it's a
+      # narrowly-scoped Application. ArgoCD retry/selfHeal applies the
+      # ServiceMonitor once the CRD registers.
+      - SkipDryRunOnMissingResource=true
       # NOTE: if a prior attempt left orphaned traefik.io CRDs, the FIRST sync may
       # hit a field-manager adoption conflict (kubectl-client-side-apply vs argocd);
       # if so, one-time-add Force=true to this list to adopt, then remove it.

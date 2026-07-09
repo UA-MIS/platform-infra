@@ -1,0 +1,134 @@
+# Admin dashboard (Observability admin dashboards, Grafana SSO + dashboard fleet
+# PR). Ceph cluster health, OSD/mon status, PG state, capacity, and IOPS/
+# throughput — the storage layer every stateful platform component (Prometheus,
+# Harbor, Vault, Grafana itself, CNPG, MariaDB) sits on.
+#
+# Becomes real once THIS SAME PR's rook-ceph-cluster-app.yaml change
+# (`monitoring.enabled: true`) syncs — that flips on the Ceph mgr `prometheus`
+# module (ceph_* metrics on rook-ceph-mgr:9283) and has the chart create its own
+# ServiceMonitor. This is an ArgoCD-managed change (unlike Cilium), so it
+# self-heals on sync — no human step required; panels below show "No data"
+# only until that sync completes.
+#
+# Standard Ceph mgr-exporter metric names (ceph_*), no custom label assumptions.
+#
+# Auto-provisioned by the Grafana sidecar via the `grafana_dashboard: "1"` label,
+# filed into the "Platform / Infra" folder via the `grafana_folder` annotation.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-ceph-rook
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: "Platform / Infra"
+data:
+  ceph-rook.json: |
+    {
+      "uid": "platform-ceph-rook",
+      "title": "Platform / Infra — Ceph / Rook",
+      "description": "Real metrics once rook-ceph-cluster-app.yaml's monitoring.enabled=true syncs (ArgoCD-managed, self-heals — no human step).",
+      "tags": ["platform", "admin", "storage"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "time": { "from": "now-6h", "to": "now" },
+      "refresh": "1m",
+      "templating": {
+        "list": [
+          {
+            "name": "datasource",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": {},
+            "hide": 0
+          }
+        ]
+      },
+      "panels": [
+        { "id": 1, "type": "row", "title": "Cluster health", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 } },
+        {
+          "id": 2, "type": "stat", "title": "Ceph Health (0=OK, 1=WARN, 2=ERR)",
+          "gridPos": { "h": 6, "w": 6, "x": 0, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 1 }, { "color": "red", "value": 2 } ] } }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "ceph_health_status", "instant": true, "refId": "A" } ]
+        },
+        {
+          "id": 3, "type": "stat", "title": "Mon Quorum Size (expect 3)",
+          "gridPos": { "h": 6, "w": 6, "x": 6, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "orange", "value": 2 }, { "color": "green", "value": 3 } ] } }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(ceph_mon_quorum_status)", "instant": true, "refId": "A" } ]
+        },
+        {
+          "id": 4, "type": "stat", "title": "OSDs Up",
+          "gridPos": { "h": 6, "w": 6, "x": 12, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "orange", "value": 1 }, { "color": "green", "value": 3 } ] } }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(ceph_osd_up)", "instant": true, "refId": "A" } ]
+        },
+        {
+          "id": 5, "type": "stat", "title": "OSDs In",
+          "gridPos": { "h": 6, "w": 6, "x": 18, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "orange", "value": 1 }, { "color": "green", "value": 3 } ] } }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(ceph_osd_in)", "instant": true, "refId": "A" } ]
+        },
+        { "id": 6, "type": "row", "title": "Placement groups", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 7 } },
+        {
+          "id": 7, "type": "timeseries", "title": "PG State (active / clean / degraded)",
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "ceph_pg_active", "legendFormat": "active", "refId": "A" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "ceph_pg_clean", "legendFormat": "clean", "refId": "B" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "ceph_pg_degraded", "legendFormat": "degraded", "refId": "C" }
+          ]
+        },
+        { "id": 8, "type": "row", "title": "Capacity", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 16 } },
+        {
+          "id": 9, "type": "bargauge", "title": "Cluster Capacity Used %",
+          "gridPos": { "h": 6, "w": 8, "x": 0, "y": 17 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 75 }, { "color": "red", "value": 90 } ] } }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "100 * sum(ceph_cluster_total_used_bytes) / sum(ceph_cluster_total_bytes)", "instant": true, "refId": "A" } ]
+        },
+        {
+          "id": 10, "type": "table", "title": "Pool Capacity (stored vs max avail)",
+          "gridPos": { "h": 8, "w": 16, "x": 8, "y": 17 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+          "transformations": [ { "id": "merge", "options": {} } ],
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "ceph_pool_stored", "legendFormat": "stored", "format": "table", "instant": true, "refId": "A" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "ceph_pool_max_avail", "legendFormat": "max_avail", "format": "table", "instant": true, "refId": "B" }
+          ]
+        },
+        { "id": 11, "type": "row", "title": "OSD IOPS + throughput", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 25 } },
+        {
+          "id": 12, "type": "timeseries", "title": "OSD Ops/sec (read vs write)",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 26 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(rate(ceph_osd_op_r[5m]))", "legendFormat": "read ops/s", "refId": "A" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(rate(ceph_osd_op_w[5m]))", "legendFormat": "write ops/s", "refId": "B" }
+          ]
+        },
+        {
+          "id": 13, "type": "timeseries", "title": "OSD Throughput (read vs write)",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 26 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "Bps" }, "overrides": [] },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(rate(ceph_osd_op_r_out_bytes[5m]))", "legendFormat": "read bytes/s", "refId": "A" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(rate(ceph_osd_op_w_in_bytes[5m]))", "legendFormat": "write bytes/s", "refId": "B" }
+          ]
+        }
+      ]
+    }

@@ -1,0 +1,110 @@
+# Admin dashboard (Observability admin dashboards, Grafana SSO + dashboard fleet
+# PR). External Secrets Operator sync health — ExternalSecret/ClusterSecretStore/
+# SecretStore readiness and sync error rate. Real metrics, scraped day-one via
+# the `external-secrets` PodMonitor (servicemonitors.yaml, already live — the
+# ESO chart ships no metrics Service by default, so the controller POD is
+# scraped directly on its named `metrics` port).
+#
+# Same `externalsecret_status_condition` / `clustersecretstore_status_condition`
+# / `secretstore_status_condition` metric+label names already used by this
+# platform's ExternalSecretSyncError / ClusterSecretStoreNotReady /
+# SecretStoreNotReady PrometheusRules (alerts.yaml) — kept consistent here.
+#
+# Auto-provisioned by the Grafana sidecar via the `grafana_dashboard: "1"` label,
+# filed into the "Platform / Infra" folder via the `grafana_folder` annotation.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-eso
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: "Platform / Infra"
+data:
+  eso.json: |
+    {
+      "uid": "platform-eso",
+      "title": "Platform / Infra — External Secrets",
+      "tags": ["platform", "admin", "secrets"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "time": { "from": "now-6h", "to": "now" },
+      "refresh": "1m",
+      "templating": {
+        "list": [
+          {
+            "name": "datasource",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": {},
+            "hide": 0
+          }
+        ]
+      },
+      "panels": [
+        { "id": 1, "type": "row", "title": "Store readiness", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 } },
+        {
+          "id": 2, "type": "stat", "title": "ClusterSecretStore Ready",
+          "gridPos": { "h": 6, "w": 6, "x": 0, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] } }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "min(clustersecretstore_status_condition{condition=\"Ready\", status=\"True\"})", "instant": true, "refId": "A" } ]
+        },
+        {
+          "id": 3, "type": "table", "title": "Namespaced SecretStores NOT Ready",
+          "gridPos": { "h": 8, "w": 18, "x": 6, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "secretstore_status_condition{condition=\"Ready\", status=\"False\"}",
+              "format": "table",
+              "instant": true,
+              "refId": "A"
+            }
+          ]
+        },
+        { "id": 4, "type": "row", "title": "ExternalSecret sync health", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 } },
+        {
+          "id": 5, "type": "table", "title": "ExternalSecrets NOT Ready (all namespaces)",
+          "gridPos": { "h": 10, "w": 24, "x": 0, "y": 10 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "externalsecret_status_condition{condition=\"Ready\", status=\"False\"}",
+              "format": "table",
+              "instant": true,
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 6, "type": "timeseries", "title": "Sync Call Rate",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(rate(externalsecret_sync_calls_total[5m]))", "legendFormat": "syncs/s", "refId": "A" } ]
+        },
+        {
+          "id": 7, "type": "timeseries", "title": "Sync Error Rate",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "color": { "mode": "thresholds" },
+              "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 0.01 } ] }
+            },
+            "overrides": []
+          },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(rate(externalsecret_sync_calls_error[5m]))", "legendFormat": "errors/s", "refId": "A" } ]
+        }
+      ]
+    }

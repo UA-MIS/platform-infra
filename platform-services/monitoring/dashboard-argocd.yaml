@@ -1,0 +1,100 @@
+# Admin dashboard (Observability admin dashboards, Grafana SSO + dashboard fleet
+# PR). A DEEPER companion to the ArgoCD row in "Platform / Health"
+# (dashboard-platform-health.yaml) — that dashboard has the at-a-glance
+# Synced/Healthy/Degraded stat counts + the "needs attention" table; this one
+# adds trend-over-time + reconcile/API/git performance, not a duplicate.
+#
+# Real metrics, scraped day-one via the `argocd-application-controller`
+# ServiceMonitor (servicemonitors.yaml, already live).
+#
+# Auto-provisioned by the Grafana sidecar via the `grafana_dashboard: "1"` label,
+# filed into the "Platform / Infra" folder via the `grafana_folder` annotation.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-argocd
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: "Platform / Infra"
+data:
+  argocd.json: |
+    {
+      "uid": "platform-argocd",
+      "title": "Platform / Infra — ArgoCD (detailed)",
+      "description": "At-a-glance sync/health counts + the needs-attention table live on Platform / Health instead — this dashboard is trend + performance detail.",
+      "tags": ["platform", "admin", "gitops"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "time": { "from": "now-6h", "to": "now" },
+      "refresh": "1m",
+      "templating": {
+        "list": [
+          {
+            "name": "datasource",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": {},
+            "hide": 0
+          }
+        ]
+      },
+      "panels": [
+        { "id": 1, "type": "row", "title": "Sync / health trend", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 } },
+        {
+          "id": 2, "type": "timeseries", "title": "App Count by Sync Status (over time)",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "count by (sync_status) (argocd_app_info)", "legendFormat": "{{sync_status}}", "refId": "A" } ]
+        },
+        {
+          "id": 3, "type": "timeseries", "title": "App Count by Health Status (over time)",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "count by (health_status) (argocd_app_info)", "legendFormat": "{{health_status}}", "refId": "A" } ]
+        },
+        { "id": 4, "type": "row", "title": "Reconcile + API performance", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 } },
+        {
+          "id": 5, "type": "timeseries", "title": "Reconcile Duration p95",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 10 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.95, sum by (le) (rate(argocd_app_reconcile_bucket[5m])))", "legendFormat": "p95", "refId": "A" } ]
+        },
+        {
+          "id": 6, "type": "timeseries", "title": "Kubernetes API Request Rate (by verb)",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 10 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (verb) (rate(argocd_app_k8s_request_total[5m]))", "legendFormat": "{{verb}}", "refId": "A" } ]
+        },
+        {
+          "id": 7, "type": "stat", "title": "Total K8s Objects Tracked",
+          "gridPos": { "h": 6, "w": 8, "x": 0, "y": 18 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(argocd_cluster_api_resource_objects)", "instant": true, "refId": "A" } ]
+        },
+        { "id": 8, "type": "row", "title": "Git activity", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 } },
+        {
+          "id": 9, "type": "timeseries", "title": "Git Request Rate (by type)",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 25 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (request_type) (rate(argocd_git_request_total[5m]))", "legendFormat": "{{request_type}}", "refId": "A" } ]
+        },
+        {
+          "id": 10, "type": "timeseries", "title": "Git Request Latency p95",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 25 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.95, sum by (le) (rate(argocd_git_request_duration_seconds_bucket[5m])))", "legendFormat": "p95", "refId": "A" } ]
+        }
+      ]
+    }

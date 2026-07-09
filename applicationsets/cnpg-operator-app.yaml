@@ -48,8 +48,13 @@ spec:
         replicaCount: 1
         # Leave monitoring.podMonitorEnabled at the chart default (true): the
         # Prometheus Operator CRDs already exist in-cluster
-        # (kube-prometheus-stack, applicationsets/kube-prometheus-stack-app.yaml),
-        # so the default PodMonitor is picked up for free — no extra wiring here.
+        # (kube-prometheus-stack, applicationsets/kube-prometheus-stack-app.yaml).
+        # ⚠ CORRECTION (Observability dashboards PR, verified live 2026-07-08):
+        # this operator-chart default does NOT by itself create a PodMonitor for
+        # any given Cluster CR — no PodMonitor existed for `capstone-pg` despite
+        # this setting. The definitive per-Cluster switch is `spec.monitoring.
+        # enablePodMonitor: true` on the Cluster itself
+        # (platform-services/cnpg/cluster/cluster.yaml) — added there.
   destination:
     server: https://kubernetes.default.svc
     namespace: cnpg-system

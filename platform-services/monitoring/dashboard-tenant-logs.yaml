@@ -1,0 +1,93 @@
+# Admin+tenant dashboard (Grafana SSO + dashboard fleet PR, PART C). Per-tenant
+# logs, scoped by the `$namespace` template variable — the "provide Loki log
+# panels pre-filtered to their namespace" requirement from PART B. Real,
+# day-one (Loki already scraped + wired as a datasource; Alloy already attaches
+# `namespace`/`pod`/`container` labels — see dashboard-loki-logs-overview.yaml's
+# header for the sourcing detail, not repeated here).
+#
+# Auto-provisioned by the Grafana sidecar via the `grafana_dashboard: "1"` label,
+# filed into the "Platform / Tenants" folder via the `grafana_folder` annotation.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-tenant-logs
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: "Platform / Tenants"
+data:
+  tenant-logs.json: |
+    {
+      "uid": "platform-tenant-logs",
+      "title": "Platform / Tenants — Logs",
+      "tags": ["platform", "tenants", "logs"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "time": { "from": "now-6h", "to": "now" },
+      "refresh": "1m",
+      "templating": {
+        "list": [
+          {
+            "name": "loki_datasource",
+            "type": "datasource",
+            "query": "loki",
+            "current": {},
+            "hide": 0
+          },
+          {
+            "name": "datasource",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": {},
+            "hide": 2
+          },
+          {
+            "name": "namespace",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "${datasource}" },
+            "query": { "query": "label_values(kube_pod_info, namespace)", "refId": "namespace" },
+            "refresh": 2,
+            "multi": false,
+            "includeAll": true,
+            "current": { "text": "All", "value": ["$__all"] },
+            "sort": 1
+          }
+        ]
+      },
+      "panels": [
+        { "id": 1, "type": "row", "title": "Volume", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 } },
+        {
+          "id": 2, "type": "timeseries", "title": "Log Volume by Pod",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+          "datasource": { "type": "loki", "uid": "${loki_datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "loki", "uid": "${loki_datasource}" }, "expr": "sum by (pod) (count_over_time({namespace=~\"$namespace\"}[$__interval]))", "legendFormat": "{{pod}}", "refId": "A" } ]
+        },
+        {
+          "id": 3, "type": "timeseries", "title": "Error Rate by Pod (error / exception / fatal)",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+          "datasource": { "type": "loki", "uid": "${loki_datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": { "mode": "thresholds" },
+              "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] }
+            },
+            "overrides": []
+          },
+          "targets": [ { "datasource": { "type": "loki", "uid": "${loki_datasource}" }, "expr": "sum by (pod) (count_over_time({namespace=~\"$namespace\"} |~ \"(?i)error|exception|fatal\" [$__interval]))", "legendFormat": "{{pod}}", "refId": "A" } ]
+        },
+        { "id": 4, "type": "row", "title": "Recent logs", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 } },
+        {
+          "id": 5, "type": "logs", "title": "Recent Logs",
+          "gridPos": { "h": 14, "w": 24, "x": 0, "y": 10 },
+          "datasource": { "type": "loki", "uid": "${loki_datasource}" },
+          "options": { "showTime": true, "sortOrder": "Descending", "wrapLogMessage": true, "enableLogDetails": true },
+          "targets": [ { "datasource": { "type": "loki", "uid": "${loki_datasource}" }, "expr": "{namespace=~\"$namespace\"}", "refId": "A" } ]
+        }
+      ]
+    }

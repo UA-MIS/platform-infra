@@ -130,6 +130,47 @@ kubectl -n dex rollout restart deploy/dex
 kubectl -n db-console-auth rollout restart deploy/oauth2-proxy
 ```
 
+## Grafana static client (Observability SSO)
+
+`configmap.yaml` registers a `grafana` staticClient for Grafana's `auth.
+generic_oauth` (`applicationsets/kube-prometheus-stack-app.yaml`'s `grafana.ini`
+block) — same "one GitHub OAuth app, N tools" model as ArgoCD/Harbor/Backstage/
+DB-console. Unlike DB-console's shared oauth2-proxy, Grafana talks to Dex
+directly (native OIDC support), so the redirect URI is Grafana's own
+`root_url + /login/generic_oauth`.
+
+**Role mapping** (`role_attribute_path`, JMESPath over the `groups` claim):
+
+| GitHub Team / membership | OIDC group | Grafana role |
+| --- | --- | --- |
+| `labmx` Team (same one ArgoCD RBAC maps to `role:admin`) | `UA-MIS:labmx` | `GrafanaAdmin` (org Admin + server admin) |
+| any other authenticated UA-MIS member (any other `UA-MIS:*` team, or none) | — | `Viewer` |
+
+Unlike ArgoCD/Backstage/DB-console, this `grafana-client-secret` key was
+sealed with REAL values in this PR (not a placeholder) — no reseal needed
+before go-live. It is the SAME value as the `client-secret` key in
+`platform-services/monitoring/sealedsecret-grafana-oauth.yaml` (both sides of
+the OAuth handshake must agree). To rotate:
+
+```bash
+# from platform-infra/, cluster up, sealed-secrets controller running:
+NEW_SECRET=$(openssl rand -base64 32)
+
+# 1) Recover every OTHER existing key first (same recipe as the GitHub re-seal
+#    above), add/replace grafana-client-secret with $NEW_SECRET, then:
+make seal SECRET=/tmp/dex-secret.yaml NS=dex > platform-services/dex/sealedsecret.yaml
+
+# 2) Reseal the SAME value into the Grafana side:
+kubectl create secret generic grafana-oauth --namespace monitoring \
+    --from-literal=client-secret="$NEW_SECRET" --dry-run=client -o yaml \
+  | kubeseal --controller-namespace kube-system --controller-name sealed-secrets-controller \
+      --format yaml > platform-services/monitoring/sealedsecret-grafana-oauth.yaml
+
+# 3) Commit on a branch + PR, then after sync:
+kubectl -n dex rollout restart deploy/dex
+kubectl -n monitoring rollout restart deploy/kube-prometheus-stack-grafana
+```
+
 ## Validate
 
 ```bash
@@ -140,4 +181,8 @@ curl -sk https://id.capstone.uamishub.com/.well-known/openid-configuration | jq 
 
 # ArgoCD UI: open https://argocd.capstone.uamishub.com -> "LOG IN VIA Dex (GitHub)".
 # A UA-MIS member lands with their mapped role; a non-member is rejected at GitHub/Dex.
+
+# Grafana UI: open https://grafana.capstone.uamishub.com -> "Sign in with Dex
+# (GitHub / UA-MIS)" (the admin/password form stays visible as break-glass). A
+# labmx member lands as GrafanaAdmin; any other UA-MIS member lands as Viewer.
 ```

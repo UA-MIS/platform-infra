@@ -88,6 +88,16 @@ spec:
                   name: dex-github
                   key: db-console-client-secret
                   optional: true
+            # Grafana (Observability SSO) static-client secret. Unlike PROCESS_/
+            # DB_CONSOLE_CLIENT_SECRET above, the `grafana-client-secret` key was
+            # sealed with a REAL value in the same PR that added this staticClient
+            # (see platform-services/dex/README.md "Grafana static client") — no
+            # placeholder period, so this is required (not `optional`) from the start.
+            - name: GRAFANA_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: dex-github
+                  key: grafana-client-secret
           volumeMounts:
             - name: config
               mountPath: /etc/dex

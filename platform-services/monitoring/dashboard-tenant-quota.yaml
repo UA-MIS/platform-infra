@@ -20,6 +20,10 @@ metadata:
   labels:
     platform.capstone/component: platform
     grafana_dashboard: "1"
+  annotations:
+    # Folder placement (team-scoped UX) — moved into "Platform / Tenants"
+    # (was unfoldered/"General") since this is a per-tenant dashboard.
+    grafana_folder: "Platform / Tenants"
 data:
   tenant-quota.json: |
     {

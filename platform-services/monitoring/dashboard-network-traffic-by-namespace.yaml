@@ -1,0 +1,111 @@
+# Platform / Infra — Network Traffic by Namespace (Cilium/Hubble). THE
+# "N requests this week to team X" dashboard. Sourced from Hubble flow metrics
+# with `sourceContext=namespace|destinationContext=namespace` on the `http`
+# metric (clusters/real-talos/cilium-metrics-values.yaml) — every
+# `hubble_http_requests_total` series carries `source`/`destination` labels
+# that ARE the K8s namespace, not just a pod identity.
+#
+# ⚠ REQUIRES A HUMAN STEP: Cilium is install-owned (helm CLI, not an ArgoCD
+# Application — it's the CNI, chicken/egg with ArgoCD's own pod networking).
+# The ServiceMonitors this dashboard depends on are already shipped
+# (clusters/real-talos/cilium-metrics-values.yaml), but scraping only starts
+# once a human runs the one-time `helm upgrade` documented there and in
+# docs/cilium-cni-runbook.md Step 6. Until then every panel below shows "No
+# data" — the metric names are real and this is a real, already-wired
+# ServiceMonitor, not a fabricated panel; see README "Cilium/Hubble metrics —
+# requires a human step".
+#
+# Auto-provisioned by the Grafana sidecar via the `grafana_dashboard: "1"`
+# label; filed into "Platform / Infra" via the `grafana_folder` annotation.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-network-traffic-by-namespace
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: "Platform / Infra"
+data:
+  network-traffic-by-namespace.json: |
+    {
+      "uid": "platform-network-namespace",
+      "title": "Platform / Infra — Network Traffic by Namespace (Cilium/Hubble)",
+      "description": "Requires the one-time human step in clusters/real-talos/cilium-metrics-values.yaml (helm upgrade cilium ... — see docs/cilium-cni-runbook.md Step 6). Until that runs, every panel here shows No data: the metric names are real and the ServiceMonitors are already shipped, this just isn't activated yet (Cilium is install-owned, not ArgoCD-managed).",
+      "tags": ["platform", "admin", "network", "cilium", "hubble"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "time": { "from": "now-6h", "to": "now" },
+      "refresh": "1m",
+      "templating": {
+        "list": [
+          {
+            "name": "datasource",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": {},
+            "hide": 0
+          }
+        ]
+      },
+      "panels": [
+        { "id": 1, "type": "row", "title": "Per-tenant HTTP request volume (\"N requests this week to team X\")", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 } },
+        {
+          "id": 2, "type": "table", "title": "Requests This Week by Destination Namespace",
+          "gridPos": { "h": 9, "w": 24, "x": 0, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "description": "topk(20) — the top 20 busiest destination namespaces over the trailing 7 days. This is the panel: point at it to answer \"how many requests did team X's app get this week\".",
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "topk(20, sum by (destination) (increase(hubble_http_requests_total[7d])))",
+              "format": "table",
+              "instant": true,
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 3, "type": "timeseries", "title": "HTTP Requests/sec by Destination Namespace",
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 10 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (destination) (rate(hubble_http_requests_total[5m]))", "legendFormat": "{{destination}}", "refId": "A" }
+          ]
+        },
+        { "id": 4, "type": "row", "title": "Flow verdicts & drops", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 } },
+        {
+          "id": 5, "type": "timeseries", "title": "Flows/sec by Verdict (FORWARDED vs DROPPED)",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 19 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (verdict) (rate(hubble_flows_processed_total[5m]))", "legendFormat": "{{verdict}}", "refId": "A" }
+          ]
+        },
+        {
+          "id": 6, "type": "timeseries", "title": "Drops/sec by Reason (why traffic is being blocked — NetworkPolicy visibility)",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 19 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (reason) (rate(hubble_drop_total[5m]))", "legendFormat": "{{reason}}", "refId": "A" }
+          ]
+        },
+        { "id": 7, "type": "row", "title": "DNS", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 27 } },
+        {
+          "id": 8, "type": "timeseries", "title": "DNS Queries/sec (Hubble-observed, cluster-wide)",
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 28 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(rate(hubble_dns_queries_total[5m]))", "legendFormat": "queries/sec", "refId": "A" }
+          ]
+        }
+      ]
+    }

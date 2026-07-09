@@ -1,0 +1,110 @@
+# Admin dashboard (Observability admin dashboards, Grafana SSO + dashboard fleet
+# PR). Traefik ingress request rate, error rate, latency, and connection/reload
+# health — the platform's single ingress point (Cloudflare Tunnel -> Traefik ->
+# every app).
+#
+# Becomes real once THIS SAME PR's traefik-app.yaml change
+# (`metrics.prometheus.service.enabled` + `serviceMonitor.enabled`) syncs — the
+# chart's own `ports.metrics` entrypoint (:9100) is already a chart DEFAULT and
+# already listens inside the pod; this PR only adds the Service + ServiceMonitor
+# actually scraping it. ArgoCD-managed, self-heals — no human step required.
+#
+# Traefik service names are `<namespace>-<name>-<port>@kubernetescrd`, so a
+# `service=~"<namespace>-.*"` regex doubles as a rough per-tenant filter (used
+# on the "Platform / Tenants — App Golden Signals" dashboard).
+#
+# Auto-provisioned by the Grafana sidecar via the `grafana_dashboard: "1"` label,
+# filed into the "Platform / Infra" folder via the `grafana_folder` annotation.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-traefik-ingress
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: "Platform / Infra"
+data:
+  traefik-ingress.json: |
+    {
+      "uid": "platform-traefik-ingress",
+      "title": "Platform / Infra — Traefik Ingress",
+      "description": "Real once traefik-app.yaml's metrics.prometheus service+serviceMonitor sync (ArgoCD-managed, self-heals — no human step).",
+      "tags": ["platform", "admin", "ingress"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "time": { "from": "now-6h", "to": "now" },
+      "refresh": "1m",
+      "templating": {
+        "list": [
+          {
+            "name": "datasource",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": {},
+            "hide": 0
+          }
+        ]
+      },
+      "panels": [
+        { "id": 1, "type": "row", "title": "Request rate + status codes", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 } },
+        {
+          "id": 2, "type": "timeseries", "title": "Request Rate by Service",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (service) (rate(traefik_service_requests_total[5m]))", "legendFormat": "{{service}}", "refId": "A" } ]
+        },
+        {
+          "id": 3, "type": "timeseries", "title": "5xx Error Rate by Service",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "color": { "mode": "thresholds" },
+              "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 0.1 } ] }
+            },
+            "overrides": []
+          },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (service) (rate(traefik_service_requests_total{code=~\"5..\"}[5m]))", "legendFormat": "{{service}}", "refId": "A" } ]
+        },
+        {
+          "id": 4, "type": "timeseries", "title": "Request Rate by Entrypoint + Code",
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 9 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (entrypoint, code) (rate(traefik_entrypoint_requests_total[5m]))", "legendFormat": "{{entrypoint}} / {{code}}", "refId": "A" } ]
+        },
+        { "id": 5, "type": "row", "title": "Latency", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 17 } },
+        {
+          "id": 6, "type": "timeseries", "title": "Request Duration by Service (p50 / p95 / p99)",
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 18 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.50, sum by (le, service) (rate(traefik_service_request_duration_seconds_bucket[5m])))", "legendFormat": "{{service}} p50", "refId": "A" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.95, sum by (le, service) (rate(traefik_service_request_duration_seconds_bucket[5m])))", "legendFormat": "{{service}} p95", "refId": "B" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.99, sum by (le, service) (rate(traefik_service_request_duration_seconds_bucket[5m])))", "legendFormat": "{{service}} p99", "refId": "C" }
+          ]
+        },
+        { "id": 7, "type": "row", "title": "Connections + config health", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 26 } },
+        {
+          "id": 8, "type": "timeseries", "title": "Open Connections by Entrypoint",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 27 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (entrypoint) (traefik_entrypoint_open_connections)", "legendFormat": "{{entrypoint}}", "refId": "A" } ]
+        },
+        {
+          "id": 9, "type": "timeseries", "title": "Config Reload Rate",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 27 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(rate(traefik_config_reloads_total[5m]))", "legendFormat": "reloads/s", "refId": "A" } ]
+        }
+      ]
+    }
