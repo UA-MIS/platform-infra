@@ -127,6 +127,15 @@ catalog:
     #   - `platformInfra`: this repo specifically, matched by exact name (it isn't a
     #     "tenant" and the scaffolder doesn't create it, so it can't self-tag; a name filter
     #     is fine here since platform-infra never renames).
+    # TIMEOUT: UA-MIS is a ~5,520-repo org. GithubEntityProvider enumerates the ENTIRE org
+    # before applying filters.topic/filters.repository client-side (there is no server-side
+    # scoping for these filter types), so a full run reads all ~5,520 repos even though
+    # `tenants` matches only a handful and `platformInfra` matches exactly one. That
+    # enumeration alone exceeds the old 10m timeout ("Read 5520 GitHub repositories (1
+    # matching the pattern)" followed by "Task timed out and was lost" in the backend log),
+    # so the task was killed before it could commit — tenant Components never landed and
+    # /my-projects stayed empty. 30m is comfortably under the 1h frequency (no run overlap)
+    # and covers the observed enumeration time with headroom.
     github:
       tenants:
         organization: 'UA-MIS'
@@ -136,9 +145,9 @@ catalog:
           topic:
             include: ['capstone-tenant']
         schedule:
-          initialDelay: { seconds: 45 }
+          initialDelay: { minutes: 2 }
           frequency: { hours: 1 }
-          timeout: { minutes: 10 }
+          timeout: { minutes: 30 }
       platformInfra:
         organization: 'UA-MIS'
         catalogPath: '/catalog-info.yaml'
@@ -146,9 +155,9 @@ catalog:
           branch: 'main'
           repository: '^platform-infra$'
         schedule:
-          initialDelay: { seconds: 50 }
+          initialDelay: { minutes: 2, seconds: 5 }
           frequency: { hours: 1 }
-          timeout: { minutes: 10 }
+          timeout: { minutes: 30 }
 
 # GitHub integration: authenticates as the UA-MIS GitHub App (ua-mis-backstage). M2 uses it
 # for org ingestion (Organization: Members = Read); M4's Scaffolder reuses it for repo
