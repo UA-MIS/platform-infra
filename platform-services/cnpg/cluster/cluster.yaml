@@ -81,5 +81,12 @@ spec:
   # (independent of the operator chart's global default): the operator creates
   # a PodMonitor targeting each instance's `metrics` port itself, no manual
   # ServiceMonitor/PodMonitor needed here.
+  # ⚠ `kubectl explain cluster.spec.monitoring.enablePodMonitor` flags this
+  # field DEPRECATED on the live CRD ("will be removed in an upcoming
+  # release... create a PodMonitor manually") — still functional as of chart
+  # 0.29.0/CNPG 1.30.0 (this pin), so left as the one-line switch for now. If a
+  # future CNPG bump removes it, fall back to a hand-written PodMonitor in
+  # servicemonitors.yaml (same pattern already used there for ESO/Crossplane)
+  # targeting the Cluster's `metrics` port.
   monitoring:
     enablePodMonitor: true
