@@ -287,6 +287,17 @@ spec:
                 #     existing live tenants were backfilled directly via the GitHub API).
                 #   - `platformInfra`: this repo specifically, matched by exact name (not a
                 #     tenant, doesn't self-tag).
+                # TIMEOUT: UA-MIS is a ~5,520-repo org. GithubEntityProvider enumerates the
+                # ENTIRE org before applying filters.topic/filters.repository client-side
+                # (no server-side scoping for these filter types), so a full run reads all
+                # ~5,520 repos even though `tenants` matches only a handful and
+                # `platformInfra` matches exactly one. That enumeration alone exceeded the
+                # old 10m timeout ("Read 5520 GitHub repositories (1 matching the pattern)"
+                # followed by "Task timed out and was lost" in the backend log), killing the
+                # task before it could commit — tenant Components never landed and
+                # /my-projects stayed empty. 30m is comfortably under the 1h frequency (no
+                # run overlap) and covers the observed enumeration time with headroom.
+                # MIRROR of app-config.production.yaml's copy of this block.
                 github:
                   tenants:
                     organization: 'UA-MIS'
@@ -296,9 +307,9 @@ spec:
                       topic:
                         include: ['capstone-tenant']
                     schedule:
-                      initialDelay: {seconds: 45}
+                      initialDelay: {minutes: 2}
                       frequency: {hours: 1}
-                      timeout: {minutes: 10}
+                      timeout: {minutes: 30}
                   platformInfra:
                     organization: 'UA-MIS'
                     catalogPath: '/catalog-info.yaml'
@@ -306,9 +317,9 @@ spec:
                       branch: 'main'
                       repository: '^platform-infra$'
                     schedule:
-                      initialDelay: {seconds: 50}
+                      initialDelay: {minutes: 2, seconds: 5}
                       frequency: {hours: 1}
-                      timeout: {minutes: 10}
+                      timeout: {minutes: 30}
             # ── Permission framework (M2: THE SPINE) ─────────────────────────────────
             # Turn enforcement ON so the custom CapstoneTeamPermissionPolicy filters the
             # catalog per-team. WITHOUT this the framework no-ops and serves everything
