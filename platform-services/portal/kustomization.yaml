@@ -1,0 +1,29 @@
+# portal (apex landing/routing page) — managed by the platform-services directory
+# generator (platform-services-appset); this dir produces app `platform-svc-portal`.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - netpol.yaml
+  - deployment.yaml
+  - service.yaml
+  - middleware.yaml
+  - ingress.yaml
+
+# Site content as a ConfigMap generated from the site/ dir (same pattern as
+# db-admin's adminer.css). A STABLE name (disableNameSuffixHash) is required
+# because deployment.yaml's volume reference (`portal-site`) is a fixed string.
+configMapGenerator:
+  - name: portal-site
+    namespace: portal
+    files:
+      - site/index.html
+      - site/internal.html
+generatorOptions:
+  disableNameSuffixHash: true
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false

@@ -1,0 +1,23 @@
+# portal namespace — the apex (capstone.uamishub.com) landing/routing page.
+# A tiny static nginx site, split into a PUBLIC route (project name + description +
+# links to live student prod apps + a Sign in button) and a GATED /internal route
+# (quick links to every platform tool, one-line "what is this" for each) behind the
+# EXISTING shared oauth2-proxy forwardAuth gate (platform-services/db-console-auth/,
+# same singleton every DB console already reuses — see middleware.yaml here).
+#
+# A platform singleton (same tier as Dex/ArgoCD/db-console-auth), NOT a tenant
+# namespace. Ships via the platform-services directory generator
+# (platform-services-appset) -> Application `platform-svc-portal`.
+#
+# pod-security: RESTRICTED. nginx (unprivileged image, no host mounts, no extra
+# caps) fits the strictest PSA profile, same posture as db-console-auth/db-admin.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: portal
+  labels:
+    platform.capstone/component: platform
+    goldilocks.fairwinds.com/enabled: "true"
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted

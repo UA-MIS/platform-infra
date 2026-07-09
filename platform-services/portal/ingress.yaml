@@ -1,0 +1,83 @@
+# Portal Ingress — the APEX host (capstone.uamishub.com), split into a PUBLIC route
+# and a GATED /internal route on the SAME host, via two Ingress objects (Traefik
+# merges multiple Ingress resources for one host by path specificity, same as
+# multiple paths within a single Ingress). Explicit `router.priority` annotations
+# make that precedence certain rather than relying on the auto length-based
+# tie-break across separately-authored objects.
+#
+# TLS: host listed, NO secretName — Traefik's default TLSStore serves the
+# cert-manager wildcard cert, which already lists the bare apex as a SAN
+# (platform-services/cert-manager/wildcard-certificate.yaml: "capstone.uamishub.com
+# # apex"). Public TLS terminates at the Cloudflare edge (Universal SSL) same as
+# every other host.
+#
+# ⚠ CLOUDFLARE-SIDE ACTION REQUIRED (one-time, human dashboard step, same class
+# as the DB-console/db-admin "Operator activation" steps): the tunnel's existing
+# Public Hostname route only covers `*.capstone.uamishub.com` (cloudflared/
+# deployment.yaml header) — a wildcard Public Hostname in Cloudflare Tunnel is a
+# literal DNS entry for subdomains only and does NOT also match the bare apex.
+# This Ingress alone does not make the apex publicly reachable; a SECOND Public
+# Hostname must be added in the Cloudflare Zero Trust dashboard:
+#   capstone.uamishub.com -> http://traefik.kube-system.svc.cluster.local:80
+# (identical target to the existing wildcard route). See platform-services/portal/
+# README.md for the full activation checklist. No git-side change can do this —
+# it is a Cloudflare dashboard-only setting, same as the tunnel token itself.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: portal-public
+  namespace: portal
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: portal
+  annotations:
+    traefik.ingress.kubernetes.io/router.priority: "10"
+spec:
+  rules:
+    - host: capstone.uamishub.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: portal
+                port:
+                  number: 80
+  tls:
+    - hosts:
+        - capstone.uamishub.com
+---
+# GATED /internal route — same host, more specific path, higher priority. Chains
+# the shared `errors` Middleware (rewrites oauth2-proxy's bare 401 into a 302 to
+# Dex/GitHub login, db-console-auth/middleware.yaml) in front of this namespace's
+# own forwardAuth Middleware (middleware.yaml) — identical chain order to
+# db-admin's Ingress. Cross-namespace Middleware refs require
+# `providers.kubernetesCRD.allowCrossNamespace: true`
+# (applicationsets/traefik-app.yaml), already enabled for the DB-console pattern.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: portal-internal
+  namespace: portal
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: portal
+  annotations:
+    traefik.ingress.kubernetes.io/router.priority: "20"
+    traefik.ingress.kubernetes.io/router.middlewares: db-console-auth-oauth2-proxy-errors@kubernetescrd,portal-portal-internal-auth@kubernetescrd
+spec:
+  rules:
+    - host: capstone.uamishub.com
+      http:
+        paths:
+          - path: /internal
+            pathType: Prefix
+            backend:
+              service:
+                name: portal
+                port:
+                  number: 80
+  tls:
+    - hosts:
+        - capstone.uamishub.com
