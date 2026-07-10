@@ -102,6 +102,34 @@ is whether a HIGH/CRITICAL finding **BLOCKS** pull/deploy or only **WARNS**:
   (severity threshold). Recommend enabling for `prod`-tagged pulls later, not for
   dev/preview. **Human decision** on threshold + which envs.
 
+## Storage + retention/GC durability (2026-07-09 incident fix)
+The `harbor-registry` PVC (ceph-block, expandable) filled to 100% of its original
+20Gi and started returning ENOSPC on blob upload — every Backstage image push
+failed. Root cause: nothing ever pruned old tags. Two durable fixes:
+- **PVC size**: `applicationsets/harbor-app.yaml`
+  `persistence.persistentVolumeClaim.registry.size` is now `60Gi`, matching the
+  live online-resize (ceph-block supports RWO expansion; ArgoCD would otherwise
+  show `harbor-registry` OutOfSync since it can't reconcile a git value LOWER than
+  the bound PVC). Headroom, not a fix by itself.
+- **Retention + GC**: `platform-services/harbor-retention-gc-config/` (a Job in
+  this same directory-generator pattern as `harbor-oidc-config/`) sets, via the
+  Harbor API using `harbor-admin`:
+  - a per-project tag-retention policy (`backstage`, `swami`) keeping the **10 most
+    recently pushed tags** across every repository in the project (covers both the
+    deployable image repo and `backstage/cache`, the Kaniko layer cache).
+  - a **nightly GC schedule** (`Daily @ 02:30 UTC`, `delete_untagged: true`) that
+    reclaims blobs once retention prunes their tags. Retention runs at `02:00 UTC`
+    (each policy's own `trigger.settings.cron`) so pruned tags are gone before GC
+    walks the blob graph 30 minutes later.
+
+  This is a Job, not a `provider-harbor` Crossplane managed resource, because the
+  `default` ProviderConfig credential (`robot$provisioner`) is deliberately scoped
+  to `project + robot + member` only (ADR-031 §6 least-privilege) and has neither
+  the project-level `tag-retention` nor the system-level `garbage-collection`
+  permission — verified live via `GET /robots`. `garbage-collection` in particular
+  is Harbor-admin/system-scope only regardless of robot level, and is a one-time
+  system singleton, not a per-tenant reconciling resource.
+
 ## Validation (post-merge + post-method-confirm)
 - Harbor UI reachable over TLS at https://harbor.capstone.uamishub.com; `admin` login
   with the sealed password.
