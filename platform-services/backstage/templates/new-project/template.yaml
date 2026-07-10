@@ -355,13 +355,18 @@ spec:
     # 1) PREFLIGHT — fail fast + clean if `appName` collides with an existing GitHub repo,
     #    catalog entry, or tenant claim, BEFORE anything is created (the swamiapp lesson: a
     #    reused name once got PAST compose/publish and only failed at register, leaving an
-    #    orphaned repo + rendered code). Read-only; throws with a clear message on collision.
+    #    orphaned repo + rendered code), OR if the team already has ANY claim for this
+    #    semester under a different app name (one claim per team per semester — PR #311).
+    #    Read-only; throws with a clear message on collision.
     - id: preflight
       name: Check for a name collision
       action: capstone:preflight
       input:
         team: ${{ parameters.team }}
         appName: ${{ parameters.appName }}
+        # SLUG form (year-first, e.g. 2026-fall) — keys the one-claim-per-team-per-semester
+        # guard (PR #311); matches the semester passed downstream to render-tenant.
+        semester: ${{ parameters.year }}-${{ parameters.season | lower }}
 
     # 2) COMPOSE — assemble the repo from the chosen fragment(s) + the ONE shared contract.
     #    This single step replaces the per-stack fetch-skeleton steps. The inactive

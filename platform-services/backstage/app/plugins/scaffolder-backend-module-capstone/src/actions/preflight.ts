@@ -29,6 +29,21 @@
  *      backend (the same blast-radius concern harborOnboard calls out).
  *   4. the tenant claim `tenants/_claims/<team>-<appName>.yaml` on `<owner>/platform-infra`
  *      main (does the zero-touch claim-emit/commit step collide with a prior claim?)
+ *   5. ONE-CLAIM-PER-TEAM (the 2026-07-09 incident, PR #311): does this TEAM already have
+ *      ANY CapstoneTenant claim for this semester, under a DIFFERENT appName? `emitTenant-
+ *      Claim.ts` + `commitToMain.ts` had NO such check — a second `capstone:emit-tenant-
+ *      claim` run for the same team just wrote a second `tenants/_claims/<team>-<other-
+ *      app>.yaml` file straight onto main (no PR, no review). Two CapstoneTenant XRs then
+ *      co-managed the same team-keyed namespaces/netpols/quotas; when their rendered specs
+ *      diverged, the provider-kubernetes reconcile loops fought over the objects every
+ *      30-60s, which cascaded into a Vault raft-leader fsync stall (full root cause in PR
+ *      #311). `make validate`'s claim-uniqueness guard (also PR #311) catches this AFTER
+ *      the fact in CI; this is the scaffolder-side guard that stops it from ever being
+ *      committed in the first place. It scans `tenants/_claims/*.yaml` on
+ *      `<owner>/platform-infra` main for any OTHER file whose `spec.team`+`spec.semester`
+ *      match this run's — the EXACT team+semester key `make validate` uses (mirrored so the
+ *      two guards can never disagree) — and fails closed with a dedicated, actionable error
+ *      if one is found (see `teamClaimConflict`).
  *
  * AUTH: same model as capstone:commit-to-main / publish:github — NO token input. The
  * GitHub App installation token is resolved from `integrations.github` via
@@ -50,6 +65,8 @@ import { Octokit } from '@octokit/rest';
 const TEAM_SLUG = /^[a-z]([-a-z0-9]*[a-z0-9])?$/;
 /** App slug — DNS-1123 label (mirrors the templates' `appName` pattern). */
 const APP_SLUG = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
+/** Semester slug `YYYY-(spring|summer|fall)` (mirrors emitTenantClaim's SEMESTER pattern). */
+const SEMESTER = /^[0-9]{4}-(spring|summer|fall)$/;
 
 /** Default org — matches the templates' hardcoded `owner=UA-MIS` publish target. */
 export const DEFAULT_OWNER = 'UA-MIS';
@@ -87,7 +104,7 @@ function isNotFound(err: unknown): boolean {
 }
 
 /** Re-validate the slugs before making any network call (fail closed, mirrors harborOnboard/emitTenantClaim). */
-function assertSlugs(team: string, appName: string): void {
+function assertSlugs(team: string, appName: string, semester: string): void {
   if (!TEAM_SLUG.test(team)) {
     throw new Error(
       `capstone:preflight: invalid team slug '${team}' — must match ${TEAM_SLUG}.`,
@@ -96,6 +113,12 @@ function assertSlugs(team: string, appName: string): void {
   if (!APP_SLUG.test(appName)) {
     throw new Error(
       `capstone:preflight: invalid app name '${appName}' — must match ${APP_SLUG}.`,
+    );
+  }
+  if (!SEMESTER.test(semester)) {
+    throw new Error(
+      `capstone:preflight: invalid semester '${semester}' — must match ${SEMESTER} ` +
+        '(e.g. 2026-fall).',
     );
   }
 }
@@ -163,6 +186,100 @@ export async function tenantDirExists(
   }
 }
 
+/** One entry from a `tenants/_claims/` directory listing (GitHub contents API, dir form). */
+interface ClaimFileEntry {
+  name: string;
+  path: string;
+  type?: string;
+}
+
+/**
+ * List the `.yaml` claim files under `tenants/_claims/` on `<owner>/platform-infra` main.
+ * Returns `[]` if the directory does not exist yet (404 — no claims onboarded at all,
+ * so there can be no team-claim conflict). A non-404 error is rethrown (fail closed).
+ */
+export async function listClaimFiles(
+  octokit: OctokitLike,
+  owner: string,
+): Promise<ClaimFileEntry[]> {
+  try {
+    const res = await octokit.rest.repos.getContent({
+      owner,
+      repo: CLAIMS_REPO,
+      path: 'tenants/_claims',
+      ref: 'main',
+    });
+    const data = res.data;
+    if (!Array.isArray(data)) return [];
+    return (data as ClaimFileEntry[]).filter(
+      e => e.type !== 'dir' && e.name.endsWith('.yaml'),
+    );
+  } catch (err) {
+    if (isNotFound(err)) return [];
+    throw err;
+  }
+}
+
+/** Decode a GitHub file-content response body (base64) to a UTF-8 string. */
+function decodeFileContent(data: unknown): string {
+  const content = (data as { content?: string }).content;
+  if (!content) return '';
+  return Buffer.from(content, 'base64').toString('utf8');
+}
+
+/**
+ * Parse the `spec.team` / `spec.semester` scalar values out of a rendered CapstoneTenant
+ * claim YAML. Mirrors the Makefile `validate` claim-uniqueness guard's sed extraction (PR
+ * #311, the `team:`/`semester:` capture-group sed one-liners in the Makefile's claim-
+ * uniqueness target) EXACTLY — same 2-space indent, same optional-double-quote scalar,
+ * same charset — so this scaffolder-side guard and the git-side `make validate` guard key
+ * on the identical team+semester pair and can never disagree. Exported for unit tests.
+ */
+export function parseClaimTeamSemester(yaml: string): {
+  team?: string;
+  semester?: string;
+} {
+  const teamMatch = /^ {2}team: *"?([A-Za-z0-9-]+)"?/m.exec(yaml);
+  const semesterMatch = /^ {2}semester: *"?([A-Za-z0-9-]+)"?/m.exec(yaml);
+  return { team: teamMatch?.[1], semester: semesterMatch?.[1] };
+}
+
+/**
+ * true (returning the conflicting file's repo-relative path) if the TEAM already has a
+ * CapstoneTenant claim for this semester under a DIFFERENT appName — the ONE-CLAIM-PER-
+ * TEAM guard (PR #311 incident). Excludes the literal target file `<team>-<appName>.yaml`
+ * itself: an exact-name resubmit is already reported by `claimExists`, above, so the two
+ * checks don't both fire on the same file with overlapping messages. Lists the claims
+ * directory once, then reads each OTHER file to check its team+semester — read-only,
+ * mirrors the Makefile guard's key exactly (see `parseClaimTeamSemester`).
+ */
+export async function teamClaimConflict(
+  octokit: OctokitLike,
+  owner: string,
+  team: string,
+  appName: string,
+  semester: string,
+): Promise<string | undefined> {
+  const targetFile = `${team}-${appName}.yaml`;
+  const files = await listClaimFiles(octokit, owner);
+  for (const file of files) {
+    if (file.name === targetFile) continue;
+    const res = await octokit.rest.repos.getContent({
+      owner,
+      repo: CLAIMS_REPO,
+      path: file.path,
+      ref: 'main',
+    });
+    const { team: fileTeam, semester: fileSemester } = parseClaimTeamSemester(
+      decodeFileContent(res.data),
+    );
+    if (fileTeam === team && fileSemester === semester) {
+      return file.path;
+    }
+  }
+  return undefined;
+}
+
 /**
  * true if the catalog already has a Component named `appName` in the default namespace
  * — i.e. the entity `catalog:register` would produce for a fresh scaffold. If that
@@ -222,7 +339,9 @@ export function createPreflightAction(deps: PreflightActionDeps) {
     description:
       'Fail fast, before any repo/catalog/namespace/claim is created, if a project with ' +
       'this name already exists (GitHub repo, catalog entry, the team namespaces via ' +
-      'tenants/team-<team>/, or a zero-touch tenant claim). Read-only.',
+      'tenants/team-<team>/, or a zero-touch tenant claim), OR if the team already has a ' +
+      'tenant claim for this semester under a different app name (one claim per team ' +
+      'per semester — PR #311). Read-only.',
     schema: {
       input: {
         team: z =>
@@ -234,6 +353,12 @@ export function createPreflightAction(deps: PreflightActionDeps) {
             description:
               'App name / repo slug you want to scaffold — checked for collisions.',
           }),
+        semester: z =>
+          z.string({
+            description:
+              'Cohort slug YYYY-(spring|summer|fall) — used to key the one-claim-per-' +
+              'team-per-semester guard (mirrors make validate, PR #311).',
+          }),
         owner: z =>
           z
             .string({
@@ -244,10 +369,10 @@ export function createPreflightAction(deps: PreflightActionDeps) {
     },
 
     async handler(ctx) {
-      const { team, appName } = ctx.input;
+      const { team, appName, semester } = ctx.input;
       const owner = ctx.input.owner ?? DEFAULT_OWNER;
 
-      assertSlugs(team, appName);
+      assertSlugs(team, appName, semester);
 
       const { token } = await credentialsProvider.getCredentials({
         url: `https://github.com/${owner}`,
@@ -261,12 +386,30 @@ export function createPreflightAction(deps: PreflightActionDeps) {
       const apiBaseUrl = integrations.github.byHost('github.com')?.config.apiBaseUrl;
       const octokit = octokitFactory({ auth: token, baseUrl: apiBaseUrl });
 
-      const [hasRepo, hasCatalogEntry, hasNamespaces, hasClaim] = await Promise.all([
-        repoExists(octokit, owner, appName),
-        catalogEntryExists(catalog, auth, appName),
-        tenantDirExists(octokit, owner, team),
-        claimExists(octokit, owner, team, appName),
-      ]);
+      const [hasRepo, hasCatalogEntry, hasNamespaces, hasClaim, teamConflictFile] =
+        await Promise.all([
+          repoExists(octokit, owner, appName),
+          catalogEntryExists(catalog, auth, appName),
+          tenantDirExists(octokit, owner, team),
+          claimExists(octokit, owner, team, appName),
+          teamClaimConflict(octokit, owner, team, appName, semester),
+        ]);
+
+      // ONE-CLAIM-PER-TEAM (PR #311): a dedicated, earlier failure — separate from the
+      // name-collision block below — because the remediation is different ("edit the
+      // existing claim", not "pick a different name"). Checked first so it wins even if a
+      // name-collision also happens to be true.
+      if (teamConflictFile) {
+        ctx.logger.error(
+          `capstone:preflight: team '${team}' already has a tenant claim ` +
+            `(${teamConflictFile}) for semester '${semester}'.`,
+        );
+        throw new Error(
+          `team '${team}' already has a tenant claim (${teamConflictFile}) for this ` +
+            `semester ('${semester}') — a team gets ONE app claim per semester; edit ` +
+            'the existing claim or contact platform admins.',
+        );
+      }
 
       const collisions: string[] = [];
       if (hasRepo) collisions.push(`the GitHub repo ${owner}/${appName}`);
