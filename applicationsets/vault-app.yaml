@@ -200,6 +200,28 @@ spec:
           #     chart's own default `server.affinity` — made EXPLICIT here (rather
           #     than relying on the chart default) so the anti-affinity guarantee is
           #     visible in git and survives a future chart default change.
+          #
+          # --- NOISY-NEIGHBOR (scheduling-hardening PR, post SEC-011-adjacent
+          #     incident): a cilium policy-recalc loop saturated mac-debian-01,
+          #     which happened to be running the raft LEADER (vault-0) *and*
+          #     Prometheus (kube-prometheus-stack, ~469m CPU / 2.6GB RAM,
+          #     fsync-heavy TSDB on the same Ceph RBD path) at once — raft
+          #     snapshots stalled 2s -> 23min and ESO logins timed out. The 3 Vault
+          #     server pods already get one-per-node via the hard rule above (which,
+          #     with only 3 Mac-Mini-class workers on 4c/8GB currently eligible,
+          #     structurally means each Mac Mini hosts exactly one Vault pod at all
+          #     times — see kube-prometheus-stack-app.yaml and
+          #     platform-services/cnpg/cluster/cluster.yaml for the matching
+          #     Prometheus-side and CNPG-side rules). This SOFT (preferred) term
+          #     adds the other half: steer Vault itself away from any node already
+          #     running Prometheus, so the guarantee holds regardless of which
+          #     workload reschedules first (e.g. a future Vault pod restart landing
+          #     on Prometheus's node). Preferred, not required — Vault's raft quorum
+          #     must never wedge on a soft placement preference for an unrelated
+          #     workload; see artifacts/design/scheduling-hardening-runbook.md for
+          #     the full rationale
+          #     and the safe apply order (Prometheus moves first; Vault is NOT
+          #     force-failed-over by this change).
           affinity: |
             podAntiAffinity:
               requiredDuringSchedulingIgnoredDuringExecution:
@@ -209,6 +231,13 @@ spec:
                       app.kubernetes.io/instance: vault
                       component: server
                   topologyKey: kubernetes.io/hostname
+              preferredDuringSchedulingIgnoredDuringExecution:
+                - weight: 80
+                  podAffinityTerm:
+                    labelSelector:
+                      matchLabels:
+                        app.kubernetes.io/name: prometheus
+                    topologyKey: kubernetes.io/hostname
 
           # --- HA/active service topology (decision B). The chart's defaults are
           #     already what we want (service.enabled + active.enabled +

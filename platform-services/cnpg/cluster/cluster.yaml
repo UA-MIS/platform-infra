@@ -47,6 +47,33 @@ spec:
     enablePodAntiAffinity: true
     topologyKey: kubernetes.io/hostname   # one instance per node (3 nodes, 3 instances)
     podAntiAffinityType: required
+    # Scheduling hardening (noisy-neighbor incident follow-up, applicationsets/
+    # vault-app.yaml has the full writeup): `additionalPodAntiAffinity` is
+    # explicitly documented by the CNPG API as ADDITIVE to the required
+    # self-anti-affinity above (not a replacement), so it's safe to layer here.
+    # Soft-prefer nodes that are not already running a Vault server pod or the
+    # Prometheus pod — best-effort only, since with just 3 HA-eligible Mac-Mini
+    # workers the 3 CNPG instances still land 1-per-Mac-Mini alongside the 3
+    # Vault pods by construction of their own independent required rules; the
+    # real fix for that deeper co-location is a 4th HA-eligible worker node
+    # (tracked as a follow-up, not in this PR's blast radius since it doesn't
+    # touch any live pod's scheduling — additionalPodAntiAffinity only affects
+    # FUTURE scheduling decisions for this Cluster's instances).
+    additionalPodAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 80
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: vault
+                component: server
+            topologyKey: kubernetes.io/hostname
+        - weight: 60
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: prometheus
+            topologyKey: kubernetes.io/hostname
 
   resources:
     requests:

@@ -149,6 +149,63 @@ spec:
             resources:
               requests: { cpu: 128m, memory: 2048Mi }
               limits: { memory: 2560Mi }
+            # ── SCHEDULING HARDENING (noisy-neighbor incident follow-up) ──────────
+            # mac-debian-01 (4c/8GB) was simultaneously running the Vault raft
+            # LEADER (vault-0), this Prometheus pod (2048-2560Mi mem request/limit,
+            # the single heaviest thing on that box besides Ceph), AND a CNPG
+            # Postgres replica — all fsync-sensitive on the same overlay-attached
+            # Ceph RBD path. A cilium policy-recalc loop saturating that node
+            # stalled Vault's raft snapshots 2s -> 23min. Vault (3 pods) and the
+            # CNPG Cluster (3 instances) each carry their OWN required
+            # one-pod-per-node anti-affinity (vault-app.yaml / cluster.yaml), which
+            # — with only 3 Mac-Mini-class 4c/8GB workers currently eligible —
+            # structurally pins one of each onto every Mac Mini already. This
+            # single-replica Prometheus is the one piece of that puzzle that is
+            # FREE to move: soft-prefer any node NOT already running a Vault server
+            # pod or a CNPG instance, which in practice steers the scheduler toward
+            # the untainted, comparatively idle `ua-mis-db-1` worker (or, under
+            # pressure, the beefier 15GB control-plane OptiPlex nodes) instead of
+            # re-landing on the same crowded Mac Mini. `preferred`, not `required`
+            # — with only 7 nodes total we do not want to risk Prometheus going
+            # Pending if every node happens to score poorly; see
+            # artifacts/design/scheduling-hardening-runbook.md for the apply order (this is the
+            # SAFE-to-apply-first half: Prometheus has no raft/quorum state, its
+            # TSDB just reattaches wherever it lands).
+            #
+            # ⚠ podAntiAffinity: "" is REQUIRED alongside a custom `affinity:`
+            #   below — verified by rendering the chart (helm template): the
+            #   `prometheus.yaml` template has TWO independent `if` blocks that
+            #   both write into `spec.affinity` (one for the custom `affinity`
+            #   value, a SEPARATE one for the `podAntiAffinity: "soft"` chart
+            #   default), producing a duplicate `podAntiAffinity:` map key with
+            #   the chart's default self-anti-affinity term silently clobbering
+            #   ours (last-key-wins on the k8s API's YAML/JSON unmarshal). With
+            #   `replicas: 1` (unset here = chart default) the chart's own
+            #   self-anti-affinity was inert anyway (nothing to avoid), so
+            #   disabling it costs nothing.
+            podAntiAffinity: ""
+            affinity:
+              podAntiAffinity:
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 80
+                    podAffinityTerm:
+                      labelSelector:
+                        matchLabels:
+                          app.kubernetes.io/name: vault
+                          component: server
+                      topologyKey: kubernetes.io/hostname
+                  - weight: 60
+                    podAffinityTerm:
+                      labelSelector:
+                        matchLabels:
+                          cnpg.io/podRole: instance
+                      topologyKey: kubernetes.io/hostname
+                  - weight: 60
+                    podAffinityTerm:
+                      labelSelector:
+                        matchLabels:
+                          app.kubernetes.io/name: mariadb
+                      topologyKey: kubernetes.io/hostname
             # TSDB on a Ceph RBD PVC (replica-3, survives node loss; same SC as
             # Harbor/Vault). 20Gi holds ~15d of platform-scale metrics comfortably.
             storageSpec:
