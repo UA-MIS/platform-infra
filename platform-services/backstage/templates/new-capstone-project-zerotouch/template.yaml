@@ -211,13 +211,19 @@ spec:
     #    naming EVERY place that collides — the GitHub repo UA-MIS/<appName>, a catalog
     #    entry, the team's namespaces (tenants/team-<team>/ -> <team>-dev/staging/prod), or a
     #    zero-touch tenant claim (tenants/_claims/<team>-<appName>.yaml — the marker THIS
-    #    template's commit-claim step writes). Runs first so a collision creates nothing.
+    #    template's commit-claim step writes), OR if the team already has ANY claim for
+    #    this semester under a different app name (one claim per team per semester — the
+    #    2026-07-09 duplicate-claim/Vault-outage incident, PR #311). Runs first so a
+    #    collision creates nothing.
     - id: preflight
       name: Check for a name collision
       action: capstone:preflight
       input:
         team: ${{ parameters.team }}
         appName: ${{ parameters.appName }}
+        # SLUG form (year-first, e.g. 2026-fall) — keys the one-claim-per-team-per-semester
+        # guard (PR #311); matches the semester passed to emit-claim below.
+        semester: ${{ parameters.year }}-${{ parameters.season | lower }}
 
     # 1) Render the per-team starter (app/ + the 4-field app-metadata.yaml + catalog).
     #    SINGLE-COMPONENT path (the default). Guarded by layout so the proven golden-path
