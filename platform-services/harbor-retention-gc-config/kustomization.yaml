@@ -1,0 +1,18 @@
+# Harbor tag-retention + garbage-collection config (durability fix for the
+# 2026-07-09 registry-full incident, see configure-retention-gc-job.yaml).
+#
+# Kept in its OWN dir (harbor-oidc-config/ precedent) so it renders into the
+# harbor namespace (where harbor-admin already lives) via the generic
+# platform-services/* directory generator (applicationsets/platform-services-appset.yaml)
+# -> Application `platform-svc-harbor-retention-gc-config`. No new Application file
+# needed; no exclude entry needed (nothing excludes this path).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - configure-retention-gc-job.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false

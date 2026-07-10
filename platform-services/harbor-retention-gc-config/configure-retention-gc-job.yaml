@@ -1,0 +1,225 @@
+# Harbor tag-retention + garbage-collection config Job — durability fix for the
+# 2026-07-09 registry-full incident (harbor-registry PVC hit 100% of 20Gi, ENOSPC
+# on every blob upload, every Backstage image push failed). Root cause: nothing
+# ever pruned old tags (backstage/backstage-process: 21 tagged artifacts, ~8.5GB;
+# backstage/cache, the Kaniko layer cache: 31 layers, ~1GB) and Harbor's GC had
+# never run (verified live: GET /system/gc/schedule returned an empty body, GET
+# /system/gc returned []). This Job sets BOTH durably: a per-project "keep the
+# most recently pushed 10 tags" retention rule, and a nightly GC schedule
+# (delete_untagged:true) that reclaims the blobs retention prunes.
+#
+# WHY A JOB, NOT A CROSSPLANE MANAGED RESOURCE: provider-harbor (ADR-031) ships
+# CRDs for both (retentionpolicies.project.harbor.crossplane.io,
+# garbagecollections.garbagecollection.harbor.crossplane.io), and using them would
+# make this reconciling instead of run-once. It was NOT used here because the
+# ProviderConfig `default` credential (robot$provisioner, config/providerconfig-harbor.yaml)
+# is deliberately least-privileged for tenant onboarding (ADR-031 §6: "project +
+# robot + member admin ONLY") — verified live via GET /robots that its permission
+# list has NO `tag-retention` (project-scoped) and NO `garbage-collection`
+# (system-scoped) resource grants. Widening that shared onboarding-automation
+# credential to include registry-wide GC power (GC pauses read/write on the whole
+# registry while it runs) is a bigger blast-radius change than this incident calls
+# for. `garbage-collection` in particular is Harbor SYSTEM ADMIN-only regardless of
+# robot scope, and is a one-time system-wide singleton, not a per-tenant reconciling
+# resource — it does not fit the Composition's "N resources per tenant" shape.
+# harbor-admin (already a namespace-scoped Secret used by the sibling
+# harbor-configure-oidc Job) is the right credential for both calls. If a future
+# tenant-onboarding need justifies it, granting `tag-retention` (project-scope) to
+# a NEW dedicated robot and folding per-project retention into the Composition is a
+# reasonable follow-up — filed as a note, not done here.
+#
+# IDEMPOTENT: retention is create-if-absent (project metadata has no `retention_id`
+# yet, verified live for both `backstage` and `swami`) then update-in-place on every
+# subsequent run (PUT /retentions/{id}); GC schedule is the same create-once /
+# update-in-place shape (POST when GET returns an empty body, PUT thereafter). A
+# REGULAR ArgoCD resource (not a sync hook — see harbor-configure-oidc for why a
+# hook-only app never fires) with Force=true,Replace=true,ServerSideApply=false, so
+# a changed manifest re-runs it and an unchanged re-sync leaves the completed Job in
+# place.
+#
+# SAFETY (verified live, 2026-07-09, read-only queries against the running Harbor —
+# no mutating call was made while checking this):
+#   - backstage/backstage-process has 21 tagged artifacts; the CURRENTLY DEPLOYED tag
+#     f35301221b05 is the MOST RECENTLY PUSHED (rank 1 of 21) -> always inside "keep
+#     last 10", by push-time, for any push cadence where deploys follow builds.
+#   - swami/swamiapp-app has 5 tagged artifacts total -> "keep last 10" prunes
+#     nothing there today.
+#   - GC's delete_untagged:true only removes UNTAGGED artifacts (manifests with zero
+#     tag references) or blobs orphaned once retention removes a tag — never a
+#     tagged, in-use image.
+#   - No project today carries a long-lived "stable"/pinned tag that would fall
+#     outside "last 10 pushed" — if one is added later, give it its own `always`
+#     retain rule (see the Harbor UI or POST /retentions rule array) so it survives.
+#
+# SECRETS NEVER ON ARGV: same pattern as harbor-configure-oidc.yaml — admin password
+# is injected as env via secretKeyRef; curl reads it with `-u` from
+# $HARBOR_ADMIN_PASSWORD, never on the command line / in git.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: harbor-configure-retention-gc
+  namespace: harbor
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-options: Force=true,Replace=true,ServerSideApply=false
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  backoffLimit: 10
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+        platform.capstone/component: platform
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: configure-retention-gc
+          image: curlimages/curl:8.11.1
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          env:
+            - name: HARBOR_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: harbor-admin
+                  key: HARBOR_ADMIN_PASSWORD
+            - name: HARBOR_CORE
+              value: "http://harbor-core.harbor.svc:80"
+            # Space-separated project names to apply the "keep last N pushed tags"
+            # retention rule to. Adding a project = adding it here (no code change).
+            - name: RETENTION_PROJECTS
+              value: "backstage swami"
+            - name: RETENTION_KEEP_LAST_N
+              value: "10"
+          command: ["/bin/sh", "-eu", "-c"]
+          args:
+            - |
+              CORE="$HARBOR_CORE"
+              AUTH="admin:$HARBOR_ADMIN_PASSWORD"
+
+              echo "==> waiting for Harbor core API at $CORE ..."
+              i=0
+              until curl -fsS -o /dev/null "$CORE/api/v2.0/systeminfo"; do
+                i=$((i+1)); [ "$i" -ge 60 ] && { echo "core not ready after ~5m"; exit 1; }
+                echo "   ...not ready yet (attempt $i), sleeping 5s"; sleep 5
+              done
+              echo "==> core is up."
+
+              # --- 1) per-project tag retention: keep the N most recently PUSHED
+              #        tags across every repository in the project (doublestar "**"
+              #        matches all repos, including backstage/cache). -------------
+              for P in $RETENTION_PROJECTS; do
+                echo "==> retention: resolving project '$P' ..."
+                proj=$(curl -fsS -u "$AUTH" "$CORE/api/v2.0/projects/$P")
+                PID=$(printf '%s' "$proj" | grep -o '"project_id":[0-9]*' | head -1 | grep -o '[0-9]*')
+                if [ -z "$PID" ]; then
+                  echo "FAIL: could not resolve project_id for '$P'"; echo "$proj"; exit 1
+                fi
+                RID=$(printf '%s' "$proj" | grep -o '"retention_id":"[0-9]*"' | head -1 | grep -o '[0-9]*' || true)
+
+                cat > "/tmp/ret_${P}.json" <<EOF
+              {
+                "algorithm": "or",
+                "rules": [
+                  {
+                    "disabled": false,
+                    "action": "retain",
+                    "template": "latestPushedK",
+                    "params": { "latestPushedK": ${RETENTION_KEEP_LAST_N} },
+                    "tag_selectors": [
+                      { "kind": "doublestar", "decoration": "matches", "pattern": "**" }
+                    ],
+                    "scope_selectors": {
+                      "repository": [
+                        { "kind": "doublestar", "decoration": "repoMatches", "pattern": "**" }
+                      ]
+                    }
+                  }
+                ],
+                "trigger": { "kind": "Schedule", "settings": { "cron": "0 0 2 * * *" }, "references": {} },
+                "scope": { "level": "project", "ref": ${PID} }
+              }
+              EOF
+
+                if [ -z "$RID" ]; then
+                  echo "==> retention: creating policy for project '$P' (id $PID, no existing retention_id) ..."
+                  code=$(curl -sS -u "$AUTH" -o "/tmp/ret_${P}.out" -w '%{http_code}' \
+                    -X POST "$CORE/api/v2.0/retentions" -H 'Content-Type: application/json' \
+                    --data "@/tmp/ret_${P}.json")
+                  if [ "$code" != "201" ]; then
+                    echo "FAIL: POST /retentions for '$P' returned HTTP $code"; cat "/tmp/ret_${P}.out"; exit 1
+                  fi
+                  # re-read the project to pick up the retention_id Harbor just assigned
+                  RID=$(curl -fsS -u "$AUTH" "$CORE/api/v2.0/projects/$P" \
+                    | grep -o '"retention_id":"[0-9]*"' | head -1 | grep -o '[0-9]*' || true)
+                  [ -n "$RID" ] || { echo "FAIL: '$P' has no retention_id after create"; exit 1; }
+                else
+                  echo "==> retention: updating existing policy $RID for project '$P' (id $PID) ..."
+                  code=$(curl -sS -u "$AUTH" -o "/tmp/ret_${P}.out" -w '%{http_code}' \
+                    -X PUT "$CORE/api/v2.0/retentions/$RID" -H 'Content-Type: application/json' \
+                    --data "@/tmp/ret_${P}.json")
+                  if [ "$code" != "200" ]; then
+                    echo "FAIL: PUT /retentions/$RID for '$P' returned HTTP $code"; cat "/tmp/ret_${P}.out"; exit 1
+                  fi
+                fi
+
+                echo "==> retention: verifying policy $RID for '$P' (read-back) ..."
+                verify=$(curl -fsS -u "$AUTH" "$CORE/api/v2.0/retentions/$RID")
+                echo "$verify" | grep -qF '"latestPushedK"' || { echo "FAIL: policy $RID for '$P' missing latestPushedK after apply"; echo "$verify"; exit 1; }
+                echo "==> retention: OK for '$P' (policy id $RID, keep last $RETENTION_KEEP_LAST_N pushed tags, all repos)."
+              done
+
+              # --- 2) system-wide GC schedule, nightly, delete_untagged so retention
+              #        prunes actually reclaim blobs. Runs 30m after the retention
+              #        cron above so pruned tags are already gone by the time GC
+              #        walks the blob graph. -----------------------------------
+              echo "==> gc: checking existing schedule ..."
+              current=$(curl -fsS -u "$AUTH" "$CORE/api/v2.0/system/gc/schedule")
+              cat > /tmp/gc.json <<'EOF'
+              {
+                "schedule": { "type": "Daily", "cron": "0 30 2 * * *" },
+                "parameters": { "delete_untagged": true }
+              }
+              EOF
+
+              if [ -z "$current" ] || [ "$current" = "null" ]; then
+                echo "==> gc: no schedule set, creating (POST) ..."
+                code=$(curl -sS -u "$AUTH" -o /tmp/gc.out -w '%{http_code}' \
+                  -X POST "$CORE/api/v2.0/system/gc/schedule" -H 'Content-Type: application/json' \
+                  --data @/tmp/gc.json)
+                if [ "$code" != "201" ]; then
+                  echo "FAIL: POST /system/gc/schedule returned HTTP $code"; cat /tmp/gc.out; exit 1
+                fi
+              else
+                echo "==> gc: schedule exists, updating (PUT) ..."
+                code=$(curl -sS -u "$AUTH" -o /tmp/gc.out -w '%{http_code}' \
+                  -X PUT "$CORE/api/v2.0/system/gc/schedule" -H 'Content-Type: application/json' \
+                  --data @/tmp/gc.json)
+                if [ "$code" != "200" ]; then
+                  echo "FAIL: PUT /system/gc/schedule returned HTTP $code"; cat /tmp/gc.out; exit 1
+                fi
+              fi
+
+              echo "==> gc: verifying schedule (read-back) ..."
+              verify=$(curl -fsS -u "$AUTH" "$CORE/api/v2.0/system/gc/schedule")
+              echo "$verify" | grep -qF '"type":"Daily"' || { echo "FAIL: gc schedule type != Daily after apply"; echo "$verify"; exit 1; }
+              echo "$verify" | grep -qF '"cron":"0 30 2 * * *"' || { echo "FAIL: gc cron mismatch after apply"; echo "$verify"; exit 1; }
+              echo "==> gc: OK (Daily @ 02:30 UTC, delete_untagged=true)."
+
+              echo "==> harbor retention + gc configuration complete."
+      volumes:
+        - name: tmp
+          emptyDir: {}

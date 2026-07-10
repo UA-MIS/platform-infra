@@ -60,10 +60,22 @@ spec:
         #     hung Pending "unbound immediate PersistentVolumeClaims" and the data
         #     tier never started. ceph-block is replica-3 RWO RBD (survives a node
         #     loss). ---
+        # registry size: 20Gi -> 60Gi (2026-07-09). The registry PVC hit 100% full
+        # (ENOSPC/Err:28 on blob upload -> every Backstage image push failed) because
+        # tag pruning was never configured: backstage/backstage-process accumulated 21
+        # tagged artifacts (~8.5GB) and backstage/cache (Kaniko layer cache) accumulated
+        # 31 layers, with nothing reclaiming either. ceph-block supports online
+        # expansion, so the PVC was live-resized 20Gi -> 60Gi to unblock pushes
+        # immediately; this bumps the git value to match so ArgoCD does not show
+        # harbor-registry OutOfSync (PVC shrink is unsupported, but the sizes must
+        # still agree — ArgoCD/K8s reject a spec.resources.requests.storage that is
+        # LOWER than the bound PVC's current size, which 20Gi now is). The retention +
+        # GC setup below (platform-services/harbor-retention-gc-config) is the actual
+        # fix for the leak; 60Gi is headroom, not a substitute for pruning.
         persistence:
           enabled: true
           persistentVolumeClaim:
-            registry:   { storageClass: ceph-block, size: 20Gi }
+            registry:   { storageClass: ceph-block, size: 60Gi }
             jobservice:
               jobLog:   { storageClass: ceph-block, size: 1Gi }
             database:   { storageClass: ceph-block, size: 2Gi }
