@@ -52,6 +52,13 @@ spec:
                    `<team>_<env>` becomes a MariaDB schema + username (ADR-033). */}}
             {{- $teamDb := $team | replace "-" "_" }}
             {{- $registry := printf "harbor.%s" $domain }}
+            {{- /* Harbor robot LOGIN usernames are deterministic: `robot$<project>+<name>`
+                   = `robot$<team>+<team>-{push,pull}` (project == team). Known at render
+                   time, so the arc push imagePullSecret templates the username STATICALLY
+                   and only reads the token (`secret`) from Vault — the robot connection
+                   secret publishes ONLY `attribute.secret`, never a name, so there is no
+                   Vault `name` to read (that gap 401'd brand-new tenants). */}}
+            {{- $robotPushUser := printf "robot$%s+%s-push" $team $team }}
             {{- $repoUrl := printf "https://github.com/UA-MIS/%s" $app }}
             {{- $infraUrl := "https://github.com/UA-MIS/platform-infra" }}
             {{- /* env quota tiers — dev/staging modest, prod higher (mirrors tenants/_template/namespaces/*) */}}
@@ -1044,8 +1051,13 @@ spec:
             ---
             # 2) harbor-push-<team> imagePullSecret materialized by ESO from Vault — the
             #    zero-touch replacement for the sealed `make harbor-push-robot` output.
-            #    Reads via the platform ClusterSecretStore (vault-backend) and templates
-            #    dockerconfigjson from the name+secret the PushSecret wrote to Vault.
+            #    Reads via the platform ClusterSecretStore (vault-backend). The robot
+            #    USERNAME is the deterministic $robotPushUser (static, render-time); only
+            #    the token `secret` is read from Vault — the RobotAccount connection secret
+            #    publishes ONLY attribute.secret (no name key), so the PushSecret can write
+            #    only `secret` to tenants/<team>/ci/harbor-push. A prior version read a Vault
+            #    `name` property that was NEVER written, so new tenants (no manual name seed)
+            #    got an empty docker username -> 401 UNAUTHORIZED on push.
             apiVersion: kubernetes.crossplane.io/v1alpha1
             kind: Object
             metadata:
@@ -1082,12 +1094,10 @@ spec:
                         type: kubernetes.io/dockerconfigjson
                         data:
                           .dockerconfigjson: |
-                            {{ `{"auths":{"` }}{{ $registry }}{{ `":{"username":"{{ .name }}","password":"{{ .secret }}","auth":"{{ printf "%s:%s" .name .secret | b64enc }}"}}}` }}
+                            {{ `{"auths":{"` }}{{ $registry }}{{ `":{"username":"` }}{{ $robotPushUser }}{{ `","password":"{{ .secret }}","auth":"` }}{{ `{{ printf "%s:%s" "` }}{{ $robotPushUser }}{{ `" .secret | b64enc }}` }}{{ `"}}}` }}
                     data:
-                      - secretKey: name
-                        remoteRef:
-                          key: {{ printf "tenants/%s/ci/harbor-push" $team | quote }}
-                          property: name
+                      # Only the token is read from Vault; the username is the static,
+                      # render-time $robotPushUser injected into the template above.
                       - secretKey: secret
                         remoteRef:
                           key: {{ printf "tenants/%s/ci/harbor-push" $team | quote }}
