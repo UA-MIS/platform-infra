@@ -142,17 +142,55 @@ spec:
         #     `--entryPoints.websecure.http.tls=true` BY DEFAULT in v40, so omitting
         #     the block is behavior-identical (in-cluster TLS preserved). Verified by
         #     rendering traefik/traefik 40.2.0.
+        #
+        # --- forwardedHeaders.trustedIPs (APEX AUTH-REDIRECT FIX) — public TLS
+        #     terminates at the Cloudflare edge and cloudflared dials the `web`
+        #     entrypoint over PLAIN HTTP (cloudflared/deployment.yaml header). So the
+        #     connection Traefik sees is http, and by DEFAULT Traefik does NOT trust a
+        #     downstream's X-Forwarded-* headers (empty trustedIPs) — it treats the
+        #     request scheme as `http`. That makes Traefik reconstruct request-origin
+        #     URLs as `http://<host>` instead of the real public `https://<host>`.
+        #     The visible break: the apex sign-in gate (portal-services/portal +
+        #     db-console-auth `oauth2-proxy-errors` Middleware) builds the post-login
+        #     `rd` return-URL from Traefik's `{url}` (the reconstructed request URL).
+        #     With scheme=http the browser is bounced to an http apex URL whose Secure
+        #     session cookie can't ride the plaintext leg → an OIDC redirect LOOP
+        #     ("sign-in hangs"), and the origin's non-default port leaks into the URL
+        #     → the browser ends on `capstone.uamishub.com:8080` (the `traefik` API
+        #     entrypoint port) and Firefox throws "SSL received a record that exceeded
+        #     the maximum permissible length" (TLS spoken to a plaintext Cloudflare
+        #     port). Trusting cloudflared's source range makes Traefik honor
+        #     `X-Forwarded-Proto: https` (which cloudflared always sets), so `{url}`
+        #     becomes `https://<host>/...` with the default 443 port omitted — the
+        #     correct public origin. cloudflared reaches the Service from a POD IP, so
+        #     the trusted range is the cluster POD CIDR (10.244.0.0/16 on this Talos
+        #     cluster; nodes carve /24s from it — `kubectl get nodes -o
+        #     jsonpath=...spec.podCIDR`). Scoped to the pod CIDR (not `insecure: true`
+        #     / 0.0.0.0/0) so only in-cluster senders — i.e. cloudflared, the sole
+        #     ingress path — can set forwarded headers. Set on BOTH entrypoints for
+        #     parity (websecure is the in-cluster OIDC path). This fixes EVERY
+        #     tunnel-fronted auth redirect uniformly (the apex /internal gate AND every
+        #     db-console/db-admin console, which share this oauth2-proxy + errors
+        #     Middleware). Belt-and-suspenders operator step (Cloudflare dashboard, not
+        #     git): turn ON "Always Use HTTPS" so no plaintext client leg can exist —
+        #     see platform-services/portal/README.md.
         ports:
           web:
             port: 8000
             exposedPort: 80
             expose:
               default: true
+            forwardedHeaders:
+              trustedIPs:
+                - 10.244.0.0/16   # cluster pod CIDR — cloudflared's source range
           websecure:
             port: 8443
             exposedPort: 443
             expose:
               default: true
+            forwardedHeaders:
+              trustedIPs:
+                - 10.244.0.0/16   # cluster pod CIDR — cloudflared's source range
 
         # --- 2 replicas for the 3-node cluster (was 1 on the k3d laptop), spread
         #     across nodes via soft anti-affinity so they don't co-schedule.
