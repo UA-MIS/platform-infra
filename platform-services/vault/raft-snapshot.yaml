@@ -110,15 +110,65 @@ spec:
                   VAULT_TOKEN="$(vault write -field=token auth/kubernetes/login \
                       role="${VAULT_ROLE}" jwt="${JWT}")"
                   export VAULT_TOKEN
+
                   TS="$(date -u +%Y%m%dT%H%M%SZ)"
                   DEST="/snapshots/vault-raft-${TS}.snap"
+
+                  # Cleanup trap: on ANY non-zero exit, delete the partial DEST so a failed
+                  # run never strands a multi-hundred-MB truncated .snap on the PVC — then
+                  # ALWAYS apply retention. (Previously `set -e` exited BEFORE retention on a
+                  # failed `snapshot save`, so failed 141M files piled up run after run.)
+                  cleanup() {
+                    rc=$?
+                    if [ "${rc}" -ne 0 ] && [ -f "${DEST}" ]; then
+                      echo "[snapshot] run failed (rc=${rc}); removing partial ${DEST}" >&2
+                      rm -f "${DEST}"
+                    fi
+                    ls -1t /snapshots/vault-raft-*.snap 2>/dev/null \
+                      | tail -n +"$((RETAIN + 1))" | xargs -r rm -f
+                    exit "${rc}"
+                  }
+                  trap cleanup EXIT
+
+                  # Preflight — confirm VAULT_ADDR resolves to the RAFT LEADER. `snapshot
+                  # save` is a raft-local op that is NOT request-forwarded to the active node
+                  # (hashicorp/vault#15258): landing on a standby silently yields an incomplete
+                  # snapshot ("unable to read SHA256SUMS.sealed file"). vault-active should
+                  # always point at the leader, but a failover label-race could misroute us —
+                  # fail fast rather than write a bad backup. The active node is the only one
+                  # whose `vault status -format=json` reports `"is_self": true` (standbys omit
+                  # the field). `grep -q` isolates this from `set -e` even when status is
+                  # non-zero (sealed/unreachable node).
+                  if vault status -format=json 2>/dev/null \
+                       | grep -q '"is_self"[[:space:]]*:[[:space:]]*true'; then
+                    :
+                  else
+                    echo "[snapshot] FATAL: VAULT_ADDR=${VAULT_ADDR} is not the active raft node" >&2
+                    echo "[snapshot] (or is sealed/unreachable); refusing to write an incomplete" >&2
+                    echo "[snapshot] snapshot. Check the vault-active Service and its endpoints." >&2
+                    exit 1
+                  fi
+
                   echo "[snapshot] saving ${DEST}"
-                  vault operator raft snapshot save "${DEST}"
-                  echo "[snapshot] saved $(wc -c < "${DEST}") bytes"
-                  # Retention: keep the newest ${RETAIN}, delete older snapshots.
-                  ls -1t /snapshots/vault-raft-*.snap 2>/dev/null \
-                    | tail -n +"$((RETAIN + 1))" | xargs -r rm -f
-                  echo "[snapshot] retained newest ${RETAIN}:"
+                  if ! vault operator raft snapshot save "${DEST}"; then
+                    echo "[snapshot] FATAL: 'raft snapshot save' failed." >&2
+                    echo "[snapshot] If the error is 'unable to read SHA256SUMS.sealed file', the" >&2
+                    echo "[snapshot] transit auto-unseal backend (vault-unsealer.vault-unsealer.svc)" >&2
+                    echo "[snapshot] is unreachable or SEALED, so Vault cannot seal-wrap the snapshot" >&2
+                    echo "[snapshot] checksums. Verify with 'kubectl -n vault-unsealer exec" >&2
+                    echo "[snapshot] vault-unsealer-0 -- vault status' and unseal it per" >&2
+                    echo "[snapshot] artifacts/design/vault-dr-runbook.md." >&2
+                    exit 1
+                  fi
+
+                  # Validate: a complete snapshot is a non-empty gzip tarball. Guard against a
+                  # 0-byte / truncated file ever being counted as a good DR backup.
+                  if ! gzip -t "${DEST}" 2>/dev/null; then
+                    echo "[snapshot] FATAL: ${DEST} is not a valid gzip archive — corrupt/incomplete." >&2
+                    exit 1
+                  fi
+                  echo "[snapshot] saved $(wc -c < "${DEST}") bytes, gzip-verified OK"
+                  echo "[snapshot] retention keeps newest ${RETAIN}; current snapshots:"
                   ls -1t /snapshots/vault-raft-*.snap 2>/dev/null || true
               volumeMounts:
                 - name: snapshots
