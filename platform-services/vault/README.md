@@ -229,7 +229,14 @@ kubectl -n vault exec -it vault-0 -- vault operator unseal <KEY_SHARE_3>
 kubectl -n vault exec -it vault-0 -- vault login <ROOT_TOKEN>
 
 # 6) Enable the KV v2 engine ESO reads from + the Kubernetes auth method.
-kubectl -n vault exec -it vault-0 -- vault secrets enable -path=secret -version=2 kv
+#    -max-versions=10: cap retained versions PER SECRET at the mount level so KV
+#    version churn (every ESO PushSecret reconcile writes a new version) can't
+#    accumulate unbounded and bloat the raft FSM. Applies to every existing and
+#    future secret with no per-secret metadata override. See the FSM-hygiene
+#    runbook (§ Storage hygiene below) for capping/pruning an ALREADY-bloated mount.
+kubectl -n vault exec -it vault-0 -- vault secrets enable -path=secret -version=2 -max-versions=10 kv
+#    (On an already-running install where the mount predates this flag, tune it in
+#    place instead — root only: `vault secrets tune -max-versions=10 secret/`.)
 kubectl -n vault exec -it vault-0 -- vault auth enable kubernetes
 kubectl -n vault exec -it vault-0 -- sh -c \
   'vault write auth/kubernetes/config \
@@ -267,6 +274,25 @@ kubectl -n vault exec -it vault-0 -- sh -c \
   PVCs are retained on delete (`persistentVolumeClaimRetentionPolicy: Retain`).
 - **HA scale-down** → not a supported live operation; see §G's Rollback note
   (`vault operator raft remove-peer` before reducing `ha.replicas`).
+
+### Storage hygiene (raft FSM bloat)
+
+The raft FSM (`/vault/data/vault.db`, a BoltDB file) grows to a high-water mark and
+**never shrinks on its own** — deleting KV versions / tidying tokens frees pages
+*inside* the file for reuse but does not return them to the OS. Two levers keep it
+bounded:
+
+1. **Cap KV versions** — `-max-versions=10` on the `secret/` mount (step 6 above, or
+   `vault secrets tune` in place). Root-only; capping is permanent + automatic.
+2. **Tidy expired tokens/leases** — the ~24 ESO ExternalSecrets/PushSecrets each
+   re-login via k8s-auth (`token_ttl=1h`) and Upjet provider-vault mints a child
+   token per API call, so token/lease storage entries dominate FSM churn far more
+   than KV versions do. `vault token tidy` / `vault lease tidy` (root-only) reclaim
+   them internally; a snapshot save+restore rewrites a compacted `vault.db` to
+   actually reclaim disk.
+
+Full diagnosis + exact operator commands (root token required for the tune/tidy/
+prune steps): **`artifacts/design/vault-storage-hygiene-runbook.md`**.
 
 ---
 
