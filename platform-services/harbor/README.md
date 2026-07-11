@@ -124,8 +124,12 @@ failed. Root cause: nothing ever pruned old tags. Two durable fixes:
 
   This is a Job, not a `provider-harbor` Crossplane managed resource, because the
   `default` ProviderConfig credential (`robot$provisioner`) is deliberately scoped
-  to `project + robot + member` only (ADR-031 §6 least-privilege) and has neither
-  the project-level `tag-retention` nor the system-level `garbage-collection`
+  to `project + robot + member` admin, plus (as of the 2026-07-11 harbor-push-robot
+  fix, `crossplane/creds/README.md` § Harbor CI-push robot-minting scope)
+  `repository:push/pull/read/list`, `artifact:read/list`, and
+  `artifact-addition:read` — the exact set the per-team CI robots it mints need
+  (ADR-031 §6 least-privilege; NOT harbor-admin). It still has neither the
+  project-level `tag-retention` nor the system-level `garbage-collection`
   permission — verified live via `GET /robots`. `garbage-collection` in particular
   is Harbor-admin/system-scope only regardless of robot level, and is a one-time
   system singleton, not a per-tenant reconciling resource.

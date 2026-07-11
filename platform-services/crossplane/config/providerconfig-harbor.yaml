@@ -1,6 +1,10 @@
 # ProviderConfig for provider-harbor (globallogicuki). ADR-031 §6 — authenticates
 # as a least-privilege Harbor PROVISIONER ROBOT (project + robot + member admin,
-# NOT harbor-admin). References the placeholder-sealed credentials Secret
+# PLUS repository:push/pull/read/list + artifact:read/list + artifact-addition:read
+# so it can delegate that exact scope to the per-team CI robots it mints — Harbor
+# refuses to let a robot create a child with WIDER permissions than its own; see
+# the 2026-07-11 harbor-push-robot incident in creds/README.md § Harbor CI-push
+# robot-minting scope. NOT harbor-admin). References the sealed credentials Secret
 # (creds/harbor-provisioner-creds-sealed.yaml), materialized to `harbor-provider-creds`.
 # The `credentials` key is the JSON the Upjet harbor provider expects:
 #   {"url":"http://harbor-core.harbor.svc","username":"robot$provisioner","password":"<token>"}
@@ -13,7 +17,9 @@
 # EMPTY connection secrets — which starves the whole tenant CI push chain
 # (crossplane conn-secret -> Vault PushSecret -> ESO -> arc-runners harbor-push).
 # The provider makes only small API calls, so the Cloudflare 100MB edge cap is
-# irrelevant; use in-cluster HTTP. (Root cause of the swamiapp CI push blocker.)
+# irrelevant; use in-cluster HTTP. (Root cause of an EARLIER swamiapp CI push
+# blocker — connection-level, distinct from the 2026-07-11 permission-scope
+# blocker documented above; both manifest as a broken CI push credential.)
 #
 # ⚠ Verify the ProviderConfig apiVersion (harbor.crossplane.io/v1beta1) + the
 # credentials JSON keys against the installed provider-harbor v0.1.1 CRDs at Phase-0.
