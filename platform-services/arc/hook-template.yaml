@@ -31,23 +31,31 @@ metadata:
 data:
   content: |
     spec:
-      # --- Node placement for the KANIKO BUILD pod (CI-fast, #237; db1 CI-build node) ---
+      # --- Node placement for the KANIKO BUILD pod (CI-fast, #237/#297; BUILD POOL) ---
       # In containerMode:kubernetes the Kaniko build runs HERE (this step pod), NOT on
       # the runner pod — so the build's node placement is governed by THIS template, not
-      # arc-runner-scaleset-app.yaml. `ua-mis-db-1` joined the cluster labeled
-      # `capstone.io/ci-build=true` (~7.5GiB allocatable) specifically to host memory-
-      # hungry builds (a Backstage yarn build needs ~6Gi, more than the OptiPlexes/Macs
-      # comfortably spare). nodeSelector is a HARD constraint — this PodSpecPatch is
-      # merged verbatim onto the generated step pod's spec (runner-container-hooks'
-      # k8s mergePodSpecWithOptions directly assigns top-level fields, no deep-merge),
-      # so it fully pins the build pod to db1. This supersedes the softer control-plane
-      # toleration/affinity below (kept as no-ops: db1 carries neither the
-      # control-plane taint nor label, so they simply don't match anything once
-      # nodeSelector narrows the candidate set to db1). The SAME nodeSelector is
+      # arc-runner-scaleset-app.yaml. Was pinned to the single node `ua-mis-db-1` via
+      # `capstone.io/ci-build=true` (#297), which bottlenecked the whole CI queue onto
+      # one box. Switched to the POOL label `capstone.io/pool=build` (same convention as
+      # the Mac fleet's `capstone.io/pool=mac-debian`) so ANY labeled node is a
+      # candidate — currently `ua-mis-db-1` (~7.5GiB allocatable) + `laptop-01`
+      # (Ryzen 7 8C/16T, ~14GiB allocatable), both memory-hungry-build-capable, more
+      # than the OptiPlexes/Macs comfortably spare. nodeSelector is a HARD (required)
+      # constraint — this PodSpecPatch is merged verbatim onto the generated step pod's
+      # spec (runner-container-hooks' k8s mergePodSpecWithOptions directly assigns
+      # top-level fields, no deep-merge) — so it fully pins the build pod to the pool,
+      # just no longer to a single member of it. This supersedes the softer
+      # control-plane toleration/affinity below (kept as no-ops: neither pool node
+      # carries the control-plane taint/label, so they simply don't match anything once
+      # nodeSelector narrows the candidate set to the pool). The SAME nodeSelector is
       # mirrored on the runner pod in applicationsets/arc-runner-scaleset-app.yaml —
-      # both are needed; this one only moves the heavy Kaniko step pod.
+      # both are needed; this one only moves the heavy Kaniko step pod. laptop-01 is
+      # TEMPORARY — un-label it (`kubectl label node laptop-01 capstone.io/pool-`) to
+      # fall back to db1-only with no manifest change; nodes are labeled live, there is
+      # no git-tracked join automation for either box (see the sibling nodeSelector
+      # comment in arc-runner-scaleset-app.yaml for the exact kubectl label commands).
       nodeSelector:
-        capstone.io/ci-build: "true"
+        capstone.io/pool: "build"
       tolerations:
         - key: capstone.io/control-plane
           operator: Equal
@@ -96,10 +104,11 @@ data:
           # arc-runner-scaleset-app.yaml) so that pod can actually use the memory it
           # needs. REQUEST is kept low (not ~4Gi): since this same block also sizes the
           # much-lighter job-container pod, and BOTH pods (plus the runner pod) now
-          # land on the single db1 node (nodeSelector below, ~7.5Gi allocatable) and can
-          # be co-resident, summing ~4Gi requests across 2-3 pods would overcommit
-          # db1's scheduling budget and Pend the very pod this fix is for. See the
-          # matching note in arc-runner-scaleset-app.yaml.
+          # land on a pool node (nodeSelector below — db1 ~7.5Gi allocatable or
+          # laptop-01 ~14Gi; the scheduler decides, not guaranteed to spread) and can
+          # be co-resident, summing ~4Gi requests across 2-3 pods would overcommit the
+          # SMALLEST pool member's (db1's) scheduling budget and Pend the very pod this
+          # fix is for. See the matching note in arc-runner-scaleset-app.yaml.
           resources:
             requests: { memory: "512Mi" }
             limits:   { memory: "6Gi" }

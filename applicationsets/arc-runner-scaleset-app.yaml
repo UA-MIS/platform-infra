@@ -78,21 +78,31 @@ spec:
         #     restricted posture via the controller.) ---
         template:
           spec:
-            # --- Node placement for the RUNNER pod (CI-fast, #237; db1 CI-build node) ---
-            # `ua-mis-db-1` joined the cluster labeled `capstone.io/ci-build=true`
-            # (~7.5GiB allocatable) specifically to host CI builds that need more memory
-            # than the control-plane OptiPlexes comfortably spare. nodeSelector is a HARD
-            # constraint, so the runner pod now schedules ONLY on db1 — this supersedes
-            # the softer control-plane toleration/affinity below (still harmless: db1
-            # carries neither the control-plane taint nor label, so those blocks are
-            # no-ops against the single nodeSelector-matched candidate). NOTE: the actual
+            # --- Node placement for the RUNNER pod (CI-fast, #237/#297; BUILD POOL) ---
+            # Was pinned to the single node `ua-mis-db-1` via `capstone.io/ci-build=true`
+            # (#297) — a hard bottleneck: every CI job serialized onto one box. Switched
+            # to the POOL label `capstone.io/pool=build` (same convention as the Mac
+            # fleet's `capstone.io/pool=mac-debian`, see ansible/inventory/group_vars/
+            # mac_workers.yml) so ANY node carrying the label is a candidate — currently
+            # `ua-mis-db-1` (~7.5GiB allocatable) + `laptop-01` (Ryzen 7 8C/16T,
+            # ~14GiB allocatable), giving the scheduler two boxes to spread builds across
+            # instead of queuing on one. nodeSelector stays a HARD (required) constraint
+            # — it just now matches a set, not a singleton — so this supersedes the
+            # softer control-plane toleration/affinity below (still harmless no-ops:
+            # neither pool node carries the control-plane taint/label). laptop-01 is
+            # TEMPORARY (retires when a replacement mini PC arrives) — un-labeling it
+            # cleanly falls back to db1-only with no manifest change. NOTE: the actual
             # Kaniko BUILD runs in a separate step pod (containerMode:kubernetes) whose
             # placement is set in platform-services/arc/hook-template.yaml — the SAME
             # nodeSelector is mirrored there (that is what makes the memory-hungry build
-            # land on db1 too). Both are needed; this one only moves the lightweight
-            # runner pod.
+            # land on a pool node too). Both are needed; this one only moves the
+            # lightweight runner pod. Nodes must be labeled live (not git-declared — db1
+            # was labeled the same way in #297; there is no Ansible/join automation for
+            # either db1 or laptop-01, unlike the Mac fleet):
+            #   kubectl label node ua-mis-db-1 capstone.io/pool=build --overwrite
+            #   kubectl label node laptop-01    capstone.io/pool=build --overwrite
             nodeSelector:
-              capstone.io/ci-build: "true"
+              capstone.io/pool: "build"
             tolerations:
               - key: capstone.io/control-plane
                 operator: Equal
@@ -151,15 +161,21 @@ spec:
                   # kubernetes' `container:` — see workflow), AND the Kaniko step-pod
                   # (hook-template.yaml's "$job" resources apply to BOTH job-container
                   # AND step pods per runner-container-hooks' mergeContainerWithOptions,
-                  # confirmed against actions/runner-container-hooks source) — onto the
-                  # SAME single db1 node (~7.5Gi allocatable). All 3 can be co-resident
+                  # confirmed against actions/runner-container-hooks source) — onto a
+                  # SINGLE pool node (whichever of db1 ~7.5Gi / laptop-01 ~14Gi
+                  # allocatable the scheduler picks for that pod; the pool can now spread
+                  # a build's 3 pods across nodes, but nothing GUARANTEES that — treat
+                  # worst case as all 3 landing on one node). All 3 can be co-resident
                   # for most of a build. Requesting ~4Gi on each would sum to ~12Gi of
-                  # scheduler-admission requests on a ~7.5Gi node -> the step-pod would
-                  # Pend forever (insufficient memory), defeating the fix. Keeping
-                  # requests low + limits high (burstable) lets the Kaniko step-pod
-                  # actually USE up to 6Gi at runtime (fixing the OOM, which was caused
-                  # by NO limit at all, not by an under-provisioned request) without
-                  # over-committing db1's scheduling budget.
+                  # scheduler-admission requests — more than db1's ~7.5Gi allocatable
+                  # alone -> the step-pod would Pend forever there (insufficient memory),
+                  # defeating the fix (laptop-01's ~14Gi has headroom for that sum, but
+                  # requests still must fit the SMALLEST pool member since nodeSelector
+                  # doesn't guarantee which node). Keeping requests low + limits high
+                  # (burstable) lets the Kaniko step-pod actually USE up to 6Gi at
+                  # runtime (fixing the OOM, which was caused by NO limit at all, not by
+                  # an under-provisioned request) without over-committing either pool
+                  # node's scheduling budget.
                   requests: { cpu: "250m", memory: "512Mi" }
                   limits:   { cpu: "2",    memory: "6Gi" }
             volumes:
