@@ -46,7 +46,7 @@ credentials in the whole onboarding stack and they live **only** in
 | File | Secret (crossplane-system) | Credential — scope to grant (NOT admin) |
 | --- | --- | --- |
 | `github-app-creds-sealed.yaml` | `github-provider-creds` | the EXISTING `ua-mis-backstage` GitHub App (App ID 4097147, install 141394298). JSON: `{"app_auth":[{"id":"4097147","installation_id":"141394298","pem_file":"<PEM \n-escaped>"}],"owner":"UA-MIS"}` |
-| `harbor-provisioner-creds-sealed.yaml` | `harbor-provider-creds` | **RESEALED — IN-CLUSTER** (see incident note above + "Harbor CI-push robot-minting scope" below). A Harbor PROVISIONER ROBOT (derive from harbor-admin; do NOT use harbor-admin itself), scoped `system`: `create,list project`; `project` (namespace `*`): `create,read,update,delete,list project` \| `create,read,delete,list robot` \| `create,read,update,delete,list member` \| **`push,pull,read,list repository`** \| **`read,list artifact`** \| **`read artifact-addition`** — the bolded grants are the 2026-07-11 fix; without them every child CI robot the Composition mints comes out permission-scoped WIDER than its creator and Harbor rejects the create (`403 permission scope is invalid`), which is what broke tenant onboarding. JSON: `{"url":"http://harbor-core.harbor.svc","username":"robot$provisioner","password":"<token>"}` (note: **`http://`**, port 80 — see `config/providerconfig-harbor.yaml` header). |
+| `harbor-provisioner-creds-sealed.yaml` | `harbor-provider-creds` | **RESEALED — IN-CLUSTER** (see incident note above + "Harbor CI-push robot-minting scope" below). A Harbor PROVISIONER ROBOT (derive from harbor-admin; do NOT use harbor-admin itself), scoped `system`: `create,list project`; `project` (namespace `*`): `create,read,update,delete,list project` \| `create,read,delete,list robot` \| `create,read,update,delete,list member` \| **`push,pull,read,list repository`** \| **`read,list artifact`** \| **`read artifact-addition`** — the bolded grants are the 2026-07-11 fix; without them every child CI robot the Composition mints comes out permission-scoped WIDER than its creator and Harbor rejects the create (`403 permission scope is invalid`), which is what broke tenant onboarding. ⚠ **AND every access entry MUST carry `"effect": "allow"`** — the breadth grant alone is necessary but NOT sufficient (see "part 2" note below); the provider sends `effect:"allow"` and Harbor's subset check keys on effect, so an empty-effect provisioner still 403s. JSON: `{"url":"http://harbor-core.harbor.svc","username":"robot$provisioner","password":"<token>"}` (note: **`http://`**, port 80 — see `config/providerconfig-harbor.yaml` header). |
 | `vault-provisioner-creds-sealed.yaml` | `vault-provider-creds` | a Vault token with a `tenant-provisioner` policy: write `sys/policies/acl/tenant-*` + `auth/kubernetes/role/tenant-*`, plus `auth/token/create` (provider-vault mints a short-lived child token per call — see below). JSON: `{"token":"<token>","address":"https://vault.vault.svc.cluster.local:8200"}` |
 | `mysql-admin-creds-sealed.yaml` (ADR-033) | `db-tier-mysql-admin` | **RESEALED — IN-CLUSTER (docs/operator/in-cluster-db-tier-runbook.md §4c).** A DB-tier MariaDB PROVISIONER LOGIN — **NOT** `root`. The in-cluster `crossplane-provisioner` mariadb-operator User/Grant (`applicationsets/mariadb-cluster-app.yaml`) — same least-privilege grant list as the retired off-box login (excludes SUPER/FILE/PROCESS/RELOAD/SHUTDOWN). **Four keys** (NOT a JSON blob): `endpoint`=`capstone-mariadb-mariadb-cluster-primary.db-tier.svc.cluster.local`, `port`=`3306`, `username`=`crossplane-provisioner`, `password`=`<token, matches secret db-tier/mariadb-crossplane-provisioner-credentials>`. provider-sql reads these via `MySQLConnectionSecret` (config/providerconfig-sql.yaml). |
 | `postgres-admin-creds-sealed.yaml` (ADR-033) | `db-tier-postgres-admin` | **RESEALED — IN-CLUSTER (docs/operator/in-cluster-db-tier-runbook.md §4c).** A DB-tier **PG17** PROVISIONER ROLE — **NOT** `postgres` superuser. The in-cluster `crossplane_provisioner` CNPG DatabaseRole (`platform-services/cnpg/cluster/roles.yaml`) — `LOGIN CREATEDB CREATEROLE` ONLY (no `SUPERUSER`/`REPLICATION`/`BYPASSRLS`). **Four keys**: `endpoint`=`capstone-pg-rw.db-tier.svc.cluster.local`, `port`=`5432`, `username`=`crossplane_provisioner`, `password`=`<token, matches secret db-tier/cnpg-crossplane-provisioner-credentials>`. provider-sql reads these via `PostgreSQLConnectionSecret` (config/providerconfig-postgres.yaml). No live Postgres tenant exists yet — this reseal activates reconciliation for the first time with no prior state. |
@@ -244,6 +244,40 @@ number of unrelated system-admin grants — registry/user/scanner/replication/
 GC/ldap — from an earlier over-correction made while chasing this bug live).
 Run the runbook above at a controlled maintenance window to right-size it; it is
 a hardening follow-up, not a functional blocker.
+
+### 2026-07-11 (part 2) — the missing piece: `effect: "allow"` on every access entry
+
+The part-1 breadth grant above was **necessary but not sufficient.** After it landed,
+the `swami` `RobotAccount` MRs were STILL `Ready=False (Creating)` with empty connection
+secrets, and a create issued **as `robot$provisioner` itself** still 403'd. Root cause of
+the *residual* failure (confirmed live against Harbor **v2.15.1**, and by reading
+`src/server/v2.0/handler/robot.go`):
+
+- Harbor's `isValidPermissionScope` keys each access policy by **`Resource:Action:Effect`**.
+- `goharbor/terraform-provider-harbor` (which `provider-harbor` wraps) defaults every robot
+  `access.effect` to **`"allow"`**, so the child request is keyed `repository:pull:allow`.
+- `robot$provisioner`'s 140 stored entries were minted with **no effect** → keyed
+  `repository:pull:` (empty). Keys never match → subset check fails → **403**, despite the
+  provisioner now holding a genuine superset of resources+actions.
+
+Proof (as `robot$provisioner`, project `swami`): `repository:pull` **with** `effect:"allow"`
+→ **403**; the same **without** `effect` → **201**. Harbor persists `effect:"allow"` on a
+GET round-trip, so aligning the creator's stored effect to `"allow"` is the durable fix.
+
+**Fix (recommended, token-preserving, NO reseal):** an IN-PLACE `PUT` that adds
+`effect:"allow"` to every stored access entry —
+`platform-services/crossplane/scripts/fix-harbor-provisioner-effect.sh`. Full runbook +
+verification: **`docs/operator/harbor-provisioner-robot-effect-fix.md`**.
+
+> **⚠ Corrects the part-1 "no working in-place edit" claim above.** `PUT
+> /api/v2.0/robots/{id}` DOES work — you must send the `name` **exactly as GET returns it**
+> (i.e. the `robot$`-**prefixed** name) and keep `level`. The part-1 attempts 400'd because
+> they sent a *stripped* name (`"cannot update the level or name of robot"`) or omitted
+> name/level (`"bad request error level input"`). Verified live across system- and
+> project-level robots: round-tripping the GET body verbatim (mutating only `effect`) → HTTP
+> 200, and `PUT` does **not** regenerate the secret — so the `harbor-provider-creds`
+> SealedSecret stays valid and no reseal/token rotation is needed. The delete+recreate+reseal
+> runbook in part 1 remains valid as a fallback if you are rotating the token anyway.
 
 ## Resealing the real values (operator, at go-live)
 
