@@ -1,0 +1,186 @@
+# kubernetes-sigs/descheduler Application (node-rebalancing follow-up to the
+# resource-governance work — VPA/Goldilocks right-size REQUESTS, this actually MOVES
+# pods). K8s' default scheduler only places pods at creation time; it never revisits
+# a placement decision once a node's real utilization drifts (a node joining idle
+# stays idle forever unless something evicts pods off the hot nodes so the scheduler
+# re-places them). Observed live: a new node at ~1% CPU / 7% mem sitting next to
+# mac-debian-02 at ~65-70% mem — exactly the imbalance this closes.
+#
+# Deploy method A (D-022/D-028, same as VPA/Goldilocks/metrics-server): pinned
+# official chart + the chart repo added to the `platform` AppProject sourceRepos
+# allowlist (bootstrap/platform-appproject.yaml in this PR; security audits the
+# addition). ⚠ INSTALL-OWNED like every other Helm-source add — reaches the live
+# `platform` AppProject only via `make bootstrap`/`make bootstrap-reapply` + VERIFY,
+# else this app InvalidSpecErrors "repo not permitted".
+#
+# Root-app recurses applicationsets/, so this Application is registered.
+#
+# ── CronJob mode, not Deployment (deliberate) ─────────────────────────────────
+# `kind: CronJob` (the chart default) runs the descheduler as a single bounded batch
+# job on a schedule, then exits — no long-lived controller reconciling continuously.
+# The alternative `Deployment` mode with `deschedulingInterval` re-evaluates on a
+# tight loop; CronJob makes "how often does this evict anything" an explicit,
+# auditable git diff (the `schedule` field) instead of an in-process timer.
+#
+# ── why this is configured conservatively (SAFETY RATIONALE) ─────────────────
+# This cluster already had an incident where excessive pod/policy churn on one node
+# saturated it and cascaded into a Vault outage (raft snapshot stall under CPU
+# pressure — see memory/capstone-duplicate-tenant-claim-incident). A descheduler is
+# a tool that deliberately deletes running, healthy pods; run aggressively it is a
+# self-inflicted repeat of that incident. Every knob below is chosen to make an
+# eviction rare, small, and reversible:
+#   - hourly schedule (not the chart's default */2 * * * *) — rebalancing a handful
+#     of GB of idle headroom is not urgent; churn is the actual risk.
+#   - maxNoOfPodsToEvictPerNode/PerNamespace/Total: 3/3/5 — caps the blast radius of
+#     any single run even if the utilization math is more aggressive than expected.
+#   - gracePeriodSeconds: 60 — evicted pods get a real shutdown window, not a SIGKILL.
+#   - DefaultEvictor.nodeFit: true — refuses to evict a pod unless a schedulable
+#     target node actually exists (no evict-with-nowhere-to-go churn).
+#   - DefaultEvictor.minReplicas: 2 — never evicts a pod from a workload running at
+#     1 replica (the descheduler's own pod, or any singleton, is never a candidate).
+#   - DefaultEvictor.podProtections.extraEnabled: [PodsWithPVC] — belt-and-suspenders
+#     on top of the namespace excludes below: ANY pod anywhere with a PVC (not just
+#     in the excluded namespaces) is protected.
+#   - PodDisruptionBudgets are respected by construction: the chart's RBAC only
+#     grants `pods/eviction` (the Eviction subresource), which the API server
+#     enforces against each pod's PDB server-side — there is no policy flag to
+#     bypass this, and none is set here.
+#   - Stateful/system-critical namespaces are hard-excluded on BOTH active
+#     strategies (LowNodeUtilization.evictableNamespaces.exclude and
+#     RemoveDuplicates.namespaces.exclude): vault, vault-unsealer (Raft quorum —
+#     mid-quorum eviction is the exact failure mode from the incident), db-tier
+#     (CNPG + MariaDB Galera — evicting a Galera member mid-quorum or a CNPG replica
+#     during failover is a data-availability risk), cnpg-system + mariadb-system
+#     (the DB operators — their leader-election churn is also excluded), rook-ceph
+#     (OSD/mon/mgr — evicting an OSD or mon is a storage-availability risk), and
+#     kube-system (etcd-adjacent control-plane static pods — kube-apiserver/
+#     kube-controller-manager/kube-scheduler/Cilium — plus every DaemonSet, which
+#     DefaultEvictor's default `DaemonSetPods` protection already blocks anyway;
+#     kube-system is belt-and-suspenders for the rest of that namespace).
+#   - Only two strategies are enabled: LowNodeUtilization (the actual imbalance
+#     fix) and RemoveDuplicates (spreads replicas of the same
+#     Deployment/StatefulSet/ReplicaSet/Job off a shared node — safe, no threshold
+#     tuning to get wrong). Every other upstream strategy (PodLifeTime, node-taint/
+#     affinity/topology-spread strategies, etc.) is left OFF.
+#
+# ── LowNodeUtilization thresholds ─────────────────────────────────────────────
+# underutilized (eviction TARGET): cpu/memory/pods < 20%   — genuinely idle, like the
+#   laptop-01 node above, not "slightly below average".
+# overutilized (eviction SOURCE):  cpu/memory/pods > 50%   — a real, sustained
+#   imbalance (mac-debian-02 at ~65-70% mem), not the constant few-percent noise a
+#   lower target would chase every hour.
+# A node between 20-50% is left alone entirely — no reshuffling of "fine" nodes.
+#
+# Chart: descheduler 0.36.0 (appVersion v0.36.0), pinned. Bump deliberately.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-descheduler
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://kubernetes-sigs.github.io/descheduler/   # PINNED chart repo (sourceRepos allowlist)
+    chart: descheduler
+    targetRevision: 0.36.0                          # pinned chart version (appVersion v0.36.0); no ^/~/latest
+    helm:
+      releaseName: descheduler
+      values: |
+        # Satisfies PodSecurity "restricted" (the chart's own securityContext is
+        # already restricted-compliant otherwise: runAsNonRoot, all caps dropped,
+        # no privilege escalation, read-only rootfs).
+        podSecurityContext:
+          seccompProfile:
+            type: RuntimeDefault
+        kind: CronJob
+        schedule: "0 * * * *"        # hourly — see safety rationale above
+        suspend: false
+        startingDeadlineSeconds: 300
+        activeDeadlineSeconds: 300    # shorter than the schedule interval, per chart guidance
+        successfulJobsHistoryLimit: 3
+        failedJobsHistoryLimit: 3
+        ttlSecondsAfterFinished: 600
+
+        deschedulerPolicyAPIVersion: "descheduler/v1alpha2"
+        deschedulerPolicy:
+          # Global caps on top of the per-strategy config below — belt-and-suspenders
+          # blast-radius limit even if the utilization math ever evaluates more nodes
+          # as imbalanced than expected.
+          maxNoOfPodsToEvictPerNode: 3
+          maxNoOfPodsToEvictPerNamespace: 3
+          maxNoOfPodsToEvictTotal: 5
+          gracePeriodSeconds: 60      # real shutdown window for evicted pods, not SIGKILL
+          profiles:
+            - name: capstone-conservative
+              pluginConfig:
+                - name: DefaultEvictor
+                  args:
+                    # Refuse to evict unless a schedulable target node genuinely
+                    # exists (no evict-with-nowhere-to-go churn).
+                    nodeFit: true
+                    # Never evict from a workload running at 1 replica (protects
+                    # every singleton, including the descheduler's own CronJob pod).
+                    minReplicas: 2
+                    podProtections:
+                      # Every DEFAULT protection stays ON (nothing added to
+                      # defaultDisabled): PodsWithLocalStorage, DaemonSetPods,
+                      # SystemCriticalPods, FailedBarePods are all still protected.
+                      # Additionally protect any pod anywhere that mounts a PVC,
+                      # on top of the namespace excludes below.
+                      extraEnabled:
+                        - PodsWithPVC
+                - name: LowNodeUtilization
+                  args:
+                    thresholds:            # underutilized (eviction target) cutoff
+                      cpu: 20
+                      memory: 20
+                      pods: 20
+                    targetThresholds:       # overutilized (eviction source) cutoff
+                      cpu: 50
+                      memory: 50
+                      pods: 50
+                    evictableNamespaces:
+                      exclude:
+                        - vault              # Raft quorum
+                        - vault-unsealer
+                        - db-tier            # CNPG + MariaDB Galera cluster members
+                        - cnpg-system        # CNPG operator (leader election)
+                        - mariadb-system     # MariaDB operator (leader election)
+                        - rook-ceph          # OSD/mon/mgr
+                        - kube-system        # etcd-adjacent control-plane + CNI
+                - name: RemoveDuplicates
+                  args:
+                    namespaces:
+                      exclude:
+                        - vault
+                        - vault-unsealer
+                        - db-tier
+                        - cnpg-system
+                        - mariadb-system
+                        - rook-ceph
+                        - kube-system
+              plugins:
+                balance:
+                  enabled:
+                    - LowNodeUtilization
+                    - RemoveDuplicates
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: descheduler
+  syncPolicy:
+    managedNamespaceMetadata:
+      labels:
+        platform.capstone/component: platform
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true    # dedicated `descheduler` namespace
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

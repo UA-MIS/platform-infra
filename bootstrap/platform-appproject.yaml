@@ -198,6 +198,16 @@ spec:
     # `platform` AppProject only via `make bootstrap`/`make bootstrap-reapply` +
     # VERIFY or platform-minio-backups will InvalidSpecError "repo not permitted".
     - https://charts.min.io                                # MinIO (platform-minio-backups Application)
+    # Descheduler (node-rebalancing, applicationsets/descheduler-app.yaml): the
+    # official kubernetes-sigs Helm chart repo. ONE named source, chart version
+    # pinned in the Application (descheduler @ 0.36.0). Runs as a conservative,
+    # hourly CronJob (LowNodeUtilization + RemoveDuplicates only, PDBs respected,
+    # stateful tiers excluded — see the Application's header for the full safety
+    # rationale). ⚠ INSTALL-OWNED (same as every add above): reaches the live
+    # `platform` AppProject only via `make bootstrap`/`make bootstrap-reapply` +
+    # VERIFY (the AppProject is bootstrap-managed, not GitOps-reconciled) or
+    # platform-descheduler will InvalidSpecError "repo not permitted".
+    - https://kubernetes-sigs.github.io/descheduler/       # Descheduler (platform-descheduler Application)
 
   # Platform services are cluster-wide; allow any namespace on the in-cluster API.
   destinations:
