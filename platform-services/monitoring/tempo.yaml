@@ -28,6 +28,12 @@
 # Grafana wiring: the `Tempo` entry in `additionalDataSources`
 # (applicationsets/kube-prometheus-stack-app.yaml), http://tempo.monitoring.svc.cluster.local:3200.
 #
+# Metrics-generator: the `metrics_generator` block below enables the `local-blocks`
+# processor so Grafana's Traces Drilldown span-rate / RED panels (TraceQL `rate()`,
+# `histogram_over_time()`) work — without this the querier returns 500 "empty ring".
+# It is self-contained (no Prometheus remote-write); see that block's comment for the
+# root cause and why span-metrics/service-graphs are a deliberate follow-up.
+#
 # Image: docker.io/grafana/tempo:2.9.0, pinned (same appVersion the now-deprecated
 # chart would have installed at 1.24.4) — bump deliberately.
 ---
@@ -66,8 +72,56 @@ data:
           path: /var/tempo/wal
     querier: {}
     query_frontend: {}
+    # ── Metrics-generator: TraceQL metrics (`rate()`, `histogram_over_time()`,
+    # `quantile_over_time()` …) that back Grafana's Traces Drilldown span-rate / RED
+    # panels. ROOT CAUSE of the prior 500 ("error querying generators in
+    # Querier.queryRangeRecent: … error finding generators: empty ring"): there was
+    # NO `metrics_generator` block AND `overrides.defaults` was empty, so no
+    # processor was ever enabled for the (single, default) tenant → the
+    # metrics-generator module (which IS part of the single-binary `all` target in
+    # Tempo 2.9 — verified against cmd/tempo/app/modules.go@v2.9.0) never activated,
+    # never registered in its ring → the querier found an empty generator ring.
+    #
+    # SCOPE (matches this platform's "NO Prometheus remote-write" posture, header of
+    # applicationsets/kube-prometheus-stack-app.yaml — and that Prometheus is already
+    # ~96% of its memory limit): enable ONLY the `local-blocks` processor.
+    # `local-blocks` answers TraceQL metrics straight from the generator's own
+    # recent-trace store; it needs NO remote_write into Prometheus. `span-metrics` /
+    # `service-graphs` (which DO remote_write high-cardinality series to Prometheus,
+    # would need `enableRemoteWriteReceiver: true` on that Prometheus AND a
+    # cardinality budget) are a deliberate follow-up — NOT enabled here.
+    metrics_generator:
+      # Ring: kvstore defaults to `memberlist`, exactly like the ingester ring
+      # above. In single-binary this self-registers a ring-of-one over the same
+      # memberlist cluster the ingester already forms (proven live: ingester ring
+      # ACTIVE, member tempo-0 on :7946) — so NO explicit ring config is needed.
+      processor:
+        local_blocks:
+          # Keep ALL spans (not just server spans) so arbitrary TraceQL metrics —
+          # including the Drilldown's `{nestedSetParent<0 …} | rate() by(...)` —
+          # have complete data. Default `true` would drop client/internal spans.
+          filter_server_spans: false
+          # Flush completed local blocks to `traces_storage` so the query-frontend
+          # serves TraceQL metrics over the whole retention window, not just the
+          # in-memory recent slice.
+          flush_to_storage: true
+      # local-blocks trace store — on the writable Ceph RBD PVC (/var/tempo, the
+      # only writable path under readOnlyRootFilesystem: true).
+      traces_storage:
+        path: /var/tempo/generator/traces
+      # Prometheus-registry WAL path (present so the generator initialises cleanly).
+      # remote_write is intentionally EMPTY: local-blocks does not use it, and
+      # span-metrics/service-graphs (the only processors that would) are not enabled.
+      storage:
+        path: /var/tempo/generator/wal
+        remote_write: []
     overrides:
-      defaults: {}
+      defaults:
+        # THIS is the line whose absence produced the empty ring: turn the
+        # local-blocks processor ON for the default tenant.
+        metrics_generator:
+          processors:
+            - local-blocks
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -112,8 +166,14 @@ spec:
             - name: otlp-http
               containerPort: 4318
           resources:
-            requests: { cpu: 50m, memory: 128Mi }
-            limits: { memory: 512Mi }
+            # Memory bumped 512Mi → 768Mi: enabling the local-blocks processor
+            # makes the metrics-generator module retain recent traces in memory (+
+            # a Prometheus registry) in-process, on top of ingest. Low trace volume
+            # here keeps this modest; raise `limits.memory` (and, if needed, add
+            # `metrics_generator.processor.local_blocks.max_live_traces`) if the pod
+            # OOMs under heavier trace load.
+            requests: { cpu: 50m, memory: 192Mi }
+            limits: { memory: 768Mi }
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
