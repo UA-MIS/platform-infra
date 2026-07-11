@@ -468,9 +468,38 @@ spec:
           # `grafana` container is cpu 11m / mem ~259Mi (+15% headroom below) —
           # memory was UNDER-provisioned (old 128Mi request vs. actual pod usage
           # already at ~380Mi total across grafana + both sidecars).
+          #
+          # ⚠ UPDATE (operator-reported incident, 2026-07-10): clicking through several
+          # dashboards quickly made Grafana unavailable for a few minutes. Live
+          # investigation (thanos-query PromQL against this exact pod):
+          #   - kube_pod_container_status_last_terminated_reason{reason="OOMKilled"}:
+          #     NO MATCH for this pod over the last 30d, and restartCount==0 the whole
+          #     time — this was NOT a container OOMKill.
+          #   - increase(container_cpu_cfs_throttled_periods_total{...}[24h]): NO DATA
+          #     — expected, since the OLD spec set NO cpu limit at all, so CFS throttling
+          #     was structurally impossible; "CPU limit too low" was not the cause either.
+          #   - max_over_time(container_memory_working_set_bytes{...}[24h]) = 401870848
+          #     bytes (~383.2Mi) against a 384Mi limit / GOMEMLIMIT (the chart wires
+          #     GOMEMLIMIT to limits.memory automatically, visible on the live pod as
+          #     GOMEMLIMIT=402653184) — i.e. the container was running at ~99.8% of its
+          #     memory ceiling. That's the real mechanism: as heap approaches GOMEMLIMIT,
+          #     Go's GC runs continuously trying to stay under it, burning CPU and
+          #     stalling request handling long enough to fail the liveness/readiness
+          #     probe (observed: repeated `Liveness probe failed: ... 503` /
+          #     `Readiness probe failed: ... 503` events) — which reads to an operator
+          #     as "the pod restarted," even though no restart/OOMKill occurred.
+          #     Clicking through several dashboards quickly is exactly the burst
+          #     (many concurrent panel-query allocations) that pushes it there.
+          #   Fix: give real memory headroom (2x the old 384Mi limit, comfortably above
+          #   the observed ~401Mi peak) so GC stops thrashing at the edge, and add a
+          #   generous (not tight) CPU limit — `monitoring` is excluded from the
+          #   Kyverno require-limits policy today, so a cpu limit isn't mandatory here,
+          #   but on a 6-node homelab an literally-unbounded container can still starve
+          #   its node's neighbors under the same burst, so bound it generously (1 core,
+          #   ~60x the observed idle usage of ~16m) rather than leave it unlimited.
           resources:
-            requests: { cpu: 20m, memory: 320Mi }
-            limits: { memory: 384Mi }
+            requests: { cpu: 50m, memory: 384Mi }
+            limits: { cpu: 1000m, memory: 768Mi }
           # sidecar.resources is shared by BOTH the dashboard- and datasource-sync
           # sidecar containers (chart limitation, one knob for both). Sized for the
           # larger of the two VPA targets (grafana-sc-dashboard ~121Mi) + headroom.

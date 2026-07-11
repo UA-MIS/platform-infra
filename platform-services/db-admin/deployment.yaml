@@ -88,12 +88,29 @@ spec:
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
+          # Bumped from requests 10m/32Mi, limits mem-only 64Mi (operator-reported incident,
+          # 2026-07-10: the DB console crashes under a heavy query/click load — same class of
+          # bug as the Grafana fix in applicationsets/kube-prometheus-stack-app.yaml, see that
+          # file's comment for the full live-cluster diagnosis method, and
+          # platform-services/crossplane/apis/composition.yaml's dbconsole containers for the
+          # identical per-tenant fix). Adminer buffers whole result sets/HTML tables in PHP
+          # memory, so a big SELECT or bulk export under a 64Mi ceiling (only 32Mi of headroom
+          # above the request) is an easy OOMKill; no cpu limit existed at all, which is itself
+          # a Kyverno require-limits violation in this namespace (`db-admin` is NOT in that
+          # policy's exclude list, unlike `monitoring` — confirmed live via `kubectl get events`
+          # showing PolicyViolation warnings on this exact Deployment/ReplicaSet/Pod). New
+          # limits keep both cpu+memory set (satisfies require-limits) with real headroom: 4x
+          # the old memory ceiling, and a cpu limit generous enough (500m) not to throttle a
+          # heavy query/render burst while still bounding this console on this shared cluster —
+          # this instance queries EVERY platform DB (Backstage/Harbor/Crossplane-provisioner/
+          # MariaDB), so it sees the widest variety of query sizes of any console.
           resources:
             requests:
-              cpu: 10m
-              memory: 32Mi
-            limits:
+              cpu: 50m
               memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
           securityContext:
             allowPrivilegeEscalation: false
             runAsNonRoot: true

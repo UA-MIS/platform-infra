@@ -2252,9 +2252,24 @@ spec:
                                     key: ADMINER_AUTOLOGIN_SERVER
                             ports:
                               - containerPort: 8080
+                            # Bumped from requests 10m/32Mi, limits mem-only 64Mi (operator-reported
+                            # incident, 2026-07-10: the DB console crashes under a heavy query/click
+                            # load — same class of bug as the Grafana fix in
+                            # applicationsets/kube-prometheus-stack-app.yaml, see that file's comment
+                            # for the full live-cluster diagnosis method). Adminer buffers whole result
+                            # sets/HTML tables in PHP memory, so a big SELECT or bulk export under a
+                            # 64Mi ceiling (only 32Mi of headroom above the request) is an easy OOMKill;
+                            # no cpu limit existed at all, which is itself a Kyverno require-limits
+                            # violation in this namespace (db-console namespaces are NOT in that
+                            # policy's exclude list, unlike `monitoring` — confirmed live via
+                            # `kubectl get events` showing PolicyViolation warnings on db-admin-console,
+                            # same pod spec pattern as this one). New limits keep both cpu+memory set
+                            # (satisfies require-limits) with real headroom: 4x the old memory ceiling,
+                            # and a cpu limit generous enough (500m) not to throttle a heavy query/render
+                            # burst while still bounding a single console on this shared homelab cluster.
                             resources:
-                              requests: { cpu: "10m", memory: "32Mi" }
-                              limits: { memory: "64Mi" }
+                              requests: { cpu: "50m", memory: "64Mi" }
+                              limits: { cpu: "500m", memory: "256Mi" }
                             securityContext:
                               allowPrivilegeEscalation: false
                               runAsNonRoot: true
@@ -3402,9 +3417,24 @@ spec:
                                     key: ADMINER_AUTOLOGIN_SERVER
                             ports:
                               - containerPort: 8080
+                            # Bumped from requests 10m/32Mi, limits mem-only 64Mi (operator-reported
+                            # incident, 2026-07-10: the DB console crashes under a heavy query/click
+                            # load — same class of bug as the Grafana fix in
+                            # applicationsets/kube-prometheus-stack-app.yaml, see that file's comment
+                            # for the full live-cluster diagnosis method). Adminer buffers whole result
+                            # sets/HTML tables in PHP memory, so a big SELECT or bulk export under a
+                            # 64Mi ceiling (only 32Mi of headroom above the request) is an easy OOMKill;
+                            # no cpu limit existed at all, which is itself a Kyverno require-limits
+                            # violation in this namespace (db-console namespaces are NOT in that
+                            # policy's exclude list, unlike `monitoring` — confirmed live via
+                            # `kubectl get events` showing PolicyViolation warnings on db-admin-console,
+                            # same pod spec pattern as this one). New limits keep both cpu+memory set
+                            # (satisfies require-limits) with real headroom: 4x the old memory ceiling,
+                            # and a cpu limit generous enough (500m) not to throttle a heavy query/render
+                            # burst while still bounding a single console on this shared homelab cluster.
                             resources:
-                              requests: { cpu: "10m", memory: "32Mi" }
-                              limits: { memory: "64Mi" }
+                              requests: { cpu: "50m", memory: "64Mi" }
+                              limits: { cpu: "500m", memory: "256Mi" }
                             securityContext:
                               allowPrivilegeEscalation: false
                               runAsNonRoot: true
