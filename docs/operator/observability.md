@@ -131,6 +131,88 @@ pods are CrashLooping (README "Long-term metrics").
 
 ---
 
+## Traces — instrumenting span producers (the repeatable pattern)
+
+Tempo + the `otel-collector` are healthy but only store what apps SEND them. The
+collector's span receiver is idle until at least one app is instrumented. **Backstage
+("The Process") is the first wired producer** — it's the highest-value target (Node/TS,
+platform-central, high traffic) and Backstage ships first-class OpenTelemetry support.
+
+### The one canonical endpoint
+
+Every app — platform or tenant — sends OTLP to the SAME collector, which samples 15%
+and re-exports to Tempo:
+
+```
+OTLP gRPC : otel-collector.monitoring.svc.cluster.local:4317
+OTLP HTTP : http://otel-collector.monitoring.svc.cluster.local:4318   ← use this by default
+```
+
+Send to the **collector**, never straight to Tempo — the collector owns batching,
+the memory-limiter, and the global 15% `probabilistic_sampler`
+(`kubectl -n monitoring get cm otel-collector -o yaml`).
+
+> Alloy (the DaemonSet) is **logs-only** (`→ Loki`); it has no OTLP traces receiver.
+> There is no NetworkPolicy between app namespaces and `monitoring` today, so egress to
+> the collector is open. If per-namespace egress netpols are ever added, they must allow
+> `monitoring/otel-collector:4318`.
+
+### Node / TypeScript apps (Backstage, and the copy-paste pattern)
+
+Two moving parts — a baked require hook, and env that tunes it (no rebuild to retune):
+
+1. **Dependencies** (`packages/backend/package.json`): `@opentelemetry/api` +
+   `@opentelemetry/auto-instrumentations-node`. Backstage does NOT bundle its
+   node_modules (skeleton + `yarn workspaces focus --production`), so require-in-the-
+   middle can patch the real `http`/`pg`/`express` libs — auto-instrumentation works.
+2. **Load the hook** (image `NODE_OPTIONS`, coexisting with any existing flags):
+   `--require @opentelemetry/auto-instrumentations-node/register`. That entrypoint reads
+   its ENTIRE config from `OTEL_*` env, so no instrumentation code is written.
+   ⚠ Bake this in the Dockerfile, do NOT set `NODE_OPTIONS` via Helm — a Helm value
+   REPLACES the whole var and would drop other flags (e.g. Backstage's `--no-node-snapshot`).
+3. **Env** (Helm `backstage.extraEnvVars` / any Deployment `env:`) — copy verbatim,
+   change only `OTEL_SERVICE_NAME`:
+
+   ```yaml
+   - { name: OTEL_SERVICE_NAME,     value: <app-name> }
+   - { name: OTEL_TRACES_EXPORTER,  value: otlp }
+   - { name: OTEL_METRICS_EXPORTER, value: none }   # Prometheus is near-OOM — traces only
+   - { name: OTEL_LOGS_EXPORTER,    value: none }   # logs already go via Alloy → Loki
+   - { name: OTEL_EXPORTER_OTLP_PROTOCOL, value: http/protobuf }
+   - { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: http://otel-collector.monitoring.svc.cluster.local:4318 }
+   - { name: OTEL_TRACES_SAMPLER,     value: parentbased_traceidratio }
+   - { name: OTEL_TRACES_SAMPLER_ARG, value: "0.5" }   # platform portal; tenants → "0.1"
+   - { name: OTEL_NODE_DISABLED_INSTRUMENTATIONS, value: fs }   # fs spans are noise
+   ```
+
+**Sampling:** the app head-samples (`parentbased_traceidratio`) AND the collector tail-
+samples 15%, so retained ≈ arg × 0.15. Keep the arg modest (never always-on 100% at
+scale). Bump `OTEL_TRACES_SAMPLER_ARG` (env-only, no rebuild) for a denser demo.
+
+**Other runtimes:** same endpoint + same `OTEL_*` env; swap the loader —
+Python `opentelemetry-instrument`, Java `-javaagent:opentelemetry-javaagent.jar`,
+.NET the OTel auto-instrumentation. The env contract above is identical across all.
+
+**Follow-up — tenant apps / scaffolder:** fold this env block (with `SAMPLER_ARG=0.1`)
+into the golden-path scaffolder templates
+(`platform-services/backstage/templates/**`, per-runtime `_fragments`) so every new
+tenant app emits traces by default. Tracked separately from this first slice.
+
+### Verify spans are flowing
+
+```bash
+# 1) The collector's receiver counter goes > 0 AFTER the app takes real traffic.
+#    (The counter does not exist until the first span — absence == zero producers.)
+kubectl -n monitoring port-forward deploy/otel-collector 18888:8888 &
+curl -s localhost:18888/metrics | grep -E 'otelcol_receiver_accepted_spans|otelcol_exporter_sent_spans'
+# 2) Generate traffic: browse The Process (https://process.capstone.uamishub.com) — sign in,
+#    open the catalog. Each backend request produces spans.
+# 3) Grafana → Drilldown → Traces (or Explore → Tempo datasource), service.name="backstage-process".
+kubectl -n backstage logs deploy/backstage | grep -i 'instrumentation started'  # register hook confirms load
+```
+
+---
+
 ## Day-2 checks
 
 ```bash

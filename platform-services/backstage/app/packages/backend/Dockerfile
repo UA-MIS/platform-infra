@@ -171,8 +171,19 @@ USER node
 WORKDIR /app
 
 ENV NODE_ENV=production
-# Disable the Node snapshot so the scaffolder's isolated-vm works.
-ENV NODE_OPTIONS="--no-node-snapshot"
+# Disable the Node snapshot so the scaffolder's isolated-vm works, AND load the
+# OpenTelemetry auto-instrumentation register hook before the backend bundle starts
+# (OBSERVABILITY / traces first-producer, ADR-032). The register entrypoint reads ALL
+# of its config from OTEL_* env vars (exporter, endpoint, service name, sampler), which
+# the Helm values inject at deploy time (applicationsets/backstage-process-app.yaml
+# backstage.extraEnvVars) — so WHERE spans go and HOW MUCH is sampled is tunable with
+# no rebuild; only toggling instrumentation on/off touches this line. require-in-the-
+# middle patches the real node_modules (Backstage does NOT bundle its deps — it ships a
+# skeleton + `yarn workspaces focus --production`, so the http/pg/express libs stay
+# require()'d and are patchable). Baked here (not in Helm NODE_OPTIONS) so it can COEXIST
+# with --no-node-snapshot: a Helm-set NODE_OPTIONS would REPLACE this value wholesale and
+# silently drop --no-node-snapshot, breaking the scaffolder's isolated-vm.
+ENV NODE_OPTIONS="--no-node-snapshot --require @opentelemetry/auto-instrumentations-node/register"
 
 # Manifests (yarn.lock + root package.json + each workspace package.json from the skeleton
 # tarball). No yarn command runs in this stage anymore (see HARDENING note above) — these
