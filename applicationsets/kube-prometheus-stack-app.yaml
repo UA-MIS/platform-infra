@@ -206,6 +206,19 @@ spec:
                         matchLabels:
                           app.kubernetes.io/name: mariadb
                       topologyKey: kubernetes.io/hostname
+            # Allow scheduling onto the roomy OptiPlex control-plane nodes (see the
+            # preferredDuringScheduling steering above — under memory pressure this
+            # is where we WANT Prometheus to land). The control-plane nodes carry a
+            # PreferNoSchedule taint (capstone.io/control-plane=true, verified live
+            # via `kubectl get node capstone-n1 -o jsonpath='{.spec.taints}'`) so
+            # they stay soft-repellent to everything else by default; this
+            # toleration just opts single-replica, stateless-relative-to-quorum
+            # Prometheus back in.
+            tolerations:
+              - key: capstone.io/control-plane
+                operator: Equal
+                value: "true"
+                effect: PreferNoSchedule
             # TSDB on a Ceph RBD PVC (replica-3, survives node loss; same SC as
             # Harbor/Vault). 20Gi holds ~15d of platform-scale metrics comfortably.
             storageSpec:
