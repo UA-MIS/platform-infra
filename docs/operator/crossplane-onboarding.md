@@ -100,7 +100,7 @@ real **least-privilege** credential against the live sealed-secrets controller:
 | Secret (crossplane-system) | Scope to grant — NOT admin |
 | --- | --- |
 | `github-provider-creds` | the existing `ua-mis-backstage` GitHub App (App ID 4097147, install 141394298) |
-| `harbor-provider-creds` | a Harbor **provisioner robot** — project + robot + member admin ONLY (derive from harbor-admin; do **not** use harbor-admin itself) |
+| `harbor-provider-creds` | a Harbor **provisioner robot** — project + robot + member admin, **plus `repository:push/pull/read/list`, `artifact:read/list`, `artifact-addition:read`** (derive from harbor-admin; do **not** use harbor-admin itself). ⚠ The repository/artifact grants are load-bearing: Harbor refuses to let a robot mint a child robot with wider permissions than itself, and the per-team CI push/pull robots this Composition mints need exactly those actions — omitting them 403s every `RobotAccount` create with "permission scope is invalid" and silently breaks tenant onboarding (2026-07-11 incident; full root cause + exact grant JSON + reseal runbook in `creds/README.md` § Harbor CI-push robot-minting scope) |
 | `vault-provider-creds` | a Vault token with the `tenant-provisioner` policy (write `sys/policies/acl/tenant-*` + `auth/kubernetes/role/tenant-*`, plus `auth/token/create` for provider-vault's per-call child token) |
 
 Reseal pattern (from `creds/README.md`, fish-safe — build the JSON in a file, no

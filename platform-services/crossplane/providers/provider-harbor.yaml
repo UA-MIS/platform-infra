@@ -9,8 +9,19 @@
 # capture): the PRIMARY path is viable, the mint-Job fallback is NOT needed.
 #
 # Auth: a least-privilege Harbor PROVISIONER ROBOT (project + robot + member admin,
+# PLUS repository:push/pull/read/list + artifact:read/list + artifact-addition:read
+# — the exact scope the per-team CI robots below need Harbor to let it delegate;
 # NOT harbor-admin), via config/providerconfig-harbor.yaml. Derive it once from
 # harbor-admin and seal it (creds/harbor-provisioner-creds-sealed.yaml).
+#
+# ⚠ Harbor enforces "creator permissions ⊇ child permissions" on robot create
+# (`POST /robots` 403s "permission scope is invalid" otherwise). Omitting the
+# repository/artifact grants above breaks EVERY tenant's harbor-robot-push /
+# harbor-robot-pull RobotAccount below, silently — the RobotAccount MR just sits
+# Ready=False forever, and the CI push credential it should produce never
+# materializes (2026-07-11 incident; full writeup + exact grant JSON + a
+# recreate+reseal runbook — Harbor's robot-permission PUT cannot edit in place,
+# confirmed live — in creds/README.md § Harbor CI-push robot-minting scope).
 #
 # ⚠ Provider maturity (ADR-031 Consequences): community provider, v0.1.1. Pin and
 # watch. The unified Harbor v2.15 robot API (memory harbor-robots-unified-api) is
