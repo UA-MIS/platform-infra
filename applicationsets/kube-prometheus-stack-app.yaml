@@ -137,18 +137,31 @@ spec:
             podMonitorSelectorNilUsesHelmValues: false
             probeSelectorNilUsesHelmValues: false
             ruleSelectorNilUsesHelmValues: false
-            # Resource-reclaim (VPA-driven, task follow-up) — the 400Mi/1800Mi staged
-            # above did NOT land: live RSS is ~1729Mi (`kubectl top`), 96% of the
-            # 1800Mi limit and 4.3x the 400Mi request — an active OOMKill risk, not
-            # over-provisioning. (Goldilocks/VPA itself can't see this StatefulSet:
-            # it's owned by the `Prometheus` CRD, which VPA's controller-fetcher
-            # reports ConfigUnsupported/NoPodsMatched for — a genuine platform gap,
-            # not fixable by a namespace label; `kubectl top` is ground truth here.)
-            # Raise BOTH request (to actual + ~15% headroom) and the limit ceiling
-            # (to give burst room above the new request) rather than trimming.
+            # ── OOM-headroom bump (paired with the laptop-01 nodeSelector below) ──
+            # The 2048Mi/2560Mi pair below was chronically near-OOM: live RSS was
+            # ~2418Mi (`kubectl top`), ~94% of the 2560Mi limit — one WAL-replay or
+            # compaction spike from an OOMKill. Now that this pod is PINNED to
+            # laptop-01 (nodeSelector below) — a ~16GB / 14.72GiB-allocatable box
+            # with ~11GiB of that still unreserved — we have room to give it real
+            # headroom instead of running it on the edge.
+            #   request 3Gi  — reserves comfortably above the ~2.4Gi steady-state
+            #                  working set; steady-state RSS sits ~600Mi under the
+            #                  reservation so the scheduler protects it from evict.
+            #   limit   6Gi  — a burst ceiling for WAL replay / block compaction,
+            #                  ~2.5x steady state. Deliberately NOT larger: laptop-01
+            #                  is ALSO in the CI build pool (capstone.io/pool=build)
+            #                  where Kaniko bursts to ~6Gi. Sizing prom's limit at 6Gi
+            #                  keeps the worst-case double-peak (prom 6Gi + a 6Gi
+            #                  Kaniko build + ~3.4Gi node baseline ≈ 15Gi) within the
+            #                  node's physical ceiling rather than guaranteeing an OOM.
+            #                  Steady state the node sits ~25% used, so this is slack,
+            #                  not overcommit that bites day to day.
+            # (Goldilocks/VPA still can't see this StatefulSet — it's owned by the
+            # `Prometheus` CRD, ConfigUnsupported/NoPodsMatched — so `kubectl top` is
+            # ground truth here, not a VPA target.)
             resources:
-              requests: { cpu: 128m, memory: 2048Mi }
-              limits: { memory: 2560Mi }
+              requests: { cpu: 128m, memory: 3Gi }
+              limits: { memory: 6Gi }
             # ── SCHEDULING HARDENING (noisy-neighbor incident follow-up) ──────────
             # mac-debian-01 (4c/8GB) was simultaneously running the Vault raft
             # LEADER (vault-0), this Prometheus pod (2048-2560Mi mem request/limit,
@@ -219,6 +232,34 @@ spec:
                 operator: Equal
                 value: "true"
                 effect: PreferNoSchedule
+            # ── HARD PIN to laptop-01 (OOM-relief follow-up) ──────────────────────
+            # Pin this single-replica Prometheus onto laptop-01, a ~16GB /
+            # 14.72GiB-allocatable worker with ~11GiB still unreserved — the roomiest
+            # eligible box for the 3Gi/6Gi memory profile above. `nodeSelector` is a
+            # HARD filter (not the soft `affinity` steering above), so the pod lands
+            # here deterministically.
+            #
+            # The #316 `affinity:` (soft anti-affinity away from Vault/CNPG/MariaDB)
+            # and the control-plane `tolerations:` above are KEPT ON PURPOSE even
+            # though this hard nodeSelector makes them inert while the pin is in
+            # place (with exactly one candidate node the soft preferences never come
+            # into play, and laptop-01 carries no control-plane taint). Retaining
+            # them means that when the pin is later removed — see the caveat below —
+            # #316's intended soft-steering behaviour is restored by that single
+            # deletion, with no second edit needed. They cost nothing to leave here.
+            #
+            # ⚠ TEMPORARY-NODE CAVEAT: laptop-01 is a stopgap worker. A hostname pin
+            #   means if laptop-01 drains/leaves the cluster, this pod goes Pending
+            #   (its Ceph RBD PVC is RWO/replica-3 and survives node loss, so the
+            #   DATA is safe — but nothing will schedule the pod until a node named
+            #   laptop-01 exists again OR this selector is changed/removed). When the
+            #   permanent mini-PC arrives: either (a) repin — swap this hostname to
+            #   the new node's `kubernetes.io/hostname`, sync, pod moves; or (b) drop
+            #   this `nodeSelector:` block entirely to hand scheduling back to the
+            #   #316 soft-affinity + toleration (retained above). Either is a one-line
+            #   change; the PVC reattaches wherever the pod next lands.
+            nodeSelector:
+              kubernetes.io/hostname: laptop-01
             # TSDB on a Ceph RBD PVC (replica-3, survives node loss; same SC as
             # Harbor/Vault). 20Gi holds ~15d of platform-scale metrics comfortably.
             storageSpec:
