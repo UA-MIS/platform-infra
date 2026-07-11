@@ -55,6 +55,34 @@ spec:
               but NEW/refreshed secret sync is paused. Check `kubectl -n vault get pods`
               and unseal/recover per artifacts/design/vault-dr-runbook.md.
 
+        # ── (a2) Transit auto-unseal backend sealed ───────────────────────────
+        # The main Vault (a) auto-unseals against a SEPARATE single-node, manual-
+        # Shamir unsealer Vault (`vault-unsealer` ns). That unsealer is NOT covered
+        # by (a) — and when it seals (e.g. after a node-churn restart) the main Vault
+        # stays UP and serving (it holds its key in memory) so NOTHING in (a) fires.
+        # But the main Vault can no longer seal-WRAP new data: transit/encrypt returns
+        # 503 "Vault is sealed", which silently breaks `raft snapshot save` (the
+        # SHA256SUMS.sealed file can't be produced) AND means any main-Vault pod
+        # restart can no longer auto-unseal — a latent full-platform outage. A sealed
+        # Vault reports its pod not-Ready, so 0 ready replicas of the unsealer STS is
+        # the signal. This gap let the unsealer sit sealed for 5h+ unnoticed.
+        - alert: VaultUnsealerSealed
+          expr: kube_statefulset_status_replicas_ready{namespace="vault-unsealer", statefulset="vault-unsealer"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Vault transit auto-unseal backend is sealed or down"
+            description: >-
+              The vault-unsealer StatefulSet has 0 ready replicas for 5m — the transit
+              auto-unseal backend is SEALED or down. The main Vault keeps serving
+              already-unsealed, but (1) `raft snapshot save` fails with 'unable to read
+              SHA256SUMS.sealed file' (no fresh DR backup), and (2) any main-Vault pod
+              restart can NO LONGER auto-unseal → latent platform-wide outage. The
+              unsealer is single-node manual-Shamir: unseal it by hand per
+              artifacts/design/vault-dr-runbook.md (`kubectl -n vault-unsealer exec -it
+              vault-unsealer-0 -- vault operator unseal`, 3 key shares).
+
         # 3-node Raft HA (this PR): a degraded-but-serving state is now possible —
         # 1 or 2 of 3 pods down while the cluster still has quorum via the rest.
         # This is warning (not critical): secret sync is NOT interrupted, but the
@@ -92,9 +120,12 @@ spec:
             description: >-
               A vault-raft-snapshot job has FAILED — no fresh Vault DR snapshot is being
               written to the vault-snapshots PVC. A Vault data loss right now would be
-              unrecoverable past the last good snapshot. Common cause: the `snapshot`
-              k8s-auth role is missing (`invalid role name "snapshot"` at login) —
-              re-run platform-services/external-secrets/vault-policies/snapshot-role.sh
+              unrecoverable past the last good snapshot. Common causes: (1) the
+              transit auto-unseal backend is SEALED — error 'unable to read
+              SHA256SUMS.sealed file' — see the VaultUnsealerSealed alert and unseal
+              vault-unsealer-0 (runbook); (2) the `snapshot` k8s-auth role is missing
+              (`invalid role name "snapshot"` at login) — re-run
+              platform-services/external-secrets/vault-policies/snapshot-role.sh
               (runbook §D). Inspect `kubectl -n vault logs job/<failed-job>`.
 
     # ── (b) External Secrets Operator: store not Ready / sync error ────────────
