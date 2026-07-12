@@ -151,10 +151,11 @@ spec:
                     mountPath: /home/runner/pod-templates
                     readOnly: true
                 resources:
-                  # RESOURCE KNOB — LIMIT raised 2Gi -> 6Gi to match the Kaniko WORKLOAD
+                  # RESOURCE KNOB — LIMIT raised to 8Gi (was 6Gi, which still OOM-killed
+                  # the larger node_modules build — PR #329) to match the Kaniko WORKLOAD
                   # step-pod ceiling (platform-services/arc/hook-template.yaml), so
-                  # nothing on this scaleset is capped below the ~6Gi a Backstage yarn
-                  # build needs. REQUEST deliberately left low (not raised to ~4Gi):
+                  # nothing on this scaleset is capped below the memory a Backstage yarn
+                  # build peaks at. REQUEST is a MODEST 1Gi (not raised to ~4Gi):
                   # this listener/orchestration pod's real usage is a few hundred Mi, and
                   # nodeSelector now pins EVERY pod this scaleset creates — this runner
                   # pod, the job-container pod (checkout/resolve, containerMode:
@@ -172,12 +173,15 @@ spec:
                   # defeating the fix (laptop-01's ~14Gi has headroom for that sum, but
                   # requests still must fit the SMALLEST pool member since nodeSelector
                   # doesn't guarantee which node). Keeping requests low + limits high
-                  # (burstable) lets the Kaniko step-pod actually USE up to 6Gi at
-                  # runtime (fixing the OOM, which was caused by NO limit at all, not by
-                  # an under-provisioned request) without over-committing either pool
-                  # node's scheduling budget.
-                  requests: { cpu: "250m", memory: "512Mi" }
-                  limits:   { cpu: "2",    memory: "6Gi" }
+                  # (burstable) lets the Kaniko step-pod actually USE up to 8Gi at
+                  # runtime (fixing the OOM, which at 6Gi still killed the larger build,
+                  # not an under-provisioned request) without over-committing either pool
+                  # node's scheduling budget (1Gi + 2Gi job + 2Gi kaniko = 5Gi worst-case
+                  # sum on db1 ~7.5Gi allocatable). CPU is left unchanged — memory is the
+                  # fix; the runner is not CPU-bound and the Kaniko step-pod keeps its
+                  # (unbounded) CPU so builds are not throttled.
+                  requests: { cpu: "250m", memory: "1Gi" }
+                  limits:   { cpu: "2",    memory: "8Gi" }
             volumes:
               # The hook template (arc-hook-template ConfigMap, key `content`) the
               # runner passes to the k8s container hook for every job-step pod.

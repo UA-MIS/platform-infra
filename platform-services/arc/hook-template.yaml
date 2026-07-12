@@ -100,18 +100,26 @@ data:
           # per the OOM investigation above the executor invocation in
           # backstage-process-build-push.yaml) — it was previously UNSET (no limit at
           # all), letting the in-memory snapshot/cache grow until the node OOM-killed
-          # the pod. LIMIT is raised to 6Gi here (matches the runner pod's ceiling in
-          # arc-runner-scaleset-app.yaml) so that pod can actually use the memory it
-          # needs. REQUEST is kept low (not ~4Gi): since this same block also sizes the
-          # much-lighter job-container pod, and BOTH pods (plus the runner pod) now
-          # land on a pool node (nodeSelector below — db1 ~7.5Gi allocatable or
-          # laptop-01 ~14Gi; the scheduler decides, not guaranteed to spread) and can
-          # be co-resident, summing ~4Gi requests across 2-3 pods would overcommit the
-          # SMALLEST pool member's (db1's) scheduling budget and Pend the very pod this
-          # fix is for. See the matching note in arc-runner-scaleset-app.yaml.
+          # the pod. LIMIT is raised to 8Gi here (6Gi still OOM-killed the larger
+          # node_modules build — see PR #329; matches the runner pod's ceiling in
+          # arc-runner-scaleset-app.yaml) so that pod can burst to the memory a Backstage
+          # yarn+tsc+full-fs-snapshot build peaks at, with headroom (the operator has
+          # confirmed RAM is not the constraint). REQUEST is a MODEST 2Gi (not ~4Gi):
+          # this same block also sizes the much-lighter job-container pod, and BOTH pods
+          # (plus the runner pod) now land on a pool node (nodeSelector below — db1
+          # ~7.5Gi allocatable or laptop-01 ~14Gi; the scheduler decides, not guaranteed
+          # to spread) and can be co-resident. Worst case all 3 on db1 sums 2Gi + 2Gi +
+          # 1Gi = 5Gi of admission requests < db1's ~7.5Gi allocatable, so nothing Pends;
+          # a 2Gi request (vs the old 512Mi) also makes this heavy pod a LESS likely
+          # kernel-OOM victim under node pressure (protected up to its request). NOTE on
+          # db1: an 8Gi LIMIT exceeds db1's ~7.5Gi allocatable, so a build that lands on
+          # db1 can never actually reach 8Gi — it is effectively node-capped there and
+          # only one heavy build fits at a time; that is acceptable (maxRunners is small,
+          # builds are serial in practice, and laptop-01 ~14Gi has full 8Gi headroom).
+          # See the matching note in arc-runner-scaleset-app.yaml.
           resources:
-            requests: { memory: "512Mi" }
-            limits:   { memory: "6Gi" }
+            requests: { memory: "2Gi" }
+            limits:   { memory: "8Gi" }
           volumeMounts:
             - name: harbor-push
               mountPath: /kaniko/.docker
