@@ -3,8 +3,12 @@
 # promote-to-prod workflow_dispatch (a human click), NOT an ArgoCD manual sync —
 # ArgoCD auto-syncs whatever this overlay's images[].newTag says, and nothing
 # writes that value except that workflow (promotion.yaml: prod trigger =
-# manual:promote-to-prod). Values are explicit here for clarity even though the
-# trigger/gate live in promotion.yaml. Image seam: prod=explicitly-promoted semver tag.
+# manual:promote-to-prod) — with ONE exception: the FIRST-deploy seed. This overlay
+# ships a v0.0.0 placeholder sentinel; on the FIRST push-to-main build, bump-dev's
+# seed-initial-envs.sh rewrites it (ONLY while still at the sentinel) to the just-built
+# image so prod is green out of the box. After that one-time seed it is promotion-gated
+# as described — ongoing pushes bump ONLY dev. Values are explicit here for clarity even
+# though the trigger/gate live in promotion.yaml. Image seam: prod=explicitly-promoted tag.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: ${{ values.team }}-prod
@@ -52,10 +56,14 @@ images:
 {%- if c.buildType != "mobile-artifact" %}
   - name: ${{ values.appName }}-${{ c.name }}
     newName: harbor.capstone.uamishub.com/${{ values.team }}/${{ values.appName }}-${{ c.name }}
-    # Bare semver (NO 'v' prefix) — matches what CI pushes: resolve-image.sh strips
-    # the git tag's 'v' (refs/tags/v0.1.0 -> image tag 0.1.0). A v-prefixed newTag
-    # here would reference an image CI never pushed -> ImagePullBackOff.
-    newTag: 0.1.0
+    # FIRST-DEPLOY PLACEHOLDER SENTINEL. Do NOT hand-set a semver here: a bare
+    # semver like 0.1.0 references an image CI has NOT built on a brand-new tenant
+    # -> ImagePullBackOff out of the box (the bug this replaces). On the first CI run
+    # seed-initial-envs.sh points this at the first REAL built image so prod is green
+    # out of the box too. Thereafter NOTHING writes this overlay except the
+    # promote-to-prod gate (promote.sh reads staging's live tag and writes it here) —
+    # ongoing pushes bump ONLY dev, so prod is never auto-deployed on a commit.
+    newTag: v0.0.0
 {%- endif %}
 {%- endfor %}
 # Prod runs more replicas; quota ceiling is higher (§3.2).

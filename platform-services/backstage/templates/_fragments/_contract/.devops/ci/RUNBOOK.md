@@ -109,8 +109,25 @@ Platform-managed (part of the immutable `.devops` contract). Triggers and output
 
 The workflow runs three jobs: **resolve** (one tag + the per-component build matrix via
 `resolve-components.sh`), **build-and-push** (a MATRIX — one Kaniko build per component),
-and **bump-dev** (one commit bumping every component's dev tag). One image is built and
-pushed PER component (`<registry>/<app>-<component>:<tag>`).
+and **bump-dev** (bumps dev to the built tag every push, and on the FIRST build only ALSO
+seeds staging + prod — see "First deploy" below). One image is built and pushed PER
+component (`<registry>/<app>-<component>:<tag>`).
+
+### First deploy — green in all three envs (the seed)
+
+A brand-new tenant's `staging` + `prod` overlays ship a **`v0.0.0` placeholder sentinel** —
+an image no build has produced yet. (Pinning a real-looking `0.1.0` there was the old bug:
+nobody has tagged `v0.1.0` on a fresh repo, so staging/prod sat in ImagePullBackOff.) On the
+**first** successful push-to-main build, the `bump-dev` job runs
+[`seed-initial-envs.sh`](./seed-initial-envs.sh), which — **only while an overlay still reads
+the sentinel** — points staging + prod at the SAME just-built image `dev` got. So the first
+CI run brings **all three environments up green out of the box**, no release required.
+
+It is a **one-time initial condition, not auto-prod**: once staging/prod hold a real tag
+(`!= v0.0.0`), the seed is a no-op, so **every subsequent push bumps ONLY `dev`**. From then
+on staging/prod advance **solely via the promote-to-prod gate** (`promote.sh` — below): a
+push never auto-deploys to prod. The seed reuses `bump-image.sh` (the one write path) and its
+`[skip ci]` commit, so it never re-triggers the workflow.
 
 - **runs-on: `ua-mis-kaniko`** — the ARC `gha-runner-scale-set` name (the scale-set
   model selects runners by set name). CI ↔ workflow contract with the platform
@@ -131,11 +148,14 @@ pushed PER component (`<registry>/<app>-<component>:<tag>`).
 
 ### The tag IS the promotion mechanism (D-030 prod-gate)
 
-One `vX.Y.Z` git tag builds ONE **immutable** `:X.Y.Z` image that BOTH the staging
-and prod overlays pin — staging auto-syncs it, **prod is the manual gate** (§4).
-`main` pushes build a **mutable** `:<short-sha>` dev image. There is no second
-promotion artifact: the git tag names both the image and (via `bump-image.sh`) the
-manifest revision. The trigger→env→tag mapping is computed by
+One `vX.Y.Z` git tag builds ONE **immutable** `:X.Y.Z` image; `main` pushes build a
+**mutable** `:<git-describe>` dev image. There is no second promotion artifact: the git
+tag names both the image and (via `bump-image.sh`) the manifest revision. After the
+first-deploy seed (above), **staging and prod do NOT auto-track a tag** — nothing writes
+their overlays except the **promote-to-prod gate** (`promote.sh`, run via the
+`promote-to-prod` workflow_dispatch): a human clicks to re-point `staging`→`prod` (or
+`dev`→`staging`) at whatever tag is CURRENTLY LIVE upstream. So a `vX.Y.Z` release builds
+the immutable image, and a human promotes it — a push never auto-deploys prod. The trigger→env→tag mapping is computed by
 `.devops/ci/resolve-image.sh` (reads `promotion.yaml`) and unit-tested by
 `.devops/ci/resolve-image.test.sh` — the SAME resolver, no drift.
 

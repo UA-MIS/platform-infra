@@ -1,6 +1,12 @@
-# staging overlay — tracks release tags, auto-synced by the env ApplicationSet
-# (§2.3). Image seam: staging follows the pushed semver tag (promotion.yaml:
-# staging=tags/v*).
+# staging overlay — auto-synced by the env ApplicationSet (§2.3). Image seam:
+# FIRST DEPLOY = green out of the box, then promotion-gated. This overlay ships a
+# v0.0.0 PLACEHOLDER SENTINEL (an image no build has produced yet). On the FIRST
+# successful push-to-main build, CI's bump-dev job runs seed-initial-envs.sh, which
+# — ONLY while this still reads the sentinel — rewrites it to the just-built dev
+# image so staging comes up green alongside dev + prod with no release required.
+# Thereafter it holds a real tag and is NEVER touched by a push again: staging
+# advances ONLY via the promote-to-prod gate (promote.sh writes an env's live tag
+# here). See .devops/ci/seed-initial-envs.sh + .devops/ci/RUNBOOK.md.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: ${{ values.team }}-staging
@@ -48,10 +54,13 @@ images:
 {%- if c.buildType != "mobile-artifact" %}
   - name: ${{ values.appName }}-${{ c.name }}
     newName: harbor.capstone.uamishub.com/${{ values.team }}/${{ values.appName }}-${{ c.name }}
-    # Bare semver (NO 'v' prefix) — matches what CI pushes: resolve-image.sh strips
-    # the git tag's 'v' (refs/tags/v0.1.0 -> image tag 0.1.0). A v-prefixed newTag
-    # here would reference an image CI never pushed -> ImagePullBackOff.
-    newTag: 0.1.0
+    # FIRST-DEPLOY PLACEHOLDER SENTINEL. Do NOT hand-set a semver here: a bare
+    # semver like 0.1.0 references an image CI has NOT built on a brand-new tenant
+    # (nobody has tagged v0.1.0 yet) -> ImagePullBackOff out of the box (the bug this
+    # replaces). Leaving it at the v0.0.0 sentinel lets seed-initial-envs.sh point it
+    # at the first REAL built image on the first CI run. A later promote (dev/staging
+    # -> here) or release overwrites it with the tag being shipped.
+    newTag: v0.0.0
 {%- endif %}
 {%- endfor %}
 replicas:

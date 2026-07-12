@@ -166,10 +166,18 @@ jobs:
           PUSH: ${{ needs.resolve.outputs.PUSH }}
           DOCKER_CONFIG_DIR: ${{ env.DOCKER_CONFIG_DIR }}
 
-  # ---- 3) bump-dev: ONE commit bumping ALL components -------------------------
+  # ---- 3) bump-dev: bump dev every push + FIRST-DEPLOY seed staging/prod -------
   # GitOps image-bump (D-030): after all component images are pushed, rewrite the dev
   # overlay so EVERY component's images[].newTag = the built tag, commit [skip ci], push.
   # ArgoCD syncs all components into <team>-dev. Runs ONCE (not per matrix leg).
+  #
+  # FIRST-DEPLOY GREEN-EVERYWHERE (Deploy Model A initial condition): staging + prod ship a
+  # v0.0.0 PLACEHOLDER sentinel that no build has produced (an unbuilt 0.1.0 was the old
+  # ImagePullBackOff bug). After bumping dev, this job runs seed-initial-envs.sh, which
+  # points staging + prod at THIS SAME just-built image — but ONLY while they still carry
+  # the sentinel (never bumped/promoted). So the FIRST build brings all three envs up green;
+  # every SUBSEQUENT push is a no-op there and bumps ONLY dev. staging/prod then advance
+  # solely via the promote-to-prod gate. This is NOT auto-prod-on-every-push.
   #
   # SECURITY (least privilege — SEPARATE job): `if:` restricts to a real push to main
   # (never pull_request, so untrusted PR code can't reach the write token); job-scoped
@@ -196,7 +204,7 @@ jobs:
           ref: main
           fetch-depth: 0
           persist-credentials: true
-      - name: Bump dev overlay (ALL components) -> built tag + commit + push
+      - name: Bump dev (always) + seed staging/prod on first deploy -> commit + push
         env:
           TAG: ${{ needs.resolve.outputs.TAG }}
           GIT_AUTHOR_NAME: ua-mis-ci
@@ -207,5 +215,14 @@ jobs:
           set -eu
           # CONSUME the resolve job's TAG (no recompute). bump-image.sh (COMMIT=1) sets
           # newTag on EVERY component's images[] entry + commits with "[skip ci]".
+          # 1) dev — continuous: every push to main points dev at the just-built image.
           COMMIT=1 sh .devops/ci/bump-image.sh dev "${TAG}"
+          # 2) FIRST DEPLOY ONLY — seed staging + prod at the SAME image so a brand-new
+          #    tenant is green in all three envs out of the box. seed-initial-envs.sh is a
+          #    no-op once they hold a real tag (past the v0.0.0 sentinel), so later pushes
+          #    bump ONLY dev and staging/prod stay promotion-gated (promote-to-prod). It
+          #    reuses bump-image.sh (COMMIT=1 -> a [skip ci] commit per seeded env).
+          COMMIT=1 sh .devops/ci/seed-initial-envs.sh "${TAG}"
+          # 3) ONE push for whatever the two steps committed (all commits carry [skip ci]
+          #    so this push does NOT re-trigger the workflow — no bump loop).
           git push origin HEAD:main
