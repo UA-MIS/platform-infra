@@ -156,6 +156,20 @@ const EXPRESS = [
   { path: 'skeleton/src/index.ts', content: "const app = '${{ values.appName }}'\n" },
 ];
 
+/**
+ * A realistic compiled-Python bytecode body: the .pyc magic header (which contains NUL
+ * bytes) followed by the exact `{%(py2)s = %(py0)s.status_code` pattern pytest's
+ * assertion-rewrite bakes into test .pyc files. This is precisely what a stray committed
+ * __pycache__/*.pyc under a fragment skeleton contains, and the `{%` bytes are what crash
+ * nunjucks ("tag name expected") when the file is (wrongly) templated.
+ */
+const PYC_BYTES = Buffer.concat([
+  Buffer.from([0x16, 0x0d, 0x0d, 0x0a, 0x00, 0x00, 0x00, 0x00]), // .pyc magic + NUL header
+  Buffer.from('assert response.status_code == 200\n', 'utf8'),
+  Buffer.from('{%(py2)s = %(py0)s.status_code\n', 'utf8'),
+  Buffer.from([0x00]),
+]);
+
 describe('capstone:compose-project', () => {
   const mockDir = createMockDirectory();
   afterEach(() => {
@@ -371,6 +385,41 @@ describe('capstone:compose-project', () => {
     expect(deploymentCount).toBe(2);
     expect(rendered).not.toContain('kind: Rollout');
     expect(rendered).not.toContain('setWeight: 25');
+  });
+
+  it('copies a binary fragment file (a committed .pyc) byte-for-byte instead of nunjucks-rendering it', async () => {
+    // ROOT-CAUSE regression for the "Python single-webapp template fails" report: a stray
+    // committed __pycache__/*.pyc under a fragment skeleton is BINARY and its body embeds
+    // `{%` (pytest's assertion-rewrite format strings), so nunjucks threw
+    // "tag name expected" on the compose step. The action must detect binary content (NUL
+    // byte) / the __pycache__ path and ship it VERBATIM, never through env.renderString.
+    const fastapiWithPyc: Entry[] = [
+      ...asEntries(FASTAPI),
+      { path: 'skeleton/app/__pycache__/main.cpython-314.pyc', content: async () => PYC_BYTES },
+    ];
+    const reader = treeReader({ '/_contract': asEntries(CONTRACT), '/backend/fastapi': fastapiWithPyc });
+    const action = createComposeProjectAction({ reader });
+    const ws = mockDir.resolve('wspyc');
+    await fs.ensureDir(ws);
+    const ctx = createMockActionContext({
+      input: {
+        ...common,
+        projectType: 'web' as const,
+        layout: 'single' as const,
+        singleFragment: 'backend/fastapi',
+        database: 'none' as const,
+      },
+      workspacePath: ws,
+    });
+
+    // Pre-fix this REJECTS with a nunjucks "tag name expected"; post-fix it resolves.
+    await expect(action.handler(ctx)).resolves.toBeUndefined();
+
+    // The .pyc was copied byte-for-byte — NUL + `{%` bytes preserved exactly, not rendered.
+    const written = await fs.readFile(path.join(ws, 'app/app/__pycache__/main.cpython-314.pyc'));
+    expect(written.equals(PYC_BYTES)).toBe(true);
+    // The adjacent real .py source still rendered with ${{ }} substitution (text path intact).
+    expect(await fs.readFile(path.join(ws, 'app/app/main.py'), 'utf8')).toBe('APP = "notes-api"\n');
   });
 
   it('fails closed on a bad appName', async () => {

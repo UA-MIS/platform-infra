@@ -1,3 +1,10 @@
-# Python bytecode from the wizard compose harnesses (_fragments/_tools/*.py).
+# Python bytecode + test caches from the wizard compose harnesses
+# (_fragments/_tools/*.py) and the language-fragment skeletons (e.g.
+# _fragments/backend/fastapi/skeleton). These must never be committed: the
+# compose action (capstone:compose-project) nunjucks-renders every non-verbatim
+# fragment file, and a binary .pyc containing `{%` bytes crashes the render
+# ("tag name expected"), breaking Python scaffolds. See composeProject.ts.
 __pycache__/
 *.pyc
+*.pyo
+.pytest_cache/
