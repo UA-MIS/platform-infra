@@ -92,8 +92,11 @@ spec:
                     mountPath: /home/runner/pod-templates
                     readOnly: true
                 resources:
-                  requests: { cpu: "250m", memory: "512Mi" }
-                  limits:   { cpu: "2",    memory: "2Gi" }
+                  # Mirror the shared scaleset (applicationsets/arc-runner-scaleset-app.yaml):
+                  # memory LIMIT 8Gi so a per-team Kaniko build is not OOM-capped; request
+                  # kept modest (1Gi) so co-resident build pods fit the smallest pool node.
+                  requests: { cpu: "250m", memory: "1Gi" }
+                  limits:   { cpu: "2",    memory: "8Gi" }
             volumes:
               # Per-team hook template ConfigMap (per-team/hook-template.template.yaml,
               # rendered → arc-hook-template-__TEAM__).

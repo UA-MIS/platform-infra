@@ -58,6 +58,15 @@ data:
             - harbor.capstone.uamishub.com
       containers:
         - name: "$job"
+          # Mirror the shared hook-template.yaml: "$job" sizes BOTH the job-container pod
+          # and the Kaniko step pod. Memory LIMIT 8Gi so the per-team Kaniko build can
+          # burst to the memory a yarn+tsc+snapshot build peaks at (was previously UNSET —
+          # no limit — which let the in-memory snapshot grow until the node OOM-killed the
+          # pod); MODEST 2Gi request keeps co-resident build pods within the smallest pool
+          # node's (db1 ~7.5Gi) scheduling budget.
+          resources:
+            requests: { memory: "2Gi" }
+            limits:   { memory: "8Gi" }
           volumeMounts:
             - name: harbor-push
               mountPath: /kaniko/.docker
