@@ -116,6 +116,8 @@
   }
   .app-card .name { font-weight: 700; margin-bottom: 4px; }
   .app-card .url { font-size: 0.85rem; color: var(--text-dim); word-break: break-all; }
+  .apps-empty { font-size: 0.95rem; color: var(--text-dim); margin: 0; }
+  [hidden] { display: none !important; }
 
   .cta {
     margin-top: 56px;
@@ -162,15 +164,54 @@
       </p>
     </div>
 
+    <!--
+      "Live on the platform" is rendered DYNAMICALLY from live tenants — no hardcoded
+      cards. The list comes from /data/tenants.json (same-origin, no CORS, no auth),
+      published by the portal-tenants-refresh service from the live PROD Ingresses.
+      Both the grid and the empty message start hidden; the script below reveals
+      exactly one after the fetch resolves (so there is no flash). Users without JS
+      see the <noscript> line.
+    -->
     <section class="apps">
       <h2>Live on the platform</h2>
-      <div class="app-grid">
-        <a class="app-card" href="https://swamiapp.capstone.uamishub.com" target="_blank" rel="noopener">
-          <div class="name">Swami</div>
-          <div class="url">swamiapp.capstone.uamishub.com</div>
-        </a>
-      </div>
+      <div class="app-grid" id="app-grid" hidden></div>
+      <p class="apps-empty" id="apps-empty" hidden>No student apps are live right now — check back soon.</p>
+      <noscript><p class="apps-empty">Enable JavaScript to see the live student apps.</p></noscript>
     </section>
+    <script>
+      (function () {
+        var grid = document.getElementById('app-grid');
+        var empty = document.getElementById('apps-empty');
+        // Only ever link to an https:// host under the platform domain — defense in
+        // depth for a page rendered from a fetched list on a PUBLIC (pre-login) page.
+        var SAFE_URL = /^https:\/\/[a-z0-9-]+(\.[a-z0-9-]+)*\.capstone\.uamishub\.com\/?$/;
+        function titleCase(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; }
+        function showEmpty() { empty.hidden = false; grid.hidden = true; }
+
+        fetch('/data/tenants.json', { cache: 'no-store' })
+          .then(function (r) { return r.ok ? r.json() : []; })
+          .then(function (list) {
+            if (!Array.isArray(list)) { list = []; }
+            var frag = document.createDocumentFragment();
+            list.forEach(function (t) {
+              if (!t || typeof t.url !== 'string' || !SAFE_URL.test(t.url)) { return; }
+              var host = t.url.replace(/^https:\/\//, '').replace(/\/$/, '');
+              var name = (typeof t.name === 'string' && t.name) ? t.name : host.split('.')[0];
+              var a = document.createElement('a');
+              a.className = 'app-card';
+              a.href = t.url; a.target = '_blank'; a.rel = 'noopener';
+              var n = document.createElement('div'); n.className = 'name'; n.textContent = titleCase(name);
+              var u = document.createElement('div'); u.className = 'url'; u.textContent = host;
+              a.appendChild(n); a.appendChild(u);
+              frag.appendChild(a);
+            });
+            if (!frag.childNodes.length) { showEmpty(); return; }
+            grid.appendChild(frag);
+            grid.hidden = false;
+          })
+          .catch(showEmpty);
+      })();
+    </script>
 
     <div class="cta">
       <a class="button" href="/internal/">Sign in with UA-MIS GitHub &rarr;</a>

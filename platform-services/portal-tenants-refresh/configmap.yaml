@@ -1,0 +1,73 @@
+# The refresher script, mounted read-only into the Job/CronJob pods.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: portal-tenants-refresh-script
+  namespace: crossplane-system
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: portal-tenants-refresh
+data:
+  refresh.sh: |
+    #!/usr/bin/env bash
+    # ------------------------------------------------------------------------
+    # Rebuild the PUBLIC "Live on the platform" list for the apex portal
+    # (capstone.uamishub.com / platform-services/portal/site/index.html).
+    #
+    # SOURCE OF TRUTH — the live PROD Ingresses of tenant apps. Every Ingress
+    # labeled `platform.capstone/env=prod` is a tenant's production, publicly
+    # routed front door (<app>.capstone.uamishub.com, emitted by the tenant
+    # ApplicationSet — see crossplane/apis/composition.yaml). That is the honest
+    # "live on the platform" signal:
+    #   * it captures BOTH Crossplane-onboarded tenants (CapstoneTenant) AND
+    #     legacy / VM apps (e.g. tenantvm) — anything actually serving in prod;
+    #   * no host derivation or claim parsing — the Ingress carries the real host;
+    #   * it self-heals on teardown (Ingress gone -> card gone next run).
+    # db-console / adminer Ingresses use `platform.capstone/component=tenant`
+    # WITHOUT an env label, so this selector excludes them automatically. dev /
+    # staging / preview Ingresses carry env=dev|staging|preview -> also excluded.
+    #
+    # OUTPUT — a compact JSON array [{name,url}] into the `portal-tenants`
+    # ConfigMap in the portal namespace. ONLY the app name and its ALREADY-PUBLIC
+    # prod URL are emitted; the apex page is served PRE-SIGN-IN, so nothing
+    # internal must ever land here.
+    # ------------------------------------------------------------------------
+    set -euo pipefail
+    export HOME=/tmp   # kubectl cache dir on the writable tmp volume (RO rootfs)
+
+    tenants_json="$(
+      kubectl get ingress --all-namespaces \
+        -l platform.capstone/env=prod -o json \
+      | jq -c '
+          [ .items[]
+            | { name: ( .metadata.labels["app.kubernetes.io/name"]
+                        // ( .spec.rules[0].host | split(".")[0] ) ),
+                url:  ( "https://" + .spec.rules[0].host ) }
+          ]
+          | unique_by(.url)
+          | sort_by(.name)
+        '
+    )"
+
+    # A transient pipeline failure yields an EMPTY string (not "[]"): never
+    # overwrite a good list with garbage — bail and leave the last value intact.
+    # An empty platform legitimately yields "[]" (length 2) and IS written, so the
+    # page shows its graceful empty state.
+    if [ -z "${tenants_json}" ]; then
+      echo "portal-tenants refresh: empty pipeline result, aborting write" >&2
+      exit 1
+    fi
+
+    echo "portal-tenants refresh -> ${tenants_json}"
+    printf '%s' "${tenants_json}" > /tmp/tenants.json
+
+    # Idempotent upsert. Same content -> no-op (no needless ConfigMap version bump,
+    # so no needless kubelet re-projection into the portal pods). Changed content ->
+    # the non-subPath mount in the portal Deployment refreshes within ~1 min, NO
+    # pod restart needed. This ConfigMap is controller-owned (NOT in any kustomize /
+    # ArgoCD app), so there is no GitOps self-heal fight over its .data.
+    kubectl create configmap portal-tenants \
+      --namespace portal \
+      --from-file=tenants.json=/tmp/tenants.json \
+      --dry-run=client -o yaml \
+      | kubectl apply -f -
