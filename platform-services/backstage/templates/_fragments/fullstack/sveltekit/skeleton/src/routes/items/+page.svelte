@@ -1,4 +1,3 @@
-{% raw %}
 <script lang="ts">
   import type { PageData } from './$types'
 
@@ -45,4 +44,3 @@
     border-radius: 6px;
   }
 </style>
-{% endraw %}
