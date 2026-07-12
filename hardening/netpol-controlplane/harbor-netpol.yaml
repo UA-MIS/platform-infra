@@ -85,6 +85,23 @@ spec:
       ports:
         - protocol: TCP
           port: 8080
+    # backstage — the VM scaffolder template (`vm-app`) runs the Backstage-side
+    # action `capstone:harbor-onboard`, which creates the tenant's Harbor project
+    # (the containerDisk home) by calling harbor-core DIRECTLY at
+    # http://harbor-core.harbor.svc:80 (pod port 8080), same as crossplane-system
+    # above. This control-plane path does NOT transit harbor.${PLATFORM_DOMAIN} ->
+    # Traefik, so the kube-system rule does not cover it — default-deny drops it and
+    # `capstone:harbor-onboard` fails `TypeError: fetch failed` / TimeoutError,
+    # stalling the VM tenant onboarding. Container tenants use the crossplane-system
+    # path above; VM tenants use this Backstage path. Scope to the core API pod port
+    # (8080) for least privilege.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: backstage
+      ports:
+        - protocol: TCP
+          port: 8080
 ---
 # --- EGRESS: DNS, intra-cluster (pods+services — reaches Dex/Traefik ClusterIPs,
 #     and Harbor's own bundled postgres/redis), apiserver (node IPs), and external
