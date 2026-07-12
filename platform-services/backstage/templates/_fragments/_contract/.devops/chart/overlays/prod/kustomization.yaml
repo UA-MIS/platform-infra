@@ -67,14 +67,28 @@ images:
 {%- endif %}
 {%- endfor %}
 # Prod runs more replicas; quota ceiling is higher (§3.2).
-replicas:
+# Per-component replica count via a JSON6902 `op: replace` (NOT the builtin `replicas:`
+# transformer, which is hard-wired to Deployment/StatefulSet/ReplicaSet/RC and ERRORS on a
+# progressive-delivery argoproj.io/Rollout — #337). Target kind is branched on the SAME
+# condition deployments.yaml uses so it always matches the rendered workload (and excludes
+# the same-named Service). Base pins replicas:1, so `replace` always has a path to hit.
+patches:
 {%- for c in values.components %}
 {%- if c.buildType != "mobile-artifact" %}
-  - name: ${{ values.appName }}-${{ c.name }}
-    count: 3
+  - target:
+{%- if values.single and values.progressiveDelivery %}
+      group: argoproj.io
+      kind: Rollout
+{%- else %}
+      kind: Deployment
+{%- endif %}
+      name: ${{ values.appName }}-${{ c.name }}
+    patch: |
+      - op: replace
+        path: /spec/replicas
+        value: 3
 {%- endif %}
 {%- endfor %}
-patches:
   - target:
       kind: Ingress
       name: ${{ values.appName }}
