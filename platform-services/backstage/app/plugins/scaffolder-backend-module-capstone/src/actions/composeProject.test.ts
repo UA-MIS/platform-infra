@@ -157,6 +157,36 @@ const EXPRESS = [
 ];
 
 /**
+ * A single-component fragment whose skeleton mixes ALL four delimiter classes in one file:
+ *   - Svelte `{#if}`/`{:else}`/`{#each}` control blocks — MUST survive verbatim (the durable
+ *     comment-delimiter fix: stock `{#` comment start ate these, which is bug #5);
+ *   - a real `${{ values.* }}` variable — MUST substitute;
+ *   - a `{% for %}` block — MUST run;
+ *   - a `{#! … !#}` comment (the NEW delimiter) — MUST be stripped;
+ *   - literal `{'{ … }'}` braces — MUST pass through untouched.
+ * This is the fixture that would have failed pre-fix and now proves no `{% raw %}` wrapper is
+ * needed for a `{#`-using framework.
+ */
+const SVELTE = [
+  { path: 'fragment.yaml', content: 'id: sveltekit\ncategory: fullstack\nslots: [single]\ndefaultPort: 8080\ningressPath: /\nneedsDB: true\nbuildType: container\ndockerfile: Dockerfile\n' },
+  {
+    path: 'skeleton/src/routes/items/+page.svelte',
+    content:
+      "<script lang=\"ts\">let appName = '${{ values.appName }}'</script>\n" +
+      '{#if data.dbError}\n' +
+      '  <p>db error</p>\n' +
+      '{:else if data.items.length === 0}\n' +
+      '  <p>none</p>\n' +
+      '{:else}\n' +
+      '  <ul>{#each data.items as item (item.id)}<li>{item.name}</li>{/each}</ul>\n' +
+      '{/if}\n' +
+      '{#! this comment must vanish !#}\n' +
+      '{% for c in values.components %}<span>${{ c.name }}</span>{% endfor %}\n' +
+      "literal={'{ \"name\": \"...\" }'}\n",
+  },
+];
+
+/**
  * A realistic compiled-Python bytecode body: the .pyc magic header (which contains NUL
  * bytes) followed by the exact `{%(py2)s = %(py0)s.status_code` pattern pytest's
  * assertion-rewrite bakes into test .pyc files. This is precisely what a stray committed
@@ -420,6 +450,40 @@ describe('capstone:compose-project', () => {
     expect(written.equals(PYC_BYTES)).toBe(true);
     // The adjacent real .py source still rendered with ${{ }} substitution (text path intact).
     expect(await fs.readFile(path.join(ws, 'app/app/main.py'), 'utf8')).toBe('APP = "notes-api"\n');
+  });
+
+  it('renders a {#-using framework fragment (Svelte {#if}/{#each}) verbatim while still substituting ${{ }} and running {% %} — no {% raw %} wrapper needed', async () => {
+    // The durable comment-delimiter fix: the engine's comment token is `{#!`/`!#}`, not the
+    // stock `{#`/`#}`, so Svelte's `{#if}`/`{#each}` (and any other `{#`-using framework) pass
+    // through untouched instead of being swallowed as comments. This is the follow-up to #342,
+    // which wrapped the file in `{% raw %}` — that wrapper is now removed on disk and unneeded.
+    const reader = mockReader({ '/_contract': CONTRACT, '/fullstack/sveltekit': SVELTE });
+    const action = createComposeProjectAction({ reader });
+    const ws = mockDir.resolve('wssvelte');
+    await fs.ensureDir(ws);
+    const ctx = createMockActionContext({
+      input: { ...common, projectType: 'web' as const, layout: 'single' as const, singleFragment: 'fullstack/sveltekit', database: 'host-mysql' as const },
+      workspacePath: ws,
+    });
+
+    await action.handler(ctx);
+
+    const rendered = await fs.readFile(path.join(ws, 'app/src/routes/items/+page.svelte'), 'utf8');
+    // Svelte control blocks survive literally (pre-fix: eaten by the `{#` comment start).
+    expect(rendered).toContain('{#if data.dbError}');
+    expect(rendered).toContain('{:else if data.items.length === 0}');
+    expect(rendered).toContain('{#each data.items as item (item.id)}');
+    expect(rendered).toContain('{/each}');
+    expect(rendered).toContain('{/if}');
+    // The real ${{ }} variable still substitutes.
+    expect(rendered).toContain("let appName = 'notes-api'");
+    // The {% for %} block still runs (single plan -> one component named `app`).
+    expect(rendered).toContain('<span>app</span>');
+    // The new {#! … !#} comment is stripped, its body gone.
+    expect(rendered).not.toContain('this comment must vanish');
+    expect(rendered).not.toContain('{#!');
+    // Literal `{'{ … }'}` braces (a Svelte idiom for printing a literal brace) untouched.
+    expect(rendered).toContain('literal={\'{ "name": "..." }\'}');
   });
 
   it('fails closed on a bad appName', async () => {

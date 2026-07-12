@@ -38,11 +38,16 @@ PLANNER = (
 # Files shipped VERBATIM (never templated) — the copyWithoutTemplating contract.
 NO_TEMPLATE = ["**/.github/**", ".github/**", "**/.devops/ci/**", ".devops/ci/**"]
 
-# Backstage's scaffolder nunjucks uses ${{ }} for variables; blocks stay {% %}.
+# Backstage's scaffolder nunjucks uses ${{ }} for variables; blocks stay {% %}. Comments are
+# `{#! … !#}`, NOT the stock jinja/nunjucks `{# … #}`: fragment source is arbitrary framework
+# code and several frameworks use `{#…}` as real syntax (Svelte `{#if}`/`{#each}`, Handlebars
+# `{{#…}}`), which the stock `{#` comment start would eat or choke on. The three-char `{#!`
+# start collides with nothing. MUST stay identical to makeNunjucks() in composeProject.ts
+# (the live action) — these two engines share the delimiter contract and must not drift.
 JENV = Environment(
     variable_start_string="${{", variable_end_string="}}",
     block_start_string="{%", block_end_string="%}",
-    comment_start_string="{#", comment_end_string="#}",
+    comment_start_string="{#!", comment_end_string="!#}",
     undefined=StrictUndefined, keep_trailing_newline=True,
     trim_blocks=False, lstrip_blocks=False,
 )

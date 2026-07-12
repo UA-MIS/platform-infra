@@ -82,7 +82,21 @@ function toBuffer(content: unknown): Buffer {
   return Buffer.from(content as ArrayLike<number>);
 }
 
-/** A nunjucks env configured exactly like Backstage's scaffolder (${{ }} variables). */
+/**
+ * A nunjucks env configured like Backstage's scaffolder (${{ }} variables), with ONE
+ * deliberate deviation: the comment delimiter is `{#! … !#}`, NOT the stock nunjucks `{# … #}`.
+ *
+ * WHY (the durable comment-delimiter fix): fragment source is arbitrary framework code, and
+ * several frameworks use `{#…}` as real, load-bearing syntax — Svelte's `{#if}`/`{#each}`
+ * control blocks, Handlebars/Mustache `{{#…}}`, etc. With the stock `{#` comment start,
+ * nunjucks swallowed those as comments (or threw on the unterminated ones), which is exactly
+ * how the Svelte fragment broke. Rather than wrap every such file in `{% raw %}` per-file
+ * (fragile — every new `{#`-using framework re-breaks), we move the comment start to a
+ * three-char token no framework emits: `{#!` (mirrors HTML/`<!-- -->` "bang = comment"). Any
+ * `{#if`/`{#each`/`{{#` now passes through verbatim because it does not begin with `{#!`.
+ * The offline dry-render engine (templates/_fragments/_tools/compose_lib.py) mirrors these
+ * exact delimiters so the two engines cannot drift.
+ */
 function makeNunjucks(): nunjucks.Environment {
   return new nunjucks.Environment(undefined, {
     autoescape: false,
@@ -91,8 +105,8 @@ function makeNunjucks(): nunjucks.Environment {
       variableEnd: '}}',
       blockStart: '{%',
       blockEnd: '%}',
-      commentStart: '{#',
-      commentEnd: '#}',
+      commentStart: '{#!',
+      commentEnd: '!#}',
     },
   });
 }
