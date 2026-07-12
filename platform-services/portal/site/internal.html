@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Platform Tools &mdash; UA-MIS Capstone Platform</title>
+<style>
+  :root {
+    --ua-crimson: #9E1B32;
+    --ua-crimson-dark: #7A1426;
+    --ua-charcoal: #1F2023;
+    --ua-tint: rgba(158, 27, 50, 0.08);
+    --bg: #FAF9F7;
+    --surface: #FFFFFF;
+    --text: #1A1C20;
+    --text-dim: #55585E;
+    --border: #E7E3DD;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+  }
+  header.band {
+    background: var(--ua-crimson);
+    color: #fff;
+    padding: 14px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .brand {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+  }
+  .brand .a { font-family: Georgia, serif; font-size: 1.4rem; }
+  .brand .mis { font-size: 1rem; letter-spacing: 0.12em; opacity: 0.92; }
+  .brand a { color: inherit; text-decoration: none; display: flex; align-items: baseline; gap: 10px; }
+  .signout {
+    color: rgba(255,255,255,0.85);
+    text-decoration: none;
+    font-size: 0.88rem;
+    font-weight: 600;
+  }
+  .signout:hover { color: #fff; text-decoration: underline; }
+
+  main { max-width: 900px; margin: 0 auto; padding: 44px 24px 80px; }
+
+  main > p.lead {
+    font-size: 1.02rem;
+    color: var(--text-dim);
+    max-width: 68ch;
+    margin-bottom: 40px;
+  }
+  main h1 {
+    font-size: 1.6rem;
+    color: var(--ua-charcoal);
+    margin: 0 0 6px;
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 16px;
+  }
+  .card {
+    display: block;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px 20px;
+    text-decoration: none;
+    color: var(--text);
+    transition: border-color 0.15s, transform 0.15s;
+  }
+  .card:hover { border-color: var(--ua-crimson); transform: translateY(-1px); }
+  .card .name {
+    font-weight: 700;
+    font-size: 1.05rem;
+    margin-bottom: 6px;
+    color: var(--ua-charcoal);
+  }
+  .card .desc { font-size: 0.9rem; color: var(--text-dim); }
+  .card .host {
+    display: block;
+    margin-top: 10px;
+    font-size: 0.78rem;
+    color: var(--ua-crimson);
+    word-break: break-all;
+  }
+  .card.no-link {
+    cursor: default;
+  }
+  .card.no-link:hover { border-color: var(--border); transform: none; }
+
+  section { margin-top: 40px; }
+  section h2 {
+    font-size: 0.85rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 10px;
+    margin-bottom: 18px;
+  }
+
+  footer {
+    text-align: center;
+    padding: 24px;
+    color: var(--text-dim);
+    font-size: 0.82rem;
+  }
+</style>
+</head>
+<body>
+  <header class="band">
+    <a class="brand" href="/"><span class="a">A</span><span class="mis">MIS</span></a>
+    <a class="signout" href="https://db-auth.capstone.uamishub.com/oauth2/sign_out?rd=https%3A%2F%2Fcapstone.uamishub.com%2F">Sign out</a>
+  </header>
+
+  <main>
+    <h1>Platform tools</h1>
+    <p class="lead">
+      Everything the platform runs, in one place. If you've never used one of
+      these before, the one-liner under each name tells you what it's for &mdash;
+      click through and you'll already be signed in.
+    </p>
+
+    <section>
+      <h2>Build &amp; ship</h2>
+      <div class="grid">
+        <a class="card" href="https://process.capstone.uamishub.com" target="_blank" rel="noopener">
+          <div class="name">Backstage</div>
+          <div class="desc">The developer portal &mdash; onboard a new app, manage its secrets, and browse the catalog of everything running on the platform. Start here.</div>
+          <span class="host">process.capstone.uamishub.com</span>
+        </a>
+        <a class="card" href="https://harbor.capstone.uamishub.com" target="_blank" rel="noopener">
+          <div class="name">Harbor</div>
+          <div class="desc">The container image registry &mdash; where your app's Docker images land after CI builds them, and get pulled from when deployed.</div>
+          <span class="host">harbor.capstone.uamishub.com</span>
+        </a>
+        <a class="card" href="https://argocd.capstone.uamishub.com" target="_blank" rel="noopener">
+          <div class="name">Argo CD</div>
+          <div class="desc">GitOps deployment &mdash; shows exactly what's deployed right now and keeps it in sync with what's committed to git.</div>
+          <span class="host">argocd.capstone.uamishub.com</span>
+        </a>
+      </div>
+    </section>
+
+    <section>
+      <h2>Observe &amp; debug</h2>
+      <div class="grid">
+        <a class="card" href="https://grafana.capstone.uamishub.com" target="_blank" rel="noopener">
+          <div class="name">Grafana</div>
+          <div class="desc">Dashboards &amp; logs &mdash; metrics, alerts, and log search for your app and the platform it runs on.</div>
+          <span class="host">grafana.capstone.uamishub.com</span>
+        </a>
+        <a class="card" href="https://db-admin.capstone.uamishub.com" target="_blank" rel="noopener">
+          <div class="name">Database consoles</div>
+          <div class="desc">Browse and query databases directly. Your own team's console is linked from your app's page in Backstage; this link is the platform-wide admin console (UA-MIS platform team only &mdash; you'll get a clean access-denied if that's not you).</div>
+          <span class="host">db-admin.capstone.uamishub.com</span>
+        </a>
+      </div>
+    </section>
+
+    <section>
+      <h2>Secrets</h2>
+      <div class="grid">
+        <div class="card no-link">
+          <div class="name">Vault</div>
+          <div class="desc">The secrets store behind everything &mdash; holds database credentials and API keys for every app. No public UI by design; you manage your app's secrets through Backstage's Secrets tab, not here directly.</div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    UA-MIS Capstone Platform &middot; signed in as a UA-MIS member
+  </footer>
+</body>
+</html>

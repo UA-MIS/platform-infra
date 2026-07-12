@@ -126,7 +126,14 @@ spec:
               providerConfigRef:
                 name: default
             ---
-            # Per-team PUSH robot (CI). pull+push on the team project. Token → connection
+            # Per-team PUSH robot (CI). pull+push on the team project, plus scan:read
+            # (supply-chain hardening — mirrors `make harbor-push-robot`: the reusable
+            # CI's Trivy gate (supply-chain-verify composite action) polls Harbor's own
+            # scan-on-push result via GET .../artifacts/<ref>?with_scan_overview=true and
+            # fails the build on any CRITICAL finding — that read needs the
+            # project-scoped "scan" resource "read" action, NOT covered by repository
+            # pull/push. Without it the scan-gate 403s, fails closed, and the build
+            # (and its downstream GitOps bump) never completes. Token → connection
             # secret <team>-harbor-push in crossplane-system → PushSecret → Vault.
             apiVersion: robotaccount.harbor.crossplane.io/v1alpha1
             kind: RobotAccount
@@ -147,6 +154,8 @@ spec:
                         resource: repository
                       - action: pull
                         resource: repository
+                      - action: read
+                        resource: scan
               writeConnectionSecretToRef:
                 namespace: crossplane-system
                 name: {{ printf "%s-harbor-push" $team | quote }}
@@ -487,6 +496,38 @@ spec:
                           - { protocol: TCP, port: 53 }
                       - to:
                           - podSelector: {}
+                      # DB tier — MariaDB (3306) / Postgres (5432), scoped to the db-tier
+                      # namespace by name. Codifies the tenant side of the
+                      # CiliumNetworkPolicy hand-applied live for swami-dev/staging/prod on
+                      # 2026-07-07/08 (the matching platform.capstone/team-keyed ingress
+                      # lives in platform-services/db-tier/netpol.yaml, rule
+                      # allow-ingress-tenant-namespaces — the other half of this door) as a
+                      # REUSABLE default rendered for every tenant/env, so a new team never
+                      # needs a hand-applied CNP to reach a managed DB.
+                      #
+                      # tenant-db-access (§6.3): gated on the SAME $database field the
+                      # DATABASE blocks below use — a DB-less team's netpol is untouched,
+                      # and the one team already live (swami, database != "none") keeps
+                      # exactly the access the 2026-07-07/08 hotfix granted it. Port-scoped
+                      # to the ONE engine chosen (mutually exclusive, XRD enum is a single
+                      # value) — not a blanket db-tier admit. Opening the path does not by
+                      # itself grant access — actual credentials/grants below are still
+                      # gated on `$database` (mysql/postgres). Supersedes an earlier
+                      # unconditional (no `if` guard) variant of this same rule that opened
+                      # both ports regardless of `$database`: since the Composition
+                      # re-renders on every claim update, there is no need to pre-open the
+                      # door for a `database` field that hasn't been set yet, and the
+                      # conditional form avoids granting DB-tier egress to teams that have
+                      # no database at all.
+                      {{- if ne $database "none" }}
+                      - to:
+                          - namespaceSelector:
+                              matchLabels:
+                                kubernetes.io/metadata.name: db-tier
+                        ports:
+                          - protocol: TCP
+                            port: {{ if eq $database "postgres" }}5432{{ else }}3306{{ end }}
+                      {{- end }}
             ---
             # Developer RBAC (CXP-2): a namespaced RoleBinding to the pre-reviewed
             # ClusterRole capstone-tenant-developer (rbac/capstone-tenant-developer-
@@ -1211,8 +1252,23 @@ spec:
               providerConfigRef:
                 name: db-tier-mariadb
             ---
-            # ALL privileges on the tenant's own schema (the team owns its DB). user +
-            # database reference the DB-level names (the external-names pinned above).
+            # Explicit privilege list on the tenant's own schema (the team owns its
+            # DB) -- NOT literal `ALL`. crossplane-provisioner (the db-tier-mariadb
+            # ProviderConfig admin, in-cluster MariaDB) holds a broad-but-SPECIFIC
+            # privilege set WITH GRANT OPTION, not MariaDB's literal ALL PRIVILEGES
+            # bundle (confirmed live: SHOW GRANTS FOR 'crossplane-provisioner'@'%' --
+            # see docs/db-tier-runbook.md). MariaDB 1044s ("Access denied ... to
+            # database") on `GRANT ALL` from a grantor that doesn't itself hold ALL
+            # PRIVILEGES -- you can't grant what you don't hold. swami's 3 existing
+            # per-env Grants happen to be Synced=True only because they were created
+            # 2026-07-03, BEFORE #289 repointed this ProviderConfig at the current
+            # restricted-list admin; any NEW tenant onboarded now (or a re-provision)
+            # would hit the 1044 with `ALL`. This explicit list mirrors
+            # crossplane-provisioner's held set 1:1 (database-scoped subset -- CREATE
+            # USER is global-only in MariaDB and cannot appear in a database-level
+            # GRANT, so it is excluded even though the grantor holds it) and is
+            # functionally equivalent to ALL at the db.* level for an app.
+            # user + database reference the DB-level names (the external-names above).
             apiVersion: mysql.sql.crossplane.io/v1alpha1
             kind: Grant
             metadata:
@@ -1223,7 +1279,24 @@ spec:
                 user: {{ $dbName | quote }}
                 database: {{ $dbName | quote }}
                 privileges:
-                  - ALL
+                  - SELECT
+                  - INSERT
+                  - UPDATE
+                  - DELETE
+                  - CREATE
+                  - DROP
+                  - REFERENCES
+                  - INDEX
+                  - ALTER
+                  - CREATE TEMPORARY TABLES
+                  - LOCK TABLES
+                  - EXECUTE
+                  - CREATE VIEW
+                  - SHOW VIEW
+                  - CREATE ROUTINE
+                  - ALTER ROUTINE
+                  - EVENT
+                  - TRIGGER
               providerConfigRef:
                 name: db-tier-mariadb
             ---
@@ -1286,6 +1359,1016 @@ spec:
                             remoteKey: {{ printf "tenants/%s/%s/database" $team $e.name | quote }}
                             property: port
             {{- end }}
+            {{- /* =====================================================================
+                   TEAM DB CONSOLE (MySQL) -- ONE Adminer per TEAM (not per
+                   env), per user feedback on the original per-env design (design doc
+                   artifacts/research/tenant-db-access.md §3/§4/§7). Autologin server carries
+                   NO fixed db path, so Adminer's own #dbs switcher (a real
+                   <select name="db">, confirmed against the live dockette/adminer:5.4.2
+                   image's index.php) lists every database the console's DB user has been
+                   granted -- populated by the per-env Grants below, so it always tracks
+                   whatever $envs is at render time.
+
+                   Lives in the team's OWN dev namespace ({{ $team }}-dev) -- a deliberate
+                   reuse, not a new namespace: that namespace already has the exact
+                   plumbing a per-team (not per-env) resource needs -- the vault-tenant
+                   SecretStore + eso-tenant SA rendered above, both scoped to the WHOLE
+                   tenant-<team> Vault policy (secret/data/tenants/<team>/*), not just the
+                   dev env. No new namespace/quota/PSA/netpol/AppProject-destination is
+                   needed as a result (dev's existing egress-to-db-tier rule already
+                   covers this pod). status.dbConsoleUrl (bottom of this template)
+                   reflects the same <team>-db host.
+
+                   Console user: `<teamDb>_console`, granted an EXPLICIT privilege list
+                   (functionally equivalent to the per-env app users' ALL, NOT the
+                   literal keyword -- see the Grant loop below for why) on EVERY per-env
+                   schema. Password Vault leaf: tenants/<team>/console/database
+                   (SAME shape/properties as the per-env tenants/<team>/<env>/database
+                   leaves, just a `console` slot instead of dev/staging/prod, so it reuses
+                   the SAME ExternalSecret/PushSecret pattern verbatim).
+                   ===================================================================== */}}
+            {{- $consoleUser := printf "%s_console" $teamDb }}
+            {{- $consoleConnSecret := printf "%s-console-db" $team }}
+            {{- $consoleNs := printf "%s-dev" $team }}
+            ---
+            # The shared team-console login. No passwordSecretRef -> provider-sql
+            # generates the password (stable across reconciles, same rationale as the
+            # per-env Users above).
+            apiVersion: mysql.sql.crossplane.io/v1alpha1
+            kind: User
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation "sql-user-console" }}
+                crossplane.io/external-name: {{ $consoleUser | quote }}
+            spec:
+              forProvider: {}
+              writeConnectionSecretToRef:
+                namespace: crossplane-system
+                name: {{ $consoleConnSecret | quote }}
+              providerConfigRef:
+                name: db-tier-mariadb
+            {{- range $e := $envs }}
+            ---
+            # Explicit privilege list on EVERY per-env schema -- NOT literal `ALL`.
+            # crossplane-provisioner (the db-tier-mariadb ProviderConfig admin) holds a
+            # broad-but-SPECIFIC privilege set WITH GRANT OPTION, not MariaDB's literal
+            # ALL PRIVILEGES bundle (confirmed live: SHOW GRANTS FOR
+            # 'crossplane-provisioner'@'%' -- see docs/db-tier-runbook.md). MariaDB 1044s
+            # ("Access denied ... to database") on `GRANT ALL` from a grantor that
+            # doesn't itself hold ALL PRIVILEGES -- you can't grant what you don't hold.
+            # (The per-env app-user Grant above still says `ALL` and is Synced=True, but
+            # only because those 3 Grants were created 2026-07-03, before #289 repointed
+            # this ProviderConfig at the current restricted-list admin; they're stable
+            # existing state, not proof `ALL` still works for a *new* Grant today -- a
+            # new tenant's per-env Grant would hit this same 1044. Out of scope here;
+            # tracked as a follow-up.) This list mirrors crossplane-provisioner's held
+            # set 1:1 (database-scoped subset -- CREATE USER is global-only in MariaDB
+            # and cannot appear in a database-level GRANT, so it is intentionally
+            # excluded even though the grantor holds it). It is also correct
+            # least-privilege for a console/admin-tool user, so this is not merely a
+            # workaround.
+            apiVersion: mysql.sql.crossplane.io/v1alpha1
+            kind: Grant
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation (printf "sql-grant-console-%s" $e.name) }}
+            spec:
+              forProvider:
+                user: {{ $consoleUser | quote }}
+                database: {{ printf "%s_%s" $teamDb $e.name | quote }}
+                privileges:
+                  - SELECT
+                  - INSERT
+                  - UPDATE
+                  - DELETE
+                  - CREATE
+                  - DROP
+                  - REFERENCES
+                  - INDEX
+                  - ALTER
+                  - CREATE TEMPORARY TABLES
+                  - LOCK TABLES
+                  - EXECUTE
+                  - CREATE VIEW
+                  - SHOW VIEW
+                  - CREATE ROUTINE
+                  - ALTER ROUTINE
+                  - EVENT
+                  - TRIGGER
+              providerConfigRef:
+                name: db-tier-mariadb
+            {{- end }}
+            ---
+            # Bridge the console user's generated creds into Vault at the `console` leaf
+            # (same four properties as the per-env `database` leaves).
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              name: {{ printf "xp-%s-console-db-push" $team | quote }}
+              annotations:
+                {{ setResourceNameAnnotation "push-db-console" }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: external-secrets.io/v1alpha1
+                  kind: PushSecret
+                  metadata:
+                    name: {{ printf "%s-console-db" $team | quote }}
+                    namespace: crossplane-system
+                    labels:
+                      platform.capstone/component: platform
+                      platform.capstone/team: {{ $team | quote }}
+                  spec:
+                    refreshInterval: "1h"
+                    secretStoreRefs:
+                      - name: vault-push
+                        kind: SecretStore
+                    selector:
+                      secret:
+                        name: {{ $consoleConnSecret | quote }}
+                    data:
+                      - match:
+                          secretKey: username
+                          remoteRef:
+                            remoteKey: {{ printf "tenants/%s/console/database" $team | quote }}
+                            property: username
+                      - match:
+                          secretKey: password
+                          remoteRef:
+                            remoteKey: {{ printf "tenants/%s/console/database" $team | quote }}
+                            property: password
+                      - match:
+                          secretKey: endpoint
+                          remoteRef:
+                            remoteKey: {{ printf "tenants/%s/console/database" $team | quote }}
+                            property: host
+                      - match:
+                          secretKey: port
+                          remoteRef:
+                            remoteKey: {{ printf "tenants/%s/console/database" $team | quote }}
+                            property: port
+            ---
+            # UA-MIS theme ConfigMap. Mounted straight to /srv/adminer.css via subPath in
+            # the Deployment below -- bypasses the /srv root:root 0755 write-wall the
+            # adminer-plugins emptyDir fix below also works around: Adminer's own css()
+            # helper (index.php) does file_exists("adminer.css") relative to its cwd and
+            # links it in if present, so no ADMINER_THEME env/entrypoint cooperation is
+            # needed, and the kubelet creates this bind mount as root at container-create
+            # time (before the UID-1000 process starts), so /srv's permissions never come
+            # into it -- a different mechanism than entrypoint.sh's in-container `cp` for
+            # adminer-plugins, which IS blocked by them.
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              name: {{ printf "xp-%s-dbconsole-css" $team | quote }}
+              annotations:
+                {{ setResourceNameAnnotation "dbconsole-css-cm" }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: v1
+                  kind: ConfigMap
+                  metadata:
+                    name: db-console-css
+                    namespace: {{ $consoleNs | quote }}
+                    labels:
+                      platform.capstone/component: tenant
+                      platform.capstone/team: {{ $team | quote }}
+                  data:
+                    adminer.css: |
+                      /*
+                       * University of Alabama MIS — Adminer theme (tenant DB console + db-admin console).
+                       * ONE committed LIGHT theme. Crimson #9E1B32 accents, warm-white surfaces, dark
+                       * readable text, a light-grey / black-mono SQL editor + result grid.
+                       *
+                       * ============================================================================
+                       * WHY THERE IS NO DARK VARIANT / NO OS-ADAPTIVE STYLING (read before editing)
+                       * ============================================================================
+                       * Adminer's loader (index.php `css()`) scans this file's TEXT and, if it finds
+                       * the token that spells the CSS dark-scheme media feature, flips this sheet from
+                       * "light" to "adaptive" AND ALSO links Adminer's OWN built-in dark stylesheet
+                       * gated to the visitor's OS dark setting. A previous revision of this theme had
+                       * that exact token sitting harmlessly in a code comment — which made Adminer pull
+                       * in its dark sheet for anyone whose OS was in dark mode, and THAT sheet (not this
+                       * one) painted the broken dark-navy action bar / dark panels over our light theme.
+                       *
+                       * So this file DELIBERATELY contains that token NOWHERE — not in a rule, not in a
+                       * comment, not in a media query. We force a single light look for every visitor
+                       * regardless of OS via the variable overrides below + `color-scheme: light`. If
+                       * you ever add an OS-dark media block here you will silently re-arm that trap.
+                       *
+                       * ============================================================================
+                       * HOW IT WORKS — override Adminer's OWN design tokens, don't fight each element.
+                       * ============================================================================
+                       * Adminer 5.4.2's default.css drives nearly everything from four CSS variables on
+                       * <html>:  --bg (surfaces), --fg (text), --dim (th / secondary surfaces),
+                       * --lit (thead + selected-row + :target highlight). Re-defining those four (with
+                       * !important, and since this sheet loads AFTER default.css) recolors the bulk of
+                       * the UI coherently in one place. We then layer crimson accents + an editor/grid
+                       * polish on top, and otherwise WORK WITH Adminer's native layout (a ~19em
+                       * absolute left #menu, #content offset 21em, an absolute #breadcrumb) rather than
+                       * re-positioning it — the prior fixed-position surgery is what produced the
+                       * partial-width header strip and the empty full-height sidebar column.
+                       *
+                       * DOM verified against the LIVE dockette/adminer:mysql image (Adminer 5.4.2):
+                       *   #menu (left nav, holds #dbs the DB switcher + table lists), #content (h1,
+                       *   #breadcrumb, tables, forms), .footer > fieldset (the bulk "Selected (N)"
+                       *   action bar), textarea.sqlarea.jush-sql (the SQL editor — a PLAIN textarea,
+                       *   no JS overlay). CSS is auto-loaded by Adminer via file_exists("adminer.css")
+                       *   relative to its docroot (/srv), linked after default.css.
+                       */
+
+                      /* ==========================================================================
+                       * 1. DESIGN TOKENS
+                       *    (a) Override Adminer's four native variables -> light palette.
+                       *    (b) Our own namespaced palette for the accent layer.
+                       * ========================================================================== */
+                      html {
+                        /* Adminer's own tokens — the single biggest lever. */
+                        --bg:  #ffffff !important;   /* primary surfaces */
+                        --fg:  #1a1c20 !important;   /* body text — near-black, high contrast */
+                        --dim: #f0eeea !important;   /* th / secondary surfaces — warm light grey */
+                        --lit: #f7e5e9 !important;   /* thead + selected-row + :target — crimson tint */
+                        color-scheme: light;         /* keep UA form controls / scrollbars light on dark OS */
+                      }
+
+                      :root {
+                        --ua-crimson:      #9E1B32;
+                        --ua-crimson-dark: #7A1426;
+                        --ua-tint:         rgba(158, 27, 50, 0.08);
+                        --ua-tint-strong:  rgba(158, 27, 50, 0.16);
+
+                        --ua-ink:      #1A1C20;
+                        --ua-ink-soft: #4A4642;
+                        --ua-muted:    #79736D;
+
+                        --ua-page:     #ffffff;
+                        --ua-sidebar:  #F5F3F0;     /* barely-grey sidebar surface */
+                        --ua-border:   #E4E1DB;
+                        --ua-border-strong: #D3CFC8;
+
+                        --ua-editor-bg: #F5F5F5;    /* light-grey code surface */
+                        --ua-editor-fg: #14161A;    /* black-ish mono text */
+
+                        --ua-ok:    #1C7C4A;
+                        --ua-ok-bg: #EAF6EF;
+                        --ua-err:   #B3261E;
+                        --ua-err-bg:#FCEBEA;
+
+                        --ua-radius:    8px;
+                        --ua-radius-sm: 6px;
+                        --ua-font: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, Helvetica, Arial, sans-serif;
+                        --ua-mono: "SFMono-Regular", "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+                      }
+
+                      /* ==========================================================================
+                       * 2. BASE
+                       * ========================================================================== */
+                      html { box-sizing: border-box; }
+                      *, *:before, *:after { box-sizing: inherit; }
+
+                      body {
+                        background: var(--ua-page) !important;
+                        color: var(--ua-ink) !important;
+                        font-family: var(--ua-font) !important;
+                        font-size: 14px;
+                        line-height: 1.55;
+                        -webkit-font-smoothing: antialiased;
+                      }
+
+                      a { color: var(--ua-crimson); text-decoration: none; }
+                      a:hover { color: var(--ua-crimson-dark); text-decoration: underline; }
+
+                      /* ==========================================================================
+                       * 3. LEFT SIDEBAR (#menu) — native Adminer position (absolute, ~19em, left:0).
+                       *    We give it a light surface, a clear right border, a min-height so it reads
+                       *    as a real column even when its content is short, and the UA-MIS wordmark.
+                       * ========================================================================== */
+                      #menu {
+                        background: var(--ua-sidebar) !important;
+                        border-right: 1px solid var(--ua-border) !important;
+                        min-height: calc(100vh - 2em) !important;
+                        padding: 16px 16px 32px !important;
+                        margin: 0 !important;
+                        top: 0 !important;               /* start at the very top so the wordmark aligns */
+                      }
+
+                      /* UA-MIS wordmark at the top of the sidebar (inline SVG data-URI — no external
+                         asset host, offline-safe). */
+                      #menu:before {
+                        content: "";
+                        display: block;
+                        height: 34px;
+                        margin: 0 0 16px 2px;
+                        background: url("data:image/svg+xml;utf8,\
+                      <svg xmlns='http://www.w3.org/2000/svg' width='210' height='34' viewBox='0 0 210 34'>\
+                      <rect width='34' height='34' rx='6' fill='%239E1B32'/>\
+                      <text x='17' y='24' text-anchor='middle' font-family='Georgia, serif' font-size='19' font-weight='700' fill='%23FFFFFF'>A</text>\
+                      <text x='44' y='16' font-family='-apple-system, Helvetica, Arial, sans-serif' font-size='13' font-weight='700' fill='%231A1C20' letter-spacing='.3'>UA-MIS</text>\
+                      <text x='44' y='29' font-family='-apple-system, Helvetica, Arial, sans-serif' font-size='10' font-weight='500' fill='%2379736D' letter-spacing='.3'>DB Console</text>\
+                      </svg>") no-repeat left center;
+                        background-size: contain;
+                      }
+
+                      /* Nav section headings (Tables / Views / …) rendered as <p> in the menu. */
+                      #menu p {
+                        font-size: 11px;
+                        font-weight: 700;
+                        text-transform: uppercase;
+                        letter-spacing: .05em;
+                        color: var(--ua-muted);
+                        margin: 16px 0 6px !important;
+                        border: none !important;
+                        background: none !important;
+                      }
+
+                      #menu a {
+                        color: var(--ua-ink) !important;
+                        display: inline-block;
+                        padding: 3px 8px;
+                        margin: 1px 0;
+                        border-radius: var(--ua-radius-sm);
+                        border: none !important;
+                        text-transform: none;   /* nav/table links stay normal-case; only the <p> section headings are uppercased */
+                      }
+                      #menu a:hover {
+                        background: var(--ua-tint) !important;
+                        color: var(--ua-crimson-dark) !important;
+                        text-decoration: none;
+                        box-shadow: inset 2px 0 0 0 var(--ua-crimson);
+                      }
+                      #menu a.active,
+                      #menu a:active {
+                        background: var(--ua-tint-strong) !important;
+                        color: var(--ua-crimson-dark) !important;
+                        box-shadow: inset 3px 0 0 0 var(--ua-crimson);
+                      }
+
+                      /* #dbs — the database switcher (the dropdown listing <team>_dev/staging/prod). */
+                      #dbs {
+                        margin: 0 0 12px !important;
+                        padding: 0 !important;
+                        border: none !important;
+                      }
+                      #dbs label { font-weight: 600; color: var(--ua-ink-soft); }
+
+                      /* Sidebar toggle handle */
+                      #menuopen { color: var(--ua-muted); }
+
+                      /* ==========================================================================
+                       * 4. CONTENT + BREADCRUMB
+                       *    #breadcrumb is natively position:absolute with NO width, so ANY colored
+                       *    background would render as a short partial strip. We keep it text-only
+                       *    (transparent) — no strip, nothing can look "cut off".
+                       * ========================================================================== */
+                      #content {
+                        padding: 8px 32px 48px 28px !important;
+                        max-width: 1180px;
+                      }
+
+                      #breadcrumb {
+                        background: transparent !important;
+                        box-shadow: none !important;
+                        border: none !important;
+                        height: auto !important;
+                        line-height: 1.6 !important;
+                        padding: 6px 0 !important;
+                        margin: 0 0 4px -6px !important;
+                        font-size: 12px;
+                        color: var(--ua-muted);
+                      }
+                      #breadcrumb a { color: var(--ua-crimson); }
+                      #breadcrumb a:hover { color: var(--ua-crimson-dark); }
+
+                      /* ==========================================================================
+                       * 5. TYPOGRAPHY
+                       * ========================================================================== */
+                      h1 {
+                        font-size: 21px;
+                        font-weight: 700;
+                        color: var(--ua-ink);
+                        background: none !important;
+                        border: none !important;
+                        border-bottom: 2px solid var(--ua-tint-strong) !important;
+                        padding: 0 0 10px !important;
+                        margin: 4px 0 20px !important;
+                      }
+                      h1 .version { font-size: 11px; font-weight: 400; color: var(--ua-muted); opacity: .7; }
+                      h1 a[href*="adminer.org"] { display: none !important; }   /* hide upstream donate/version chrome */
+
+                      h2 {
+                        font-size: 16px;
+                        font-weight: 600;
+                        color: var(--ua-ink);
+                        background: none !important;   /* was --lit; keep clean, use a border accent instead */
+                        border: none !important;
+                        border-bottom: 2px solid var(--ua-tint-strong) !important;
+                        padding: 0 0 8px !important;
+                        margin: 26px 0 14px !important;
+                      }
+                      h3 { font-size: 14px; font-weight: 600; color: var(--ua-ink-soft); margin: 16px 0 8px; }
+
+                      p { color: var(--ua-ink-soft); }
+
+                      /* ==========================================================================
+                       * 6. MESSAGES / ALERTS
+                       * ========================================================================== */
+                      .message, .error {
+                        display: block;
+                        border-radius: var(--ua-radius);
+                        padding: 10px 14px !important;
+                        margin: 0 0 16px !important;
+                        font-weight: 500;
+                        background-image: none !important;
+                        box-shadow: none !important;
+                      }
+                      .message { background: var(--ua-ok-bg) !important;  color: var(--ua-ok) !important;  border: 1px solid rgba(28,124,74,.25); }
+                      .error   { background: var(--ua-err-bg) !important; color: var(--ua-err) !important; border: 1px solid rgba(179,38,30,.25); }
+
+                      /* ==========================================================================
+                       * 7. FORMS — inputs / selects / buttons
+                       * ========================================================================== */
+                      fieldset {
+                        border: 1px solid var(--ua-border) !important;
+                        border-radius: var(--ua-radius);
+                        padding: 12px 14px !important;
+                        margin: 0 0 14px !important;
+                        background: #FCFBFA !important;
+                        box-shadow: none !important;
+                      }
+                      legend {
+                        color: var(--ua-ink-soft);
+                        font-weight: 600;
+                        padding: 0 6px;
+                      }
+
+                      input[type=text], input[type=password], input[type=number],
+                      input[type=search], input[type=email], input:not([type]), select, textarea {
+                        font-family: var(--ua-font);
+                        font-size: 13px;
+                        color: var(--ua-ink);
+                        background: #ffffff;
+                        border: 1px solid var(--ua-border-strong);
+                        border-radius: var(--ua-radius-sm);
+                        padding: 6px 9px;
+                        transition: border-color .12s ease, box-shadow .12s ease;
+                      }
+                      input[type=text]:focus, input[type=password]:focus, input[type=number]:focus,
+                      input[type=search]:focus, input[type=email]:focus, input:not([type]):focus,
+                      select:focus, textarea:focus {
+                        outline: none;
+                        border-color: var(--ua-crimson);
+                        box-shadow: 0 0 0 3px var(--ua-tint);
+                      }
+
+                      /* Primary submit buttons — crimson (matches ArgoCD/Grafana). */
+                      input[type=submit], input[type=button], button {
+                        font-family: var(--ua-font);
+                        font-size: 13px;
+                        font-weight: 600;
+                        color: #ffffff !important;
+                        background: var(--ua-crimson) !important;
+                        border: 1px solid var(--ua-crimson) !important;
+                        border-radius: var(--ua-radius-sm);
+                        padding: 6px 15px;
+                        cursor: pointer;
+                        transition: background-color .12s ease, border-color .12s ease;
+                      }
+                      input[type=submit]:hover, input[type=button]:hover, button:hover {
+                        background: var(--ua-crimson-dark) !important;
+                        border-color: var(--ua-crimson-dark) !important;
+                      }
+
+                      /* Destructive actions (drop / delete) — quiet GHOST style, never a bold crimson
+                         button, so they don't invite a click. Red only on hover. (DB-level drop is
+                         hidden entirely below.) */
+                      input[name=drop], input[name=delete], input[name=truncate], input[value=Drop], input[value=Delete] {
+                        color: var(--ua-err) !important;
+                        background: #ffffff !important;
+                        border: 1px solid var(--ua-border-strong) !important;
+                        font-weight: 500;
+                      }
+                      input[name=drop]:hover, input[name=delete]:hover, input[name=truncate]:hover,
+                      input[value=Drop]:hover, input[value=Delete]:hover {
+                        background: var(--ua-err-bg) !important;
+                        border-color: var(--ua-err) !important;
+                      }
+
+                      .icon { border-radius: 4px; }
+
+                      /* ==========================================================================
+                       * 8. SQL EDITOR — plain textarea, styled to read like a code editor:
+                       *    light-grey surface, black mono text, soft inset, crimson focus ring.
+                       * ========================================================================== */
+                      textarea, .sqlarea, textarea.sqlarea, textarea.jush-sql, .jush-sql {
+                        font-family: var(--ua-mono) !important;
+                        font-size: 13.5px !important;
+                        line-height: 1.65 !important;
+                        color: var(--ua-editor-fg) !important;
+                        background: var(--ua-editor-bg) !important;
+                        border: 1px solid var(--ua-border-strong) !important;
+                        border-radius: var(--ua-radius) !important;
+                        padding: 13px 15px !important;
+                        box-shadow: inset 0 1px 3px rgba(20,22,26,.05) !important;
+                        tab-size: 2;
+                      }
+                      textarea:focus, textarea.sqlarea:focus, .sqlarea:focus {
+                        border-color: var(--ua-crimson) !important;
+                        box-shadow: inset 0 1px 3px rgba(20,22,26,.05), 0 0 0 3px var(--ua-tint) !important;
+                      }
+
+                      code, .jush-js {
+                        font-family: var(--ua-mono);
+                        background: var(--ua-editor-bg);
+                        color: var(--ua-editor-fg);
+                        border-radius: 4px;
+                        padding: 1px 5px;
+                      }
+                      .sql-footer { margin-top: 10px; }
+
+                      /* ==========================================================================
+                       * 9. TABLES — schema lists AND result grids: light surface, BLACK text.
+                       * ========================================================================== */
+                      table {
+                        border-collapse: collapse;
+                        margin: 6px 0 20px;
+                        background: #ffffff;
+                        border: 1px solid var(--ua-border);
+                        border-radius: var(--ua-radius);
+                        overflow: hidden;
+                        font-size: 13px;
+                        color: var(--ua-editor-fg) !important;
+                      }
+
+                      thead th, thead td {
+                        background: #F7E5E9 !important;   /* crimson tint */
+                        color: var(--ua-ink) !important;
+                        font-weight: 600;
+                        text-align: left;
+                        padding: 8px 11px !important;
+                        border-bottom: 2px solid var(--ua-tint-strong) !important;
+                        white-space: nowrap;
+                      }
+                      thead th a, thead td a { color: var(--ua-ink) !important; }
+
+                      tbody th, tbody td {
+                        padding: 7px 11px !important;
+                        border-bottom: 1px solid var(--ua-border) !important;
+                        color: var(--ua-editor-fg) !important;
+                        background: #ffffff !important;
+                        vertical-align: top;
+                      }
+                      .odds tbody tr:nth-child(2n) td,
+                      .odds tbody tr:nth-child(2n) th { background: #FAF9F7 !important; }
+
+                      tbody tr:hover td, tbody tr:hover th { background: var(--ua-tint) !important; }
+
+                      .js .checked td, .js .checked th,
+                      .js .checkable .checked td, .js .checkable .checked th { background: var(--ua-tint-strong) !important; }
+
+                      table code { background: transparent; padding: 0; }
+
+                      /* Pagination */
+                      .pages { border: none !important; box-shadow: none !important; padding: 4px 0; }
+                      .pages a {
+                        display: inline-block;
+                        padding: 3px 9px; margin: 0 2px 0 0;
+                        border: 1px solid var(--ua-border-strong);
+                        border-radius: var(--ua-radius-sm);
+                        color: var(--ua-ink-soft);
+                      }
+                      .pages a:hover { border-color: var(--ua-crimson); color: var(--ua-crimson); text-decoration: none; }
+
+                      /* ==========================================================================
+                       * 10. FOOTER ACTION BAR (.footer) — Adminer's sticky bulk-action bar. Native
+                       *     default.css gives it a `box-shadow: 0 -5px 10px 10px var(--bg)` glow;
+                       *     neutralize it so it's a clean inline row, never a floating dark/glowing
+                       *     panel.
+                       * ========================================================================== */
+                      .footer {
+                        position: static !important;   /* was sticky (default.css) — pin it inline so it's a clean action row, never a floating overlay */
+                        box-shadow: none !important;
+                        background: transparent !important;
+                        border: none !important;
+                        margin: 16px 0 0 !important;
+                      }
+                      .footer > div {
+                        background: transparent !important;
+                        box-shadow: none !important;
+                        padding: 0 !important;
+                      }
+                      .footer fieldset {
+                        display: inline-block;
+                        background: #FCFBFA !important;
+                        border: 1px solid var(--ua-border) !important;
+                        box-shadow: none !important;
+                      }
+
+                      /* ==========================================================================
+                       * 11. SAFETY — hide the DATABASE-level bulk "Drop" button.
+                       *     Rationale: on the "Select database" page one bulk click drops an entire
+                       *     provisioned tenant database. DROP is a single MySQL/PG privilege covering
+                       *     both tables AND databases, so it can't be revoked at the grant level
+                       *     without losing table-drop too — so we remove the accidental one-click
+                       *     PATH instead. A deliberate `DROP DATABASE` typed in the SQL box still
+                       *     works (intentional); table-level drop stays fully usable.
+                       *
+                       *     Scoping: the databases-list page is the ONLY page whose <form> contains
+                       *     database checkboxes named `db[]` (verified in index.php: checkbox("db[]",…)
+                       *     on the databases listing; the tables page uses `tables[]`/`check[]`). So
+                       *     :has() targets exactly that form's Drop submit and nothing else. :has() is
+                       *     Baseline-supported in current browsers; if it ever isn't, the button simply
+                       *     reverts to visible (fail-safe, no breakage).
+                       * ========================================================================== */
+                      form:has(input[name="db[]"]) input[name="drop"],
+                      form:has(input[name="db[]"]) input[value="Drop"] {
+                        display: none !important;
+                      }
+                      /* Also drop the now-purposeless bulk "Selected" fieldset on that page so the
+                         databases view doesn't show an empty action bar. */
+                      form:has(input[name="db[]"]) .footer fieldset { display: none !important; }
+
+                      /* ==========================================================================
+                       * 12. MISC
+                       * ========================================================================== */
+                      /* Quiet ghost logout. Selector carries an extra class over `input[type=submit]`
+                         so it out-specifies the crimson primary-button rule (which would otherwise win
+                         and paint logout a heavy crimson block). */
+                      .logout,
+                      input[type=submit].logout,
+                      input[type=button].logout {
+                        display: inline-block;
+                        padding: 5px 12px !important;
+                        background: #ffffff !important;
+                        color: var(--ua-ink-soft) !important;
+                        border: 1px solid var(--ua-border-strong) !important;
+                        border-radius: var(--ua-radius-sm);
+                        box-shadow: none !important;
+                        font-size: 12px;
+                        font-weight: 600;
+                        cursor: pointer;
+                      }
+                      .logout:hover,
+                      input[type=submit].logout:hover {
+                        background: #ffffff !important;
+                        border-color: var(--ua-crimson) !important;
+                        color: var(--ua-crimson) !important;
+                      }
+
+                      #lang { color: var(--ua-muted); font-size: 12px; }
+                      hr { border: none; border-top: 1px solid var(--ua-border); margin: 18px 0; }
+
+                      /* Narrow screens: let the native layout collapse gracefully (Adminer's own
+                         #menuopen toggle still applies). max-width query only — contains no OS-scheme
+                         token, so the dark-sheet trap stays disarmed. */
+                      @media (max-width: 800px) {
+                        #content { margin-left: 0 !important; padding-left: 16px !important; }
+                        #menu { min-height: 0 !important; }
+                      }
+
+                      /* ==========================================================================
+                       * 13. LOGIN FORM — hide the dead-end driver/server/username rows on these
+                       *     auto-login consoles. Belt-and-suspenders for the AdminerHideLoginFields
+                       *     plugin (db-console-plugin ConfigMap below, mounted at
+                       *     /srv/adminer-plugins/adminer-hide-login-fields.php in the Deployment) --
+                       *     if that plugin ever fails to load, this still hides the same three rows.
+                       *     Scoping: these `name="auth[...]"` attributes are emitted only by Adminer's
+                       *     core loginForm() (adminer.inc.php) and appear nowhere else in the app, so
+                       *     :has() can't accidentally hide an unrelated row elsewhere. Password and
+                       *     Database stay visible/usable either way — only System/Server/Username are
+                       *     dead ends here (every other engine/server on the platform is unreachable
+                       *     from this console; ADMINER_AUTOLOGIN_SERVER below pins all three).
+                       * ========================================================================== */
+                      tr:has(select[name="auth[driver]"]),
+                      tr:has(input[name="auth[server]"]),
+                      tr:has(input[name="auth[username]"]) {
+                        display: none !important;
+                      }
+            ---
+            # Adminer login-form plugin ConfigMap: hides the driver ("System"), server, and
+            # username rows on the login form of these auto-login consoles.
+            # ADMINER_AUTOLOGIN_SERVER (ExternalSecret below) already pins all three — and
+            # every other engine/server on the platform is unreachable from here anyway — so
+            # leaving them editable is a dead end that only confuses a team ("what do I put
+            # here?"), not a real choice. Mounted into /srv/adminer-plugins/ alongside the
+            # entrypoint-copied adminer-autologin.php (dbconsole-deploy below, same directory,
+            # different file); Adminer 5's own plugin loader glob()s every *.php file it finds
+            # there and auto-instantiates any class extending Adminer\Plugin (confirmed against
+            # the live dockette/adminer:5.4.2 index.php: `Plugins::__construct` does
+            # `foreach(glob("adminer-plugins/*.php") as $p) $this->includeOnce($p)`, then
+            # `get_declared_classes()` picks up subclasses of Adminer\Plugin) — no extra wiring
+            # needed beyond the volume mount below.
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              name: {{ printf "xp-%s-dbconsole-plugin" $team | quote }}
+              annotations:
+                {{ setResourceNameAnnotation "dbconsole-plugin-cm" }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: v1
+                  kind: ConfigMap
+                  metadata:
+                    name: db-console-plugin
+                    namespace: {{ $consoleNs | quote }}
+                    labels:
+                      platform.capstone/component: tenant
+                      platform.capstone/team: {{ $team | quote }}
+                  data:
+                    adminer-hide-login-fields.php: |
+                      <?php
+
+                      /**
+                       * UA-MIS DB console — hide the unusable login-form fields on these auto-login
+                       * consoles. System (driver), Server, and Username are all pinned by
+                       * ADMINER_AUTOLOGIN_SERVER (adminer-autologin.php, same
+                       * /srv/adminer-plugins/ directory) — there is nowhere else for a team to
+                       * point them, so an editable field is a dead end, not a real choice.
+                       * Returning '' from loginFormField() suppresses that row entirely
+                       * (Adminer's Plugins::__call gives the first non-null hook result priority,
+                       * short-circuiting the built-in row for that field name); returning null
+                       * (the implicit default below for password/db) leaves Adminer's normal row
+                       * untouched, so Password and Database keep working exactly as before.
+                       *
+                       * Belt-and-suspenders: adminer.css (db-console-css ConfigMap, section 13)
+                       * hides these same rows by selector too, in case this plugin ever fails to
+                       * load.
+                       *
+                       * @link https://www.adminer.org/en/plugins/#use
+                       */
+                      class AdminerHideLoginFields extends Adminer\Plugin {
+                        function loginFormField($name, $heading, $value) {
+                          if (in_array($name, array('driver', 'server', 'username'))) {
+                            return '';
+                          }
+                        }
+                      }
+            ---
+            # ExternalSecret: assembles ADMINER_AUTOLOGIN_SERVER from the console leaf --
+            # NO db path in the DSN, so Adminer's autologin plugin logs into the SERVER
+            # only (empty `db`) and lands on its own database list/switcher, populated by
+            # the Grants above. Depends on the console PushSecret so it doesn't spin on a
+            # not-yet-populated Vault leaf on first apply.
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              name: {{ printf "xp-%s-dbconsole-es" $team | quote }}
+              annotations:
+                {{ setResourceNameAnnotation "dbconsole-es" }}
+            spec:
+              providerConfigRef:
+                name: default
+              references:
+                - dependsOn:
+                    apiVersion: kubernetes.crossplane.io/v1alpha1
+                    kind: Object
+                    name: {{ printf "xp-%s-console-db-push" $team | quote }}
+              forProvider:
+                manifest:
+                  apiVersion: external-secrets.io/v1
+                  kind: ExternalSecret
+                  metadata:
+                    name: db-console
+                    namespace: {{ $consoleNs | quote }}
+                    labels:
+                      platform.capstone/component: tenant
+                      platform.capstone/team: {{ $team | quote }}
+                  spec:
+                    refreshInterval: "1h"
+                    secretStoreRef:
+                      name: vault-tenant
+                      kind: SecretStore
+                    target:
+                      name: db-console
+                      creationPolicy: Owner
+                      deletionPolicy: Delete
+                      template:
+                        engineVersion: v2
+                        data:
+                          ADMINER_AUTOLOGIN_SERVER: "server://{{ `{{ .username }}` }}:{{ `{{ .password }}` }}@{{ `{{ .host }}` }}:{{ `{{ .port }}` }}"
+                    data:
+                      - secretKey: username
+                        remoteRef:
+                          key: {{ printf "tenants/%s/console/database" $team | quote }}
+                          property: username
+                      - secretKey: password
+                        remoteRef:
+                          key: {{ printf "tenants/%s/console/database" $team | quote }}
+                          property: password
+                      - secretKey: host
+                        remoteRef:
+                          key: {{ printf "tenants/%s/console/database" $team | quote }}
+                          property: host
+                      - secretKey: port
+                        remoteRef:
+                          key: {{ printf "tenants/%s/console/database" $team | quote }}
+                          property: port
+            ---
+            # Deployment: dockette/adminer:mysql -- identical pod spec to the retired per-env consoles
+            # (see git history for the non-root-UID / adminer-plugins emptyDir
+            # rationale), plus the adminer.css mount.
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              name: {{ printf "xp-%s-dbconsole-deploy" $team | quote }}
+              annotations:
+                {{ setResourceNameAnnotation "dbconsole-deploy" }}
+            spec:
+              providerConfigRef:
+                name: default
+              # provider-kubernetes Object has no `.metadata.references` field (server
+              # dry-run rejects it -- this is the #281/#283 bug); dependsOn belongs under
+              # `spec.references`, same as every other cross-Object dependency in this
+              # file.
+              references:
+                - dependsOn:
+                    apiVersion: kubernetes.crossplane.io/v1alpha1
+                    kind: Object
+                    name: {{ printf "xp-%s-dbconsole-es" $team | quote }}
+                - dependsOn:
+                    apiVersion: kubernetes.crossplane.io/v1alpha1
+                    kind: Object
+                    name: {{ printf "xp-%s-dbconsole-css" $team | quote }}
+                - dependsOn:
+                    apiVersion: kubernetes.crossplane.io/v1alpha1
+                    kind: Object
+                    name: {{ printf "xp-%s-dbconsole-plugin" $team | quote }}
+              forProvider:
+                manifest:
+                  apiVersion: apps/v1
+                  kind: Deployment
+                  metadata:
+                    name: db-console
+                    namespace: {{ $consoleNs | quote }}
+                    labels:
+                      platform.capstone/component: tenant
+                      platform.capstone/team: {{ $team | quote }}
+                      app.kubernetes.io/name: db-console
+                  spec:
+                    replicas: 1
+                    selector:
+                      matchLabels:
+                        app.kubernetes.io/name: db-console
+                    template:
+                      metadata:
+                        labels:
+                          app.kubernetes.io/name: db-console
+                          platform.capstone/team: {{ $team | quote }}
+                      spec:
+                        containers:
+                          - name: adminer
+                            image: dockette/adminer:mysql
+                            imagePullPolicy: IfNotPresent
+                            env:
+                              - name: ADMINER_PLUGIN_AUTOLOGIN
+                                value: "1"
+                              - name: PORT
+                                value: "8080"
+                              - name: ADMINER_BANNER
+                                value: "0"
+                              - name: ADMINER_AUTOLOGIN_SERVER
+                                valueFrom:
+                                  secretKeyRef:
+                                    name: db-console
+                                    key: ADMINER_AUTOLOGIN_SERVER
+                            ports:
+                              - containerPort: 8080
+                            resources:
+                              requests: { cpu: "10m", memory: "32Mi" }
+                              limits: { memory: "64Mi" }
+                            securityContext:
+                              allowPrivilegeEscalation: false
+                              runAsNonRoot: true
+                              runAsUser: 1000
+                              capabilities:
+                                drop: ["ALL"]
+                              seccompProfile:
+                                type: RuntimeDefault
+                            volumeMounts:
+                              - name: adminer-plugins
+                                mountPath: /srv/adminer-plugins
+                              - name: adminer-plugin-hide-login
+                                mountPath: /srv/adminer-plugins/adminer-hide-login-fields.php
+                                subPath: adminer-hide-login-fields.php
+                                readOnly: true
+                              - name: adminer-css
+                                mountPath: /srv/adminer.css
+                                subPath: adminer.css
+                                readOnly: true
+                        volumes:
+                          - name: adminer-plugins
+                            emptyDir: {}
+                          - name: adminer-plugin-hide-login
+                            configMap:
+                              name: db-console-plugin
+                          - name: adminer-css
+                            configMap:
+                              name: db-console-css
+                        securityContext:
+                          fsGroup: 1000
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation "dbconsole-svc" }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: v1
+                  kind: Service
+                  metadata:
+                    name: db-console
+                    namespace: {{ $consoleNs | quote }}
+                    labels:
+                      platform.capstone/component: tenant
+                      platform.capstone/team: {{ $team | quote }}
+                  spec:
+                    selector:
+                      app.kubernetes.io/name: db-console
+                    ports:
+                      - port: 80
+                        targetPort: 8080
+            ---
+            # Traefik forwardAuth Middleware -- team-scoped (allowed_groups=UA-MIS:<team>),
+            # unchanged in shape from the retired per-env version, just rendered once.
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation "dbconsole-mw" }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: traefik.io/v1alpha1
+                  kind: Middleware
+                  metadata:
+                    name: db-console-auth
+                    namespace: {{ $consoleNs | quote }}
+                    labels:
+                      platform.capstone/component: tenant
+                      platform.capstone/team: {{ $team | quote }}
+                  spec:
+                    forwardAuth:
+                      address: {{ printf "http://oauth2-proxy.db-console-auth.svc.cluster.local:4180/oauth2/auth?allowed_groups=UA-MIS:%s" $team | quote }}
+                      trustForwardHeader: true
+                      authResponseHeaders:
+                        - X-Auth-Request-User
+                        - X-Auth-Request-Email
+                        - X-Auth-Request-Groups
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation "dbconsole-ing" }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: networking.k8s.io/v1
+                  kind: Ingress
+                  metadata:
+                    name: db-console
+                    namespace: {{ $consoleNs | quote }}
+                    labels:
+                      platform.capstone/component: tenant
+                      platform.capstone/team: {{ $team | quote }}
+                    annotations:
+                      # Chain order matters: Traefik applies middlewares in list order,
+                      # each wrapping the next, so the `errors` middleware (outermost)
+                      # must be listed BEFORE the forwardAuth middleware (innermost) to
+                      # catch the 401 it returns and rewrite it to a 302 login redirect.
+                      # Cross-namespace ref requires providers.kubernetesCRD.
+                      # allowCrossNamespace (applicationsets/traefik-app.yaml).
+                      traefik.ingress.kubernetes.io/router.middlewares: {{ printf "db-console-auth-oauth2-proxy-errors@kubernetescrd,%s-db-console-auth@kubernetescrd" $consoleNs | quote }}
+                  spec:
+                    rules:
+                      - host: {{ printf "%s-db.%s" $team $domain | quote }}
+                        http:
+                          paths:
+                            - path: /
+                              pathType: Prefix
+                              backend:
+                                service:
+                                  name: db-console
+                                  port:
+                                    number: 80
+                    tls:
+                      - hosts:
+                          - {{ printf "%s-db.%s" $team $domain | quote }}
             {{- end }}
 
             {{- /* =====================================================================
@@ -1453,6 +2536,989 @@ spec:
                             remoteKey: {{ printf "tenants/%s/%s/database" $team $e.name | quote }}
                             property: port
             {{- end }}
+            {{- /* =====================================================================
+                   TEAM DB CONSOLE (Postgres) -- ONE Adminer per TEAM (not per
+                   env), per user feedback on the original per-env design (design doc
+                   artifacts/research/tenant-db-access.md §3/§4/§7). Autologin server carries
+                   NO fixed db path, so Adminer's own #dbs switcher (a real
+                   <select name="db">, confirmed against the live dockette/adminer:5.4.2
+                   image's index.php) lists every database the console's DB user has been
+                   granted -- populated by the per-env Grants below, so it always tracks
+                   whatever $envs is at render time.
+
+                   Lives in the team's OWN dev namespace ({{ $team }}-dev) -- a deliberate
+                   reuse, not a new namespace: that namespace already has the exact
+                   plumbing a per-team (not per-env) resource needs -- the vault-tenant
+                   SecretStore + eso-tenant SA rendered above, both scoped to the WHOLE
+                   tenant-<team> Vault policy (secret/data/tenants/<team>/*), not just the
+                   dev env. No new namespace/quota/PSA/netpol/AppProject-destination is
+                   needed as a result (dev's existing egress-to-db-tier rule already
+                   covers this pod). status.dbConsoleUrl (bottom of this template)
+                   reflects the same <team>-db host.
+
+                   Console user: `<teamDb>_console`, granted the SAME privilege level the
+                   per-env app users/roles already hold, on EVERY per-env schema (see the
+                   Grant loop below). Password Vault leaf: tenants/<team>/console/database
+                   (SAME shape/properties as the per-env tenants/<team>/<env>/database
+                   leaves, just a `console` slot instead of dev/staging/prod, so it reuses
+                   the SAME ExternalSecret/PushSecret pattern verbatim).
+                   ===================================================================== */}}
+            {{- $consoleUser := printf "%s_console" $teamDb }}
+            {{- $consoleConnSecret := printf "%s-console-db" $team }}
+            {{- $consoleNs := printf "%s-dev" $team }}
+            ---
+            # The shared team-console login role. No passwordSecretRef ->
+            # provider-sql generates the password (stable across reconciles, same
+            # rationale as the per-env Roles above). login-only, same as the per-env
+            # Roles -- not createdb/createrole/superuser.
+            apiVersion: postgresql.sql.crossplane.io/v1alpha1
+            kind: Role
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation "sql-role-console" }}
+                crossplane.io/external-name: {{ $consoleUser | quote }}
+            spec:
+              forProvider:
+                privileges:
+                  login: true
+              writeConnectionSecretToRef:
+                namespace: crossplane-system
+                name: {{ $consoleConnSecret | quote }}
+              providerConfigRef:
+                name: db-tier-postgres
+            {{- range $e := $envs }}
+            ---
+            # CONNECT+CREATE+TEMPORARY on EVERY per-env database -- the same grant the
+            # per-env app Role for that env already holds (mirrors the Grant in the
+            # per-env loop above; the per-env Role also OWNS its own db, so this is
+            # explicit database-level access for the console Role, which owns nothing).
+            apiVersion: postgresql.sql.crossplane.io/v1alpha1
+            kind: Grant
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation (printf "sql-grant-console-%s" $e.name) }}
+            spec:
+              forProvider:
+                role: {{ $consoleUser | quote }}
+                database: {{ printf "%s_%s" $teamDb $e.name | quote }}
+                privileges:
+                  - CONNECT
+                  - CREATE
+                  - TEMPORARY
+              providerConfigRef:
+                name: db-tier-postgres
+            {{- end }}
+            ---
+            # Bridge the console user's generated creds into Vault at the `console` leaf
+            # (same four properties as the per-env `database` leaves).
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              name: {{ printf "xp-%s-console-db-push" $team | quote }}
+              annotations:
+                {{ setResourceNameAnnotation "push-db-console" }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: external-secrets.io/v1alpha1
+                  kind: PushSecret
+                  metadata:
+                    name: {{ printf "%s-console-db" $team | quote }}
+                    namespace: crossplane-system
+                    labels:
+                      platform.capstone/component: platform
+                      platform.capstone/team: {{ $team | quote }}
+                  spec:
+                    refreshInterval: "1h"
+                    secretStoreRefs:
+                      - name: vault-push
+                        kind: SecretStore
+                    selector:
+                      secret:
+                        name: {{ $consoleConnSecret | quote }}
+                    data:
+                      - match:
+                          secretKey: username
+                          remoteRef:
+                            remoteKey: {{ printf "tenants/%s/console/database" $team | quote }}
+                            property: username
+                      - match:
+                          secretKey: password
+                          remoteRef:
+                            remoteKey: {{ printf "tenants/%s/console/database" $team | quote }}
+                            property: password
+                      - match:
+                          secretKey: endpoint
+                          remoteRef:
+                            remoteKey: {{ printf "tenants/%s/console/database" $team | quote }}
+                            property: host
+                      - match:
+                          secretKey: port
+                          remoteRef:
+                            remoteKey: {{ printf "tenants/%s/console/database" $team | quote }}
+                            property: port
+            ---
+            # UA-MIS theme ConfigMap. Mounted straight to /srv/adminer.css via subPath in
+            # the Deployment below -- bypasses the /srv root:root 0755 write-wall the
+            # adminer-plugins emptyDir fix below also works around: Adminer's own css()
+            # helper (index.php) does file_exists("adminer.css") relative to its cwd and
+            # links it in if present, so no ADMINER_THEME env/entrypoint cooperation is
+            # needed, and the kubelet creates this bind mount as root at container-create
+            # time (before the UID-1000 process starts), so /srv's permissions never come
+            # into it -- a different mechanism than entrypoint.sh's in-container `cp` for
+            # adminer-plugins, which IS blocked by them.
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              name: {{ printf "xp-%s-dbconsole-css" $team | quote }}
+              annotations:
+                {{ setResourceNameAnnotation "dbconsole-css-cm" }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: v1
+                  kind: ConfigMap
+                  metadata:
+                    name: db-console-css
+                    namespace: {{ $consoleNs | quote }}
+                    labels:
+                      platform.capstone/component: tenant
+                      platform.capstone/team: {{ $team | quote }}
+                  data:
+                    adminer.css: |
+                      /*
+                       * University of Alabama MIS — Adminer theme (tenant DB console + db-admin console).
+                       * ONE committed LIGHT theme. Crimson #9E1B32 accents, warm-white surfaces, dark
+                       * readable text, a light-grey / black-mono SQL editor + result grid.
+                       *
+                       * ============================================================================
+                       * WHY THERE IS NO DARK VARIANT / NO OS-ADAPTIVE STYLING (read before editing)
+                       * ============================================================================
+                       * Adminer's loader (index.php `css()`) scans this file's TEXT and, if it finds
+                       * the token that spells the CSS dark-scheme media feature, flips this sheet from
+                       * "light" to "adaptive" AND ALSO links Adminer's OWN built-in dark stylesheet
+                       * gated to the visitor's OS dark setting. A previous revision of this theme had
+                       * that exact token sitting harmlessly in a code comment — which made Adminer pull
+                       * in its dark sheet for anyone whose OS was in dark mode, and THAT sheet (not this
+                       * one) painted the broken dark-navy action bar / dark panels over our light theme.
+                       *
+                       * So this file DELIBERATELY contains that token NOWHERE — not in a rule, not in a
+                       * comment, not in a media query. We force a single light look for every visitor
+                       * regardless of OS via the variable overrides below + `color-scheme: light`. If
+                       * you ever add an OS-dark media block here you will silently re-arm that trap.
+                       *
+                       * ============================================================================
+                       * HOW IT WORKS — override Adminer's OWN design tokens, don't fight each element.
+                       * ============================================================================
+                       * Adminer 5.4.2's default.css drives nearly everything from four CSS variables on
+                       * <html>:  --bg (surfaces), --fg (text), --dim (th / secondary surfaces),
+                       * --lit (thead + selected-row + :target highlight). Re-defining those four (with
+                       * !important, and since this sheet loads AFTER default.css) recolors the bulk of
+                       * the UI coherently in one place. We then layer crimson accents + an editor/grid
+                       * polish on top, and otherwise WORK WITH Adminer's native layout (a ~19em
+                       * absolute left #menu, #content offset 21em, an absolute #breadcrumb) rather than
+                       * re-positioning it — the prior fixed-position surgery is what produced the
+                       * partial-width header strip and the empty full-height sidebar column.
+                       *
+                       * DOM verified against the LIVE dockette/adminer:mysql image (Adminer 5.4.2):
+                       *   #menu (left nav, holds #dbs the DB switcher + table lists), #content (h1,
+                       *   #breadcrumb, tables, forms), .footer > fieldset (the bulk "Selected (N)"
+                       *   action bar), textarea.sqlarea.jush-sql (the SQL editor — a PLAIN textarea,
+                       *   no JS overlay). CSS is auto-loaded by Adminer via file_exists("adminer.css")
+                       *   relative to its docroot (/srv), linked after default.css.
+                       */
+
+                      /* ==========================================================================
+                       * 1. DESIGN TOKENS
+                       *    (a) Override Adminer's four native variables -> light palette.
+                       *    (b) Our own namespaced palette for the accent layer.
+                       * ========================================================================== */
+                      html {
+                        /* Adminer's own tokens — the single biggest lever. */
+                        --bg:  #ffffff !important;   /* primary surfaces */
+                        --fg:  #1a1c20 !important;   /* body text — near-black, high contrast */
+                        --dim: #f0eeea !important;   /* th / secondary surfaces — warm light grey */
+                        --lit: #f7e5e9 !important;   /* thead + selected-row + :target — crimson tint */
+                        color-scheme: light;         /* keep UA form controls / scrollbars light on dark OS */
+                      }
+
+                      :root {
+                        --ua-crimson:      #9E1B32;
+                        --ua-crimson-dark: #7A1426;
+                        --ua-tint:         rgba(158, 27, 50, 0.08);
+                        --ua-tint-strong:  rgba(158, 27, 50, 0.16);
+
+                        --ua-ink:      #1A1C20;
+                        --ua-ink-soft: #4A4642;
+                        --ua-muted:    #79736D;
+
+                        --ua-page:     #ffffff;
+                        --ua-sidebar:  #F5F3F0;     /* barely-grey sidebar surface */
+                        --ua-border:   #E4E1DB;
+                        --ua-border-strong: #D3CFC8;
+
+                        --ua-editor-bg: #F5F5F5;    /* light-grey code surface */
+                        --ua-editor-fg: #14161A;    /* black-ish mono text */
+
+                        --ua-ok:    #1C7C4A;
+                        --ua-ok-bg: #EAF6EF;
+                        --ua-err:   #B3261E;
+                        --ua-err-bg:#FCEBEA;
+
+                        --ua-radius:    8px;
+                        --ua-radius-sm: 6px;
+                        --ua-font: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, Helvetica, Arial, sans-serif;
+                        --ua-mono: "SFMono-Regular", "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+                      }
+
+                      /* ==========================================================================
+                       * 2. BASE
+                       * ========================================================================== */
+                      html { box-sizing: border-box; }
+                      *, *:before, *:after { box-sizing: inherit; }
+
+                      body {
+                        background: var(--ua-page) !important;
+                        color: var(--ua-ink) !important;
+                        font-family: var(--ua-font) !important;
+                        font-size: 14px;
+                        line-height: 1.55;
+                        -webkit-font-smoothing: antialiased;
+                      }
+
+                      a { color: var(--ua-crimson); text-decoration: none; }
+                      a:hover { color: var(--ua-crimson-dark); text-decoration: underline; }
+
+                      /* ==========================================================================
+                       * 3. LEFT SIDEBAR (#menu) — native Adminer position (absolute, ~19em, left:0).
+                       *    We give it a light surface, a clear right border, a min-height so it reads
+                       *    as a real column even when its content is short, and the UA-MIS wordmark.
+                       * ========================================================================== */
+                      #menu {
+                        background: var(--ua-sidebar) !important;
+                        border-right: 1px solid var(--ua-border) !important;
+                        min-height: calc(100vh - 2em) !important;
+                        padding: 16px 16px 32px !important;
+                        margin: 0 !important;
+                        top: 0 !important;               /* start at the very top so the wordmark aligns */
+                      }
+
+                      /* UA-MIS wordmark at the top of the sidebar (inline SVG data-URI — no external
+                         asset host, offline-safe). */
+                      #menu:before {
+                        content: "";
+                        display: block;
+                        height: 34px;
+                        margin: 0 0 16px 2px;
+                        background: url("data:image/svg+xml;utf8,\
+                      <svg xmlns='http://www.w3.org/2000/svg' width='210' height='34' viewBox='0 0 210 34'>\
+                      <rect width='34' height='34' rx='6' fill='%239E1B32'/>\
+                      <text x='17' y='24' text-anchor='middle' font-family='Georgia, serif' font-size='19' font-weight='700' fill='%23FFFFFF'>A</text>\
+                      <text x='44' y='16' font-family='-apple-system, Helvetica, Arial, sans-serif' font-size='13' font-weight='700' fill='%231A1C20' letter-spacing='.3'>UA-MIS</text>\
+                      <text x='44' y='29' font-family='-apple-system, Helvetica, Arial, sans-serif' font-size='10' font-weight='500' fill='%2379736D' letter-spacing='.3'>DB Console</text>\
+                      </svg>") no-repeat left center;
+                        background-size: contain;
+                      }
+
+                      /* Nav section headings (Tables / Views / …) rendered as <p> in the menu. */
+                      #menu p {
+                        font-size: 11px;
+                        font-weight: 700;
+                        text-transform: uppercase;
+                        letter-spacing: .05em;
+                        color: var(--ua-muted);
+                        margin: 16px 0 6px !important;
+                        border: none !important;
+                        background: none !important;
+                      }
+
+                      #menu a {
+                        color: var(--ua-ink) !important;
+                        display: inline-block;
+                        padding: 3px 8px;
+                        margin: 1px 0;
+                        border-radius: var(--ua-radius-sm);
+                        border: none !important;
+                        text-transform: none;   /* nav/table links stay normal-case; only the <p> section headings are uppercased */
+                      }
+                      #menu a:hover {
+                        background: var(--ua-tint) !important;
+                        color: var(--ua-crimson-dark) !important;
+                        text-decoration: none;
+                        box-shadow: inset 2px 0 0 0 var(--ua-crimson);
+                      }
+                      #menu a.active,
+                      #menu a:active {
+                        background: var(--ua-tint-strong) !important;
+                        color: var(--ua-crimson-dark) !important;
+                        box-shadow: inset 3px 0 0 0 var(--ua-crimson);
+                      }
+
+                      /* #dbs — the database switcher (the dropdown listing <team>_dev/staging/prod). */
+                      #dbs {
+                        margin: 0 0 12px !important;
+                        padding: 0 !important;
+                        border: none !important;
+                      }
+                      #dbs label { font-weight: 600; color: var(--ua-ink-soft); }
+
+                      /* Sidebar toggle handle */
+                      #menuopen { color: var(--ua-muted); }
+
+                      /* ==========================================================================
+                       * 4. CONTENT + BREADCRUMB
+                       *    #breadcrumb is natively position:absolute with NO width, so ANY colored
+                       *    background would render as a short partial strip. We keep it text-only
+                       *    (transparent) — no strip, nothing can look "cut off".
+                       * ========================================================================== */
+                      #content {
+                        padding: 8px 32px 48px 28px !important;
+                        max-width: 1180px;
+                      }
+
+                      #breadcrumb {
+                        background: transparent !important;
+                        box-shadow: none !important;
+                        border: none !important;
+                        height: auto !important;
+                        line-height: 1.6 !important;
+                        padding: 6px 0 !important;
+                        margin: 0 0 4px -6px !important;
+                        font-size: 12px;
+                        color: var(--ua-muted);
+                      }
+                      #breadcrumb a { color: var(--ua-crimson); }
+                      #breadcrumb a:hover { color: var(--ua-crimson-dark); }
+
+                      /* ==========================================================================
+                       * 5. TYPOGRAPHY
+                       * ========================================================================== */
+                      h1 {
+                        font-size: 21px;
+                        font-weight: 700;
+                        color: var(--ua-ink);
+                        background: none !important;
+                        border: none !important;
+                        border-bottom: 2px solid var(--ua-tint-strong) !important;
+                        padding: 0 0 10px !important;
+                        margin: 4px 0 20px !important;
+                      }
+                      h1 .version { font-size: 11px; font-weight: 400; color: var(--ua-muted); opacity: .7; }
+                      h1 a[href*="adminer.org"] { display: none !important; }   /* hide upstream donate/version chrome */
+
+                      h2 {
+                        font-size: 16px;
+                        font-weight: 600;
+                        color: var(--ua-ink);
+                        background: none !important;   /* was --lit; keep clean, use a border accent instead */
+                        border: none !important;
+                        border-bottom: 2px solid var(--ua-tint-strong) !important;
+                        padding: 0 0 8px !important;
+                        margin: 26px 0 14px !important;
+                      }
+                      h3 { font-size: 14px; font-weight: 600; color: var(--ua-ink-soft); margin: 16px 0 8px; }
+
+                      p { color: var(--ua-ink-soft); }
+
+                      /* ==========================================================================
+                       * 6. MESSAGES / ALERTS
+                       * ========================================================================== */
+                      .message, .error {
+                        display: block;
+                        border-radius: var(--ua-radius);
+                        padding: 10px 14px !important;
+                        margin: 0 0 16px !important;
+                        font-weight: 500;
+                        background-image: none !important;
+                        box-shadow: none !important;
+                      }
+                      .message { background: var(--ua-ok-bg) !important;  color: var(--ua-ok) !important;  border: 1px solid rgba(28,124,74,.25); }
+                      .error   { background: var(--ua-err-bg) !important; color: var(--ua-err) !important; border: 1px solid rgba(179,38,30,.25); }
+
+                      /* ==========================================================================
+                       * 7. FORMS — inputs / selects / buttons
+                       * ========================================================================== */
+                      fieldset {
+                        border: 1px solid var(--ua-border) !important;
+                        border-radius: var(--ua-radius);
+                        padding: 12px 14px !important;
+                        margin: 0 0 14px !important;
+                        background: #FCFBFA !important;
+                        box-shadow: none !important;
+                      }
+                      legend {
+                        color: var(--ua-ink-soft);
+                        font-weight: 600;
+                        padding: 0 6px;
+                      }
+
+                      input[type=text], input[type=password], input[type=number],
+                      input[type=search], input[type=email], input:not([type]), select, textarea {
+                        font-family: var(--ua-font);
+                        font-size: 13px;
+                        color: var(--ua-ink);
+                        background: #ffffff;
+                        border: 1px solid var(--ua-border-strong);
+                        border-radius: var(--ua-radius-sm);
+                        padding: 6px 9px;
+                        transition: border-color .12s ease, box-shadow .12s ease;
+                      }
+                      input[type=text]:focus, input[type=password]:focus, input[type=number]:focus,
+                      input[type=search]:focus, input[type=email]:focus, input:not([type]):focus,
+                      select:focus, textarea:focus {
+                        outline: none;
+                        border-color: var(--ua-crimson);
+                        box-shadow: 0 0 0 3px var(--ua-tint);
+                      }
+
+                      /* Primary submit buttons — crimson (matches ArgoCD/Grafana). */
+                      input[type=submit], input[type=button], button {
+                        font-family: var(--ua-font);
+                        font-size: 13px;
+                        font-weight: 600;
+                        color: #ffffff !important;
+                        background: var(--ua-crimson) !important;
+                        border: 1px solid var(--ua-crimson) !important;
+                        border-radius: var(--ua-radius-sm);
+                        padding: 6px 15px;
+                        cursor: pointer;
+                        transition: background-color .12s ease, border-color .12s ease;
+                      }
+                      input[type=submit]:hover, input[type=button]:hover, button:hover {
+                        background: var(--ua-crimson-dark) !important;
+                        border-color: var(--ua-crimson-dark) !important;
+                      }
+
+                      /* Destructive actions (drop / delete) — quiet GHOST style, never a bold crimson
+                         button, so they don't invite a click. Red only on hover. (DB-level drop is
+                         hidden entirely below.) */
+                      input[name=drop], input[name=delete], input[name=truncate], input[value=Drop], input[value=Delete] {
+                        color: var(--ua-err) !important;
+                        background: #ffffff !important;
+                        border: 1px solid var(--ua-border-strong) !important;
+                        font-weight: 500;
+                      }
+                      input[name=drop]:hover, input[name=delete]:hover, input[name=truncate]:hover,
+                      input[value=Drop]:hover, input[value=Delete]:hover {
+                        background: var(--ua-err-bg) !important;
+                        border-color: var(--ua-err) !important;
+                      }
+
+                      .icon { border-radius: 4px; }
+
+                      /* ==========================================================================
+                       * 8. SQL EDITOR — plain textarea, styled to read like a code editor:
+                       *    light-grey surface, black mono text, soft inset, crimson focus ring.
+                       * ========================================================================== */
+                      textarea, .sqlarea, textarea.sqlarea, textarea.jush-sql, .jush-sql {
+                        font-family: var(--ua-mono) !important;
+                        font-size: 13.5px !important;
+                        line-height: 1.65 !important;
+                        color: var(--ua-editor-fg) !important;
+                        background: var(--ua-editor-bg) !important;
+                        border: 1px solid var(--ua-border-strong) !important;
+                        border-radius: var(--ua-radius) !important;
+                        padding: 13px 15px !important;
+                        box-shadow: inset 0 1px 3px rgba(20,22,26,.05) !important;
+                        tab-size: 2;
+                      }
+                      textarea:focus, textarea.sqlarea:focus, .sqlarea:focus {
+                        border-color: var(--ua-crimson) !important;
+                        box-shadow: inset 0 1px 3px rgba(20,22,26,.05), 0 0 0 3px var(--ua-tint) !important;
+                      }
+
+                      code, .jush-js {
+                        font-family: var(--ua-mono);
+                        background: var(--ua-editor-bg);
+                        color: var(--ua-editor-fg);
+                        border-radius: 4px;
+                        padding: 1px 5px;
+                      }
+                      .sql-footer { margin-top: 10px; }
+
+                      /* ==========================================================================
+                       * 9. TABLES — schema lists AND result grids: light surface, BLACK text.
+                       * ========================================================================== */
+                      table {
+                        border-collapse: collapse;
+                        margin: 6px 0 20px;
+                        background: #ffffff;
+                        border: 1px solid var(--ua-border);
+                        border-radius: var(--ua-radius);
+                        overflow: hidden;
+                        font-size: 13px;
+                        color: var(--ua-editor-fg) !important;
+                      }
+
+                      thead th, thead td {
+                        background: #F7E5E9 !important;   /* crimson tint */
+                        color: var(--ua-ink) !important;
+                        font-weight: 600;
+                        text-align: left;
+                        padding: 8px 11px !important;
+                        border-bottom: 2px solid var(--ua-tint-strong) !important;
+                        white-space: nowrap;
+                      }
+                      thead th a, thead td a { color: var(--ua-ink) !important; }
+
+                      tbody th, tbody td {
+                        padding: 7px 11px !important;
+                        border-bottom: 1px solid var(--ua-border) !important;
+                        color: var(--ua-editor-fg) !important;
+                        background: #ffffff !important;
+                        vertical-align: top;
+                      }
+                      .odds tbody tr:nth-child(2n) td,
+                      .odds tbody tr:nth-child(2n) th { background: #FAF9F7 !important; }
+
+                      tbody tr:hover td, tbody tr:hover th { background: var(--ua-tint) !important; }
+
+                      .js .checked td, .js .checked th,
+                      .js .checkable .checked td, .js .checkable .checked th { background: var(--ua-tint-strong) !important; }
+
+                      table code { background: transparent; padding: 0; }
+
+                      /* Pagination */
+                      .pages { border: none !important; box-shadow: none !important; padding: 4px 0; }
+                      .pages a {
+                        display: inline-block;
+                        padding: 3px 9px; margin: 0 2px 0 0;
+                        border: 1px solid var(--ua-border-strong);
+                        border-radius: var(--ua-radius-sm);
+                        color: var(--ua-ink-soft);
+                      }
+                      .pages a:hover { border-color: var(--ua-crimson); color: var(--ua-crimson); text-decoration: none; }
+
+                      /* ==========================================================================
+                       * 10. FOOTER ACTION BAR (.footer) — Adminer's sticky bulk-action bar. Native
+                       *     default.css gives it a `box-shadow: 0 -5px 10px 10px var(--bg)` glow;
+                       *     neutralize it so it's a clean inline row, never a floating dark/glowing
+                       *     panel.
+                       * ========================================================================== */
+                      .footer {
+                        position: static !important;   /* was sticky (default.css) — pin it inline so it's a clean action row, never a floating overlay */
+                        box-shadow: none !important;
+                        background: transparent !important;
+                        border: none !important;
+                        margin: 16px 0 0 !important;
+                      }
+                      .footer > div {
+                        background: transparent !important;
+                        box-shadow: none !important;
+                        padding: 0 !important;
+                      }
+                      .footer fieldset {
+                        display: inline-block;
+                        background: #FCFBFA !important;
+                        border: 1px solid var(--ua-border) !important;
+                        box-shadow: none !important;
+                      }
+
+                      /* ==========================================================================
+                       * 11. SAFETY — hide the DATABASE-level bulk "Drop" button.
+                       *     Rationale: on the "Select database" page one bulk click drops an entire
+                       *     provisioned tenant database. DROP is a single MySQL/PG privilege covering
+                       *     both tables AND databases, so it can't be revoked at the grant level
+                       *     without losing table-drop too — so we remove the accidental one-click
+                       *     PATH instead. A deliberate `DROP DATABASE` typed in the SQL box still
+                       *     works (intentional); table-level drop stays fully usable.
+                       *
+                       *     Scoping: the databases-list page is the ONLY page whose <form> contains
+                       *     database checkboxes named `db[]` (verified in index.php: checkbox("db[]",…)
+                       *     on the databases listing; the tables page uses `tables[]`/`check[]`). So
+                       *     :has() targets exactly that form's Drop submit and nothing else. :has() is
+                       *     Baseline-supported in current browsers; if it ever isn't, the button simply
+                       *     reverts to visible (fail-safe, no breakage).
+                       * ========================================================================== */
+                      form:has(input[name="db[]"]) input[name="drop"],
+                      form:has(input[name="db[]"]) input[value="Drop"] {
+                        display: none !important;
+                      }
+                      /* Also drop the now-purposeless bulk "Selected" fieldset on that page so the
+                         databases view doesn't show an empty action bar. */
+                      form:has(input[name="db[]"]) .footer fieldset { display: none !important; }
+
+                      /* ==========================================================================
+                       * 12. MISC
+                       * ========================================================================== */
+                      /* Quiet ghost logout. Selector carries an extra class over `input[type=submit]`
+                         so it out-specifies the crimson primary-button rule (which would otherwise win
+                         and paint logout a heavy crimson block). */
+                      .logout,
+                      input[type=submit].logout,
+                      input[type=button].logout {
+                        display: inline-block;
+                        padding: 5px 12px !important;
+                        background: #ffffff !important;
+                        color: var(--ua-ink-soft) !important;
+                        border: 1px solid var(--ua-border-strong) !important;
+                        border-radius: var(--ua-radius-sm);
+                        box-shadow: none !important;
+                        font-size: 12px;
+                        font-weight: 600;
+                        cursor: pointer;
+                      }
+                      .logout:hover,
+                      input[type=submit].logout:hover {
+                        background: #ffffff !important;
+                        border-color: var(--ua-crimson) !important;
+                        color: var(--ua-crimson) !important;
+                      }
+
+                      #lang { color: var(--ua-muted); font-size: 12px; }
+                      hr { border: none; border-top: 1px solid var(--ua-border); margin: 18px 0; }
+
+                      /* Narrow screens: let the native layout collapse gracefully (Adminer's own
+                         #menuopen toggle still applies). max-width query only — contains no OS-scheme
+                         token, so the dark-sheet trap stays disarmed. */
+                      @media (max-width: 800px) {
+                        #content { margin-left: 0 !important; padding-left: 16px !important; }
+                        #menu { min-height: 0 !important; }
+                      }
+
+                      /* ==========================================================================
+                       * 13. LOGIN FORM — hide the dead-end driver/server/username rows on these
+                       *     auto-login consoles. Belt-and-suspenders for the AdminerHideLoginFields
+                       *     plugin (db-console-plugin ConfigMap below, mounted at
+                       *     /srv/adminer-plugins/adminer-hide-login-fields.php in the Deployment) --
+                       *     if that plugin ever fails to load, this still hides the same three rows.
+                       *     Scoping: these `name="auth[...]"` attributes are emitted only by Adminer's
+                       *     core loginForm() (adminer.inc.php) and appear nowhere else in the app, so
+                       *     :has() can't accidentally hide an unrelated row elsewhere. Password and
+                       *     Database stay visible/usable either way — only System/Server/Username are
+                       *     dead ends here (every other engine/server on the platform is unreachable
+                       *     from this console; ADMINER_AUTOLOGIN_SERVER below pins all three).
+                       * ========================================================================== */
+                      tr:has(select[name="auth[driver]"]),
+                      tr:has(input[name="auth[server]"]),
+                      tr:has(input[name="auth[username]"]) {
+                        display: none !important;
+                      }
+            ---
+            # Adminer login-form plugin ConfigMap: hides the driver ("System"), server, and
+            # username rows on the login form of these auto-login consoles.
+            # ADMINER_AUTOLOGIN_SERVER (ExternalSecret below) already pins all three — and
+            # every other engine/server on the platform is unreachable from here anyway — so
+            # leaving them editable is a dead end that only confuses a team ("what do I put
+            # here?"), not a real choice. Mounted into /srv/adminer-plugins/ alongside the
+            # entrypoint-copied adminer-autologin.php (dbconsole-deploy below, same directory,
+            # different file); Adminer 5's own plugin loader glob()s every *.php file it finds
+            # there and auto-instantiates any class extending Adminer\Plugin (confirmed against
+            # the live dockette/adminer:5.4.2 index.php: `Plugins::__construct` does
+            # `foreach(glob("adminer-plugins/*.php") as $p) $this->includeOnce($p)`, then
+            # `get_declared_classes()` picks up subclasses of Adminer\Plugin) — no extra wiring
+            # needed beyond the volume mount below.
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              name: {{ printf "xp-%s-dbconsole-plugin" $team | quote }}
+              annotations:
+                {{ setResourceNameAnnotation "dbconsole-plugin-cm" }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: v1
+                  kind: ConfigMap
+                  metadata:
+                    name: db-console-plugin
+                    namespace: {{ $consoleNs | quote }}
+                    labels:
+                      platform.capstone/component: tenant
+                      platform.capstone/team: {{ $team | quote }}
+                  data:
+                    adminer-hide-login-fields.php: |
+                      <?php
+
+                      /**
+                       * UA-MIS DB console — hide the unusable login-form fields on these auto-login
+                       * consoles. System (driver), Server, and Username are all pinned by
+                       * ADMINER_AUTOLOGIN_SERVER (adminer-autologin.php, same
+                       * /srv/adminer-plugins/ directory) — there is nowhere else for a team to
+                       * point them, so an editable field is a dead end, not a real choice.
+                       * Returning '' from loginFormField() suppresses that row entirely
+                       * (Adminer's Plugins::__call gives the first non-null hook result priority,
+                       * short-circuiting the built-in row for that field name); returning null
+                       * (the implicit default below for password/db) leaves Adminer's normal row
+                       * untouched, so Password and Database keep working exactly as before.
+                       *
+                       * Belt-and-suspenders: adminer.css (db-console-css ConfigMap, section 13)
+                       * hides these same rows by selector too, in case this plugin ever fails to
+                       * load.
+                       *
+                       * @link https://www.adminer.org/en/plugins/#use
+                       */
+                      class AdminerHideLoginFields extends Adminer\Plugin {
+                        function loginFormField($name, $heading, $value) {
+                          if (in_array($name, array('driver', 'server', 'username'))) {
+                            return '';
+                          }
+                        }
+                      }
+            ---
+            # ExternalSecret: assembles ADMINER_AUTOLOGIN_SERVER from the console leaf --
+            # NO db path in the DSN, so Adminer's autologin plugin logs into the SERVER
+            # only (empty `db`) and lands on its own database list/switcher, populated by
+            # the Grants above. Depends on the console PushSecret so it doesn't spin on a
+            # not-yet-populated Vault leaf on first apply.
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              name: {{ printf "xp-%s-dbconsole-es" $team | quote }}
+              annotations:
+                {{ setResourceNameAnnotation "dbconsole-es" }}
+            spec:
+              providerConfigRef:
+                name: default
+              references:
+                - dependsOn:
+                    apiVersion: kubernetes.crossplane.io/v1alpha1
+                    kind: Object
+                    name: {{ printf "xp-%s-console-db-push" $team | quote }}
+              forProvider:
+                manifest:
+                  apiVersion: external-secrets.io/v1
+                  kind: ExternalSecret
+                  metadata:
+                    name: db-console
+                    namespace: {{ $consoleNs | quote }}
+                    labels:
+                      platform.capstone/component: tenant
+                      platform.capstone/team: {{ $team | quote }}
+                  spec:
+                    refreshInterval: "1h"
+                    secretStoreRef:
+                      name: vault-tenant
+                      kind: SecretStore
+                    target:
+                      name: db-console
+                      creationPolicy: Owner
+                      deletionPolicy: Delete
+                      template:
+                        engineVersion: v2
+                        data:
+                          ADMINER_AUTOLOGIN_SERVER: "pgsql://{{ `{{ .username }}` }}:{{ `{{ .password }}` }}@{{ `{{ .host }}` }}:{{ `{{ .port }}` }}"
+                    data:
+                      - secretKey: username
+                        remoteRef:
+                          key: {{ printf "tenants/%s/console/database" $team | quote }}
+                          property: username
+                      - secretKey: password
+                        remoteRef:
+                          key: {{ printf "tenants/%s/console/database" $team | quote }}
+                          property: password
+                      - secretKey: host
+                        remoteRef:
+                          key: {{ printf "tenants/%s/console/database" $team | quote }}
+                          property: host
+                      - secretKey: port
+                        remoteRef:
+                          key: {{ printf "tenants/%s/console/database" $team | quote }}
+                          property: port
+            ---
+            # Deployment: dockette/adminer:pgsql -- identical pod spec to the retired per-env consoles
+            # (see git history for the non-root-UID / adminer-plugins emptyDir
+            # rationale), plus the adminer.css mount.
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              name: {{ printf "xp-%s-dbconsole-deploy" $team | quote }}
+              annotations:
+                {{ setResourceNameAnnotation "dbconsole-deploy" }}
+            spec:
+              providerConfigRef:
+                name: default
+              # provider-kubernetes Object has no `.metadata.references` field (server
+              # dry-run rejects it -- this is the #281/#283 bug); dependsOn belongs under
+              # `spec.references`, same as every other cross-Object dependency in this
+              # file.
+              references:
+                - dependsOn:
+                    apiVersion: kubernetes.crossplane.io/v1alpha1
+                    kind: Object
+                    name: {{ printf "xp-%s-dbconsole-es" $team | quote }}
+                - dependsOn:
+                    apiVersion: kubernetes.crossplane.io/v1alpha1
+                    kind: Object
+                    name: {{ printf "xp-%s-dbconsole-css" $team | quote }}
+                - dependsOn:
+                    apiVersion: kubernetes.crossplane.io/v1alpha1
+                    kind: Object
+                    name: {{ printf "xp-%s-dbconsole-plugin" $team | quote }}
+              forProvider:
+                manifest:
+                  apiVersion: apps/v1
+                  kind: Deployment
+                  metadata:
+                    name: db-console
+                    namespace: {{ $consoleNs | quote }}
+                    labels:
+                      platform.capstone/component: tenant
+                      platform.capstone/team: {{ $team | quote }}
+                      app.kubernetes.io/name: db-console
+                  spec:
+                    replicas: 1
+                    selector:
+                      matchLabels:
+                        app.kubernetes.io/name: db-console
+                    template:
+                      metadata:
+                        labels:
+                          app.kubernetes.io/name: db-console
+                          platform.capstone/team: {{ $team | quote }}
+                      spec:
+                        containers:
+                          - name: adminer
+                            image: dockette/adminer:pgsql
+                            imagePullPolicy: IfNotPresent
+                            env:
+                              - name: ADMINER_PLUGIN_AUTOLOGIN
+                                value: "1"
+                              - name: PORT
+                                value: "8080"
+                              - name: ADMINER_BANNER
+                                value: "0"
+                              - name: ADMINER_AUTOLOGIN_SERVER
+                                valueFrom:
+                                  secretKeyRef:
+                                    name: db-console
+                                    key: ADMINER_AUTOLOGIN_SERVER
+                            ports:
+                              - containerPort: 8080
+                            resources:
+                              requests: { cpu: "10m", memory: "32Mi" }
+                              limits: { memory: "64Mi" }
+                            securityContext:
+                              allowPrivilegeEscalation: false
+                              runAsNonRoot: true
+                              runAsUser: 1000
+                              capabilities:
+                                drop: ["ALL"]
+                              seccompProfile:
+                                type: RuntimeDefault
+                            volumeMounts:
+                              - name: adminer-plugins
+                                mountPath: /srv/adminer-plugins
+                              - name: adminer-plugin-hide-login
+                                mountPath: /srv/adminer-plugins/adminer-hide-login-fields.php
+                                subPath: adminer-hide-login-fields.php
+                                readOnly: true
+                              - name: adminer-css
+                                mountPath: /srv/adminer.css
+                                subPath: adminer.css
+                                readOnly: true
+                        volumes:
+                          - name: adminer-plugins
+                            emptyDir: {}
+                          - name: adminer-plugin-hide-login
+                            configMap:
+                              name: db-console-plugin
+                          - name: adminer-css
+                            configMap:
+                              name: db-console-css
+                        securityContext:
+                          fsGroup: 1000
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation "dbconsole-svc" }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: v1
+                  kind: Service
+                  metadata:
+                    name: db-console
+                    namespace: {{ $consoleNs | quote }}
+                    labels:
+                      platform.capstone/component: tenant
+                      platform.capstone/team: {{ $team | quote }}
+                  spec:
+                    selector:
+                      app.kubernetes.io/name: db-console
+                    ports:
+                      - port: 80
+                        targetPort: 8080
+            ---
+            # Traefik forwardAuth Middleware -- team-scoped (allowed_groups=UA-MIS:<team>),
+            # unchanged in shape from the retired per-env version, just rendered once.
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation "dbconsole-mw" }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: traefik.io/v1alpha1
+                  kind: Middleware
+                  metadata:
+                    name: db-console-auth
+                    namespace: {{ $consoleNs | quote }}
+                    labels:
+                      platform.capstone/component: tenant
+                      platform.capstone/team: {{ $team | quote }}
+                  spec:
+                    forwardAuth:
+                      address: {{ printf "http://oauth2-proxy.db-console-auth.svc.cluster.local:4180/oauth2/auth?allowed_groups=UA-MIS:%s" $team | quote }}
+                      trustForwardHeader: true
+                      authResponseHeaders:
+                        - X-Auth-Request-User
+                        - X-Auth-Request-Email
+                        - X-Auth-Request-Groups
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation "dbconsole-ing" }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: networking.k8s.io/v1
+                  kind: Ingress
+                  metadata:
+                    name: db-console
+                    namespace: {{ $consoleNs | quote }}
+                    labels:
+                      platform.capstone/component: tenant
+                      platform.capstone/team: {{ $team | quote }}
+                    annotations:
+                      # Chain order matters: Traefik applies middlewares in list order,
+                      # each wrapping the next, so the `errors` middleware (outermost)
+                      # must be listed BEFORE the forwardAuth middleware (innermost) to
+                      # catch the 401 it returns and rewrite it to a 302 login redirect.
+                      # Cross-namespace ref requires providers.kubernetesCRD.
+                      # allowCrossNamespace (applicationsets/traefik-app.yaml).
+                      traefik.ingress.kubernetes.io/router.middlewares: {{ printf "db-console-auth-oauth2-proxy-errors@kubernetescrd,%s-db-console-auth@kubernetescrd" $consoleNs | quote }}
+                  spec:
+                    rules:
+                      - host: {{ printf "%s-db.%s" $team $domain | quote }}
+                        http:
+                          paths:
+                            - path: /
+                              pathType: Prefix
+                              backend:
+                                service:
+                                  name: db-console
+                                  port:
+                                    number: 80
+                    tls:
+                      - hosts:
+                          - {{ printf "%s-db.%s" $team $domain | quote }}
             {{- end }}
 
             {{- /* =====================================================================
@@ -1464,6 +3530,7 @@ spec:
             status:
               repoUrl: {{ $repoUrl | quote }}
               harborProject: {{ $team | quote }}
+              dbConsoleUrl: {{ if ne $database "none" }}{{ printf "https://%s-db.%s" $team $domain | quote }}{{ else }}""{{ end }}
     # ------------------------------------------------------------------------
     - step: ready
       functionRef:

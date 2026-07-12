@@ -9,6 +9,11 @@ import catalogPlugin from '@backstage/plugin-catalog/alpha';
 import scaffolderPlugin from '@backstage/plugin-scaffolder/alpha';
 import { navModule } from './modules/nav';
 import { signInModule } from './modules/signIn';
+// UA-MIS crimson/charcoal theme (matches ArgoCD/Grafana) + the how-to landing page that
+// replaces the default catalog-as-root. See packages/app/src/theme and
+// packages/app/src/modules/home.
+import { themeModule } from './theme';
+import homePlugin from './modules/home';
 // M3: the write-only Secrets capability — adds a "/secrets" page + a "Secrets" tab on
 // Component entities (seal a secret -> PR to the team app repo). See
 // plugins/capstone-secrets.
@@ -26,5 +31,7 @@ export default createApp({
     signInModule,
     capstoneSecretsPlugin,
     capstoneTenantsPlugin,
+    themeModule,
+    homePlugin,
   ],
 });

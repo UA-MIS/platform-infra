@@ -16,10 +16,28 @@
 # only via the in-cluster Service, boundary enforced here, not by the DB login's
 # host string.
 #
-# Cilium enforces standard `networking.k8s.io/v1` NetworkPolicy (no CNP needed —
-# this doesn't touch entity-based apiserver matching or the flannel->Cilium CIDR
-# gap that apiserver-cnp.yaml/vault-cnp.yaml work around). CNP and k8s
-# NetworkPolicy on the same endpoint/direction are ADDITIVE (OR).
+# CORRECTION (live incident, 2026-07-07/08 — see the CiliumNetworkPolicy at the
+# bottom of this file): the claim above ("no CNP needed") was WRONG for two of
+# this tier's egress paths, for exactly the reason apiserver-cnp.yaml/
+# vault-cnp.yaml already document elsewhere: Cilium identifies in-cluster
+# traffic by IDENTITY (`reserved:kube-apiserver`, per-pod identities), NOT by
+# IP, so a plain k8s NetworkPolicy `ipBlock` CIDR rule does NOT match it, even
+# though the CIDR numerically covers the destination:
+#   - CNPG's initdb reaches the apiserver VIP at 10.96.0.1:443 — covered
+#     numerically by the `allow-egress-scoped` service-CIDR ipBlock below, but
+#     NOT matched, so it i/o-timed-out until fixed.
+#   - Galera group-communication (WSREP) between db-tier pods on TCP
+#     4567/4568/4444 + UDP 4567 — covered numerically by that same rule's pod-
+#     CIDR ipBlock, but NOT matched either (node-1's WSREP gcomm-timeout
+#     crashloop). The INGRESS side already works (the intra-ns rule below uses
+#     a label `podSelector`, which Cilium resolves to per-pod identity, not
+#     CIDR) — only the EGRESS side needed the identity-based fix.
+# Both are fixed by the `allow-egress-apiserver` CiliumNetworkPolicy at the
+# bottom of this file, using `toEntities: [kube-apiserver, cluster]` — the same
+# two-entity idiom apiserver-cnp.yaml/vault-cnp.yaml use for the identical
+# class of gap in argocd/dex/harbor/vault. `cluster` matches ALL in-cluster
+# endpoints, so it covers Galera's peer ports without enumerating them.
+# CNP and k8s NetworkPolicy on the same endpoint/direction are ADDITIVE (OR).
 #
 # Talos/Cilium CIDRs (see hardening/netpol-controlplane/*-netpol.yaml headers):
 # pods 10.244.0.0/16, services 10.96.0.0/12, nodes 10.237.168.0/22
@@ -83,6 +101,53 @@ spec:
           port: 3306
         - protocol: TCP
           port: 5555
+    # ns `backstage` -> CNPG (5432 only) — the companion ingress-allow edit this
+    # file's header + docs/operator/in-cluster-db-tier-runbook.md §3 flagged as
+    # needed "at that point": Backstage is now a live DB client of capstone-pg
+    # (the CNPG cutover, applicationsets/backstage-process-app.yaml). Scoped to
+    # port 5432 only (not 3306/5555/9000) — Backstage never talks to MariaDB or
+    # MinIO. Harbor/crossplane-system are NOT added here (still on their own
+    # paths — out of scope for this change; add per the same pattern at their
+    # own cutover).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: backstage
+      ports:
+        - protocol: TCP
+          port: 5432
+    # ns `crossplane-system` -> MariaDB (3306) — the Crossplane repoint cutover
+    # (docs/operator/in-cluster-db-tier-runbook.md §4c): provider-sql now runs its
+    # admin session (config/providerconfig-sql.yaml, secret db-tier-mysql-admin)
+    # against capstone-mariadb-mariadb-cluster-primary in this namespace instead of
+    # the off-box ua-mis-db-1, so its pod (ns crossplane-system) needs to actually
+    # reach 3306 here — this file's header/§3 flagged this as the deliberately
+    # deferred companion edit for "at their own cutover"; this is that cutover.
+    # Postgres (5432) is NOT added here yet — providerconfig-postgres.yaml's admin
+    # secret is still an unsealed placeholder (no live Postgres tenant), see that
+    # ProviderConfig's own comments; add this same rule at its cutover.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: crossplane-system
+      ports:
+        - protocol: TCP
+          port: 3306
+    # ns `db-admin` (tenant-db-access design §5) -> BOTH engine ports — the
+    # platform-admin Adminer reads CNPG (Backstage/Harbor/crossplane_provisioner
+    # roles) AND MariaDB (root/crossplane-provisioner). It does NOT carry
+    # `platform.capstone/team` (it's a platform namespace, not a tenant one) so it is
+    # NOT covered by the allow-ingress-tenant-namespaces rule below and needs this
+    # explicit by-name admit, same pattern as the `backstage` rule above.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: db-admin
+      ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 3306
     # Intra-namespace: CNPG replication, Galera SST/replication, and the backup
     # paths (barman-cloud sidecar + mariadb PhysicalBackup Job) reaching the MinIO
     # pod — all same-namespace today.
@@ -137,3 +202,97 @@ spec:
       ports:
         - protocol: TCP
           port: 6443
+---
+# Cilium intra-cluster + apiserver egress allow (CiliumNetworkPolicy) — db-tier.
+# Companion to hardening/netpol-controlplane/apiserver-cnp.yaml / vault-cnp.yaml
+# (same fix, same two-entity idiom); see this file's header CORRECTION note for
+# the full incident writeup. Codifies two CiliumNetworkPolicies that were
+# applied LIVE by hand (kubectl, context admin@capstone) during the overnight
+# bring-up on 2026-07-07/08 and are being made GitOps-permanent here:
+#   `allow-db-tier-apiserver-dns` (toEntities: kube-apiserver + kube-dns:53)
+#   `allow-db-tier-galera`        (intra-db-tier TCP 4567/4568/4444 + UDP 4567)
+# Both are subsumed by the single `toEntities: [kube-apiserver, cluster]` rule
+# below — `cluster` is a superset of the exact Galera ports (it matches ALL
+# in-cluster endpoints on ALL ports), so one CNP replaces both hotfixes without
+# hardcoding the WSREP port list. DNS is NOT repeated here — it's already
+# covered by the `allow-egress-scoped` k8s NetworkPolicy above.
+#
+# Safe to ship through the normal AUTOMATED platform-services-appset sync
+# (unlike hardening/netpol-controlplane's MANUAL-SYNC gate): this CNP is
+# purely additive (CNP + k8s NetworkPolicy on the same endpoint/direction are
+# OR'd, never AND'd), so it can only ADD allowed egress — it cannot narrow or
+# break the default-deny / existing scoped-allow that's already live.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-egress-apiserver
+  namespace: db-tier
+  labels:
+    platform.capstone/component: platform
+spec:
+  endpointSelector: {}
+  egress:
+    - toEntities:
+        - kube-apiserver
+        - cluster
+---
+# --- INGRESS (tenant-db-access, artifacts/research/tenant-db-access.md §6.3): admits
+# every tenant namespace's own DB console + app workloads. ONE-TIME, platform-owned
+# edit (not per-tenant) — the label-EXISTENCE namespaceSelector matches ANY namespace
+# carrying `platform.capstone/team` (every tenant namespace, container or VM, already
+# carries this label per tenants/_template/namespaces/*.yaml and the Composition's
+# rendered namespaces), so new tenants automatically match the moment Crossplane
+# creates their labeled namespace — this rule is written once and never needs a
+# per-team edit (avoids reintroducing the shared-object dual-owner problem the
+# per-team Dex-client option was rejected for, §3.2).
+#
+# Was the ONLY closed door blocking ANY tenant DB client (container app OR the new
+# Adminer console) from reaching db-tier at all — confirmed already-known/expected by
+# docs/operator/in-cluster-db-tier-runbook.md §3 ("db-tier's ingress allow-list needs
+# a companion edit... deliberately NOT pre-opened since none of those are live DB
+# clients yet"). Tenants ARE live DB clients now (ADR-033 auto-provisioning +
+# this PR's DB console), so this closes that gap. Port-scoped exactly like the
+# operator/backstage rules above (5432 CNPG, 3306 MariaDB) — NOT a blanket namespace
+# admit.
+#
+# Consolidates the hand-applied CiliumNetworkPolicy `allow-swami-to-mariadb` from the
+# 2026-07-07/08 overnight bring-up (see this file's header CORRECTION for the
+# incident writeup — that hotfix hardcoded swami-dev/staging/prod by namespace NAME
+# and was never committed) with this PR's tenant-db-access work: both landed the same
+# `platform.capstone/team` label-EXISTENCE ingress rule independently; this is the one
+# committed, GitOps-permanent version. `platform.capstone/semester` would work equally
+# well as the selector (same universality on every tenant namespace); `team` was kept
+# as the more literally tenant-defining label. `operator: Exists` (not matchLabels
+# equality) needs no enumeration of team names — onboarding a new team requires ZERO
+# edits here.
+#
+# This is a plain k8s NetworkPolicy, not a CiliumNetworkPolicy: unlike the
+# apiserver/cluster identity gap this file's CNP above works around, standard
+# `namespaceSelector` (including `matchExpressions`) is core NetworkPolicy API
+# surface that Cilium implements natively -- proven already by the
+# `allow-ingress-operators-and-intra-ns` policy above, whose cnpg-system/
+# mariadb-system namespaceSelector rules are live and working. CNP + k8s
+# NetworkPolicy on the same endpoint/direction are additive (OR), so this can
+# only ADD allowed ingress on top of the default-deny + existing scoped-allow.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-tenant-namespaces
+  namespace: db-tier
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: platform.capstone/team
+                operator: Exists
+      ports:
+        - protocol: TCP
+          port: 5432   # CNPG (postgres tenants + the Adminer console's postgres DSN)
+        - protocol: TCP
+          port: 3306   # MariaDB (mysql tenants + the Adminer console's mysql DSN)

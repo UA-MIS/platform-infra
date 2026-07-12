@@ -345,6 +345,11 @@ spec:
         description: ${{ parameters.description }}
         defaultBranch: main
         repoVisibility: private
+        # Self-tags every new tenant repo so the catalog.providers.github 'tenants'
+        # discovery provider (app-config.production.yaml / backstage-process-app.yaml)
+        # picks it up via filters.topic.include — org-wide discovery with no topic
+        # filter would ingest catalog-info.yaml from ANY of the org's other repos.
+        topics: ['capstone-tenant']
         # Platform branch policy: PRs into main, no direct pushes (mirrors the live
         # branch-protection the golden path assumes; reviewers/CI gate merges).
         protectDefaultBranch: true

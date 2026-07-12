@@ -68,6 +68,14 @@ spec:
             enabled: true
           kubernetesCRD:
             enabled: true
+            # DB-console SSO redirect fix: the shared oauth2-proxy `errors` Middleware
+            # (platform-services/db-console-auth/middleware.yaml) lives in the
+            # db-console-auth namespace but is referenced from every per-(team,env)
+            # tenant namespace's Ingress AND db-admin's Ingress
+            # (`<ns>-oauth2-proxy-errors@kubernetescrd`) so a bare 401 from the
+            # forwardAuth check gets rewritten to a 302 login redirect instead of every
+            # namespace needing its own copy of the Middleware. Default is false.
+            allowCrossNamespace: true
 
         # --- Default TLSStore -> the cert-manager wildcard secret (unchanged from
         #     the old tlsstore.yaml; serves the wildcard for any SNI with no per-

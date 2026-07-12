@@ -1,0 +1,28 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: db-admin-console
+  namespace: db-admin
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    # Chain order matters: `errors` (outermost) must precede the forwardAuth
+    # middleware (innermost) so it can catch the 401 and rewrite it to a 302 login
+    # redirect. Cross-namespace ref requires providers.kubernetesCRD.
+    # allowCrossNamespace (applicationsets/traefik-app.yaml).
+    traefik.ingress.kubernetes.io/router.middlewares: db-console-auth-oauth2-proxy-errors@kubernetescrd,db-admin-db-admin-console-auth@kubernetescrd
+spec:
+  rules:
+    - host: db-admin.capstone.uamishub.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: db-admin-console
+                port:
+                  number: 80
+  tls:
+    - hosts:
+        - db-admin.capstone.uamishub.com

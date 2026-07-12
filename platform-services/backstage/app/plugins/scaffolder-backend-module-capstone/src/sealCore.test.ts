@@ -66,7 +66,7 @@ jest.mock('@octokit/rest', () => ({
 }));
 
 // eslint-disable-next-line import/first
-import { listSecrets, deleteSecret } from './sealCore';
+import { listSecrets, deleteSecret, listMyProjects } from './sealCore';
 
 const TARGET_REF = 'component:default/my-app';
 const OWNER_GROUP = 'group:default/team-alpha';
@@ -290,5 +290,127 @@ describe('deleteSecret', () => {
     ).rejects.toThrow(NotAllowedError);
     expect(vaultDeleteCalls).toHaveLength(0);
     expect(octokitCalls.pullsCreate).not.toHaveBeenCalled();
+  });
+});
+
+// ── listMyProjects against a REALISTIC catalog (filter semantics actually evaluated) ──────
+//
+// Regression coverage for the live-data bug found while investigating "labmx sees an empty
+// project picker": the GitHub-org provider writes Group.spec.members as `<namespace>/<login>`
+// (e.g. "default/ccsmith33") — confirmed against the production catalog DB — NOT the bare
+// login that resolveActorOwnership's `spec.members` clause used to check. That meant the
+// `spec.members` fallback was silently dead code and admin recognition rode entirely on
+// `relations.hasMember`. These tests implement a small real filter evaluator (OR across filter
+// objects, AND within one) instead of the ignore-the-filter mock used above, so a regression
+// to the old (broken) clause shape fails the test.
+function matchesClause(entity: any, clause: Record<string, unknown>): boolean {
+  return Object.entries(clause).every(([key, val]) => {
+    if (key === 'kind') return entity.kind === val;
+    if (key === 'relations.hasMember') {
+      return (entity.relations ?? []).some(
+        (r: any) => r.type === 'hasMember' && r.targetRef === val,
+      );
+    }
+    if (key === 'spec.members') {
+      return (entity.spec?.members ?? []).includes(val);
+    }
+    return false;
+  });
+}
+
+function realisticCatalog(entities: any[]) {
+  return {
+    getEntities: jest.fn(async (query: any) => {
+      const clauses: any[] = Array.isArray(query.filter)
+        ? query.filter
+        : [query.filter];
+      return {
+        items: entities.filter(e => clauses.some(c => matchesClause(e, c))),
+      };
+    }),
+  };
+}
+
+const CCSMITH33: any = {
+  $$type: '@backstage/BackstageCredentials',
+  principal: { type: 'user', userEntityRef: 'user:default/ccsmith33' },
+};
+
+/** Shaped exactly like the live labmx Group row: spec.members in `default/<login>` form. */
+function labmxGroup(withRelation: boolean): any {
+  return {
+    kind: 'Group',
+    metadata: { name: 'labmx', namespace: 'default' },
+    spec: { members: ['default/ccsmith33'] },
+    relations: withRelation
+      ? [{ type: 'hasMember', targetRef: 'user:default/ccsmith33' }]
+      : [],
+  };
+}
+
+function component(name: string, ownerGroup: string): any {
+  return {
+    kind: 'Component',
+    metadata: { name, namespace: 'default', title: name },
+    spec: { owner: ownerGroup },
+    relations: [{ type: 'ownedBy', targetRef: `group:default/${ownerGroup}` }],
+  };
+}
+
+describe('listMyProjects (realistic catalog filter evaluation)', () => {
+  it('admin (labmx) sees ALL Components, including ones they do not own', async () => {
+    const catalog = realisticCatalog([
+      labmxGroup(true),
+      component('swami', 'swami'),
+      component('acme-web', 'acme'),
+    ]);
+    const deps: any = {
+      catalog,
+      auth: { getOwnServiceCredentials: jest.fn(async () => ({ token: 'svc' })) },
+    };
+    const projects = await listMyProjects(deps, { credentials: CCSMITH33 });
+    expect(projects.map(p => p.entityRef).sort()).toEqual([
+      'component:default/acme-web',
+      'component:default/swami',
+    ]);
+  });
+
+  it('REGRESSION: admin is still recognized via spec.members alone when relations.hasMember has not stitched yet', async () => {
+    // withRelation=false: the ONLY way to find labmx membership is the spec.members clause,
+    // in its ACTUAL live shape ("default/ccsmith33"). This is exactly the relation-stitching-
+    // lag window the F1 comment describes; before the fix this returned isAdmin=false here.
+    const catalog = realisticCatalog([
+      labmxGroup(false),
+      component('swami', 'swami'),
+    ]);
+    const deps: any = {
+      catalog,
+      auth: { getOwnServiceCredentials: jest.fn(async () => ({ token: 'svc' })) },
+    };
+    const projects = await listMyProjects(deps, { credentials: CCSMITH33 });
+    expect(projects.map(p => p.entityRef)).toEqual(['component:default/swami']);
+  });
+
+  it('non-admin sees only Components their groups own', async () => {
+    const catalog = realisticCatalog([
+      {
+        kind: 'Group',
+        metadata: { name: 'acme', namespace: 'default' },
+        spec: { members: ['default/bob'] },
+        relations: [{ type: 'hasMember', targetRef: 'user:default/bob' }],
+      },
+      component('swami', 'swami'),
+      component('acme-web', 'acme'),
+    ]);
+    const deps: any = {
+      catalog,
+      auth: { getOwnServiceCredentials: jest.fn(async () => ({ token: 'svc' })) },
+    };
+    const bob: any = {
+      $$type: '@backstage/BackstageCredentials',
+      principal: { type: 'user', userEntityRef: 'user:default/bob' },
+    };
+    const projects = await listMyProjects(deps, { credentials: bob });
+    expect(projects.map(p => p.entityRef)).toEqual(['component:default/acme-web']);
   });
 });

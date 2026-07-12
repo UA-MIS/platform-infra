@@ -1,0 +1,60 @@
+# Default-deny + scoped-allow for portal (same posture as every other new platform
+# namespace in this fleet — NetworkPolicy is opt-in per-namespace, not a
+# cluster-wide implicit deny).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: zz-default-deny
+  namespace: portal
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# Ingress: Traefik (kube-system) only. The forwardAuth check against oauth2-proxy
+# (db-console-auth) is made BY TRAEFIK server-side against ITS OWN Service, not by
+# this namespace's pods — the nginx pods here never call out to oauth2-proxy
+# themselves (same division of responsibility as db-admin/the tenant consoles).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-traefik
+  namespace: portal
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+---
+# Egress: DNS only. This is a fully static site (ConfigMap-mounted HTML, no API
+# calls, no upstream fetches) — nginx needs nothing beyond cluster DNS resolution.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-dns
+  namespace: portal
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

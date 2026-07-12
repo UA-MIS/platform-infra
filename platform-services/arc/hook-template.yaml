@@ -31,17 +31,23 @@ metadata:
 data:
   content: |
     spec:
-      # --- Node placement for the KANIKO BUILD pod (CI-fast, #237) ---
+      # --- Node placement for the KANIKO BUILD pod (CI-fast, #237; db1 CI-build node) ---
       # In containerMode:kubernetes the Kaniko build runs HERE (this step pod), NOT on
       # the runner pod — so the build's node placement is governed by THIS template, not
-      # arc-runner-scaleset-app.yaml. The 3 control-plane OptiPlex nodes carry the taint
-      # `capstone.io/control-plane=true:PreferNoSchedule`; without a toleration the
-      # scheduler steers build pods onto the 2-core Macs, where Backstage builds crawl
-      # (~45-60 min). This toleration makes the OptiPlexes eligible again, and the
-      # preferred nodeAffinity gives them positive weight — so builds PREFER the beefier
-      # OptiPlexes and FALL BACK to the Macs only when the OptiPlexes are saturated.
-      # (PreferNoSchedule is soft: the toleration alone would only make them eligible;
-      # the affinity is what actually pulls builds onto them.)
+      # arc-runner-scaleset-app.yaml. `ua-mis-db-1` joined the cluster labeled
+      # `capstone.io/ci-build=true` (~7.5GiB allocatable) specifically to host memory-
+      # hungry builds (a Backstage yarn build needs ~6Gi, more than the OptiPlexes/Macs
+      # comfortably spare). nodeSelector is a HARD constraint — this PodSpecPatch is
+      # merged verbatim onto the generated step pod's spec (runner-container-hooks'
+      # k8s mergePodSpecWithOptions directly assigns top-level fields, no deep-merge),
+      # so it fully pins the build pod to db1. This supersedes the softer control-plane
+      # toleration/affinity below (kept as no-ops: db1 carries neither the
+      # control-plane taint nor label, so they simply don't match anything once
+      # nodeSelector narrows the candidate set to db1). The SAME nodeSelector is
+      # mirrored on the runner pod in applicationsets/arc-runner-scaleset-app.yaml —
+      # both are needed; this one only moves the heavy Kaniko step pod.
+      nodeSelector:
+        capstone.io/ci-build: "true"
       tolerations:
         - key: capstone.io/control-plane
           operator: Equal
@@ -74,6 +80,29 @@ data:
             - harbor.capstone.uamishub.com
       containers:
         - name: "$job"
+          # RESOURCE KNOB (OOM fix) — `$job` is the runner-container-hooks placeholder
+          # matched against EVERY pod this template patches: both the containerMode:
+          # kubernetes job-container pod (prepare-job — e.g. the workflow's `container:
+          # image: node:24-trixie` running checkout/resolve) AND each `uses: docker://`
+          # container-action step's own pod (run-container-step — e.g. the Kaniko
+          # build), confirmed against actions/runner-container-hooks source
+          # (mergeContainerWithOptions DIRECTLY OVERWRITES, not deep-merges,
+          # unrecognized fields like `resources`). The Kaniko step-pod is the one that
+          # actually runs `yarn install` + `tsc` + the filesystem snapshot (~6Gi peak,
+          # per the OOM investigation above the executor invocation in
+          # backstage-process-build-push.yaml) — it was previously UNSET (no limit at
+          # all), letting the in-memory snapshot/cache grow until the node OOM-killed
+          # the pod. LIMIT is raised to 6Gi here (matches the runner pod's ceiling in
+          # arc-runner-scaleset-app.yaml) so that pod can actually use the memory it
+          # needs. REQUEST is kept low (not ~4Gi): since this same block also sizes the
+          # much-lighter job-container pod, and BOTH pods (plus the runner pod) now
+          # land on the single db1 node (nodeSelector below, ~7.5Gi allocatable) and can
+          # be co-resident, summing ~4Gi requests across 2-3 pods would overcommit
+          # db1's scheduling budget and Pend the very pod this fix is for. See the
+          # matching note in arc-runner-scaleset-app.yaml.
+          resources:
+            requests: { memory: "512Mi" }
+            limits:   { memory: "6Gi" }
           volumeMounts:
             - name: harbor-push
               mountPath: /kaniko/.docker

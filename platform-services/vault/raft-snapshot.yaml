@@ -91,7 +91,12 @@ spec:
               imagePullPolicy: IfNotPresent
               env:
                 - name: VAULT_ADDR
-                  value: "https://vault-active.vault.svc:8200"
+                  # Must be the FULL FQDN (not the short "vault-active.vault.svc"
+                  # form) — vault-server-tls's SAN list includes
+                  # vault-active.vault.svc.cluster.local but NOT the shortened
+                  # form, so a short-form VAULT_ADDR fails TLS verification with
+                  # "x509: certificate is valid for ..., not vault-active.vault.svc".
+                  value: "https://vault-active.vault.svc.cluster.local:8200"
                 - name: VAULT_CACERT
                   value: "/vault/tls/ca.crt"     # CA that signed the server cert (from vault-server-tls)
                 - name: VAULT_ROLE

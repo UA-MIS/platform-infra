@@ -48,10 +48,13 @@
 ---
 # The S3-compatible object-storage config every Thanos component (sidecar here,
 # store-gateway/compactor below) reads via --objstore.config-file. A REAL seal (not
-# a placeholder) — generated in this PR alongside the matching `minio-thanos-user`
-# secret in platform-services/minio/; the `secret_key` here MUST equal that secret's
-# `password` value. Rotate both together (same kubeseal pattern as the README
-# reseal runbooks; no human-supplied external value is needed for either one).
+# a placeholder), access_key `thanos` / secret_key matching
+# platform-services/minio/sealedsecret-thanos-user.yaml's `SECRET_KEY` field
+# EXACTLY — that file's header has the full coupling explanation (this secret
+# predates the minio-provision Job actually creating the matching MinIO IAM user;
+# that gap is closed in the same change that added this comment) and the
+# required rotate-together operator procedure. Never reseal this file's
+# objstore.yml without resealing that one from the SAME plaintext in the same PR.
 apiVersion: bitnami.com/v1alpha1
 kind: SealedSecret
 metadata:

@@ -263,6 +263,11 @@ spec:
         description: ${{ parameters.description }}
         defaultBranch: main
         repoVisibility: private
+        # Self-tags every new tenant repo so the catalog.providers.github 'tenants'
+        # discovery provider (app-config.production.yaml / backstage-process-app.yaml)
+        # picks it up via filters.topic.include — org-wide discovery with no topic
+        # filter would ingest catalog-info.yaml from ANY of the org's other repos.
+        topics: ['capstone-tenant']
         protectDefaultBranch: true
         requireCodeOwnerReviews: true
         # Role-based access by GitHub TEAM (not creator): the project team gets push,

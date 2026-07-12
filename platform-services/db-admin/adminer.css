@@ -1,0 +1,489 @@
+/*
+ * University of Alabama MIS — Adminer theme (tenant DB console + db-admin console).
+ * ONE committed LIGHT theme. Crimson #9E1B32 accents, warm-white surfaces, dark
+ * readable text, a light-grey / black-mono SQL editor + result grid.
+ *
+ * ============================================================================
+ * WHY THERE IS NO DARK VARIANT / NO OS-ADAPTIVE STYLING (read before editing)
+ * ============================================================================
+ * Adminer's loader (index.php `css()`) scans this file's TEXT and, if it finds
+ * the token that spells the CSS dark-scheme media feature, flips this sheet from
+ * "light" to "adaptive" AND ALSO links Adminer's OWN built-in dark stylesheet
+ * gated to the visitor's OS dark setting. A previous revision of this theme had
+ * that exact token sitting harmlessly in a code comment — which made Adminer pull
+ * in its dark sheet for anyone whose OS was in dark mode, and THAT sheet (not this
+ * one) painted the broken dark-navy action bar / dark panels over our light theme.
+ *
+ * So this file DELIBERATELY contains that token NOWHERE — not in a rule, not in a
+ * comment, not in a media query. We force a single light look for every visitor
+ * regardless of OS via the variable overrides below + `color-scheme: light`. If
+ * you ever add an OS-dark media block here you will silently re-arm that trap.
+ *
+ * ============================================================================
+ * HOW IT WORKS — override Adminer's OWN design tokens, don't fight each element.
+ * ============================================================================
+ * Adminer 5.4.2's default.css drives nearly everything from four CSS variables on
+ * <html>:  --bg (surfaces), --fg (text), --dim (th / secondary surfaces),
+ * --lit (thead + selected-row + :target highlight). Re-defining those four (with
+ * !important, and since this sheet loads AFTER default.css) recolors the bulk of
+ * the UI coherently in one place. We then layer crimson accents + an editor/grid
+ * polish on top, and otherwise WORK WITH Adminer's native layout (a ~19em
+ * absolute left #menu, #content offset 21em, an absolute #breadcrumb) rather than
+ * re-positioning it — the prior fixed-position surgery is what produced the
+ * partial-width header strip and the empty full-height sidebar column.
+ *
+ * DOM verified against the LIVE dockette/adminer:mysql image (Adminer 5.4.2):
+ *   #menu (left nav, holds #dbs the DB switcher + table lists), #content (h1,
+ *   #breadcrumb, tables, forms), .footer > fieldset (the bulk "Selected (N)"
+ *   action bar), textarea.sqlarea.jush-sql (the SQL editor — a PLAIN textarea,
+ *   no JS overlay). CSS is auto-loaded by Adminer via file_exists("adminer.css")
+ *   relative to its docroot (/srv), linked after default.css.
+ */
+
+/* ==========================================================================
+ * 1. DESIGN TOKENS
+ *    (a) Override Adminer's four native variables -> light palette.
+ *    (b) Our own namespaced palette for the accent layer.
+ * ========================================================================== */
+html {
+  /* Adminer's own tokens — the single biggest lever. */
+  --bg:  #ffffff !important;   /* primary surfaces */
+  --fg:  #1a1c20 !important;   /* body text — near-black, high contrast */
+  --dim: #f0eeea !important;   /* th / secondary surfaces — warm light grey */
+  --lit: #f7e5e9 !important;   /* thead + selected-row + :target — crimson tint */
+  color-scheme: light;         /* keep UA form controls / scrollbars light on dark OS */
+}
+
+:root {
+  --ua-crimson:      #9E1B32;
+  --ua-crimson-dark: #7A1426;
+  --ua-tint:         rgba(158, 27, 50, 0.08);
+  --ua-tint-strong:  rgba(158, 27, 50, 0.16);
+
+  --ua-ink:      #1A1C20;
+  --ua-ink-soft: #4A4642;
+  --ua-muted:    #79736D;
+
+  --ua-page:     #ffffff;
+  --ua-sidebar:  #F5F3F0;     /* barely-grey sidebar surface */
+  --ua-border:   #E4E1DB;
+  --ua-border-strong: #D3CFC8;
+
+  --ua-editor-bg: #F5F5F5;    /* light-grey code surface */
+  --ua-editor-fg: #14161A;    /* black-ish mono text */
+
+  --ua-ok:    #1C7C4A;
+  --ua-ok-bg: #EAF6EF;
+  --ua-err:   #B3261E;
+  --ua-err-bg:#FCEBEA;
+
+  --ua-radius:    8px;
+  --ua-radius-sm: 6px;
+  --ua-font: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, Helvetica, Arial, sans-serif;
+  --ua-mono: "SFMono-Regular", "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+/* ==========================================================================
+ * 2. BASE
+ * ========================================================================== */
+html { box-sizing: border-box; }
+*, *:before, *:after { box-sizing: inherit; }
+
+body {
+  background: var(--ua-page) !important;
+  color: var(--ua-ink) !important;
+  font-family: var(--ua-font) !important;
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--ua-crimson); text-decoration: none; }
+a:hover { color: var(--ua-crimson-dark); text-decoration: underline; }
+
+/* ==========================================================================
+ * 3. LEFT SIDEBAR (#menu) — native Adminer position (absolute, ~19em, left:0).
+ *    We give it a light surface, a clear right border, a min-height so it reads
+ *    as a real column even when its content is short, and the UA-MIS wordmark.
+ * ========================================================================== */
+#menu {
+  background: var(--ua-sidebar) !important;
+  border-right: 1px solid var(--ua-border) !important;
+  min-height: calc(100vh - 2em) !important;
+  padding: 16px 16px 32px !important;
+  margin: 0 !important;
+  top: 0 !important;               /* start at the very top so the wordmark aligns */
+}
+
+/* UA-MIS wordmark at the top of the sidebar (inline SVG data-URI — no external
+   asset host, offline-safe). */
+#menu:before {
+  content: "";
+  display: block;
+  height: 34px;
+  margin: 0 0 16px 2px;
+  background: url("data:image/svg+xml;utf8,\
+<svg xmlns='http://www.w3.org/2000/svg' width='210' height='34' viewBox='0 0 210 34'>\
+<rect width='34' height='34' rx='6' fill='%239E1B32'/>\
+<text x='17' y='24' text-anchor='middle' font-family='Georgia, serif' font-size='19' font-weight='700' fill='%23FFFFFF'>A</text>\
+<text x='44' y='16' font-family='-apple-system, Helvetica, Arial, sans-serif' font-size='13' font-weight='700' fill='%231A1C20' letter-spacing='.3'>UA-MIS</text>\
+<text x='44' y='29' font-family='-apple-system, Helvetica, Arial, sans-serif' font-size='10' font-weight='500' fill='%2379736D' letter-spacing='.3'>DB Console</text>\
+</svg>") no-repeat left center;
+  background-size: contain;
+}
+
+/* Nav section headings (Tables / Views / …) rendered as <p> in the menu. */
+#menu p {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--ua-muted);
+  margin: 16px 0 6px !important;
+  border: none !important;
+  background: none !important;
+}
+
+#menu a {
+  color: var(--ua-ink) !important;
+  display: inline-block;
+  padding: 3px 8px;
+  margin: 1px 0;
+  border-radius: var(--ua-radius-sm);
+  border: none !important;
+  text-transform: none;   /* nav/table links stay normal-case; only the <p> section headings are uppercased */
+}
+#menu a:hover {
+  background: var(--ua-tint) !important;
+  color: var(--ua-crimson-dark) !important;
+  text-decoration: none;
+  box-shadow: inset 2px 0 0 0 var(--ua-crimson);
+}
+#menu a.active,
+#menu a:active {
+  background: var(--ua-tint-strong) !important;
+  color: var(--ua-crimson-dark) !important;
+  box-shadow: inset 3px 0 0 0 var(--ua-crimson);
+}
+
+/* #dbs — the database switcher (the dropdown listing <team>_dev/staging/prod). */
+#dbs {
+  margin: 0 0 12px !important;
+  padding: 0 !important;
+  border: none !important;
+}
+#dbs label { font-weight: 600; color: var(--ua-ink-soft); }
+
+/* Sidebar toggle handle */
+#menuopen { color: var(--ua-muted); }
+
+/* ==========================================================================
+ * 4. CONTENT + BREADCRUMB
+ *    #breadcrumb is natively position:absolute with NO width, so ANY colored
+ *    background would render as a short partial strip. We keep it text-only
+ *    (transparent) — no strip, nothing can look "cut off".
+ * ========================================================================== */
+#content {
+  padding: 8px 32px 48px 28px !important;
+  max-width: 1180px;
+}
+
+#breadcrumb {
+  background: transparent !important;
+  box-shadow: none !important;
+  border: none !important;
+  height: auto !important;
+  line-height: 1.6 !important;
+  padding: 6px 0 !important;
+  margin: 0 0 4px -6px !important;
+  font-size: 12px;
+  color: var(--ua-muted);
+}
+#breadcrumb a { color: var(--ua-crimson); }
+#breadcrumb a:hover { color: var(--ua-crimson-dark); }
+
+/* ==========================================================================
+ * 5. TYPOGRAPHY
+ * ========================================================================== */
+h1 {
+  font-size: 21px;
+  font-weight: 700;
+  color: var(--ua-ink);
+  background: none !important;
+  border: none !important;
+  border-bottom: 2px solid var(--ua-tint-strong) !important;
+  padding: 0 0 10px !important;
+  margin: 4px 0 20px !important;
+}
+h1 .version { font-size: 11px; font-weight: 400; color: var(--ua-muted); opacity: .7; }
+h1 a[href*="adminer.org"] { display: none !important; }   /* hide upstream donate/version chrome */
+
+h2 {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--ua-ink);
+  background: none !important;   /* was --lit; keep clean, use a border accent instead */
+  border: none !important;
+  border-bottom: 2px solid var(--ua-tint-strong) !important;
+  padding: 0 0 8px !important;
+  margin: 26px 0 14px !important;
+}
+h3 { font-size: 14px; font-weight: 600; color: var(--ua-ink-soft); margin: 16px 0 8px; }
+
+p { color: var(--ua-ink-soft); }
+
+/* ==========================================================================
+ * 6. MESSAGES / ALERTS
+ * ========================================================================== */
+.message, .error {
+  display: block;
+  border-radius: var(--ua-radius);
+  padding: 10px 14px !important;
+  margin: 0 0 16px !important;
+  font-weight: 500;
+  background-image: none !important;
+  box-shadow: none !important;
+}
+.message { background: var(--ua-ok-bg) !important;  color: var(--ua-ok) !important;  border: 1px solid rgba(28,124,74,.25); }
+.error   { background: var(--ua-err-bg) !important; color: var(--ua-err) !important; border: 1px solid rgba(179,38,30,.25); }
+
+/* ==========================================================================
+ * 7. FORMS — inputs / selects / buttons
+ * ========================================================================== */
+fieldset {
+  border: 1px solid var(--ua-border) !important;
+  border-radius: var(--ua-radius);
+  padding: 12px 14px !important;
+  margin: 0 0 14px !important;
+  background: #FCFBFA !important;
+  box-shadow: none !important;
+}
+legend {
+  color: var(--ua-ink-soft);
+  font-weight: 600;
+  padding: 0 6px;
+}
+
+input[type=text], input[type=password], input[type=number],
+input[type=search], input[type=email], input:not([type]), select, textarea {
+  font-family: var(--ua-font);
+  font-size: 13px;
+  color: var(--ua-ink);
+  background: #ffffff;
+  border: 1px solid var(--ua-border-strong);
+  border-radius: var(--ua-radius-sm);
+  padding: 6px 9px;
+  transition: border-color .12s ease, box-shadow .12s ease;
+}
+input[type=text]:focus, input[type=password]:focus, input[type=number]:focus,
+input[type=search]:focus, input[type=email]:focus, input:not([type]):focus,
+select:focus, textarea:focus {
+  outline: none;
+  border-color: var(--ua-crimson);
+  box-shadow: 0 0 0 3px var(--ua-tint);
+}
+
+/* Primary submit buttons — crimson (matches ArgoCD/Grafana). */
+input[type=submit], input[type=button], button {
+  font-family: var(--ua-font);
+  font-size: 13px;
+  font-weight: 600;
+  color: #ffffff !important;
+  background: var(--ua-crimson) !important;
+  border: 1px solid var(--ua-crimson) !important;
+  border-radius: var(--ua-radius-sm);
+  padding: 6px 15px;
+  cursor: pointer;
+  transition: background-color .12s ease, border-color .12s ease;
+}
+input[type=submit]:hover, input[type=button]:hover, button:hover {
+  background: var(--ua-crimson-dark) !important;
+  border-color: var(--ua-crimson-dark) !important;
+}
+
+/* Destructive actions (drop / delete) — quiet GHOST style, never a bold crimson
+   button, so they don't invite a click. Red only on hover. (DB-level drop is
+   hidden entirely below.) */
+input[name=drop], input[name=delete], input[name=truncate], input[value=Drop], input[value=Delete] {
+  color: var(--ua-err) !important;
+  background: #ffffff !important;
+  border: 1px solid var(--ua-border-strong) !important;
+  font-weight: 500;
+}
+input[name=drop]:hover, input[name=delete]:hover, input[name=truncate]:hover,
+input[value=Drop]:hover, input[value=Delete]:hover {
+  background: var(--ua-err-bg) !important;
+  border-color: var(--ua-err) !important;
+}
+
+.icon { border-radius: 4px; }
+
+/* ==========================================================================
+ * 8. SQL EDITOR — plain textarea, styled to read like a code editor:
+ *    light-grey surface, black mono text, soft inset, crimson focus ring.
+ * ========================================================================== */
+textarea, .sqlarea, textarea.sqlarea, textarea.jush-sql, .jush-sql {
+  font-family: var(--ua-mono) !important;
+  font-size: 13.5px !important;
+  line-height: 1.65 !important;
+  color: var(--ua-editor-fg) !important;
+  background: var(--ua-editor-bg) !important;
+  border: 1px solid var(--ua-border-strong) !important;
+  border-radius: var(--ua-radius) !important;
+  padding: 13px 15px !important;
+  box-shadow: inset 0 1px 3px rgba(20,22,26,.05) !important;
+  tab-size: 2;
+}
+textarea:focus, textarea.sqlarea:focus, .sqlarea:focus {
+  border-color: var(--ua-crimson) !important;
+  box-shadow: inset 0 1px 3px rgba(20,22,26,.05), 0 0 0 3px var(--ua-tint) !important;
+}
+
+code, .jush-js {
+  font-family: var(--ua-mono);
+  background: var(--ua-editor-bg);
+  color: var(--ua-editor-fg);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.sql-footer { margin-top: 10px; }
+
+/* ==========================================================================
+ * 9. TABLES — schema lists AND result grids: light surface, BLACK text.
+ * ========================================================================== */
+table {
+  border-collapse: collapse;
+  margin: 6px 0 20px;
+  background: #ffffff;
+  border: 1px solid var(--ua-border);
+  border-radius: var(--ua-radius);
+  overflow: hidden;
+  font-size: 13px;
+  color: var(--ua-editor-fg) !important;
+}
+
+thead th, thead td {
+  background: #F7E5E9 !important;   /* crimson tint */
+  color: var(--ua-ink) !important;
+  font-weight: 600;
+  text-align: left;
+  padding: 8px 11px !important;
+  border-bottom: 2px solid var(--ua-tint-strong) !important;
+  white-space: nowrap;
+}
+thead th a, thead td a { color: var(--ua-ink) !important; }
+
+tbody th, tbody td {
+  padding: 7px 11px !important;
+  border-bottom: 1px solid var(--ua-border) !important;
+  color: var(--ua-editor-fg) !important;
+  background: #ffffff !important;
+  vertical-align: top;
+}
+.odds tbody tr:nth-child(2n) td,
+.odds tbody tr:nth-child(2n) th { background: #FAF9F7 !important; }
+
+tbody tr:hover td, tbody tr:hover th { background: var(--ua-tint) !important; }
+
+.js .checked td, .js .checked th,
+.js .checkable .checked td, .js .checkable .checked th { background: var(--ua-tint-strong) !important; }
+
+table code { background: transparent; padding: 0; }
+
+/* Pagination */
+.pages { border: none !important; box-shadow: none !important; padding: 4px 0; }
+.pages a {
+  display: inline-block;
+  padding: 3px 9px; margin: 0 2px 0 0;
+  border: 1px solid var(--ua-border-strong);
+  border-radius: var(--ua-radius-sm);
+  color: var(--ua-ink-soft);
+}
+.pages a:hover { border-color: var(--ua-crimson); color: var(--ua-crimson); text-decoration: none; }
+
+/* ==========================================================================
+ * 10. FOOTER ACTION BAR (.footer) — Adminer's sticky bulk-action bar. Native
+ *     default.css gives it a `box-shadow: 0 -5px 10px 10px var(--bg)` glow;
+ *     neutralize it so it's a clean inline row, never a floating dark/glowing
+ *     panel.
+ * ========================================================================== */
+.footer {
+  position: static !important;   /* was sticky (default.css) — pin it inline so it's a clean action row, never a floating overlay */
+  box-shadow: none !important;
+  background: transparent !important;
+  border: none !important;
+  margin: 16px 0 0 !important;
+}
+.footer > div {
+  background: transparent !important;
+  box-shadow: none !important;
+  padding: 0 !important;
+}
+.footer fieldset {
+  display: inline-block;
+  background: #FCFBFA !important;
+  border: 1px solid var(--ua-border) !important;
+  box-shadow: none !important;
+}
+
+/* ==========================================================================
+ * 11. SAFETY — hide the DATABASE-level bulk "Drop" button.
+ *     Rationale: on the "Select database" page one bulk click drops an entire
+ *     provisioned tenant database. DROP is a single MySQL/PG privilege covering
+ *     both tables AND databases, so it can't be revoked at the grant level
+ *     without losing table-drop too — so we remove the accidental one-click
+ *     PATH instead. A deliberate `DROP DATABASE` typed in the SQL box still
+ *     works (intentional); table-level drop stays fully usable.
+ *
+ *     Scoping: the databases-list page is the ONLY page whose <form> contains
+ *     database checkboxes named `db[]` (verified in index.php: checkbox("db[]",…)
+ *     on the databases listing; the tables page uses `tables[]`/`check[]`). So
+ *     :has() targets exactly that form's Drop submit and nothing else. :has() is
+ *     Baseline-supported in current browsers; if it ever isn't, the button simply
+ *     reverts to visible (fail-safe, no breakage).
+ * ========================================================================== */
+form:has(input[name="db[]"]) input[name="drop"],
+form:has(input[name="db[]"]) input[value="Drop"] {
+  display: none !important;
+}
+/* Also drop the now-purposeless bulk "Selected" fieldset on that page so the
+   databases view doesn't show an empty action bar. */
+form:has(input[name="db[]"]) .footer fieldset { display: none !important; }
+
+/* ==========================================================================
+ * 12. MISC
+ * ========================================================================== */
+/* Quiet ghost logout. Selector carries an extra class over `input[type=submit]`
+   so it out-specifies the crimson primary-button rule (which would otherwise win
+   and paint logout a heavy crimson block). */
+.logout,
+input[type=submit].logout,
+input[type=button].logout {
+  display: inline-block;
+  padding: 5px 12px !important;
+  background: #ffffff !important;
+  color: var(--ua-ink-soft) !important;
+  border: 1px solid var(--ua-border-strong) !important;
+  border-radius: var(--ua-radius-sm);
+  box-shadow: none !important;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.logout:hover,
+input[type=submit].logout:hover {
+  background: #ffffff !important;
+  border-color: var(--ua-crimson) !important;
+  color: var(--ua-crimson) !important;
+}
+
+#lang { color: var(--ua-muted); font-size: 12px; }
+hr { border: none; border-top: 1px solid var(--ua-border); margin: 18px 0; }
+
+/* Narrow screens: let the native layout collapse gracefully (Adminer's own
+   #menuopen toggle still applies). max-width query only — contains no OS-scheme
+   token, so the dark-sheet trap stays disarmed. */
+@media (max-width: 800px) {
+  #content { margin-left: 0 !important; padding-left: 16px !important; }
+  #menu { min-height: 0 !important; }
+}

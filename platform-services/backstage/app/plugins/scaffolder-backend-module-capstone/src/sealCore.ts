@@ -304,6 +304,14 @@ function parseGithubRepo(sourceLocation: string): {
  * Derive the actor's ownership refs (their User ref + each team Group ref). Uses the catalog
  * to resolve the user's group memberships — mirrors how M2's policy obtains
  * ownershipEntityRefs, so the belt-and-suspenders check matches the policy decision.
+ *
+ * `spec.members` matching (belt to `relations.hasMember`'s suspenders, robust to relation-
+ * stitching lag — see authOidcProcess.ts's F1): the GitHub-org provider writes this RAW field
+ * as `<namespace>/<login>` (e.g. "default/ccsmith33"), NOT a bare login and NOT a full
+ * "user:<namespace>/<login>" ref (confirmed against the live catalog — a prior version of this
+ * check only matched the bare-login form and so never actually matched anything; it was
+ * silently riding on `relations.hasMember` alone). Match all three shapes so a future change to
+ * the provider's raw format can't silently turn this fallback back into dead code.
  */
 async function resolveActorOwnership(
   deps: CapstoneSecretsDeps,
@@ -311,11 +319,14 @@ async function resolveActorOwnership(
   userEntityRef: string,
 ): Promise<string[]> {
   const refs = new Set<string>([userEntityRef]);
+  const { namespace, name } = parseEntityRef(userEntityRef);
   const { items } = await deps.catalog.getEntities(
     {
       filter: [
         { kind: 'Group', 'relations.hasMember': userEntityRef },
-        { kind: 'Group', 'spec.members': parseEntityRef(userEntityRef).name },
+        { kind: 'Group', 'spec.members': `${namespace}/${name}` },
+        { kind: 'Group', 'spec.members': name },
+        { kind: 'Group', 'spec.members': userEntityRef },
       ],
       fields: ['kind', 'metadata.name', 'metadata.namespace'],
     },

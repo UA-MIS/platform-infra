@@ -136,36 +136,53 @@ kubectl --context admin@capstone -n db-tier exec -it deploy/minio-backups -- mc 
 
 ## 3. What this tier does NOT do yet (by design)
 
-- **Backstage / Harbor are still on their bundled per-app Postgres subcharts**
-  (`applicationsets/backstage-process-app.yaml`'s `postgresql:` block,
-  `applicationsets/harbor-app.yaml`'s bundled database). The `backstage`/`harbor`
-  `Database`/`DatabaseRole` CRs on `capstone-pg` (`platform-services/cnpg/cluster/
-  {databases,roles}.yaml`) exist **ahead of** that cutover so the tier is ready —
-  see §4.
-- **Crossplane's `provider-sql` still points at `ua-mis-db-1`**
-  (`platform-services/crossplane/config/providerconfig-{postgres,sql}.yaml`,
-  secrets `db-tier-postgres-admin` / `db-tier-mysql-admin`). The
-  `crossplane_provisioner` role/user on `capstone-pg`/`capstone-mariadb` mirror the
-  off-box provisioner's exact privilege shape (LOGIN CREATEDB CREATEROLE for
-  Postgres; the same least-privilege grant list, minus SUPER/FILE/PROCESS/
-  RELOAD/SHUTDOWN, for MariaDB) so the ProviderConfig secrets **can** be repointed
-  here later without a privilege-model change — see §4.
+- **Harbor is still on its bundled per-app Postgres subchart**
+  (`applicationsets/harbor-app.yaml`'s bundled database). The `harbor`
+  `Database`/`DatabaseRole` CR on `capstone-pg` (`platform-services/cnpg/cluster/
+  {databases,roles}.yaml`) exists **ahead of** that cutover so the tier is ready —
+  see §4b. **Backstage's cutover (§4a) is done** — it now connects to
+  `capstone-pg-rw.db-tier.svc.cluster.local` / role+db `backstage`. Diverges from
+  the §4a dump/restore procedure below in one respect: no `pg_dump`/`pg_restore`
+  was run — Backstage's catalog re-ingests from GitHub on boot, so a fresh
+  `backstage` database is sufficient and the old bundled-Postgres data was left
+  untouched (rollback-safe). Also uses `pluginDivisionMode: schema` (not the
+  Backstage default `database`), since the `backstage` CNPG role deliberately has
+  no CREATEDB — see the comments in `applicationsets/backstage-process-app.yaml`'s
+  `backend.database` block.
+- **Crossplane's `provider-sql` mysql admin — REPOINTED (2026-07-08, this PR).**
+  `platform-services/crossplane/config/providerconfig-sql.yaml` / secret
+  `db-tier-mysql-admin` now targets
+  `capstone-mariadb-mariadb-cluster-primary.db-tier.svc.cluster.local:3306` with
+  the in-cluster `crossplane-provisioner` login (same least-privilege grant list
+  as the retired off-box login — see §4c below for the full cutover writeup,
+  which is now DONE for mysql). The postgres admin secret
+  (`db-tier-postgres-admin`) was ALSO resealed to the in-cluster
+  `capstone-pg-rw.db-tier.svc.cluster.local:5432` / `crossplane_provisioner`
+  DatabaseRole for parity, but has zero live blast radius today — no Postgres
+  tenant has ever been provisioned (the secret was previously an un-decryptable
+  placeholder, so this activates provider-sql's postgres reconciliation for the
+  first time with nothing to reconcile). crossplane-system's NetworkPolicy/CNP
+  egress to db-tier:5432 was deliberately NOT added yet (see
+  `hardening/netpol-controlplane/crossplane-db-cnp.yaml` and
+  `platform-services/db-tier/netpol.yaml`) — add it at the point a real Postgres
+  tenant is first provisioned, mirroring the mysql:3306 rules added here.
 - **`db-tier` has default-deny + scoped-allow NetworkPolicy**
   (`platform-services/db-tier/netpol.yaml`, auto-synced with the rest of this flat
   dir — safe on day one since the namespace has no prior live traffic to sever):
   ingress is scoped to the `cnpg-system`/`mariadb-system` operator namespaces on
   their exact reconcile ports, intra-namespace (replication/SST/backup-to-MinIO),
-  and kubelet probes; egress is DNS + intra-cluster + apiserver only. `cnpg-system`
+  ns `backstage` on 5432 only (added with the §4a Backstage cutover), and kubelet
+  probes; egress is DNS + intra-cluster + apiserver only. `cnpg-system`
   and `mariadb-system` themselves (the operator/controller pods) have **no**
   NetworkPolicy yet — only their egress-side interaction with `db-tier` is fenced
-  from that side. Revisit before the Crossplane repoint in §4: the
-  `crossplane_provisioner` accounts are host-scoped `%`/any-source in-cluster (see
-  the comments in `applicationsets/mariadb-cluster-app.yaml` and
-  `platform-services/cnpg/cluster/roles.yaml`), so `db-tier`'s ingress allow-list
-  needs a companion edit (mirroring
-  `hardening/netpol-controlplane/crossplane-db-cnp.yaml`'s pattern) to admit
-  Backstage/Harbor/`crossplane-system` by namespace at that point — it is
-  deliberately NOT pre-opened here since none of those are live DB clients yet.
+  from that side. Still needed before the Harbor cutover (§4b) and the Crossplane
+  repoint (§4c): the same companion ingress-allow edit (mirroring
+  `hardening/netpol-controlplane/crossplane-db-cnp.yaml`'s pattern) admitting
+  `harbor`/`crossplane-system` by namespace — deliberately not pre-opened here
+  since neither is a live DB client of `capstone-pg` yet. Note ns `backstage`
+  itself has **no** NetworkPolicy of its own (no entry in
+  `hardening/netpol-controlplane/`), so its egress side was already unrestricted;
+  only this ingress-side allow was needed for the cutover to pass traffic.
 - **MinIO has no TLS.** ClusterIP-only, never Ingress-exposed. Fine for a
   same-cluster-trust backup path; revisit if a review wants in-cluster mTLS
   everywhere (cert-manager is already available — same self-signed-issuer pattern
@@ -239,29 +256,88 @@ sql's ProviderConfig only affects where FUTURE `Database`/`User`/`Role` MRs land
 but plan the full data migration alongside it so you don't end up permanently
 split-brained across two DB hosts.
 
-1. **Repoint the ProviderConfigs** (no data movement yet — new tenants only):
-   - `platform-services/crossplane/config/providerconfig-postgres.yaml`: change
-     the connection secret ref from `db-tier-postgres-admin` to a NEW secret (e.g.
-     `db-tier-postgres-admin-incluster`) sourced via ExternalSecret from
-     `platform/db/cnpg/crossplane-provisioner` (endpoint
-     `capstone-pg-rw.db-tier.svc.cluster.local`, port `5432`).
-   - `platform-services/crossplane/config/providerconfig-sql.yaml`: same, pointing
-     at `platform/db/mariadb/crossplane-provisioner`
-     (`capstone-mariadb-mariadb-cluster.db-tier.svc.cluster.local`, port `3306`).
-   - Verify with a throwaway tenant claim (`database: postgres` and
-     `database: mysql`) that new `Database`/`Role`/`User`/`Grant` MRs reconcile
-     Ready against the in-cluster tier before touching anything live.
+**MYSQL: DONE (2026-07-08).** swami's data was already migrated in-cluster ahead
+of this step (Phase-2 migrations, 2026-07-08); this PR completed the provisioning
+layer. What was actually done, differing slightly from the original plan below:
+
+1. **Repointed the EXISTING `db-tier-mysql-admin` secret in place** (resealed
+   `platform-services/crossplane/creds/mysql-admin-creds-sealed.yaml` with the
+   in-cluster `crossplane-provisioner` login) rather than introducing a new
+   secret name — simpler, and `providerconfig-sql.yaml` needed no edit at all
+   since it still references the same secret name/namespace. Endpoint:
+   `capstone-mariadb-mariadb-cluster-primary.db-tier.svc.cluster.local:3306`
+   (the `-primary` Service specifically, not the plain `-cluster` Service — this
+   is the host already proven live against swami's migrated data).
+2. **Two NetworkPolicy gaps had to be closed** before the repoint actually worked
+   (the ProviderConfig YAML alone was not sufficient — first attempt failed with
+   `dial tcp <db-tier ClusterIP>:3306: i/o timeout`):
+   - Ingress: `platform-services/db-tier/netpol.yaml` needed a `crossplane-system
+     -> db-tier:3306` allow (this file's own header had deliberately deferred this
+     "to their own cutover" — this is that cutover).
+   - Egress: `hardening/netpol-controlplane/crossplane-db-cnp.yaml`'s
+     CiliumNetworkPolicy scopes the provider-sql pod's ENTIRE egress to an
+     enumerated allow-list (apiserver + DNS + the ua-mis-db-1 tailnet CIDR only) —
+     it had no rule at all for the in-cluster db-tier destination. Added a
+     `toEntities: [cluster]` rule (CIDR/ipBlock does not match in-cluster
+     destinations by identity on this Cilium install, same class of gap as every
+     other CORRECTION note in this repo's netpols) scoped to TCP 3306/5432.
+     This file is normally MANUAL-SYNC (`platform-netpol-controlplane`); it was
+     applied live for this fix and is now GitOps-permanent here.
+3. **Existing tenant `User` MRs' connection secrets do NOT self-refresh
+   endpoint/port.** provider-sql's mysql `User` controller writes
+   `endpoint`/`port`/`username`/`password` into its `writeConnectionSecretToRef`
+   secret ONLY at Create — repeated Observe/reconcile does not rewrite them even
+   though it re-validates the login against the (new) admin ProviderConfig target.
+   Confirmed empirically: `swami-{dev,staging,prod}-db` secrets in
+   `crossplane-system` still held `endpoint: 100.114.172.94` after the
+   ProviderConfig repoint reconciled clean. **New tenants created after this
+   repoint get the correct endpoint automatically** (their secret is written
+   fresh at Create against the now-correct ProviderConfig) — this only affects
+   MRs that already existed before the cutover. Fixed for swami by directly
+   patching the `endpoint` key on all three `swami-{dev,staging,prod}-db`
+   Secrets in `crossplane-system` to the in-cluster host (`kubectl patch
+   secret ... --type=json`) — this is live cluster state, not a git-tracked
+   value, so re-run this patch for any OTHER pre-existing tenant at their own
+   cutover. Verified this holds across a subsequent reconcile (crossplane never
+   reverted it) and across a forced `PushSecret` resync (Vault kept the patched
+   value).
+4. **Verification performed**: all 9 mysql MRs (3 `User`/3 `Database`/3 `Grant`)
+   Synced+Ready True against the new target; `swami_dev/staging/prod`'s Vault
+   password unchanged (confirmed live `SELECT 1` auth against
+   `capstone-mariadb-mariadb-cluster-primary` with the pre-existing password);
+   `secret/tenants/swami/{dev,staging,prod}/database`'s `host` in Vault flipped
+   to the in-cluster FQDN and held after a forced PushSecret resync; the
+   ESO-materialized `swamiapp-db` `DATABASE_URL` and `db-console`
+   `ADMINER_AUTOLOGIN_SERVER` in all three tenant namespaces show the in-cluster
+   host with the unchanged password.
+
+**POSTGRES: resealed for parity, not fully cut over.** `providerconfig-postgres.yaml`
+/ `db-tier-postgres-admin` now points at `capstone-pg-rw.db-tier.svc.cluster.local`
+with the in-cluster `crossplane_provisioner` DatabaseRole — but there is no live
+Postgres tenant to have tested this against, and the `crossplane-system ->
+db-tier:5432` NetworkPolicy/CNP egress rules were deliberately NOT added (mirror
+step 2 above at the point a real Postgres tenant needs it).
+
+**Original plan (superseded above for mysql — kept for postgres/future
+reference):**
+
+1. ~~Repoint the ProviderConfigs to a NEW secret name~~ — done by resealing the
+   existing secret in place instead (simpler, see above).
 2. **Migrate existing tenant data**, per team, on a schedule that doesn't disrupt
-   them:
+   them (mysql: already done for swami ahead of this PR, see Phase-2 migrations
+   note):
    - Postgres: `pg_dump -h ua-mis-db-1 -U crossplane_provisioner -d <team>_<env>
      -Fc | pg_restore -h capstone-pg-rw.db-tier.svc.cluster.local -U <team>_<env>_role
      -d <team>_<env>` (same `pg_dump`/`pg_restore` shape as 4a, per tenant db).
    - MySQL/MariaDB: `mysqldump -h ua-mis-db-1 -u crossplane_provisioner -p
-     <team>_<env> | mysql -h capstone-mariadb-mariadb-cluster.db-tier.svc.cluster.local
+     <team>_<env> | mysql -h capstone-mariadb-mariadb-cluster-primary.db-tier.svc.cluster.local
      -u <team>_<env>_user -p <team>_<env>` (same shape as 4a).
    - Re-point each tenant's `DATABASE_URL`/connection secret in Vault
      (`tenants/<team>/<env>/database`) to the new host — ESO re-syncs it into the
      tenant's k8s Secret automatically, no code change on the tenant's side.
+     ⚠ Also patch the tenant's `User` MR connection secret directly (step 3
+     above) — the PushSecret reads FROM that secret, so Vault won't pick up the
+     new host until the source secret is corrected.
 3. **Decommission `ua-mis-db-1`'s DB role** only after every tenant is confirmed
    migrated and stable for a full billing/semester cycle — keep it warm as a
    fallback until then. The box itself may still be useful for other purposes

@@ -285,3 +285,74 @@ describe('teardownTenant (admin)', () => {
     expect(res.repoArchived).toBe(false);
   });
 });
+
+// ── resolveActorGroups against a REALISTIC catalog (filter semantics actually evaluated) ──
+//
+// Regression coverage for the live-data bug found investigating "labmx sees an empty secrets
+// project picker": the GitHub-org provider writes Group.spec.members as `<namespace>/<login>`
+// (e.g. "default/ccsmith33") — confirmed against the production catalog DB — NOT the bare
+// login the old `spec.members` clause checked. `makeDeps` above ignores the filter argument
+// entirely (it just echoes back `actorGroups`), so it can't catch this class of bug; these
+// tests implement a small real filter evaluator instead.
+function matchesClause(entity: any, clause: Record<string, unknown>): boolean {
+  return Object.entries(clause).every(([key, val]) => {
+    if (key === 'kind') return entity.kind === val;
+    if (key === 'relations.hasMember') {
+      return (entity.relations ?? []).some(
+        (r: any) => r.type === 'hasMember' && r.targetRef === val,
+      );
+    }
+    if (key === 'spec.members') {
+      return (entity.spec?.members ?? []).includes(val);
+    }
+    return false;
+  });
+}
+
+function realisticCatalog(entities: any[]) {
+  return {
+    getEntities: jest.fn(async (query: any) => {
+      const clauses: any[] = Array.isArray(query.filter)
+        ? query.filter
+        : [query.filter];
+      return {
+        items: entities.filter(e => clauses.some(c => matchesClause(e, c))),
+      };
+    }),
+  };
+}
+
+const CCSMITH33: any = {
+  $$type: '@backstage/BackstageCredentials',
+  principal: { type: 'user', userEntityRef: 'user:default/ccsmith33' },
+};
+
+/** Shaped exactly like the live labmx Group row: spec.members in `default/<login>` form. */
+function labmxGroup(withRelation: boolean): any {
+  return {
+    kind: 'Group',
+    metadata: { name: 'labmx', namespace: 'default' },
+    spec: { members: ['default/ccsmith33'] },
+    relations: withRelation
+      ? [{ type: 'hasMember', targetRef: 'user:default/ccsmith33' }]
+      : [],
+  };
+}
+
+describe('requireAdmin (realistic catalog filter evaluation)', () => {
+  it('REGRESSION: recognizes admin via spec.members alone when relations.hasMember has not stitched yet', async () => {
+    // withRelation=false: the ONLY way to find labmx membership is the spec.members clause,
+    // in its ACTUAL live shape ("default/ccsmith33") — the relation-stitching-lag window F1
+    // documents. Before the fix, resolveActorGroups only matched a bare login and this DENIED.
+    serveLedger();
+    const deps: any = {
+      config: mockConfig(),
+      logger: { info() {}, warn() {}, error() {}, debug() {}, child() { return this; } },
+      catalog: realisticCatalog([labmxGroup(false)]),
+      permissions: { authorize: jest.fn(async () => [{ result: AuthorizeResult.ALLOW }]) },
+      auth: { getOwnServiceCredentials: jest.fn(async () => ({ token: 'svc' })) },
+    };
+    const tenants = await listTenants(deps, { credentials: CCSMITH33 });
+    expect(tenants.map(t => t.name).sort()).toEqual(['acme-web', 'swami-swamiapp']);
+  });
+});

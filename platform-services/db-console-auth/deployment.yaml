@@ -1,0 +1,128 @@
+# oauth2-proxy — the ONE shared SSO gate for every DB console (tenant-db-access
+# design, artifacts/research/tenant-db-access.md §3.2 option D). Federates to Dex as
+# the `db-console` staticClient (platform-services/dex/configmap.yaml) — same broker,
+# same "one GitHub OAuth app, N tools" model as ArgoCD/Harbor/Backstage.
+#
+# THIS POD NEVER PROXIES REAL TRAFFIC. `--upstream=static://200` means it only ever
+# answers its own `/oauth2/*` endpoints (login, callback, and the auth-check
+# `/oauth2/auth`). Every per-(team,env) Adminer console's Traefik `Middleware`
+# (rendered by the CapstoneTenant Composition) calls THIS Service's `/oauth2/auth`
+# endpoint as a forwardAuth check, appending `?allowed_groups=UA-MIS:<team>` — so ONE
+# proxy instance enforces a DIFFERENT group per route without per-team Dex config
+# (Dex has no wildcard redirectURIs; see the Composition's ADMINER CONSOLE comments).
+#
+# `--cookie-domain=.capstone.uamishub.com` + `--whitelist-domain=.capstone.uamishub.com`:
+# the documented oauth2-proxy pattern for one proxy authenticating many subdomains —
+# the session cookie is valid across every `*.capstone.uamishub.com` host, so a
+# student already SSO'd into ArgoCD/Harbor/Backstage doesn't see a second login
+# screen for a DB console (same Dex session, shared cookie domain).
+#
+# SSO REDIRECT: a bare 401 from `/oauth2/auth` (no session cookie yet) is converted
+# into a 302 redirect to Dex/GitHub login by the shared `errors` Middleware
+# (middleware.yaml, `oauth2-proxy-errors`) chained in front of every console's
+# forwardAuth Middleware — see that file's header comment for the full mechanism.
+# Requires `providers.kubernetesCRD.allowCrossNamespace: true`
+# (applicationsets/traefik-app.yaml), since every consumer lives in a different
+# namespace than this one.
+#
+# ⚠ TLS TO DEX: id.capstone.uamishub.com's in-cluster split-horizon rewrite
+# (platform-services/coredns-custom/coredns-custom.yaml) is a documented NO-OP on
+# Talos — in-cluster requests to the issuer currently egress via public DNS to
+# Cloudflare's edge (a publicly-trusted cert), same path ArgoCD/Backstage already use
+# for OIDC discovery today. So this Deployment sets NO special TLS trust config
+# (relies on the image's default CA bundle) — if the coredns-custom split-horizon is
+# ever fixed (Talos-native CoreDNS, tracked there as a BACKLOG item), in-cluster
+# traffic would switch to hitting Traefik directly with the self-signed platform CA
+# and this Deployment would need `--provider-ca-file` pointed at a mounted
+# `platform-ca` ConfigMap (same pattern as platform-services/arc/hook-template.yaml) —
+# revisit at that point, not needed today.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oauth2-proxy
+  namespace: db-console-auth
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: oauth2-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: oauth2-proxy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: oauth2-proxy
+        platform.capstone/component: platform
+    spec:
+      containers:
+        - name: oauth2-proxy
+          image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.3
+          imagePullPolicy: IfNotPresent
+          args:
+            - --provider=oidc
+            - --oidc-issuer-url=https://id.capstone.uamishub.com
+            - --redirect-url=https://db-auth.capstone.uamishub.com/oauth2/callback
+            - --client-id=db-console
+            # Same requestedScopes as ArgoCD's oidc.config (argocd-cm.yaml) — needs
+            # the `groups` claim for the per-route allowed_groups check downstream.
+            - --scope=openid profile email groups
+            - --oidc-groups-claim=groups
+            # Org membership is already gated upstream at Dex (GitHub connector
+            # `orgs: [UA-MIS]`, SEC-007) — any authenticated UA-MIS member passes
+            # THIS proxy's own login; the per-team restriction happens per-request via
+            # each Middleware's `?allowed_groups=UA-MIS:<team>` querystring, not here.
+            - --email-domain=*
+            - --cookie-domain=.capstone.uamishub.com
+            - --whitelist-domain=.capstone.uamishub.com
+            - --cookie-secure=true
+            - --cookie-samesite=lax
+            # No real upstream — this proxy only ever answers its own /oauth2/*
+            # endpoints (see header). Traefik forwardAuth treats any 2xx as "allow".
+            - --upstream=static://200
+            - --http-address=0.0.0.0:4180
+            - --skip-provider-button=true
+            - --silence-ping-logging=true
+            - --standard-logging=true
+          env:
+            - name: OAUTH2_PROXY_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: oauth2-proxy-credentials
+                  key: client-secret
+            - name: OAUTH2_PROXY_COOKIE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: oauth2-proxy-credentials
+                  key: cookie-secret
+          ports:
+            - name: http
+              containerPort: 4180
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: 4180
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: 4180
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          # Tiny, stateless proxy — same footprint class as Dex.
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532   # the image's own default nonroot UID (distroless base, v7.6+)
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault

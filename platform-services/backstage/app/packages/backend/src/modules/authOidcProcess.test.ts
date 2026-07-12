@@ -226,4 +226,48 @@ describe('createProcessOidcSignInResolver', () => {
     );
     expect(findCatalogUser).not.toHaveBeenCalled();
   });
+
+  it('F1 REGRESSION: matches Group.spec.members in its ACTUAL live shape (`default/<login>`)', async () => {
+    // Confirmed against the production catalog DB: the GitHub-org provider writes
+    // spec.members as `<namespace>/<login>` (e.g. "default/ccsmith33") — NOT a bare login
+    // and NOT a full "user:<namespace>/<login>" ref, which were the only two forms the old
+    // filter checked. Standard ownership resolution lags (no labmx yet); the ONLY signal
+    // available is spec.members in this shape.
+    resolveOwnershipEntityRefs.mockResolvedValue({
+      ownershipEntityRefs: ['user:default/ccsmith33'],
+    });
+    // A real (filter-evaluating) catalog stub instead of the blind mock the other tests use,
+    // so a regression to the old clause shape actually fails this test.
+    getEntities.mockImplementation(async (query: any) => {
+      const clauses: any[] = Array.isArray(query.filter)
+        ? query.filter
+        : [query.filter];
+      const labmx = {
+        kind: 'Group',
+        metadata: { name: 'labmx', namespace: 'default' },
+        spec: { members: ['default/ccsmith33'] },
+        relations: [],
+      };
+      const matches = clauses.some((c: Record<string, unknown>) =>
+        Object.entries(c).every(([key, val]) => {
+          if (key === 'kind') return labmx.kind === val;
+          if (key === 'spec.members') {
+            return labmx.spec.members.includes(val as string);
+          }
+          if (key === 'relations.hasMember') return false;
+          return false;
+        }),
+      );
+      return { items: matches ? [labmx] : [] };
+    });
+
+    await resolver(infoWith({ preferred_username: 'ccsmith33' }), ctx);
+
+    expect(issueToken).toHaveBeenCalledWith({
+      claims: {
+        sub: 'user:default/ccsmith33',
+        ent: ['user:default/ccsmith33', 'group:default/labmx'],
+      },
+    });
+  });
 });
