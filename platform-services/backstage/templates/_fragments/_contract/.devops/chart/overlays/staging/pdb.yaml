@@ -1,0 +1,34 @@
+# PodDisruptionBudget — ONE per deployable component (nunjucks loop, mirroring the N
+# Deployments/Rollout in ../../base/deployments.yaml). This file is present ONLY in the
+# overlays whose replica count is > 1 (staging=2, prod=3). dev/preview run 1 replica, where
+# a PDB is pointless (you cannot keep a replica up while disrupting the only one) so it is
+# intentionally absent there — matching the "gate the PDB to replicas>1" rule.
+#
+# maxUnavailable:1 (NOT minAvailable) so a node drain / rolling node upgrade evicts at most
+# ONE replica of a component at a time — the eviction API keeps the rest serving. Without it a
+# `kubectl drain` or cluster upgrade could evict EVERY replica of an app at once, defeating the
+# extra replicas. maxUnavailable also never wedges scheduling/drains the way a minAvailable ==
+# replicas PDB would. Kind-agnostic: the selector matches pod LABELS (name+component, the only
+# labels on the pods, §3.1), so ONE PDB governs both the Deployment and the Rollout
+# (progressive-delivery) pod templates identically.
+#
+# Lives inside the overlay dir (not base referenced up) so kustomize's default root-only load
+# restrictor — the one ArgoCD uses — is satisfied.
+{%- for c in values.components %}
+{%- if c.buildType != "mobile-artifact" %}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ${{ values.appName }}-${{ c.name }}-pdb
+  labels:
+    app.kubernetes.io/name: ${{ values.appName }}
+    app.kubernetes.io/component: ${{ c.name }}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ${{ values.appName }}
+      app.kubernetes.io/component: ${{ c.name }}
+{%- endif %}
+{%- endfor %}
