@@ -986,6 +986,97 @@ spec:
                       {{- end }}
 
             {{- /* =====================================================================
+                   HARBOR PULL — CONSUMER ExternalSecret (bug #7, onboarding chain).
+                   The PushSecret above writes the pull-robot token into Vault at
+                   tenants/<team>/<env>/harbor-pull (property `secret`). The workload
+                   ServiceAccount sets imagePullSecrets:[harbor-pull], so each tenant
+                   namespace needs a docker-registry Secret named `harbor-pull`. For a
+                   ZERO-TOUCH tenant nothing materialized it: the zero-touch skeleton
+                   overlay ships no harbor-pull ExternalSecret, and there is no operator
+                   `make harbor-robot` SealedSecret — so the pod ImagePullBackOff'd on
+                   its OWN private image (meow-app pulling harbor.../meow/meow-app, #7 —
+                   FailedToRetrieveImagePullSecret harbor-pull).
+                   The block header near the top delegated this consumer to the app
+                   overlay (track-4), but that consumer was never shipped. track-5 (this
+                   Composition) now OWNS it — symmetric with the ARC harbor-push
+                   ExternalSecret below, and single-owner (the overlay deliberately ships
+                   NO competing harbor-pull, so there is no dual-owner / SharedResource
+                   race — verified no tenant repo commits a harbor-pull SealedSecret).
+                   Reads via the platform `vault-backend` ClusterSecretStore (the SAME
+                   store the proven ARC push ES uses) and templates a
+                   kubernetes.io/dockerconfigjson. The robot USERNAME is deterministic —
+                   `robot$<team>+<team>-pull` (unified-API `<project>+<robot>` prefix,
+                   confirmed live: robot$<team>+<team>-push) — rendered here from $team;
+                   only the token lives in Vault. deletionPolicy is Retain-by-default
+                   (creationPolicy Owner) so a transient Vault miss doesn't yank a
+                   working pull cred out from under a running pod.
+                   ⚠ RECONCILE-SAFE: username/registry are constants; do not add the
+                   overlay-owned harbor-pull back (would reintroduce the dual-owner race).
+                   NOTE: preview (`<team>-preview`) is intentionally NOT covered here —
+                   its namespace is ArgoCD-created (CreateNamespace=true), not a
+                   Composition Object, so there is no ns Object to gate on; preview is
+                   security-gated + off by default. Follow-up if preview-enabled tenants
+                   need private pulls (read the dev Vault path).
+                   ===================================================================== */}}
+            {{- $pullUser := printf "robot$%s+%s-pull" $team $team }}
+            {{- range $e := $envs }}
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              name: {{ printf "xp-%s-%s-harborpull-es" $team $e.name | quote }}
+              annotations:
+                {{ setResourceNameAnnotation (printf "harborpull-es-%s" $e.name) }}
+            spec:
+              providerConfigRef:
+                name: default
+              # Materialize only after the namespace exists and the pull token is in Vault
+              # (provision-before-deploy — no ImagePullBackOff flap on first sync).
+              references:
+                - dependsOn:
+                    apiVersion: kubernetes.crossplane.io/v1alpha1
+                    kind: Object
+                    name: {{ printf "xp-%s-%s-ns" $team $e.name | quote }}
+                - dependsOn:
+                    apiVersion: kubernetes.crossplane.io/v1alpha1
+                    kind: Object
+                    name: {{ printf "xp-%s-harborpull" $team | quote }}
+              forProvider:
+                manifest:
+                  apiVersion: external-secrets.io/v1
+                  kind: ExternalSecret
+                  metadata:
+                    name: harbor-pull
+                    namespace: {{ printf "%s-%s" $team $e.name | quote }}
+                    labels:
+                      platform.capstone/component: tenant
+                      platform.capstone/team: {{ $team | quote }}
+                      platform.capstone/env: {{ $e.name | quote }}
+                  spec:
+                    refreshInterval: "1h"
+                    secretStoreRef:
+                      name: vault-backend
+                      kind: ClusterSecretStore
+                    target:
+                      name: harbor-pull
+                      creationPolicy: Owner
+                      template:
+                        type: kubernetes.io/dockerconfigjson
+                        data:
+                          # Backtick literals pass the inner ESO tokens (the .secret
+                          # data key + printf|b64enc) through to ESO's template engine
+                          # verbatim; registry + pullUser are rendered NOW by this
+                          # Composition. See the ARC push ES below for the same technique.
+                          .dockerconfigjson: |
+                            {{ `{"auths":{"` }}{{ $registry }}{{ `":{"username":"` }}{{ $pullUser }}{{ `","password":"{{ .secret }}","auth":"{{ printf "%s:%s" "` }}{{ $pullUser }}{{ `" .secret | b64enc }}"}}}` }}
+                    data:
+                      - secretKey: secret
+                        remoteRef:
+                          key: {{ printf "tenants/%s/%s/harbor-pull" $team $e.name | quote }}
+                          property: secret
+            {{- end }}
+
+            {{- /* =====================================================================
                    ARC PER-TEAM CI PUSH (finish-eso / track-4 PR #128, A1 model).
                    One gha-runner-scale-set per team (the container hook can't pick a
                    secret per-job → per-team scale-set, each mounting its OWN

@@ -13,15 +13,14 @@ resources:
   # deploys — M4 zero-config).
   - app-secret.externalsecret.yaml
   # harbor-pull image-pull cred (SA imagePullSecrets:[harbor-pull], #C3) is NOT shipped by
-  # this overlay. It is owned SOLELY by the platform operator's tenant directory
-  # (platform-infra/tenants/<team>/harbor-pull-<env>-sealed.yaml, synced by the tenant-<team>
-  # Application and minted by `make harbor-robot`). The base ServiceAccount keeps
-  # imagePullSecrets:[harbor-pull] so the pod still pulls from the private Harbor project;
-  # the secret is provided out-of-band by that single owner. Shipping a placeholder
-  # SealedSecret here too made harbor-pull a dual-owner resource, triggering ArgoCD's
-  # SharedResourceWarning and blocking sync (twin of the harbor-push fix, #117). RESERVED
-  # for a post-v1 ESO flip: Vault path `secret/data/tenants/<team>/<env>/harbor-pull` (key
-  # .dockerconfigjson); ADR-030 follow-on, coordinated with eso-vault.
+  # this overlay. ZERO-TOUCH (bug #7): it is owned SOLELY by the Crossplane Composition
+  # (platform-services/crossplane/apis/composition.yaml, track-5), which pushes the pull
+  # RobotAccount token to Vault (tenants/<team>/<env>/harbor-pull) and renders a per-env
+  # ExternalSecret into this namespace that templates the docker-registry Secret. The base
+  # ServiceAccount keeps imagePullSecrets:[harbor-pull] so the pod pulls from the private
+  # Harbor project; the secret is provided by that single owner. DO NOT add a harbor-pull
+  # SealedSecret/ExternalSecret here — a second owner reintroduces ArgoCD's
+  # SharedResourceWarning / dual-owner race (twin of the harbor-push fix, #117).
   # capstone:secrets — The Process "Secrets" tab (M3 ESO rework, ADR-030 §5) adds user
   # secret keys by APPENDING a `data[]` entry to app-secret.externalsecret.yaml above
   # (one ExternalSecret / one k8s Secret `${{ values.appName }}-secret` per env; all keys
