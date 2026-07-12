@@ -163,6 +163,81 @@ Only then sync `platform-crossplane-claims` and let Backstage scaffolds flow.
 
 ---
 
+## Tenant teardown & recovery
+
+De-provisioning is the mirror of onboarding: **remove the claim file, ArgoCD prunes
+the XR, Crossplane tears the tenant down.** Operators should never `kubectl delete`
+a tenant directly — drive it from git, exactly like onboarding.
+
+### 1. Normal path (git-driven, zero-touch)
+
+```bash
+git rm tenants/_claims/<team>-<app>.yaml   # e.g. via the Backstage teardown page
+# commit → main (the portal/GitHub App path)
+```
+
+`platform-crossplane-claims` (directory-sync of `tenants/_claims`, `automated:
+{prune, selfHeal}`) removes the now-orphaned `CapstoneTenant` XR; Crossplane +
+the team AppProject finalizers deprovision the tenant (repo, Harbor, Vault, the k8s
+tenancy fence). Graduating a whole cohort = `git rm` all of that semester's claims.
+
+> **Why `allowEmpty: true` is set on this app** (see
+> `applicationsets/crossplane-claims-app.yaml`): when the **last** remaining claim
+> file is removed, `tenants/_claims` renders to **zero** applied resources. ArgoCD's
+> default `allowEmpty: false` safety guard then **refuses** the sync — logging
+> `Skipping sync attempt … auto-sync will wipe out all resources` — so the orphaned
+> XR is never pruned and teardown silently no-ops (verified live 2026-07-10:
+> `meow-meow` + `computa-computa` claims stuck alive 9–13 h after their files were
+> `git rm`'d). We flip `allowEmpty: true` **only on this claims app** because the
+> safety it removes is **redundant here**: branch protection on `main` (1 required
+> approving review, no force-push, no branch deletion — confirmed live) already
+> prevents an unreviewed commit from mass-deleting claims; a wipe-to-empty must go
+> through a reviewed PR. (The `ua-mis-platform-ci` GitHub App is on the
+> branch-protection bypass list — it is the trusted onboarding/teardown automation,
+> not an unreviewed human contributor.) This makes single-/last-tenant teardown
+> reliable **and** kubectl-free.
+
+### 2. If a claim sticks in `Terminating` (wedged composition)
+
+A `CapstoneTenant` can wedge `Ready=False` with a `WatchCircuitOpen` hot-loop on its
+`xp-<team>-<env>-secretstore` object; deleting such a claim then **hangs in
+`Terminating`** on a stuck managed-resource finalizer (the 2026-07-10 apply-fight /
+prune-hang class). Recover with the incident-runbook discipline — **orphan before
+prune**, one tenant at a time:
+
+1. **Pause the churn** first (stop ArgoCD re-syncing the claims app / stop the
+   Composition re-rendering into the fight) so you are not racing the controller.
+2. **Identify the stuck managed resource(s)** — the object(s) still holding a
+   finalizer under the terminating XR (start with the `xp-<team>-<env>-secretstore`
+   and any MR whose `Synced/Ready` is False):
+
+   ```bash
+   kubectl get managed | grep <team>          # find the wedged MRs
+   kubectl get <mr-kind> <name> -o yaml | grep -A3 finalizers
+   ```
+
+3. **Orphan-before-prune** so the MR drains instead of blocking: set the deletion
+   policy to `Orphan` (`kubectl patch <mr-kind> <name> --type merge -p
+   '{"spec":{"deletionPolicy":"Orphan"}}'`) and/or remove the stuck finalizer
+   (`kubectl patch <mr-kind> <name> --type merge -p '{"metadata":{"finalizers":[]}}'`).
+   The XR then finishes terminating.
+4. **Remove the claim** (if not already `git rm`'d) and let the prune complete.
+5. **Unpause** and confirm the tenant's namespaces / appsets are gone.
+
+**Never delete multiple wedged claims simultaneously.** Do them **one at a time**,
+watching **cilium-agent and kube-apiserver CPU** between each — the 2026-07-10
+incident was a duplicate-claim apply-fight that pinned cilium and saturated a node
+(`mac-debian-01`) until vault raft snapshots stalled. Serialize and watch.
+
+### 3. "ArgoCD app shows Suspended" is (usually) not a teardown signal
+
+An ArgoCD Application reporting **Suspended** during teardown is almost always just a
+**paused canary Rollout** (Argo Rollouts pauses at a step), **not** a stuck teardown.
+Confirm with `kubectl argo rollouts get rollout <name> -n <ns>` before acting — do
+**not** start yanking finalizers because a health status reads Suspended.
+
+---
+
 ## The cutover (drop the app-overlay SecretStore)
 
 Track-4 (ESO per-team push) currently OWNS the consumer ExternalSecrets and the

@@ -41,6 +41,15 @@ spec:
     automated:
       prune: true       # `git rm` a claim → the XR is pruned → the tenant is torn down
       selfHeal: true
+      # allowEmpty: let a sync that renders to ZERO claims proceed. Without it,
+      # ArgoCD's default `allowEmpty: false` guard REFUSES to sync when the last
+      # remaining claim file is removed ("Skipping sync attempt … auto-sync will
+      # wipe out all resources"), so tearing down the LAST tenant silently no-ops
+      # and the orphaned XR is never pruned (verified live 2026-07-10). The guard
+      # is redundant here: branch protection on `main` already blocks an
+      # unreviewed commit from mass-deleting claims — a wipe would require a
+      # reviewed PR. Scoped to THIS claims app only. See docs/operator/crossplane-onboarding.md.
+      allowEmpty: true
     syncOptions:
       - CreateNamespace=false   # capstone-tenants ships via platform-crossplane-apis
       - ServerSideApply=true
