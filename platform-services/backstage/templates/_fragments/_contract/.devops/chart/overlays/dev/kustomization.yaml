@@ -54,14 +54,34 @@ images:
     newTag: v0.0.0
 {%- endif %}
 {%- endfor %}
-replicas:
+# Per-component replica count. Set via a JSON6902 `op: replace` (NOT the builtin
+# `replicas:` transformer) so the SAME override reaches a progressive-delivery Rollout:
+# kustomize's builtin `replicas:` transformer is hard-wired to the
+# Deployment/StatefulSet/ReplicaSet/ReplicationController GVK set and ERRORS on an
+# argoproj.io/Rollout ("resource <app>-<c> does not match a config with the following
+# GVK ...") — which broke `kustomize build` for EVERY single-component canary tenant
+# (#337, first hit by test tenant `computa`). A patch has no such GVK restriction. The
+# target `kind` is branched on the SAME condition deployments.yaml uses, so it always
+# matches the workload kind actually rendered; naming the kind also excludes the
+# same-named Service (which has no /spec/replicas). Base pins replicas:1, so `replace`
+# always has a path to hit.
+patches:
 {%- for c in values.components %}
 {%- if c.buildType != "mobile-artifact" %}
-  - name: ${{ values.appName }}-${{ c.name }}
-    count: 1
+  - target:
+{%- if values.single and values.progressiveDelivery %}
+      group: argoproj.io
+      kind: Rollout
+{%- else %}
+      kind: Deployment
+{%- endif %}
+      name: ${{ values.appName }}-${{ c.name }}
+    patch: |
+      - op: replace
+        path: /spec/replicas
+        value: 1
 {%- endif %}
 {%- endfor %}
-patches:
   - target:
       kind: Ingress
       name: ${{ values.appName }}
