@@ -20,6 +20,11 @@ configMapGenerator:
     files:
       - site/index.html
       - site/internal.html
+      # nginx server config overriding the image's stock
+      # /etc/nginx/conf.d/default.conf — adds absolute_redirect off /
+      # port_in_redirect off so the /internal auto-slash 301 is relative
+      # (no :8080 leak). See site/default.conf for the full rationale.
+      - site/default.conf
 generatorOptions:
   disableNameSuffixHash: true
 
