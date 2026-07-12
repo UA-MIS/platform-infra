@@ -7,17 +7,25 @@
 # per-team/per-component values come from .devops/promotion.yaml (registry/app) +
 # .devops/components.yaml (the components) + the git event.
 #
-# HOW IT WORKS (three jobs):
+# HOW IT WORKS (four jobs):
 #   1. resolve     — run ONCE. resolve-image.sh maps the git event -> env + the ONE tag
 #                    all components share (D-030); resolve-components.sh reads
 #                    components.yaml and emits the per-component build MATRIX (one image
 #                    each, full ref = <registry>/<component.image>:<tag>).
-#   2. build-and-push — a MATRIX over the components. Each leg Kaniko-builds its
+#   2. checks      — a MATRIX over the SAME components. Each leg auto-detects the
+#                    component's language (from its build-context manifest/lockfile) and
+#                    runs that language's LINT + UNIT TESTS in the right toolchain image
+#                    (a `uses: docker://` step, like the Kaniko build). This GATES the
+#                    build: build-and-push `needs: [resolve, checks]`, so a failing test
+#                    or lint (or a compile/typecheck error) NEVER reaches the registry —
+#                    and bump-dev, gated behind the build, never deploys it. ABSENCE of
+#                    tests is a notice (not a block); a real FAILURE blocks.
+#   3. build-and-push — a MATRIX over the components. Each leg Kaniko-builds its
 #                    component (rootless, no docker daemon) from that component's
 #                    `context`/`dockerfile` and pushes to the team's OWN Harbor project
 #                    using the least-privilege PUSH robot (`harbor-push`, project-scoped
 #                    so it covers every component repo — no per-component robot).
-#   3. bump-dev    — run ONCE after all matrix legs. On push-to-main, rewrite the dev
+#   4. bump-dev    — run ONCE after all matrix legs. On push-to-main, rewrite the dev
 #                    overlay so EVERY component's images[].newTag = the built tag, commit
 #                    [skip ci], push -> ArgoCD syncs all components into <team>-dev.
 #
@@ -94,9 +102,216 @@ jobs:
           # Single-component repos (no components.yaml) get a one-element matrix.
           echo "matrix=$(sh .devops/ci/resolve-components.sh)" | tee -a "$GITHUB_OUTPUT"
 
-  # ---- 2) build-and-push: one Kaniko build per component (matrix) --------------
-  build-and-push:
+  # ---- 2) checks: per-component language-aware lint + test (GATES the build) ----
+  # "Everything we ship runs its language's tests + lint before it can deploy." A MATRIX
+  # over the SAME components the build uses (resolve.outputs.matrix), so each component is
+  # checked in its OWN language toolchain. The language is auto-detected from the
+  # component's build CONTEXT (manifest/lockfile) and the toolchain runs as a
+  # `uses: docker://` CONTAINER-ACTION STEP in its own pod (shared _work volume) — the
+  # SAME container-hook shape as the Kaniko build, so the small node job-container only
+  # runs the Actions internals + checkout. build-and-push `needs: [resolve, checks]`, so a
+  # FAILING test/lint (or a compile/typecheck error) never reaches the registry.
+  #
+  # RESILIENCE CONTRACT: the ABSENCE of tests/lint is a NOTICE, not a failure (a component
+  # with no test script is not blocked); a real test/lint FAILURE (or a compile/typecheck
+  # error) DOES block. Unknown / not-yet-supported languages SKIP cleanly. Toolchain images
+  # are digest-pinned (SEC) and every dependency install is over HTTPS (:443), matching the
+  # runner egress netpol (external :443 only). Inside every docker:// step we use
+  # $GITHUB_WORKSPACE (the STEP-POD mount /__w/<repo>) — NOT ${{ github.workspace }} (the
+  # JOB-container path), which does not exist in the separate step pod (same reason the
+  # Kaniko build uses $GITHUB_WORKSPACE).
+  #
+  # LANGUAGE COVERAGE (v1): go, node/typescript, python, java(Maven), .NET, rust are STRICT
+  # (a failure blocks). ruby(Rails) + php(Laravel) are BEST-EFFORT: a dependency-install
+  # failure in the stock toolchain image (native-ext build deps / PHP extensions that the
+  # runtime Dockerfile provides but a stock image does not) degrades to a warning-skip,
+  # while a real test failure still blocks — harden those toolchain images to make them
+  # strict. Gradle/Android, Swift, Flutter, and static/mobile artifacts are DEFERRED (they
+  # fall through to the 'none' skip).
+  checks:
     needs: resolve
+    runs-on: ${{ vars.RUNNER_SCALE_SET || 'ua-mis-kaniko' }}
+    timeout-minutes: 25
+    strategy:
+      # Surface every component's result — don't cancel siblings when one fails.
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+    container:
+      image: node:24-trixie-slim
+    steps:
+      - name: Checkout (source to check for ${{ matrix.name }})
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 1
+      - name: Detect language for component '${{ matrix.name }}'
+        id: detect
+        env:
+          CONTEXT: ${{ matrix.context }}
+        run: |
+          set -eu
+          # First match wins. Compiled / manifest-specific languages are tested BEFORE
+          # node/python so a secondary package.json (a Rails importmap, a Laravel Vite
+          # bundle) never hijacks detection. Mobile toolchains (Gradle-Android / Swift /
+          # Flutter) are intentionally NOT matched (deferred) — they fall through to 'none'
+          # and skip; react-native is TS/node and is handled by the node path.
+          lang=none
+          if   [ -f "${CONTEXT}/go.mod" ]; then lang=go
+          elif [ -f "${CONTEXT}/pom.xml" ]; then lang=java
+          elif ls "${CONTEXT}"/*.csproj >/dev/null 2>&1 || ls "${CONTEXT}"/*.sln >/dev/null 2>&1; then lang=dotnet
+          elif [ -f "${CONTEXT}/Cargo.toml" ]; then lang=rust
+          elif [ -f "${CONTEXT}/composer.json" ]; then lang=php
+          elif [ -f "${CONTEXT}/Gemfile" ]; then lang=ruby
+          elif [ -f "${CONTEXT}/package.json" ]; then lang=node
+          elif [ -f "${CONTEXT}/pyproject.toml" ] || [ -f "${CONTEXT}/requirements.txt" ]; then lang=python
+          fi
+          echo "component '${{ matrix.name }}' (context '${CONTEXT}') -> lang=${lang}"
+          echo "lang=${lang}" >> "$GITHUB_OUTPUT"
+
+      - name: Go — vet + test
+        if: ${{ steps.detect.outputs.lang == 'go' }}
+        # Digest-pinned (SEC). golang:1.26-alpine. go vet = lint, go test = unit tests
+        # (both compile the package, so a build error is caught too). Both BLOCKING.
+        uses: docker://golang@sha256:3ad57304ad93bbec8548a0437ad9e06a455660655d9af011d58b993f6f615648 # 1.26-alpine
+        with:
+          entrypoint: /bin/sh
+          args: >-
+            -c 'set -eu;
+            cd "$GITHUB_WORKSPACE/${{ matrix.context }}";
+            echo "==> go vet (lint)"; go vet ./...;
+            echo "==> go test"; go test ./...'
+
+      - name: Node/TypeScript — install + lint + typecheck + test
+        if: ${{ steps.detect.outputs.lang == 'node' }}
+        # Digest-pinned (SEC). node:24-trixie-slim. lint + typecheck run only --if-present
+        # (a bare starter without them is not blocked); `npm test` runs only when a test
+        # script exists (npm test hard-errors on a missing script otherwise). A real lint /
+        # tsc / test failure BLOCKS.
+        uses: docker://node@sha256:366fdef91728b1b7fa18c84fba63b6e79ed77b7e10cc206878e9705da4d7b169 # 24-trixie-slim
+        with:
+          entrypoint: /bin/sh
+          args: >-
+            -c 'set -eu;
+            cd "$GITHUB_WORKSPACE/${{ matrix.context }}";
+            echo "==> install deps"; npm ci || npm install;
+            echo "==> lint (if present)"; npm run lint --if-present;
+            echo "==> typecheck (if present)"; npm run typecheck --if-present;
+            if npm run | grep -qE "^[[:space:]]+test"; then echo "==> npm test"; npm test;
+            else echo "::notice::no npm test script — test run skipped"; fi'
+
+      - name: Python — install + ruff (advisory) + pytest
+        if: ${{ steps.detect.outputs.lang == 'python' }}
+        # Digest-pinned (SEC). python:3-slim. Installs requirements(.txt|-dev.txt) + the app
+        # (if pyproject) + pytest/ruff over :443. ruff is advisory; pytest is BLOCKING. A
+        # pytest exit 5 (no tests collected) degrades to a notice, not a failure.
+        uses: docker://python@sha256:63a4c7f612a00f92042cbdcc7cdc6a306f38485af0a200b9c89de7d9b1607d15 # 3-slim
+        with:
+          entrypoint: /bin/sh
+          args: >-
+            -c 'set -u;
+            cd "$GITHUB_WORKSPACE/${{ matrix.context }}" || exit 1;
+            PIP="python -m pip install --quiet --root-user-action=ignore";
+            [ -f requirements.txt ] && $PIP -r requirements.txt;
+            [ -f requirements-dev.txt ] && $PIP -r requirements-dev.txt;
+            [ -f pyproject.toml ] && $PIP . || true;
+            $PIP pytest ruff;
+            echo "==> ruff (advisory)"; ruff check . || true;
+            echo "==> pytest"; pytest -q; rc=$?;
+            if [ "$rc" = "5" ]; then echo "::notice::pytest collected no tests — skipped"; rc=0; fi;
+            exit $rc'
+
+      - name: Java (Maven) — compile + test
+        if: ${{ steps.detect.outputs.lang == 'java' }}
+        # Digest-pinned (SEC). maven:3.9-eclipse-temurin-21. `mvn test` compiles main + test
+        # sources (a compile error blocks) and runs the JUnit/spring-boot-starter-test suite.
+        uses: docker://maven@sha256:2b4496088e7b80ae10a8c9f74e574ea21380325a006ec684532ad6bad5bc7273 # 3.9-eclipse-temurin-21
+        with:
+          entrypoint: /bin/sh
+          args: >-
+            -c 'set -eu;
+            cd "$GITHUB_WORKSPACE/${{ matrix.context }}";
+            echo "==> mvn test (compile + unit tests)";
+            mvn -B -ntp test'
+
+      - name: .NET — build + test
+        if: ${{ steps.detect.outputs.lang == 'dotnet' }}
+        # Digest-pinned (SEC). dotnet/sdk:8.0. Runs the *.Tests.csproj if present (which
+        # restores+builds+tests, catching compile errors); otherwise a plain `dotnet build`
+        # is the compile check.
+        uses: docker://mcr.microsoft.com/dotnet/sdk@sha256:63ebabdcde24cc8134304a6f50719cf1e22bb4e9f7148ac4ef967c7680187356 # 8.0
+        with:
+          entrypoint: /bin/sh
+          args: >-
+            -c 'set -eu;
+            cd "$GITHUB_WORKSPACE/${{ matrix.context }}";
+            TP="$(find . -name "*.Tests.csproj" -o -name "*.Test.csproj" | head -n1)";
+            if [ -n "$TP" ]; then echo "==> dotnet test $TP"; dotnet test "$TP" --nologo;
+            else echo "==> no test project — dotnet build (compile check)"; dotnet build --nologo; fi'
+
+      - name: Rust — fmt (advisory) + cargo test
+        if: ${{ steps.detect.outputs.lang == 'rust' }}
+        # Digest-pinned (SEC). rust:1-slim-trixie. `cargo test` compiles the crate (a
+        # compile error blocks) and runs any #[test]s; fmt is advisory. Uses --locked only
+        # when a Cargo.lock is committed.
+        uses: docker://rust@sha256:14c4fe50ea427dc42381a1a09a9a839c1d2346a2e508cd491bf02c659dbc0ed7 # 1-slim-trixie
+        with:
+          entrypoint: /bin/sh
+          args: >-
+            -c 'set -eu;
+            cd "$GITHUB_WORKSPACE/${{ matrix.context }}";
+            echo "==> cargo fmt --check (advisory)"; cargo fmt --check || true;
+            echo "==> cargo test (compile + tests)";
+            if [ -f Cargo.lock ]; then cargo test --locked; else cargo test; fi'
+
+      - name: Ruby — bundle + test (best-effort install)
+        if: ${{ steps.detect.outputs.lang == 'ruby' }}
+        # Digest-pinned (SEC). ruby:3.3. BEST-EFFORT: a bundle install failure (native-ext
+        # build deps / DB client headers the stock image lacks, e.g. mysql2) degrades to a
+        # warning-skip; a real test failure still BLOCKS. Harden the image to make strict.
+        uses: docker://ruby@sha256:8d62d05359e370f55c2710645c976d7f04c9f5811378c7acc340ff416986da1e # 3.3
+        with:
+          entrypoint: /bin/sh
+          args: >-
+            -c 'set -eu;
+            cd "$GITHUB_WORKSPACE/${{ matrix.context }}";
+            echo "==> bundle install";
+            if ! bundle install --quiet; then
+              echo "::warning::bundle install failed (native-ext toolchain / DB headers not in the stock ruby image) — skipping ruby checks; harden the toolchain image to enforce"; exit 0; fi;
+            if [ -f bin/rails ]; then echo "==> bin/rails test"; bin/rails test;
+            elif bundle exec rake -T 2>/dev/null | grep -q "rake test"; then echo "==> rake test"; bundle exec rake test;
+            elif [ -d spec ]; then echo "==> rspec"; bundle exec rspec;
+            else echo "::notice::no rails/rake/rspec tests — skipped"; fi'
+
+      - name: PHP (Composer) — install + test (best-effort install)
+        if: ${{ steps.detect.outputs.lang == 'php' }}
+        # Digest-pinned (SEC). composer:2. BEST-EFFORT: a composer install failure (PHP
+        # extensions the runtime Dockerfile provides but a stock image lacks) degrades to a
+        # warning-skip; a real test failure still BLOCKS. Harden the image to make strict.
+        uses: docker://composer@sha256:5946476338742b200bb9ff88f8be56275ddae4b3949c72305cb0dbf10cfcb760 # 2
+        with:
+          entrypoint: /bin/sh
+          args: >-
+            -c 'set -eu;
+            cd "$GITHUB_WORKSPACE/${{ matrix.context }}";
+            echo "==> composer install";
+            if ! composer install --no-interaction --no-progress --prefer-dist --ignore-platform-reqs; then
+              echo "::warning::composer install failed (PHP extensions not in the stock composer image) — skipping php checks; harden the toolchain image to enforce"; exit 0; fi;
+            if composer run-script --list 2>/dev/null | grep -qE "^[[:space:]]+test"; then echo "==> composer test"; composer test;
+            elif [ -x vendor/bin/phpunit ]; then echo "==> phpunit"; vendor/bin/phpunit;
+            else echo "::notice::no composer test script / phpunit — skipped"; fi'
+
+      - name: No recognized language — checks skipped
+        if: ${{ steps.detect.outputs.lang == 'none' }}
+        run: |
+          echo "::notice::component '${{ matrix.name }}' (context '${{ matrix.context }}'):" \
+               "no recognized manifest (go.mod / pom.xml / *.csproj / Cargo.toml /" \
+               "composer.json / Gemfile / package.json / pyproject|requirements) —" \
+               "language lint+test auto-checks skipped (static sites, mobile artifacts," \
+               "and bring-your-own land here). Add a recognized manifest to enable them."
+
+  # ---- 3) build-and-push: one Kaniko build per component (matrix) --------------
+  build-and-push:
+    needs: [resolve, checks]
     runs-on: ${{ vars.RUNNER_SCALE_SET || 'ua-mis-kaniko' }}
     strategy:
       # Don't cancel sibling components if one fails — surface every component's result.
@@ -178,7 +393,7 @@ jobs:
           PUSH: ${{ needs.resolve.outputs.PUSH }}
           DOCKER_CONFIG_DIR: ${{ env.DOCKER_CONFIG_DIR }}
 
-  # ---- 3) bump-dev: bump dev every push + FIRST-DEPLOY seed staging/prod -------
+  # ---- 4) bump-dev: bump dev every push + FIRST-DEPLOY seed staging/prod -------
   # GitOps image-bump (D-030): after all component images are pushed, rewrite the dev
   # overlay so EVERY component's images[].newTag = the built tag, commit [skip ci], push.
   # ArgoCD syncs all components into <team>-dev. Runs ONCE (not per matrix leg).
