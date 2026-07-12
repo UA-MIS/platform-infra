@@ -1,28 +1,45 @@
 # Cohort-cleanup CronJob (DRAFT — design, not yet reviewed/merged).
 #
-# PURPOSE: graduate a cohort — tear down every tenant namespace for one semester,
-# selected by the universal label `platform.capstone/semester=<cohort-slug>`
+# PURPOSE: sweep up leftover tenant namespaces/Applications for one graduated
+# semester, selected by the universal label `platform.capstone/semester=<cohort-slug>`
 # (e.g. 2026-fall). Every tenant object carries this label (see tenants/_template).
 #
 # ⚠ THIS IS `suspend: true` (never fires on a schedule). Graduating a cohort is a
 # DELIBERATE, destructive admin act, so this CronJob is a parameterized, on-demand
-# RUNNER, not an automatic reaper. To run it:
+# RUNNER, not an automatic reaper.
+#
+# ⚠⚠ THIS JOB IS A RESIDUE-SWEEPER, *NOT* THE PRIMARY TEARDOWN. Onboarding is now
+# Crossplane `CapstoneTenant` claims (ADR-031): each tenant is ONE claim file at
+# `tenants/_claims/<team>-<app>.yaml`, and a reviewed-once Composition fans it into
+# the repo + Harbor + Vault + the whole k8s tenancy fence (AppProject, namespaces,
+# quota/netpol/RBAC, and the env/preview ApplicationSets). The GitOps source of truth
+# is the CLAIM, not the Apps/namespaces this job deletes.
+#
+# The CANONICAL, SAFE graduate order is CLAIM-FIRST:
+#   1. `git rm tenants/_claims/<team>-<app>.yaml` for every team in the cohort + commit
+#      (graduating a whole semester = `git rm tenants/_claims/*` for that cohort).
+#   2. ArgoCD (`platform-crossplane-claims`) prunes the CapstoneTenant XR → Crossplane
+#      + the AppProject/namespace finalizers DEPROVISION the tenant declaratively
+#      (repo, Harbor, Vault, ApplicationSets, namespaces — the controllers own it).
+#   3. ONLY IF orphaned Apps/namespaces remain after the controllers settle, run THIS
+#      job to sweep the residue.
+#
+# ⚠ DO NOT run this job while the claim or its ApplicationSets still exist. Imperative
+# `kubectl delete` of Apps/namespaces that a live CapstoneTenant/ApplicationSet is
+# still reconciling is an APPLY-FIGHT (the 2026-07-10 duplicate-claim cascade:
+# imperative-delete vs controller-recreate thrash → Cilium CPU pin → node saturation).
+# This job's pre-flight REFUSES to run if a matching CapstoneTenant claim or parent
+# ApplicationSet is still present for the cohort (orphan-before-delete discipline,
+# mirroring the 2026-07-10 incident runbook). Remove the claim FIRST, let the
+# controllers deprovision, THEN sweep.
+#
+# To run it (after step 1–2 above):
 #   1. Set COHORT_SLUG below (or override per-run, see step 3).
 #   2. Confirm DRY_RUN; first run with DRY_RUN=true and READ the output.
 #   3. Trigger a one-off Job from it:
 #        kubectl -n cohort-gc create job cohort-cleanup-<slug> \
 #          --from=cronjob/cohort-cleanup
 #      (override the cohort/dry-run by editing the env or patching the one-off Job).
-#
-# ⚠ GITOPS SOURCE OF TRUTH IS `git rm`, NOT THIS JOB. The canonical way to graduate
-# a cohort is to `git rm -r tenants/team-<...>` for that semester and commit — the
-# `tenants` ApplicationSet (a git directory generator over tenants/*) then PRUNES
-# the Apps + namespaces. If you `kubectl delete ns` WITHOUT removing the tenant dirs
-# from git, the tenants ApplicationSet + the tenant Apps (selfHeal:true) will
-# RECREATE the namespaces within minutes. So this job is the IMPERATIVE convenience/
-# emergency path the _template README documents — to make it stick, ALSO delete the
-# tenant ArgoCD Applications (this job does) AND git rm the dirs (human, in git).
-# This job deletes Apps + namespaces for fast teardown; the git rm makes it durable.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -57,7 +74,12 @@ spec:
               type: RuntimeDefault
           containers:
             - name: cohort-cleanup
-              image: bitnami/kubectl:1.31.5
+              # Official Kubernetes-published kubectl image, digest-pinned. Served from
+              # registry.k8s.io (the canonical k8s registry) — NOT Docker Hub, so it is
+              # immune to Docker Hub anon pull-rate limits and the 2025 Bitnami catalog
+              # move that stopped publishing bitnami/kubectl:<ver> tags. Digest pin makes
+              # IfNotPresent safe (immutable) and matches the CI digest-pin posture.
+              image: registry.k8s.io/kubectl:v1.31.5@sha256:84f79685dae5370bbfbea3aba1c1df66365be899a73627af1d834693083828e8
               imagePullPolicy: IfNotPresent
               securityContext:
                 allowPrivilegeEscalation: false
@@ -79,10 +101,38 @@ spec:
                     exit 2
                   fi
                   echo "==> cohort-cleanup: COHORT_SLUG=$COHORT_SLUG DRY_RUN=$DRY_RUN"
-                  echo "==> REMINDER: also 'git rm -r tenants/team-*' for this cohort so the"
-                  echo "    tenants ApplicationSet doesn't recreate these namespaces."
+                  echo "==> REMINDER: durable teardown is CLAIM-FIRST. This job only sweeps"
+                  echo "    residue AFTER the CapstoneTenant claims are removed:"
+                  echo "      git rm tenants/_claims/<team>-<app>.yaml   # per team (or *) for the cohort"
+                  echo "    ArgoCD/Crossplane then deprovision the tenant. Do NOT run this while"
+                  echo "    a claim or its ApplicationSets are still live (apply-fight risk)."
 
                   SEL="platform.capstone/semester=${COHORT_SLUG}"
+
+                  # 0) ORPHAN-BEFORE-DELETE PRE-FLIGHT (2026-07-10 incident discipline).
+                  #    Refuse to sweep while the tenant's controllers still own the objects:
+                  #    imperative delete vs Crossplane/ApplicationSet reconcile = apply-fight.
+                  #    Claims are the CapstoneTenant XR (cluster-scoped, group
+                  #    platform.capstone.uamishub.com); parent ApplicationSets live in argocd.
+                  #    Both carry platform.capstone/semester, so $SEL matches them.
+                  CLAIMS=$(kubectl get capstonetenants -l "$SEL" \
+                             -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+                  APPSETS=$(kubectl -n argocd get applicationsets -l "$SEL" \
+                              -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+                  if [ -n "$CLAIMS" ] || [ -n "$APPSETS" ]; then
+                    echo "==> ⚠ NOT ORPHANED YET — live controllers still own this cohort:" >&2
+                    echo "    CapstoneTenant claims: ${CLAIMS:-（none）}" >&2
+                    echo "    ApplicationSets:       ${APPSETS:-（none）}" >&2
+                    echo "    Remove the claim(s) FIRST (git rm tenants/_claims/<team>-<app>.yaml)," >&2
+                    echo "    let ArgoCD/Crossplane deprovision, THEN re-run this sweeper." >&2
+                    if [ "$DRY_RUN" = "true" ]; then
+                      echo "    [dry-run] continuing to show the object inventory below, but a" >&2
+                      echo "    real run WOULD REFUSE until the claim/ApplicationSets are gone." >&2
+                    else
+                      echo "==> REFUSING to sweep (apply-fight guard). Exit 3." >&2
+                      exit 3
+                    fi
+                  fi
 
                   # 1) Delete the tenant ArgoCD Applications for the cohort (so selfHeal
                   #    can't recreate the namespaces before/while we delete them).
@@ -108,7 +158,8 @@ spec:
                     echo "==> deleting namespace $N"
                     kubectl delete ns "$N" --ignore-not-found --wait=false || true
                   done
-                  echo "==> cohort-cleanup: done (remember the git rm for durability)"
+                  echo "==> cohort-cleanup: residue sweep done. Durability comes from the"
+                  echo "    claim removal (git rm tenants/_claims/...), not this job."
               volumeMounts:
                 - name: tmp
                   mountPath: /tmp

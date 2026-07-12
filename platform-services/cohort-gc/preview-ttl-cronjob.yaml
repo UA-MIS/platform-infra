@@ -58,10 +58,12 @@ spec:
               type: RuntimeDefault
           containers:
             - name: preview-ttl
-              # Pinned kubectl image (bitnami publishes versioned, non-root-friendly
-              # kubectl images). Pin to a digest at go-live (advisory, like the CI
-              # workflow's digest-pins).
-              image: bitnami/kubectl:1.31.5
+              # Official Kubernetes-published kubectl image, digest-pinned. Served from
+              # registry.k8s.io (the canonical k8s registry) — NOT Docker Hub, so it is
+              # immune to Docker Hub anon pull-rate limits and the 2025 Bitnami catalog
+              # move that stopped publishing bitnami/kubectl:<ver> tags. Digest pin makes
+              # IfNotPresent safe (immutable) and matches the CI digest-pin posture.
+              image: registry.k8s.io/kubectl:v1.31.5@sha256:84f79685dae5370bbfbea3aba1c1df66365be899a73627af1d834693083828e8
               imagePullPolicy: IfNotPresent
               securityContext:
                 allowPrivilegeEscalation: false
