@@ -318,6 +318,12 @@ describe('capstone:compose-project', () => {
     // `setWeight: 25` only appears in the actual rendered strategy.canary block (never in
     // prose comments, unlike the word "canary" alone), so it's an unambiguous structural marker.
     expect(rendered).toContain('setWeight: 25');
+    // The canary must AUTO-COMPLETE: timed pauses (`duration: 30s`) that advance on their
+    // own and a terminal `setWeight: 100`, and NO bare indefinite `pause: {}` (which would
+    // park the rollout forever with no argo-rollouts plugin to promote it — the #meow bug).
+    expect(rendered).toContain('duration: 30s');
+    expect(rendered).toContain('setWeight: 100');
+    expect(rendered).not.toContain('pause: {}');
     expect(rendered).not.toContain('kind: Deployment');
     expect(rendered).not.toContain('apiVersion: apps/v1');
   });

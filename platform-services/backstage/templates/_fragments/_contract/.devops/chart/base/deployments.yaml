@@ -46,19 +46,30 @@ spec:
       app.kubernetes.io/name: ${{ values.appName }}
       app.kubernetes.io/component: ${{ c.name }}
 {%- if values.single and values.progressiveDelivery %}
-  # Simple canary (Basic Canary — no traffic-routing plugin/service mesh wired up, so
-  # weight is approximated by the stable/canary ReplicaSet replica-count ratio behind
-  # the ONE Service both share, see services.yaml). Every new image bump steps
-  # 25% -> pause (indefinite) -> 50% -> pause (indefinite) -> 100%; an operator promotes
-  # each pause with `kubectl argo rollouts promote ${{ values.appName }}-${{ c.name }}`
-  # (or lets it auto-promote after a timeout — see docs/operator/progressive-delivery.md).
+  # Basic Canary that AUTO-COMPLETES with NO human and NO kubectl plugin (Basic Canary =
+  # no traffic-routing plugin/service mesh wired up, so weight is approximated by the
+  # stable/canary ReplicaSet replica-count ratio behind the ONE Service both share, see
+  # services.yaml). Every new image bump steps 25% -> (30s) -> 50% -> (30s) -> 100%,
+  # auto-advancing on TIMED pauses (not an indefinite empty pause), then promotes to 100% and
+  # scales the old ReplicaSet to 0 on its own. scaleDownDelaySeconds is intentionally NOT
+  # set (default 30s), so the old revision is cleaned up promptly after promotion — no
+  # ImagePullBackOff pod left held forever. The FIRST-ever deploy on a fresh tenant SKIPS
+  # these steps and goes straight to 100% (Argo Rollouts has no prior stable revision to
+  # canary against yet), so a brand-new app comes up clean without a stuck initial rollout.
+  #
+  # Want a MANUAL hold gate? Replace a timed `pause` below with a bare `pause:` that has no
+  # `duration:` (an empty pause step pauses INDEFINITELY until promoted) and promote it with
+  # `kubectl argo rollouts promote ${{ values.appName }}-${{ c.name }} -n <team>-<env>`
+  # (requires the kubectl-argo-rollouts plugin installed locally). The DEFAULT here stays
+  # fully automatic — see docs/operator/progressive-delivery.md.
   strategy:
     canary:
       steps:
         - setWeight: 25
-        - pause: {}
+        - pause: { duration: 30s }
         - setWeight: 50
-        - pause: {}
+        - pause: { duration: 30s }
+        - setWeight: 100
 {%- endif %}
   template:
     metadata:
