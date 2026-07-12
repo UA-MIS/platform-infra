@@ -2649,6 +2649,37 @@ spec:
               providerConfigRef:
                 name: db-tier-postgres
             ---
+            # Role-membership grant: make the provider admin role `crossplane_provisioner`
+            # a MEMBER of the per-env owner Role, so it can `SET ROLE` to it and thereby run
+            # `CREATE DATABASE ... OWNER <teamDb>_<env>` on the Database below. provider-sql
+            # connects as `crossplane_provisioner` (ProviderConfig db-tier-postgres, secret
+            # db-tier-postgres-admin key `username`), which is NOT a superuser, so without
+            # this membership PG rejects the owned CREATE DATABASE with
+            #   pq: must be able to SET ROLE "<teamDb>_<env>" (42501)
+            # and the Database never creates -> every dependent Grant then cascade-fails with
+            # `database "<...>" does not exist`. (MySQL's CREATE DATABASE has no SET-ROLE
+            # requirement, so this path was never exercised until the first live PG tenant.)
+            # This is the membership form of the CRD (role + memberOf), NOT the db-privilege
+            # form (role + database + privileges) the Grants below use. crossplane_provisioner
+            # created the per-env Role via CREATEROLE, so on PG16+ (this tier is PG17) it holds
+            # ADMIN OPTION on that role and may grant it to itself; the grant's default
+            # `WITH SET TRUE` is exactly what enables `SET ROLE` -> no `withOption` needed
+            # (`withOption: ADMIN` would only permit re-granting the membership onward, which
+            # we don't want). Ordering-safe: Crossplane reconciles each MR independently and
+            # retries, so once BOTH the Role and this membership exist the owned Database
+            # converges regardless of render order (no hard dependency deadlock).
+            apiVersion: postgresql.sql.crossplane.io/v1alpha1
+            kind: Grant
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation (printf "sql-provmember-%s" $e.name) }}
+            spec:
+              forProvider:
+                role: crossplane_provisioner       # the provider admin login role
+                memberOf: {{ $dbName | quote }}    # the per-env owner Role (name == dbName)
+              providerConfigRef:
+                name: db-tier-postgres
+            ---
             # The per-env database, OWNED by the tenant Role (team owns its own DB).
             apiVersion: postgresql.sql.crossplane.io/v1alpha1
             kind: Database
