@@ -100,8 +100,19 @@ spec:
     limits.memory: 6Gi
     pods: "4"                       # virt-launcher + CDI importer + ≤2 helpers
     services: "3"
-    persistentvolumeclaims: "3"
-    requests.storage: 60Gi         # whole-project VM disk (often bundles a DB)
+    # A CDI registry/http disk import transiently creates THREE PVCs at once: the
+    # populator "prime" PVC + a "scratch" PVC + the final rootdisk. 3 is the exact
+    # working minimum; 4 leaves margin for retry churn (a stale prime not yet GC'd
+    # while a new one is created) so a second stall can't happen on PVC count.
+    persistentvolumeclaims: "4"
+    # CDI import PEAK, not the disk size: each of those 3 PVCs is sized to the
+    # image's *virtual* size, not the request — a 20Gi ask on the Fedora-40 base
+    # inflates to ~21.2Gi. Peak ≈ 3 × 21.2Gi ≈ 64Gi, so 60Gi DENIED the scratch PVC
+    # ("exceeded quota: requests.storage" → importer stuck Pending forever). 80Gi
+    # covers the default import + headroom; prime+scratch are freed once the import
+    # finishes, leaving only the rootdisk. A bigger guest disk still needs an
+    # explicit quota bump + a platform capacity review (not a silent default).
+    requests.storage: 80Gi         # whole-project VM disk (often bundles a DB)
     # Hard VM/disk count caps — a baseline-PSA namespace must not become a VM farm.
     count/virtualmachines.kubevirt.io: "1"
     count/datavolumes.cdi.kubevirt.io: "2"
