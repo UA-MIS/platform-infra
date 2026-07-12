@@ -16,6 +16,18 @@ This is the **frontend + backend** layout: two components in one repo, two image
 Deployments, one Ingress routing `/api` → backend and `/` → frontend. The components are
 declared in `.devops/components.yaml`.
 
+## Why is my build "Queued"?
+
+Builds run **2 at a time** to fit the shared cluster, so when several builds land close
+together the extra ones **wait their turn** — GitHub shows them as **Queued** /
+*"Waiting for a runner"*. This is normal: **nothing is broken, and you don't need to do
+anything** — your build starts automatically the moment a build slot frees up.
+
+Once a runner picks up your build, its **run Summary** (and, on a pull request, a pinned
+comment) tells you **how long it waited** and **how many of this repo's builds were ahead
+of it**. (A build that is still queued can't post this yet — it runs no code until a
+runner starts it — so the note appears as soon as yours begins.)
+
 ## Deployment targets
 
 | Environment | URL |
