@@ -66,10 +66,19 @@ echo "==> bumping ${ENV} overlay (${OVERLAY_PATH}) — every images[].newTag -> 
 # Set newTag on EVERY images[] entry (all components share the tag). yq-preferred;
 # sed fallback rewrites each `newTag:` line (the overlay's only newTag lines are under
 # images[], and image tags are [A-Za-z0-9._-] with no '|', so the sed is safe).
+#
+# The written value is ALWAYS a QUOTED YAML string. kustomize requires images[].newTag to
+# be a string; an all-numeric short git-sha (e.g. `0640920` — a sha with no a-f digit)
+# written bare is parsed by YAML as an INTEGER, and `kustomize build` then aborts the whole
+# overlay ("cannot unmarshal number into Go struct field Image.images.newTag of type
+# string") -> ArgoCD ComparisonError, the app never deploys (bug: meow-dev, #341). The yq
+# path handles this via strenv (it quotes when the value looks numeric); the sed fallback
+# must quote explicitly. `.*` consumes any prior value INCLUDING its quotes, so re-quoting
+# is idempotent across repeated CI bumps (no `""tag""` doubling).
 if command -v yq >/dev/null 2>&1; then
   NEW_TAG="${NEW_TAG}" yq -i '(.images[].newTag) = strenv(NEW_TAG)' "${KUSTOMIZATION}"
 else
-  sed -i "s|^\([[:space:]]*newTag:[[:space:]]*\).*\$|\1${NEW_TAG}|" "${KUSTOMIZATION}"
+  sed -i "s|^\([[:space:]]*newTag:[[:space:]]*\).*\$|\1\"${NEW_TAG}\"|" "${KUSTOMIZATION}"
 fi
 
 echo "==> overlay now pins:"
