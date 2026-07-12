@@ -2335,7 +2335,17 @@ spec:
                     target:
                       name: db-console
                       creationPolicy: Owner
-                      deletionPolicy: Delete
+                      # Retain (the ESO default), NOT Delete -- same rationale as the
+                      # Postgres db-console ES below: on a fresh tenant the console Vault
+                      # leaf (tenants/<team>/console/database) and/or the vault-tenant
+                      # SecretStore are briefly absent/not-ready at first reconcile, and
+                      # Delete treats that transient-missing leaf as "provider secret gone"
+                      # -> silently DELETES the target and reports SecretDeleted (a success
+                      # state), so it will not retry until refreshInterval (1h), leaving the
+                      # db-console Deployment stuck in CreateContainerConfigError. Retain
+                      # makes it a SecretSyncedError that requeues on backoff / on the
+                      # SecretStore going Ready, so the secret materializes within minutes.
+                      deletionPolicy: Retain
                       template:
                         engineVersion: v2
                         data:
