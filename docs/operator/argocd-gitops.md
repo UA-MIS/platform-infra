@@ -213,6 +213,33 @@ HMAC secret is the key `webhook.github.secret` inside the install-managed
 is added and ArgoCD's own `tls.crt` / `server.secretkey` / `admin.password` in
 `argocd-secret` are left untouched.
 
+> **Scope — one org webhook, every repo.** We use a **single org-level webhook on
+> `UA-MIS`** pointed at this endpoint, so **every** repo (platform-infra + all
+> tenant repos + any future repo) fires an instant sync on push with **zero
+> per-repo setup**. Tenant repos otherwise sit on the ~3-min poll. This supersedes
+> the old per-repo `platform-infra` webhook (see cleanup in Step 3).
+>
+> **Signing is all-or-nothing at this endpoint.** ArgoCD requires a valid HMAC on
+> **every** delivery to `/api/webhook` *only once* `webhook.github.secret` is set.
+> Until then it accepts unsigned deliveries; after then, any hook whose secret
+> doesn't match gets `401`. So the secret and the org hook must carry the **same**
+> value, and you must seal the secret **before** creating (or re-pointing) the
+> hook — see the ordering warning in Step 2.
+
+> **⚠ FIX (this PR) — the CR name is load-bearing.** The original
+> `sealedsecret-webhook.yaml` named the SealedSecret CR `argocd-webhook-github` and
+> relied on `spec.template.metadata.name: argocd-secret` to retarget the patch.
+> That does **not** work: SealedSecrets binds the output Secret's name to the **CR
+> `metadata.name`**, so the controller happily unsealed into a *standalone* Secret
+> called `argocd-webhook-github` and **never touched `argocd-secret`**. ArgoCD only
+> reads `webhook.github.secret` from `argocd-secret`, so the platform-infra webhook
+> was silently **unsigned/inert** (verified live: `argocd-secret` had only
+> `admin.password` / `admin.passwordMtime` / `server.secretkey`). The CR is now
+> named **`argocd-secret`** so the `patch: "true"` merge lands on the real secret.
+> The stale `argocd-webhook-github` Secret is pruned automatically (the config app
+> is `automated: {prune,selfHeal}`; the old SealedSecret's ownerReference
+> cascade-deletes it).
+
 **Reachability (verified read-only, 2026-07-02):** the endpoint is publicly
 POST-able through the Cloudflare Tunnel and is **not** gated by edge auth. The
 tunnel is a single wildcard route `*.capstone.uamishub.com → Traefik:80`, the
@@ -238,10 +265,11 @@ written, ArgoCD just keeps polling).
 set WEBHOOK_SECRET (openssl rand -hex 24)
 echo "GitHub webhook secret (save this): $WEBHOOK_SECRET"
 
-# 2. Seal it. The input secret name MUST equal the SealedSecret CR name
-#    (argocd-webhook-github) for the default strict scope; the TARGET (argocd-secret)
-#    lives in the file's template and is unaffected by this name.
-kubectl create secret generic argocd-webhook-github \
+# 2. Seal it. Strict scope binds the ciphertext to name+namespace, so the input
+#    secret name MUST be `argocd-secret` (the SealedSecret CR name = the patched
+#    target). Sealing under any other name (e.g. the old `argocd-webhook-github`)
+#    will fail to decrypt after the rename fix.
+kubectl create secret generic argocd-secret \
     --namespace argocd \
     --from-literal=webhook.github.secret=$WEBHOOK_SECRET \
     --dry-run=client -o yaml \
@@ -261,29 +289,94 @@ one value; leave the `sealedsecrets.bitnami.com/patch: "true"` annotation and th
 > reformats the YAML, stripping the header comments that explain why `patch` is
 > load-bearing. Replace the single value by hand instead.
 
-### Step 2 — add the webhook in GitHub
+### Step 2 — create the ORG-level webhook (needs org admin)
 
-On `github.com/UA-MIS/platform-infra` → **Settings → Webhooks → Add webhook**:
+> **⚠ ORDER MATTERS — do this AFTER the reseal PR has merged AND synced (verify in
+> Step 3 that `argocd-secret` now has `webhook.github.secret`).** The moment that
+> key exists, ArgoCD rejects any delivery to `/api/webhook` whose HMAC doesn't
+> match it (`401`). So:
+> 1. Seal + merge + sync the secret **first** (Steps 1 & 3-verify).
+> 2. **Then** create the org hook with `config.secret` = the **same**
+>    `$WEBHOOK_SECRET`.
+> If you create the hook first (or with a different value), every push 401s and the
+> instant sync silently stops working. **The same trap breaks the OLD per-repo
+> `platform-infra` hook**: it was created unsigned, so once the secret lands it
+> will start 401-ing until you delete it (Step 3 cleanup) or re-point it with the
+> secret. Retire it — the org hook already covers platform-infra.
+
+One org webhook covers every current and future UA-MIS repo. Create it with the
+`gh` CLI (as an org owner), or via the UI (**org → Settings → Webhooks → Add
+webhook**) with the same field values:
+
+```bash
+gh api -X POST /orgs/UA-MIS/hooks \
+  -f name=web \
+  -F active=true \
+  -f 'events[]=push' \
+  -f config.url=https://argocd.capstone.uamishub.com/api/webhook \
+  -f config.content_type=json \
+  -f config.insecure_ssl=0 \
+  -f config.secret="$WEBHOOK_SECRET"
+```
 
 | Field | Value |
 |---|---|
 | Payload URL | `https://argocd.capstone.uamishub.com/api/webhook` |
-| Content type | `application/json` |
+| Content type | `application/json` (`config.content_type=json`) |
 | Secret | the `$WEBHOOK_SECRET` value from Step 1 |
-| SSL verification | **Enabled** (Cloudflare Universal SSL is publicly trusted) |
-| Events | **Just the `push` event** |
+| SSL verification | **Enabled** (`insecure_ssl=0`; Cloudflare Universal SSL is publicly trusted) |
+| Events | **Just `push`** |
 | Active | ✔ |
 
-### Step 3 — verify (after the reseal PR merges and syncs)
+> **Can the `ua-mis-backstage` GitHub App create it instead?** Only with the
+> **`organization_hooks: write`** permission, which is **not currently granted** to
+> the App (it holds contents/metadata/administration/variables for tenant repos,
+> not org-hook admin). Granting it is possible but broad; the one-time manual
+> `gh api`/UI step above is simpler and safer. Leave org-hook creation as an
+> operator ceremony, not an App capability.
+>
+> **Check for an existing org hook first** so you don't create a duplicate:
+> `gh api /orgs/UA-MIS/hooks --jq '.[] | {id, url: .config.url, events}'`. If one
+> already points at `/api/webhook`, **update** it instead:
+> `gh api -X PATCH /orgs/UA-MIS/hooks/<id> -f config.secret="$WEBHOOK_SECRET" -f config.url=... -f config.content_type=json`.
+
+### Step 3 — verify + clean up (after the reseal PR merges and syncs)
 
 ```fish
-# The key landed in argocd-secret WITHOUT wiping the install-owned keys:
+# a) The key landed in argocd-secret WITHOUT wiping the install-owned keys:
 kubectl -n argocd get secret argocd-secret \
   -o jsonpath='{.data.webhook\.github\.secret}{"\n"}{.data.server\.secretkey}{"\n"}{.data.tls\.crt}{"\n"}' \
   | string collect   # all three must be non-empty
+
+# b) The stale standalone secret from the old (broken) CR name is gone
+#    (auto-pruned via ownerReference when the renamed SealedSecret replaced it):
+kubectl -n argocd get secret argocd-webhook-github   # expect: NotFound
 ```
 
-Then push a trivial commit and confirm the GitHub webhook's **Recent Deliveries**
-shows a `200`, and the target Application refreshes in ArgoCD within seconds (no
-manual Refresh). A `403`/`401` delivery means the `webhook.github.secret` in the
-cluster ≠ the secret typed into GitHub — reseal and re-enter the same value.
+If `argocd-webhook-github` still lingers (e.g. prune was disabled at the time),
+delete it once by hand — it is inert and owned by nothing after the rename:
+`kubectl -n argocd delete secret argocd-webhook-github`.
+
+Then push a trivial commit to **any** UA-MIS repo and confirm the org webhook's
+**Recent Deliveries** (org → Settings → Webhooks) shows a `200`, and the affected
+Application refreshes in ArgoCD within seconds (no manual Refresh). A `401`/`403`
+delivery means the cluster's `webhook.github.secret` ≠ the org hook's
+`config.secret` — reseal and re-enter the **same** value.
+
+**Retire the redundant per-repo hook.** Once the org hook is live, the old
+`UA-MIS/platform-infra` repo webhook is redundant (and, being unsigned, will 401).
+Remove it: `gh api /repos/UA-MIS/platform-infra/hooks --jq '.[].id'` then
+`gh api -X DELETE /repos/UA-MIS/platform-infra/hooks/<id>`. Harmless to leave *if*
+you first re-point it with the same secret, but deleting keeps a single signed
+source of truth.
+
+### Self-service durability (design note)
+
+The org-level hook is the **recommended, future-proof** design: one hook, every
+repo, no per-tenant setup, nothing for the scaffolder to maintain, no drift. The
+alternative — having the tenant scaffolder add a **per-repo** webhook at onboarding
+(belt-and-suspenders) — is **not implemented and not recommended**: it needs the
+GitHub App's `organization_hooks`/repo-hook admin scope, duplicates coverage the
+org hook already gives, and creates per-repo drift to reconcile. Keep the org hook
+as the single mechanism; only revisit per-repo hooks if org-hook access is ever
+lost.
