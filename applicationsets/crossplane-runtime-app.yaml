@@ -53,17 +53,15 @@ spec:
       # apis/ (XRD+Composition) is its own app (needs provider+function CRDs first);
       # docs are not manifests.
       #
-      # GATED until postgres db1 setup — reseal db-tier-postgres-admin with real creds
-      # (see docs/operator/db-tier-provisioner-setup.md postgres variant) then remove the
-      # two config/providerconfig-postgres.yaml + creds/postgres-admin-creds-sealed.yaml
-      # entries below to re-enable. The postgres placeholder SealedSecret carries
-      # illegal-base64 ciphertext the sealed-secrets controller can't decode → its
-      # SealedSecret goes Degraded → this whole app is Degraded. Excluding the placeholder
-      # cred (and its dependent ProviderConfig, which would sit unauthenticated without it)
-      # keeps the files on disk but out of the sync until real db1 postgres creds exist.
-      # The XRD `postgres` enum + composition postgres block stay (additive + inert
-      # without this ProviderConfig).
-      exclude: '{apis/**,README.md,creds/README.md,config/providerconfig-postgres.yaml,creds/postgres-admin-creds-sealed.yaml}'
+      # POSTGRES CUTOVER (ADR-036, #350/#356): db-tier-postgres-admin was resealed with
+      # real creds onto the dedicated CNPG cluster (capstone-tenant-pg-rw.db-tier), so the
+      # earlier gate — a placeholder SealedSecret carrying illegal-base64 ciphertext that
+      # left the app Degraded — no longer applies. The two postgres entries
+      # (config/providerconfig-postgres.yaml + creds/postgres-admin-creds-sealed.yaml) are
+      # therefore re-enabled here (removed from the exclude glob) so ArgoCD tracks and
+      # applies them. The companion db-tier ingress rule (crossplane-system -> CNPG:5432)
+      # is added in platform-services/db-tier/netpol.yaml alongside this change.
+      exclude: '{apis/**,README.md,creds/README.md}'
   destination:
     server: https://kubernetes.default.svc
     namespace: crossplane-system
