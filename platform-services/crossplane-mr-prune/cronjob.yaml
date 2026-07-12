@@ -1,0 +1,86 @@
+# ============================================================================
+# Weekly stale-Crossplane-MR prune CronJob.
+#
+# ⚠ SHIPS SAFE: env DRY_RUN="1" — it LOGS every orphan it WOULD delete and
+#   deletes NOTHING. Merging this changes no live state. To enforce, a human
+#   reviews a dry-run's logs, then flips DRY_RUN to "0" in git (see README).
+#
+# The `schedule` field is the knob (default weekly, Sunday 04:00 UTC — off-peak,
+# and rebalancing stale MRs is not urgent; churn is the real risk, so run rarely).
+# concurrencyPolicy: Forbid — never two prune passes at once. backoffLimit: 1 —
+# one retry only (a partial delete re-converges on the next run, no delete storms).
+# ============================================================================
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: crossplane-mr-prune
+  namespace: crossplane-system
+  labels:
+    platform.capstone/component: platform
+spec:
+  schedule: "0 4 * * 0"            # weekly, Sunday 04:00 UTC — the knob (edit in git)
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 600
+      ttlSecondsAfterFinished: 86400   # keep a finished job (its logs) for a day
+      template:
+        metadata:
+          labels:
+            platform.capstone/component: platform
+            app.kubernetes.io/name: crossplane-mr-prune
+        spec:
+          serviceAccountName: crossplane-mr-prune
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            fsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: prune
+              # kubectl + bash + jq, pinned to the cluster's server minor (v1.31.x).
+              image: alpine/k8s:1.31.5
+              command: ["/bin/bash", "/scripts/prune.sh"]
+              env:
+                # ── THE ENFORCE SWITCH ──────────────────────────────────────
+                # "1" (default) = report only, delete nothing (safe to merge).
+                # "0"          = actually delete orphaned MRs. Flip ONLY after
+                #                reviewing a dry-run's logs (see README).
+                - name: DRY_RUN
+                  value: "1"
+                # An orphaned MR already stuck DELETING longer than this is
+                # reported distinctly (provider finalizer blocked). Reporting
+                # only — the script never force-removes finalizers.
+                - name: STUCK_THRESHOLD_HOURS
+                  value: "24"
+                - name: HOME
+                  value: /tmp        # kubectl cache dir on the writable tmp volume
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests: { cpu: "50m", memory: "64Mi" }
+                limits:   { cpu: "500m", memory: "256Mi" }
+              volumeMounts:
+                - name: script
+                  mountPath: /scripts
+                  readOnly: true
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: script
+              configMap:
+                name: crossplane-mr-prune-script
+                defaultMode: 0555
+            - name: tmp
+              emptyDir: {}

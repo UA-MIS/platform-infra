@@ -1,0 +1,46 @@
+# Crossplane stale-MR prune Application. A directory-source app over
+# platform-services/crossplane-mr-prune/ — a scoped ServiceAccount + curated
+# ClusterRole + the prune script (ConfigMap) + a weekly CronJob.
+#
+# WHY a separate app (not folded into crossplane-runtime): this is HOUSEKEEPING that
+# DELETES managed resources — it deserves its own review surface and its own
+# lifecycle, separate from the provider install. It reads CapstoneTenants and the
+# composed MRs and deletes only those whose owning CapstoneTenant no longer exists.
+#
+# ⚠ SHIPS SAFE — the CronJob env DRY_RUN="1": it LOGS what it would prune and deletes
+#   NOTHING until a human flips DRY_RUN to "0" in git (platform-services/
+#   crossplane-mr-prune/README.md → "Review the dry-run, then enforce"). Merging this
+#   app changes no live tenant state.
+#
+# Root-app recurses applicationsets/, so this Application is registered on merge.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-crossplane-mr-prune
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/UA-MIS/platform-infra
+    targetRevision: HEAD
+    path: platform-services/crossplane-mr-prune
+    directory:
+      recurse: true
+      exclude: '{README.md}'
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: crossplane-system    # co-located with Crossplane; created by platform-crossplane-core
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

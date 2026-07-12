@@ -1,0 +1,76 @@
+# ============================================================================
+# The prune bound — a HAND-CURATED ClusterRole. NEVER cluster-admin, NEVER `*`.
+# ============================================================================
+# This is the entire authority of the prune CronJob. It can:
+#   * get/list CapstoneTenant XRs           — to build the "live tenant" set
+#   * get/list/delete the EXACT composed-MR kinds the CapstoneTenant Composition
+#     renders (apis/composition.yaml)        — to find and remove orphans
+# It deliberately holds NO create / update / patch verb anywhere — so it can only
+# READ and DELETE, never mint or mutate a resource, and it CANNOT force-remove a
+# finalizer (that needs patch/update on the MR) — deletions therefore always go
+# through the provider's normal external-cleanup path.
+#
+# Cluster-scoped (ClusterRole) because every listed kind is a cluster-scoped MR and
+# CapstoneTenants are cluster-scoped. The resource list is the minimal set that maps
+# 1:1 to the Composition's composed resources — nothing broader (no `managed`
+# category wildcard, which would grant delete over hundreds of unrelated
+# vault.upbound.io / sql.crossplane.io CRDs the Composition never creates).
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: crossplane-mr-prune
+  labels:
+    platform.capstone/component: platform
+rules:
+  # Read the onboarding ledger (the live-tenant set the orphan test compares against).
+  - apiGroups: ["platform.capstone.uamishub.com"]
+    resources: ["capstonetenants"]
+    verbs: ["get", "list"]
+  # Confirm the CapstoneTenant CRD exists (abort guard — never prune if we cannot
+  # positively determine the live-tenant set).
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list"]
+  # provider-kubernetes Objects (the k8s tenancy fence: AppProject, namespaces,
+  # quotas, netpol, RBAC, ESO stores, PushSecrets, ARC stack).
+  - apiGroups: ["kubernetes.crossplane.io"]
+    resources: ["objects"]
+    verbs: ["get", "list", "delete"]
+  # provider-harbor: per-team project + push/pull robots.
+  - apiGroups: ["project.harbor.crossplane.io"]
+    resources: ["projects"]
+    verbs: ["get", "list", "delete"]
+  - apiGroups: ["robotaccount.harbor.crossplane.io"]
+    resources: ["robotaccounts"]
+    verbs: ["get", "list", "delete"]
+  # provider-vault: per-tenant ACL policy + k8s-auth role.
+  - apiGroups: ["vault.vault.upbound.io"]
+    resources: ["policies"]
+    verbs: ["get", "list", "delete"]
+  - apiGroups: ["kubernetes.vault.upbound.io"]
+    resources: ["authbackendroles"]
+    verbs: ["get", "list", "delete"]
+  # provider-sql: per-(team,env) MySQL Database/User/Grant.
+  - apiGroups: ["mysql.sql.crossplane.io"]
+    resources: ["databases", "users", "grants"]
+    verbs: ["get", "list", "delete"]
+  # provider-sql: per-(team,env) Postgres Role/Database/Grant.
+  - apiGroups: ["postgresql.sql.crossplane.io"]
+    resources: ["roles", "databases", "grants"]
+    verbs: ["get", "list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: crossplane-mr-prune
+  labels:
+    platform.capstone/component: platform
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: crossplane-mr-prune
+subjects:
+  - kind: ServiceAccount
+    name: crossplane-mr-prune
+    namespace: crossplane-system
