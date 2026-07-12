@@ -1,0 +1,106 @@
+# CloudNativePG `Cluster` — the DEDICATED TENANT Postgres 17 tier (ADR-036).
+#
+# WHY A SECOND CLUSTER (not `capstone-pg`): `capstone-pg` (platform-services/cnpg/
+# cluster/cluster.yaml) hosts the PLATFORM CONTROL-PLANE databases — Backstage's
+# catalog + Harbor's metadata. Auto-provisioned STUDENT tenant databases
+# (ADR-033 `database: postgres`) are untrusted, churny, and can storm connections
+# / fill disk. Co-locating them on `capstone-pg` puts a runaway tenant one bad
+# query away from degrading the onboarding portal's own DB. ADR-036 isolates the
+# blast radius: tenant Postgres lives HERE, on its own cluster, with its own
+# storage, backups, provisioner credential, and failover domain. `capstone-pg`
+# stays control-plane-only.
+#
+# This cluster is the target of provider-sql's `db-tier-postgres` ProviderConfig
+# (config/providerconfig-postgres.yaml, repointed to capstone-tenant-pg-rw at the
+# ADR-036 supervised cutover). provider-sql (the crossplane_provisioner role in
+# tenant-cluster/roles.yaml) does CREATE DATABASE/ROLE per (team,env); the app's
+# DATABASE_URL then resolves to capstone-tenant-pg-rw.db-tier.svc automatically
+# (the host flows from the admin secret's endpoint → the tenant's Vault `host` →
+# the DATABASE_URL ExternalSecret + the Adminer console — no consumer edit).
+#
+# HA/storage/backup posture is a deliberate MIRROR of `capstone-pg` (parity with
+# the platform's replica-3 durability stance) — see that file for the full
+# rationale on each block; deltas are called out inline below.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: capstone-tenant-pg
+  namespace: db-tier
+  labels:
+    platform.capstone/component: platform
+spec:
+  # 3 instances (1 primary + 2 streaming replicas, operator-managed automatic
+  # failover) — same HA posture as capstone-pg. ⚠ FLEET-CAPACITY KNOB (ADR-036
+  # §Consequences): this doubles the CNPG pod footprint on the 3 HA-eligible
+  # Mac-Mini workers (3 more PG pods alongside capstone-pg's 3). Each requests
+  # only 100m/256Mi so it is affordable, but if capacity is tight during the demo
+  # phase this MAY be dropped to 1 (no HA) with no other change — the value here
+  # is the isolation, not the replica count. Default 3 for durability parity.
+  instances: 3
+  imageName: ghcr.io/cloudnative-pg/postgresql:17.9-202605110912-standard-trixie
+
+  storage:
+    storageClass: ceph-block
+    # 20Gi (vs capstone-pg's 10Gi): this cluster hosts MANY small tenant databases
+    # (dev/staging/prod × every team that picks `host-postgres`), not two fixed
+    # app DBs. Still small — application metadata, not blobs. Bump deliberately.
+    size: 20Gi
+
+  affinity:
+    enablePodAntiAffinity: true
+    topologyKey: kubernetes.io/hostname   # one instance per node (3 nodes, 3 instances)
+    podAntiAffinityType: required
+    # Soft-prefer nodes NOT already running a capstone-pg instance or a Vault
+    # server — best-effort spread (additive to the required self-anti-affinity
+    # above; the CNPG API documents additionalPodAntiAffinity as ADDITIVE, not a
+    # replacement). With only 3 HA-eligible workers the tenant instances still
+    # co-locate 1-per-node with capstone-pg by construction — a 4th HA worker is
+    # the real fix (tracked in artifacts/design/scheduling-hardening-runbook.md).
+    additionalPodAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 90
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                cnpg.io/cluster: capstone-pg
+            topologyKey: kubernetes.io/hostname
+        - weight: 70
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: vault
+                component: server
+            topologyKey: kubernetes.io/hostname
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+    # No CPU limit — avoid CPU-throttling a DB under load (same reasoning as
+    # capstone-pg / the Ceph OSDs); the memory limit is the RAM-governance
+    # guardrail on this fleet.
+
+  # initdb bootstrap DB `app`/`app` is UNUSED — every real database is created
+  # dynamically by provider-sql per tenant (postgresql.sql.crossplane.io Database),
+  # NOT declared here. So NO declarative Database/DatabaseRole CRs ship for this
+  # cluster (that is the whole point — tenant DBs are dynamic, capstone-pg's are
+  # fixed). The operator auto-generates + owns `capstone-tenant-pg-app` (harmless).
+  bootstrap:
+    initdb:
+      database: app
+      owner: app
+
+  plugins:
+    - name: barman-cloud.cloudnative-pg.io
+      isWALArchiver: true
+      parameters:
+        barmanObjectName: capstone-tenant-pg-backup-store   # objectstore.yaml
+
+  # Per-tenant login roles are created dynamically by provider-sql; the only
+  # DECLARATIVE role is the provisioner (roles.yaml), decoupled from this object.
+  # No enableSuperuserAccess.
+
+  monitoring:
+    enablePodMonitor: true

@@ -1,0 +1,35 @@
+# Barman Cloud `ObjectStore` — the S3-compatible backup target for
+# `capstone-tenant-pg` (ADR-036). Same in-cluster MinIO (ns db-tier) and same
+# scoped `cnpg-backup` MinIO user (`minio-cnpg-backup-credentials`,
+# platform-services/db-tier/externalsecrets.yaml) as capstone-pg — but a DISTINCT
+# `destinationPath` PREFIX (`s3://postgres-backups/tenant/`) inside the shared
+# `postgres-backups` bucket, so tenant WAL/base backups never intermingle with the
+# control-plane cluster's under `s3://postgres-backups/` root. Reusing the same
+# bucket+user (a prefix, not a new bucket) avoids minting a second MinIO user;
+# the existing user's policy already covers the whole `postgres-backups` bucket.
+#
+# Plain HTTP (MinIO is ClusterIP-only, never Ingress-exposed) + gzip WAL/data
+# compression + 30-day retention — identical posture to capstone-pg's ObjectStore.
+apiVersion: barmancloud.cnpg.io/v1
+kind: ObjectStore
+metadata:
+  name: capstone-tenant-pg-backup-store
+  namespace: db-tier
+  labels:
+    platform.capstone/component: platform
+spec:
+  retentionPolicy: "30d"
+  configuration:
+    destinationPath: s3://postgres-backups/tenant/
+    endpointURL: http://minio-backups.db-tier.svc.cluster.local:9000
+    s3Credentials:
+      accessKeyId:
+        name: minio-cnpg-backup-credentials
+        key: ACCESS_KEY_ID
+      secretAccessKey:
+        name: minio-cnpg-backup-credentials
+        key: ACCESS_SECRET_KEY
+    wal:
+      compression: gzip
+    data:
+      compression: gzip

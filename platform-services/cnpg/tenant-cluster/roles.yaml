@@ -1,0 +1,42 @@
+# The ONE declarative role on `capstone-tenant-pg` (ADR-036): the Crossplane
+# provisioner login that provider-sql's `db-tier-postgres` ProviderConfig
+# authenticates as. Mirrors `capstone-pg-crossplane-provisioner`
+# (platform-services/cnpg/cluster/roles.yaml) EXACTLY — LOGIN CREATEDB CREATEROLE,
+# NOT SUPERUSER (no SUPERUSER/REPLICATION/BYPASSRLS) — but is a SEPARATE identity
+# on a SEPARATE cluster with a SEPARATE password (ADR-036 isolation goal): a
+# leaked tenant-cluster provisioner credential MUST NOT authenticate to
+# `capstone-pg` (the control-plane DB). Hence a distinct passwordSecret sourced
+# from a distinct Vault leaf — see platform-services/db-tier/externalsecrets.yaml
+# (`cnpg-tenant-crossplane-provisioner-credentials`, Vault
+# `platform/db/cnpg-tenant/crossplane-provisioner`).
+#
+# The SAME password must also be sealed into `db-tier-postgres-admin`
+# (crossplane-system) with endpoint=capstone-tenant-pg-rw at the supervised
+# cutover — that is the reseal step in ADR-036 §Cutover and the note in
+# platform-services/crossplane/creds/postgres-admin-creds-sealed.yaml.
+#
+# No per-tenant login roles are declared here — provider-sql creates those
+# dynamically (postgresql.sql.crossplane.io Role). CREATEROLE makes the
+# provisioner a member of the roles it creates, so it can assign each per-tenant
+# database's ownership to that tenant's own role (ADR-033 owner model).
+#
+# `databaseRoleReclaimPolicy: retain` — never let removing this CR DROP a live
+# role as a side effect; deletion is a deliberate operator action, not ArgoCD prune.
+apiVersion: postgresql.cnpg.io/v1
+kind: DatabaseRole
+metadata:
+  name: capstone-tenant-pg-crossplane-provisioner
+  namespace: db-tier
+  labels:
+    platform.capstone/component: platform
+spec:
+  cluster:
+    name: capstone-tenant-pg
+  name: crossplane_provisioner
+  login: true
+  superuser: false
+  createdb: true
+  createrole: true
+  databaseRoleReclaimPolicy: retain
+  passwordSecret:
+    name: cnpg-tenant-crossplane-provisioner-credentials   # db-tier/externalsecrets.yaml

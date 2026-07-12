@@ -1,0 +1,49 @@
+# DEDICATED TENANT CloudNativePG CLUSTER Application (ADR-036). The
+# `capstone-tenant-pg` Cluster CR (PG17, 3-instance HA) + its
+# `ObjectStore`/`ScheduledBackup` (backups to the in-cluster MinIO, `tenant/`
+# prefix) + the `crossplane_provisioner` DatabaseRole — see
+# platform-services/cnpg/tenant-cluster/ for the manifests and ADR-036 for why
+# this is a SEPARATE cluster from capstone-pg (blast-radius isolation of untrusted
+# student tenant databases away from Backstage/Harbor's control-plane DBs).
+#
+# Git-source Application, sync-wave 1 -> lands AFTER platform-cnpg-operator +
+# platform-cnpg-barman-plugin (both wave 0), so the `postgresql.cnpg.io` and
+# `barmancloud.cnpg.io` CRDs exist before these objects are applied. Exact sibling
+# of applicationsets/cnpg-cluster-app.yaml (capstone-pg).
+#
+# ⚠ HELD FOR SUPERVISED APPLY (ADR-036): this stands up a second 3-instance CNPG
+# cluster on the DB tier + repoints provider-sql's Postgres ProviderConfig. Bring
+# it up with the operator watching (fleet-capacity + provisioner-cred reseal), NOT
+# unattended. Until Vault `platform/db/cnpg-tenant/crossplane-provisioner` is
+# written, the provisioner-role passwordSecret sits SecretSyncError (safe failure
+# mode) and the role stays unmaterialized — the cluster itself still comes up.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-cnpg-tenant-cluster
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"   # Cluster CR after the operator+plugin (wave 0)
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/UA-MIS/platform-infra
+    targetRevision: HEAD
+    path: platform-services/cnpg/tenant-cluster
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: db-tier
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false      # db-tier ns ships via platform-services/db-tier
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }
