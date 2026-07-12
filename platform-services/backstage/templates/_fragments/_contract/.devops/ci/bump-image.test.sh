@@ -51,7 +51,10 @@ for b in bash sh sed cut head dirname awk printf cat env grep git; do
   src="$(command -v "$b" 2>/dev/null)" && [ -n "$src" ] && ln -sf "$src" "${NOYQ_DIR}/$b"
 done
 
-count_tag() { local n; n="$(grep -c "newTag: $1" "$2" 2>/dev/null)" || n=0; printf '%s' "${n}"; }
+# Quote-tolerant: the bump writes newTag as a YAML STRING, which is unquoted for a
+# non-numeric tag (yq strenv) but MUST be quoted for an all-numeric git-sha (both the yq
+# strenv path and the sed fallback), else kustomize parses it as a number and rejects it.
+count_tag() { local n; n="$(grep -Ec "newTag: \"?$1\"?" "$2" 2>/dev/null)" || n=0; printf '%s' "${n}"; }
 assert_eq() { if [ "$2" = "$3" ]; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); echo "FAIL [$1]: got '$2' want '$3'"; fi; }
 
 echo "== bump-image.sh (multi-component) tests =="
@@ -72,6 +75,27 @@ else
   assert_eq "sed rc"        "${RC}" "0"
   assert_eq "sed new count" "$(count_tag '7.7.7' "${K2}")" "2"
   assert_eq "sed old count" "$(count_tag 'v0.0.0' "${K2}")" "0"
+fi
+
+# 4) all-numeric git-sha tag (e.g. 0640920 — a short sha with no a-f digit) MUST render
+#    as a QUOTED YAML string. Unquoted, YAML parses it as an integer and kustomize aborts
+#    the whole build ("cannot unmarshal number into ... Image.images.newTag of type
+#    string") -> ArgoCD ComparisonError, app never deploys (bug: meow-dev, #341). Both the
+#    yq (strenv) and the sed fallback must quote it. Progressive-delivery/Rollout tenants
+#    are NOT special here — any tenant whose sha is all digits hits this; meow was both.
+R4="$(make_repo)"; K4="${R4}/.devops/chart/overlays/dev/kustomization.yaml"
+bash "${R4}/.devops/ci/bump-image.sh" dev "0640920" >/tmp/bump.log 2>&1
+assert_eq "numeric yq quoted"  "$(grep -c 'newTag: "0640920"' "${K4}")" "2"
+if PATH="${NOYQ_DIR}" command -v yq >/dev/null 2>&1; then
+  echo "NOTE: yq present on restricted PATH — sed fallback not isolated; skipping numeric-sed"
+else
+  R5="$(make_repo)"; K5="${R5}/.devops/chart/overlays/dev/kustomization.yaml"
+  PATH="${NOYQ_DIR}" bash "${R5}/.devops/ci/bump-image.sh" dev "0640920" >/tmp/bump.log 2>&1
+  assert_eq "numeric sed quoted" "$(grep -c 'newTag: "0640920"' "${K5}")" "2"
+  # Idempotency: a second bump (file already has "0640920") must not double the quotes.
+  PATH="${NOYQ_DIR}" bash "${R5}/.devops/ci/bump-image.sh" dev "0640920" >/tmp/bump.log 2>&1
+  assert_eq "numeric sed idempotent" "$(grep -c 'newTag: "0640920"' "${K5}")" "2"
+  assert_eq "numeric sed no double-quote" "$(grep -c 'newTag: ""' "${K5}")" "0"
 fi
 
 # 3) COMMIT=1 makes a [skip ci] commit (the GitOps signal that won't re-trigger CI).
