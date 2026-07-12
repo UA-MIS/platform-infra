@@ -1,9 +1,9 @@
 # ============================================================================
 # Weekly stale-Crossplane-MR prune CronJob.
 #
-# ⚠ SHIPS SAFE: env DRY_RUN="1" — it LOGS every orphan it WOULD delete and
-#   deletes NOTHING. Merging this changes no live state. To enforce, a human
-#   reviews a dry-run's logs, then flips DRY_RUN to "0" in git (see README).
+# ⚠ ENFORCING: env DRY_RUN="0" — it DELETES orphaned Crossplane MRs it finds.
+#   A human reviewed the dry-run's logs and flipped DRY_RUN "1"->"0" in git
+#   (see README). To return to report-only, flip it back to "1".
 #
 # The `schedule` field is the knob (default weekly, Sunday 04:00 UTC — off-peak,
 # and rebalancing stale MRs is not urgent; churn is the real risk, so run rarely).
@@ -51,11 +51,11 @@ spec:
               command: ["/bin/bash", "/scripts/prune.sh"]
               env:
                 # ── THE ENFORCE SWITCH ──────────────────────────────────────
-                # "1" (default) = report only, delete nothing (safe to merge).
-                # "0"          = actually delete orphaned MRs. Flip ONLY after
-                #                reviewing a dry-run's logs (see README).
+                # "1" = report only, delete nothing (safe to merge).
+                # "0" (current) = actually delete orphaned MRs. Enforcing after
+                #                 a human reviewed a dry-run's logs (see README).
                 - name: DRY_RUN
-                  value: "1"
+                  value: "0"
                 # An orphaned MR already stuck DELETING longer than this is
                 # reported distinctly (provider finalizer blocked). Reporting
                 # only — the script never force-removes finalizers.
