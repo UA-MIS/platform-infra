@@ -304,6 +304,14 @@ spec:
             # integration) MUST live HERE, not only in the baked file. Mirror the baked
             # blocks exactly.
             catalog:
+              # MIRROR of app-config.production.yaml's catalog.orphanStrategy (the pod loads
+              # ONLY this Helm appConfig overlay). Auto-prune ORPHANED entities — a
+              # Component/Location whose emitting provider stopped yielding it. Second half of
+              # the teardown "ghost tenant" fix: teardown strips the `capstone-tenant` topic so
+              # the github.tenants provider drops the repo (and archived repos are already
+              # excluded), orphaning the tenant's Component; default `keep` would leave it in the
+              # catalog forever (why torn-down tenants lingered). `delete` prunes it next cycle.
+              orphanStrategy: delete
               rules:
                 - allow: [Component, System, API, Resource, Location, Template, Group, User]
               locations:

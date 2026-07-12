@@ -97,7 +97,22 @@ export interface TeardownResult {
   claimPath: string;
   /** Whether the GitHub app repo was archived (only when archiveRepo was requested). */
   repoArchived: boolean;
+  /**
+   * Whether the `capstone-tenant` GitHub topic was stripped from the app repo. This is what
+   * makes the catalog GitHub-discovery provider stop re-registering the repo (the "ghost
+   * tenant" cure — see teardownTenant). Done UNCONDITIONALLY on teardown (independent of
+   * archiveRepo); false only if the repo already lacked the topic or the strip call failed.
+   */
+  topicStripped: boolean;
 }
+
+/**
+ * The GitHub topic the catalog discovery provider (app-config catalog.providers.github.tenants)
+ * filters on. Every scaffolder template self-tags new tenant repos with it; discovery
+ * (re)registers any repo carrying it as a Component Location every cycle. Teardown must strip it
+ * so a de-provisioned tenant stops being resurrected.
+ */
+const CAPSTONE_TENANT_TOPIC = 'capstone-tenant';
 
 /** Resolved capstone.teardown.* config — where the onboarding ledger lives + PR conventions. */
 interface TeardownConfig {
@@ -224,6 +239,52 @@ async function octokitForRepo(
     );
   }
   return new Octokit({ auth: token });
+}
+
+/**
+ * Strip the `capstone-tenant` topic from a repo so the catalog GitHub-discovery provider's
+ * `topic.include: [capstone-tenant]` filter stops matching it — i.e. discovery stops
+ * re-registering the torn-down tenant's Component every cycle ("ghost tenant" cure). Combined
+ * with `catalog.orphanStrategy: delete` (app-config), the now-orphaned Component + Location are
+ * then pruned automatically instead of lingering forever.
+ *
+ * PERMISSION: `PUT /repos/{owner}/{repo}/topics` (replaceAllTopics) needs the GitHub App's
+ * "Administration" repository permission (write) — the SAME permission `repos.update({archived})`
+ * uses, which this module already exercises for archiveRepo, so NO new App grant is required.
+ *
+ * ORDER: this MUST run BEFORE any archive — an archived repo is READ-ONLY and its topics can no
+ * longer be changed. Non-fatal: the claim-removal PR is the primary teardown action; a failure
+ * here is logged and returns false (the admin can strip the topic by hand — see the PR body).
+ */
+async function stripCapstoneTopic(
+  deps: CapstoneTenantsDeps,
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+): Promise<boolean> {
+  try {
+    const { data } = await octokit.repos.getAllTopics({ owner, repo });
+    const names: string[] = data.names ?? [];
+    if (!names.includes(CAPSTONE_TENANT_TOPIC)) {
+      return false; // nothing to strip (never tagged, or already stripped)
+    }
+    await octokit.repos.replaceAllTopics({
+      owner,
+      repo,
+      names: names.filter(n => n !== CAPSTONE_TENANT_TOPIC),
+    });
+    deps.logger.info(
+      `capstone tenant-teardown stripped '${CAPSTONE_TENANT_TOPIC}' topic from ${owner}/${repo} ` +
+        `(catalog discovery will drop it)`,
+    );
+    return true;
+  } catch (e) {
+    deps.logger.warn(
+      `capstone tenant-teardown could not strip '${CAPSTONE_TENANT_TOPIC}' topic from ` +
+        `${owner}/${repo}: ${(e as Error).message}`,
+    );
+    return false;
+  }
 }
 
 /** A file is a LIVE claim iff it ends in .yaml and is not an `_*`-prefixed sample or README. */
@@ -419,46 +480,70 @@ export async function teardownTenant(
       '',
       '**This is irreversible.** Re-onboarding the same team/app later re-creates a fresh',
       'tenant from scratch (new Harbor project, new Vault paths, empty database).',
+      '',
+      `The \`${CAPSTONE_TENANT_TOPIC}\` topic has been stripped from the tenant's GitHub app repo`,
+      `(\`${cfg.appRepoOwner}/${appName}\`) so the catalog discovery provider stops re-registering`,
+      "its Component (with `catalog.orphanStrategy: delete`, the orphaned entity is then pruned",
+      'automatically). If the strip failed — check the teardown logs — remove the topic by hand:',
+      '`gh api -X PUT repos/' +
+        `${cfg.appRepoOwner}/${appName}` +
+        '/topics -f names[]=""` (with the repo\'s remaining topics).',
       archiveRepo
-        ? `\nThe tenant's GitHub app repo (\`${cfg.appRepoOwner}/${appName}\`) has been archived.`
+        ? `\nThe app repo has also been archived.`
         : '',
     ]
       .filter(Boolean)
       .join('\n'),
   });
 
-  // Optional: archive the tenant's app repo so it goes read-only (kept for the record; the
-  // Composition-created repo is NOT git-removed by the claim delete — archive is the tidy-up).
+  // Post-PR app-repo tidy-up (the Composition-created repo is NOT git-removed by the claim
+  // delete). TWO actions on the app repo, in a fixed order because an archived repo is
+  // READ-ONLY:
+  //   1. ALWAYS strip the `capstone-tenant` topic so catalog GitHub-discovery stops
+  //      re-registering the Component ("ghost tenant" cure). Independent of archiveRepo — the
+  //      ghost recurs on every teardown, archived or not, so untag is unconditional.
+  //   2. OPTIONALLY archive the repo (read-only, kept for the record) when archiveRepo is set.
+  // Both are non-fatal: the claim-removal PR is the primary teardown action.
+  let topicStripped = false;
   let repoArchived = false;
-  if (archiveRepo && appName) {
-    try {
-      const appOctokit = await octokitForRepo(
-        deps.config,
-        cfg.appRepoOwner,
-        appName,
-      );
-      await appOctokit.repos.update({
-        owner: cfg.appRepoOwner,
-        repo: appName,
-        archived: true,
-      });
-      repoArchived = true;
-      deps.logger.info(
-        `capstone tenant-teardown archived app repo ${cfg.appRepoOwner}/${appName}`,
-      );
-    } catch (e) {
-      // Non-fatal: the teardown PR is the primary action. Surface a warning, keep going.
-      deps.logger.warn(
-        `capstone tenant-teardown could not archive ${cfg.appRepoOwner}/${appName}: ` +
-          `${(e as Error).message}`,
-      );
+  if (appName) {
+    const appOctokit = await octokitForRepo(
+      deps.config,
+      cfg.appRepoOwner,
+      appName,
+    );
+    // MUST precede archive — topics can't be changed once the repo is archived (read-only).
+    topicStripped = await stripCapstoneTopic(
+      deps,
+      appOctokit,
+      cfg.appRepoOwner,
+      appName,
+    );
+    if (archiveRepo) {
+      try {
+        await appOctokit.repos.update({
+          owner: cfg.appRepoOwner,
+          repo: appName,
+          archived: true,
+        });
+        repoArchived = true;
+        deps.logger.info(
+          `capstone tenant-teardown archived app repo ${cfg.appRepoOwner}/${appName}`,
+        );
+      } catch (e) {
+        // Non-fatal: the teardown PR is the primary action. Surface a warning, keep going.
+        deps.logger.warn(
+          `capstone tenant-teardown could not archive ${cfg.appRepoOwner}/${appName}: ` +
+            `${(e as Error).message}`,
+        );
+      }
     }
   }
 
   deps.logger.info(
     `capstone tenant-teardown opened PR for tenant="${name}": ${pr.html_url}`,
   );
-  return { pullRequestUrl: pr.html_url, claimPath, repoArchived };
+  return { pullRequestUrl: pr.html_url, claimPath, repoArchived, topicStripped };
 }
 
 /** Decode a getContent single-file response body to UTF-8 text. */

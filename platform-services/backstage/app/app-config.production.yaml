@@ -82,6 +82,14 @@ permission:
 # carries its team memberships -> ownershipEntityRefs). The seed examples/org.yaml Location
 # is REMOVED (it would re-inject the placeholder guest/guests and shadow real ingestion).
 catalog:
+  # Auto-prune ORPHANED entities — a Component/Location whose emitting provider has stopped
+  # yielding it. This is the second half of the tenant-teardown "ghost tenant" fix: teardown
+  # strips the `capstone-tenant` topic (teardownCore.ts) so the github.tenants discovery
+  # provider drops the repo, and archived repos are already excluded by the provider; either
+  # way the tenant's Component becomes orphaned. Default `keep` leaves those orphans in the
+  # catalog forever (why torn-down computa/meow/tenantv1 lingered); `delete` removes them on
+  # the next processing cycle. New backend system auto-wires the scheduler this needs.
+  orphanStrategy: delete
   rules:
     - allow: [Component, System, API, Resource, Location, Template, Group, User]
   locations:

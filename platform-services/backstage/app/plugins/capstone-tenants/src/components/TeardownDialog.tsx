@@ -100,6 +100,8 @@ export function TeardownDialog(props: TeardownDialogProps) {
               cascade-deletes the whole tenant (namespaces + pods, Harbor project, Vault
               paths, database, ArgoCD apps). Reclaiming resources can take several minutes
               after merge.
+              {result.topicStripped &&
+                ' The tenant’s repo has been un-tagged so it drops out of the catalog.'}
               {result.repoArchived &&
                 ' The tenant’s GitHub app repo has been archived.'}
             </DialogContentText>
