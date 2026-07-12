@@ -74,6 +74,19 @@ spec:
         updater:
           enabled: true
           replicaCount: 1
+          # --min-replicas=1: by DEFAULT the updater is --min-replicas=2 and REFUSES to
+          # evict any workload with <2 replicas — which would make updateMode: Auto a
+          # silent no-op for every single-replica controller in the platform allowlist
+          # (they would only right-size at their next natural restart). Setting 1 lets
+          # Auto actively evict-and-resize singletons. SAFE cluster-wide because Auto is
+          # scoped to the curated stateless allowlist only (vpa-platform-policies-app);
+          # every stateful/quorum workload has an updateMode: Off (recommend-only) VPA
+          # which is NEVER evicted regardless of this flag.
+          # ⚠ This is the switch that turns the supervised apply into an eviction WAVE.
+          # To take the gentle path instead (right-size singletons only at their next
+          # natural restart, no forced wave), remove this and let the default (2) stand.
+          extraArgs:
+            min-replicas: "1"
         admissionController:
           enabled: true
           replicaCount: 1

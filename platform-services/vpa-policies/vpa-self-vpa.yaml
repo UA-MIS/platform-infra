@@ -1,0 +1,54 @@
+# Active right-sizing for the VPA stack's own recommender + updater (ns vpa). Both are
+# stateless singletons currently reserving 500Mi each while using ~100Mi — the single
+# largest SAFE reclaim in this allowlist (~744Mi combined).
+#
+# ⚠ DELIBERATELY EXCLUDED — vpa-admission-controller. It is the mutating webhook that
+# INJECTS the right-sized requests into pods as they are recreated. It must stay UP
+# throughout the supervised eviction wave: if it were down when a target pod restarts,
+# the pod would come back with its ORIGINAL (un-injected) request and the updater would
+# just evict it again next cycle → thrash. It keeps its recommend-only Off VPA.
+#
+# The updater evicting its own pod is harmless (a new updater resumes the loop); it and
+# the recommender simply resize themselves once, after the main wave settles.
+---
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: vpa-recommender
+  namespace: vpa
+  labels:
+    platform.capstone/component: platform
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: vpa-recommender
+  updatePolicy:
+    updateMode: "Auto"
+  resourcePolicy:
+    containerPolicies:
+      - containerName: "*"
+        controlledValues: RequestsOnly
+        minAllowed: { cpu: 10m, memory: 64Mi }
+        maxAllowed: { cpu: 500m, memory: 512Mi }
+---
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: vpa-updater
+  namespace: vpa
+  labels:
+    platform.capstone/component: platform
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: vpa-updater
+  updatePolicy:
+    updateMode: "Auto"
+  resourcePolicy:
+    containerPolicies:
+      - containerName: "*"
+        controlledValues: RequestsOnly
+        minAllowed: { cpu: 10m, memory: 64Mi }
+        maxAllowed: { cpu: 500m, memory: 512Mi }

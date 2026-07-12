@@ -1,0 +1,61 @@
+# Active right-sizing for the Crossplane CORE controllers (ns crossplane-system).
+# Both are stateless Deployments with FIXED names (chart defaults) that reconcile
+# declarative state and self-heal on restart — safe single-eviction targets.
+#
+# ⚠ crossplane core is UNDER-provisioned today (request 256Mi vs live target ~1Gi):
+# VPA-Auto will RAISE its request to match real usage. This is a STABILITY fix, not a
+# reclaim — an honest reservation prevents the OOM/scheduling-onto-a-full-node failure
+# that would break tenant provisioning. maxAllowed is set high enough (1536Mi) not to
+# starve it. crossplane-rbac-manager is the opposite (256Mi req vs ~26Mi use) → a real
+# ~156Mi reclaim.
+#
+# ⚠ DELIBERATELY EXCLUDED from Auto — the provider-* and function-* Deployments.
+# Crossplane names a package's Deployment with a REVISION HASH suffix
+# (e.g. provider-github-04d509bb9f6f); a VPA targetRef pinned to that exact name would
+# DANGLE the moment the package is upgraded (new hash → new Deployment → orphaned VPA).
+# VPA targetRef takes a single object name, not a selector, so there is no stable way to
+# track them. They keep their recommend-only Off VPAs from Goldilocks; right-size them
+# by hand at a deliberate package bump. (They were net request-INCREASES anyway — most
+# ship with no request set — so excluding them also avoids inflating reservations.)
+---
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: crossplane
+  namespace: crossplane-system
+  labels:
+    platform.capstone/component: platform
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: crossplane
+  updatePolicy:
+    updateMode: "Auto"
+  resourcePolicy:
+    containerPolicies:
+      - containerName: "*"
+        controlledValues: RequestsOnly
+        minAllowed: { cpu: 50m, memory: 128Mi }
+        maxAllowed: { cpu: 2000m, memory: 1536Mi }   # crossplane genuinely uses ~1Gi
+---
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: crossplane-rbac-manager
+  namespace: crossplane-system
+  labels:
+    platform.capstone/component: platform
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: crossplane-rbac-manager
+  updatePolicy:
+    updateMode: "Auto"
+  resourcePolicy:
+    containerPolicies:
+      - containerName: "*"
+        controlledValues: RequestsOnly
+        minAllowed: { cpu: 10m, memory: 32Mi }
+        maxAllowed: { cpu: 500m, memory: 512Mi }

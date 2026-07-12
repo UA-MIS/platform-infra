@@ -1,0 +1,146 @@
+# Active right-sizing for the remaining STATELESS edge / controller Deployments across
+# several namespaces. Split by disruption profile:
+#
+#  MULTI-REPLICA (evicted one-at-a-time by the updater, guarded by the PDBs in
+#  pdbs.yaml so the second replica always stays up — zero-downtime resize):
+#   - traefik (kube-system, 2 replicas)  → the cluster ingress + in-cluster registry
+#       data path; PDB minAvailable:1 makes the resize non-disruptive.
+#   - cloudflared (2 replicas)           → Cloudflare Tunnel connectors.
+#   - portal (2 replicas)                → apex landing page.
+#
+#  SINGLE-REPLICA (one-time eviction on first reconcile — a brief self-healing blip):
+#   - db-admin-console (Adminer), oauth2-proxy (db-console auth front), arc-gha-rs-controller
+#     (the ARC runner-scale-set controller — an eviction briefly pauses runner scaling,
+#      in-flight CI jobs are unaffected).
+---
+# ── traefik (kube-system) ─────────────────────────────────────────────────────
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: traefik
+  namespace: kube-system
+  labels:
+    platform.capstone/component: platform
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: traefik
+  updatePolicy:
+    updateMode: "Auto"
+  resourcePolicy:
+    containerPolicies:
+      - containerName: "*"
+        controlledValues: RequestsOnly
+        minAllowed: { cpu: 10m, memory: 64Mi }
+        maxAllowed: { cpu: 1000m, memory: 512Mi }
+---
+# ── cloudflared ───────────────────────────────────────────────────────────────
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: cloudflared
+  namespace: cloudflared
+  labels:
+    platform.capstone/component: platform
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: cloudflared
+  updatePolicy:
+    updateMode: "Auto"
+  resourcePolicy:
+    containerPolicies:
+      - containerName: "*"
+        controlledValues: RequestsOnly
+        minAllowed: { cpu: 10m, memory: 32Mi }
+        maxAllowed: { cpu: 500m, memory: 256Mi }
+---
+# ── portal (apex landing) ─────────────────────────────────────────────────────
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: portal
+  namespace: portal
+  labels:
+    platform.capstone/component: platform
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: portal
+  updatePolicy:
+    updateMode: "Auto"
+  resourcePolicy:
+    containerPolicies:
+      - containerName: "*"
+        controlledValues: RequestsOnly
+        minAllowed: { cpu: 10m, memory: 16Mi }
+        maxAllowed: { cpu: 250m, memory: 256Mi }
+---
+# ── db-admin-console (Adminer) ────────────────────────────────────────────────
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: db-admin-console
+  namespace: db-admin
+  labels:
+    platform.capstone/component: platform
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: db-admin-console
+  updatePolicy:
+    updateMode: "Auto"
+  resourcePolicy:
+    containerPolicies:
+      - containerName: "*"
+        controlledValues: RequestsOnly
+        minAllowed: { cpu: 10m, memory: 32Mi }
+        maxAllowed: { cpu: 250m, memory: 256Mi }
+---
+# ── oauth2-proxy (db-console auth) ────────────────────────────────────────────
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: oauth2-proxy
+  namespace: db-console-auth
+  labels:
+    platform.capstone/component: platform
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: oauth2-proxy
+  updatePolicy:
+    updateMode: "Auto"
+  resourcePolicy:
+    containerPolicies:
+      - containerName: "*"
+        controlledValues: RequestsOnly
+        minAllowed: { cpu: 10m, memory: 32Mi }
+        maxAllowed: { cpu: 250m, memory: 256Mi }
+---
+# ── arc-gha-rs-controller (ARC runner-scale-set controller) ───────────────────
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: arc-gha-rs-controller
+  namespace: arc-system
+  labels:
+    platform.capstone/component: platform
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: arc-gha-rs-controller
+  updatePolicy:
+    updateMode: "Auto"
+  resourcePolicy:
+    containerPolicies:
+      - containerName: "*"
+        controlledValues: RequestsOnly
+        minAllowed: { cpu: 10m, memory: 32Mi }
+        maxAllowed: { cpu: 500m, memory: 256Mi }

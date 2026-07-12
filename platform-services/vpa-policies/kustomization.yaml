@@ -1,8 +1,29 @@
 # Platform VPA policies — the curated allowlist of Auto/RequestsOnly
 # VerticalPodAutoscaler objects (see applicationsets/vpa-platform-policies-app.yaml).
 # Directory-source ArgoCD app; each object carries its own namespace.
+#
+# Every VPA here is updateMode: Auto + controlledValues: RequestsOnly on a STATELESS,
+# single-eviction-safe workload. Stateful / quorum / request-path workloads are
+# excluded (they keep recommend-only Off VPAs from Goldilocks) — see the header of each
+# file and docs/operator/resource-governance.md for the full exclusion rationale.
+#
+# NOTE: Auto only actively evicts single-replica workloads because the vpa-updater is
+# run with --min-replicas=1 (set in applicationsets/vpa-app.yaml). Without that flag the
+# updater's default (2) would skip every singleton here.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
+  # existing (pre-Auto) targets
   - external-secrets-vpa.yaml
   - goldilocks-vpa.yaml
+  # stateless platform components flipped to Auto (this change)
+  - argocd-vpa.yaml
+  - crossplane-vpa.yaml
+  - harbor-vpa.yaml
+  - kyverno-vpa.yaml
+  - monitoring-vpa.yaml
+  - backstage-vpa.yaml
+  - edge-and-controllers-vpa.yaml
+  - vpa-self-vpa.yaml
+  # eviction-safety PDBs for the multi-replica Auto targets
+  - pdbs.yaml

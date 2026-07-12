@@ -1,0 +1,95 @@
+# Active right-sizing for the STATELESS Harbor components (ns harbor). These are the
+# ordinary Deployments of the registry front-plane; each self-heals on restart, so a
+# one-time VPA eviction is a brief (~15-30s) blip on registry auth/serving. Sequence
+# these during a quiet window in the supervised apply — an in-flight tenant image
+# push/pull routed through harbor-core mid-eviction will retry.
+#
+# ⚠ EXCLUDED from Auto (stateful → recommend-only Off VPAs from Goldilocks):
+#   - harbor-database → embedded PostgreSQL (StatefulSet, data plane).
+#   - harbor-redis    → cache StatefulSet.
+#   - harbor-trivy    → StatefulSet with a local vuln-DB cache PVC; evicting it forces a
+#       multi-minute vuln-DB re-download. Not quorum/data-critical but not "stateless".
+---
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: harbor-core
+  namespace: harbor
+  labels:
+    platform.capstone/component: platform
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: harbor-core
+  updatePolicy:
+    updateMode: "Auto"
+  resourcePolicy:
+    containerPolicies:
+      - containerName: "*"
+        controlledValues: RequestsOnly
+        minAllowed: { cpu: 10m, memory: 64Mi }
+        maxAllowed: { cpu: 500m, memory: 512Mi }
+---
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: harbor-registry
+  namespace: harbor
+  labels:
+    platform.capstone/component: platform
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: harbor-registry
+  updatePolicy:
+    updateMode: "Auto"
+  resourcePolicy:
+    containerPolicies:
+      - containerName: "*"           # two containers (registry + registryctl)
+        controlledValues: RequestsOnly
+        minAllowed: { cpu: 10m, memory: 32Mi }
+        maxAllowed: { cpu: 500m, memory: 512Mi }
+---
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: harbor-jobservice
+  namespace: harbor
+  labels:
+    platform.capstone/component: platform
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: harbor-jobservice
+  updatePolicy:
+    updateMode: "Auto"
+  resourcePolicy:
+    containerPolicies:
+      - containerName: "*"
+        controlledValues: RequestsOnly
+        minAllowed: { cpu: 10m, memory: 32Mi }
+        maxAllowed: { cpu: 500m, memory: 512Mi }
+---
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: harbor-portal
+  namespace: harbor
+  labels:
+    platform.capstone/component: platform
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: harbor-portal
+  updatePolicy:
+    updateMode: "Auto"
+  resourcePolicy:
+    containerPolicies:
+      - containerName: "*"
+        controlledValues: RequestsOnly
+        minAllowed: { cpu: 10m, memory: 32Mi }
+        maxAllowed: { cpu: 250m, memory: 256Mi }
