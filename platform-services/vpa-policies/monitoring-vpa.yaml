@@ -1,0 +1,144 @@
+# Active right-sizing for the STATELESS monitoring components (ns monitoring). Grafana,
+# kube-state-metrics, the prometheus-operator, thanos-query, the OTel collector, and
+# ntfy are all ordinary Deployments that self-heal on restart.
+#
+# ⚠ EXCLUDED from Auto (stateful / single-replica data plane → recommend-only Off VPAs):
+#   - prometheus-*      → StatefulSet, TSDB on a PVC; evicting it drops scrape continuity.
+#   - alertmanager-*    → StatefulSet, dedup/silence state on a PVC.
+#   - loki, tempo       → StatefulSets, log/trace stores on PVCs.
+#   - thanos-store-gateway, thanos-compactor → local index cache / compaction work dir on
+#       disk; a compactor is a required singleton and eviction mid-compaction wastes work.
+# These carry a real chunk of the cluster's over-provisioning (prometheus alone reserves
+# ~3Gi) but are exactly the workloads Auto eviction must NOT touch — right-size them by
+# hand from the Goldilocks recommendation at a maintenance restart.
+#
+# NOTE (grafana): single-replica Deployment backed by a PVC (kube-prometheus-stack-grafana).
+# VPA-Auto eviction is safe (PVC re-attaches, dashboards are provisioned from ConfigMaps),
+# but expect ~30-60s of dashboard downtime on the resize. This is a request INCREASE
+# (~672Mi → ~890Mi, its real footprint across the grafana + 2 sidecar containers).
+---
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: grafana
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: kube-prometheus-stack-grafana
+  updatePolicy:
+    updateMode: "Auto"
+  resourcePolicy:
+    containerPolicies:
+      - containerName: "*"          # grafana + sc-dashboard + sc-datasources sidecars
+        controlledValues: RequestsOnly
+        minAllowed: { cpu: 10m, memory: 64Mi }
+        maxAllowed: { cpu: 1000m, memory: 1Gi }
+---
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: kube-state-metrics
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: kube-prometheus-stack-kube-state-metrics
+  updatePolicy:
+    updateMode: "Auto"
+  resourcePolicy:
+    containerPolicies:
+      - containerName: "*"
+        controlledValues: RequestsOnly
+        minAllowed: { cpu: 10m, memory: 32Mi }
+        maxAllowed: { cpu: 500m, memory: 512Mi }
+---
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: prometheus-operator
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: kube-prometheus-stack-operator
+  updatePolicy:
+    updateMode: "Auto"
+  resourcePolicy:
+    containerPolicies:
+      - containerName: "*"
+        controlledValues: RequestsOnly
+        minAllowed: { cpu: 10m, memory: 32Mi }
+        maxAllowed: { cpu: 500m, memory: 512Mi }
+---
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: thanos-query
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: thanos-query
+  updatePolicy:
+    updateMode: "Auto"
+  resourcePolicy:
+    containerPolicies:
+      - containerName: "*"
+        controlledValues: RequestsOnly
+        minAllowed: { cpu: 10m, memory: 64Mi }
+        maxAllowed: { cpu: 1000m, memory: 512Mi }
+---
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: otel-collector
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: otel-collector
+  updatePolicy:
+    updateMode: "Auto"
+  resourcePolicy:
+    containerPolicies:
+      - containerName: "*"
+        controlledValues: RequestsOnly
+        minAllowed: { cpu: 10m, memory: 32Mi }
+        maxAllowed: { cpu: 500m, memory: 512Mi }
+---
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: ntfy
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ntfy
+  updatePolicy:
+    updateMode: "Auto"
+  resourcePolicy:
+    containerPolicies:
+      - containerName: "*"
+        controlledValues: RequestsOnly
+        minAllowed: { cpu: 10m, memory: 32Mi }
+        maxAllowed: { cpu: 250m, memory: 256Mi }

@@ -1,0 +1,50 @@
+# Eviction-safety PodDisruptionBudgets for the MULTI-REPLICA workloads that this
+# directory puts on VPA-Auto. The VPA updater applies a resize by EVICTING pods, and it
+# honors PDBs server-side (the Eviction API enforces them). Each 2-replica target here
+# had NO PDB, so nothing stopped a voluntary eviction (VPA, drain, or the descheduler)
+# from taking BOTH replicas at once. minAvailable: 1 caps concurrent disruption at one,
+# turning the Auto resize into a rolling, zero-downtime update.
+#
+# Single-replica Auto targets deliberately get NO PDB: a minAvailable:1 PDB on a
+# 1-replica workload would forbid ALL voluntary eviction and DEADLOCK VPA-Auto (it could
+# never apply the resize). Those accept a one-time eviction blip instead (see the
+# per-workload files + the runbook).
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: traefik-vpa-guard
+  namespace: kube-system
+  labels:
+    platform.capstone/component: platform
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: traefik
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: cloudflared-vpa-guard
+  namespace: cloudflared
+  labels:
+    platform.capstone/component: platform
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cloudflared
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: portal-vpa-guard
+  namespace: portal
+  labels:
+    platform.capstone/component: platform
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: portal
