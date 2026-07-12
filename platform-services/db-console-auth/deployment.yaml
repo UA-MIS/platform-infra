@@ -11,11 +11,17 @@
 # proxy instance enforces a DIFFERENT group per route without per-team Dex config
 # (Dex has no wildcard redirectURIs; see the Composition's ADMINER CONSOLE comments).
 #
-# `--cookie-domain=.capstone.uamishub.com` + `--whitelist-domain=.capstone.uamishub.com`:
+# `--cookie-domain` + `--whitelist-domain` (each listed TWICE — dotted + bare apex):
 # the documented oauth2-proxy pattern for one proxy authenticating many subdomains —
 # the session cookie is valid across every `*.capstone.uamishub.com` host, so a
 # student already SSO'd into ArgoCD/Harbor/Backstage doesn't see a second login
-# screen for a DB console (same Dex session, shared cookie domain).
+# screen for a DB console (same Dex session, shared cookie domain). The bare apex
+# `capstone.uamishub.com` is listed as a SECOND value on both flags so the apex
+# landing/sign-in page (https://capstone.uamishub.com/internal) is covered too — a
+# leading-dot cookie domain matches subdomains ONLY, never the bare apex host, so
+# without the bare entry the apex cookie was set but never sent back, looping the
+# sign-in forever. See the args block below for the length-sort selection guarantee
+# that keeps subdomain consoles on the dotted domain (no regression).
 #
 # SSO REDIRECT: a bare 401 from `/oauth2/auth` (no session cookie yet) is converted
 # into a 302 redirect to Dex/GitHub login by the shared `errors` Middleware
@@ -73,8 +79,27 @@ spec:
             # THIS proxy's own login; the per-team restriction happens per-request via
             # each Middleware's `?allowed_groups=UA-MIS:<team>` querystring, not here.
             - --email-domain=*
+            # BOTH the dotted domain (every *.capstone.uamishub.com console) AND the
+            # bare apex host are listed. oauth2-proxy accepts these flags repeatedly and
+            # sorts the domains DESCENDING by length at load (pkg/validation/cookie.go:
+            # `sort.Slice(o.Domains, len(i) > len(j))`), then GetCookieDomain returns the
+            # FIRST suffix match (pkg/cookies/cookies.go). So a subdomain request
+            # (db-admin.capstone.uamishub.com) still matches `.capstone.uamishub.com`
+            # first (longest, 23 chars) — subdomain consoles do NOT regress — while the
+            # bare apex `capstone.uamishub.com` fails the dotted suffix (a leading `.`
+            # requires a char before it) and matches the bare entry. Without the bare
+            # entry the apex session cookie is scoped to `.capstone.uamishub.com` and is
+            # NOT sent back on the bare apex host → the /internal sign-in loops forever
+            # (confirmed live via cookies.go "did not match any of the specific cookie
+            # domains" warnings on every apex request). whitelist-domain gets the apex
+            # too so the post-auth `rd` redirect to https://capstone.uamishub.com/... is
+            # allowed. Order here is cosmetic — the load-time length sort is what governs
+            # selection. Docs: "The longest domain matching the request's host will be
+            # used" (oauth2-proxy configuration/overview, cookie-domain).
             - --cookie-domain=.capstone.uamishub.com
+            - --cookie-domain=capstone.uamishub.com
             - --whitelist-domain=.capstone.uamishub.com
+            - --whitelist-domain=capstone.uamishub.com
             - --cookie-secure=true
             - --cookie-samesite=lax
             # No real upstream — this proxy only ever answers its own /oauth2/*
