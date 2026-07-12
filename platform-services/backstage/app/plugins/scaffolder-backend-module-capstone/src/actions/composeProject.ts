@@ -38,8 +38,30 @@ const APPNAME = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
 const SEMESTER = /^[0-9]{4}-(spring|summer|fall)$/;
 
 /** Subtrees shipped verbatim (never templated) — the copyWithoutTemplating contract. */
-const VERBATIM = [/(^|\/)\.github\//, /(^|\/)\.devops\/ci\//, /(^|\/)\.mobile-ci\//];
+const VERBATIM = [
+  /(^|\/)\.github\//,
+  /(^|\/)\.devops\/ci\//,
+  /(^|\/)\.mobile-ci\//,
+  // Python bytecode + test caches: binary AND their bodies embed `{%` (pytest's
+  // assertion-rewrite format strings, e.g. `{%(py2)s = %(py0)s.status_code`), which
+  // crashes nunjucks with "tag name expected". A stray committed .pyc under a fragment
+  // skeleton (the root cause of the Python-scaffold failure) must never be templated.
+  // This path guard backs up the isBinary() NUL sniff below.
+  /(^|\/)__pycache__\//,
+  /\.pyc$/,
+  /\.pyo$/,
+  /(^|\/)\.pytest_cache\//,
+];
 const isVerbatim = (rel: string) => VERBATIM.some(re => re.test(rel));
+
+/**
+ * True when a file's bytes look binary (contain a NUL byte). nunjucks operates on text;
+ * feeding it a binary buffer (image, font, .so, compiled .pyc) either corrupts the output
+ * or throws when the bytes happen to contain template delimiters like `{%`. Any binary that
+ * slips into a fragment skeleton or the shared contract must be copied byte-for-byte, not
+ * rendered — this catches ANY binary, not just the extensions enumerated in VERBATIM.
+ */
+const isBinary = (raw: Buffer): boolean => raw.includes(0);
 
 /**
  * Normalise a UrlReader file's content() result to a Buffer.
@@ -115,7 +137,7 @@ async function renderSkeleton(
     if (!rel) continue;
     const dest = resolveSafeChildPath(outDir, rel);
     const raw = toBuffer(await file.content());
-    if (isVerbatim(rel)) {
+    if (isVerbatim(rel) || isBinary(raw)) {
       await fs.outputFile(dest, raw);
     } else {
       await fs.outputFile(dest, env.renderString(raw.toString('utf8'), { values }));
@@ -142,7 +164,7 @@ async function renderContract(
     const rel = file.path;
     const dest = resolveSafeChildPath(outRoot, rel);
     const raw = toBuffer(await file.content());
-    if (isVerbatim(rel)) {
+    if (isVerbatim(rel) || isBinary(raw)) {
       await fs.outputFile(dest, raw);
     } else {
       await fs.outputFile(dest, env.renderString(raw.toString('utf8'), { values }));
