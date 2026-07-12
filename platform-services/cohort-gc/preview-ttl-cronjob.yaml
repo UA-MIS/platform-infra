@@ -23,8 +23,8 @@
 # list generator (no live previews), so today this job is a no-op guard; it becomes
 # load-bearing when live previews are wired. (Documented seam, like the appset.)
 #
-# DRY-RUN: set DRY_RUN=true (default here is "true" for the DRAFT — flip to "false"
-# at go-live after the human reviews) to log what WOULD be deleted without deleting.
+# DRY-RUN: set DRY_RUN=true to log what WOULD be deleted without deleting. Now
+# "false" (ENFORCING) — the human reviewed a dry-run and flipped it at go-live.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -75,7 +75,7 @@ spec:
                 - name: TTL_HOURS
                   value: "12"
                 - name: DRY_RUN
-                  value: "true"   # DRAFT default — flip to "false" at go-live
+                  value: "false"  # ENFORCING — human reviewed dry-run, flipped at go-live
                 - name: HOME
                   value: /tmp     # kubectl writes cache/config under $HOME; /tmp is the emptyDir
               command: ["/bin/sh", "-eu", "-c"]
