@@ -60,27 +60,20 @@ images:
     newTag: v0.0.0
 {%- endif %}
 {%- endfor %}
-# Per-component replica count. Set via a JSON6902 `op: replace` (NOT the builtin
-# `replicas:` transformer) so the SAME override reaches a progressive-delivery Rollout:
-# kustomize's builtin `replicas:` transformer is hard-wired to the
-# Deployment/StatefulSet/ReplicaSet/ReplicationController GVK set and ERRORS on an
-# argoproj.io/Rollout ("resource <app>-<c> does not match a config with the following
-# GVK ...") — which broke `kustomize build` for EVERY single-component canary tenant
-# (#337, first hit by test tenant `computa`). A patch has no such GVK restriction. The
-# target `kind` is branched on the SAME condition deployments.yaml uses, so it always
-# matches the workload kind actually rendered; naming the kind also excludes the
-# same-named Service (which has no /spec/replicas). Base pins replicas:1, so `replace`
-# always has a path to hit.
+# Per-component replica count via a JSON6902 `op: replace` (NOT the builtin `replicas:`
+# transformer). dev is ALWAYS a plain Deployment (progressive delivery is prod-only, ADR-037),
+# so a `replicas:` transformer would work here — but the patch form is kept UNIFORM across all
+# overlays because the PROD overlay's single-component workload is an argoproj.io/Rollout, and
+# the builtin `replicas:` transformer is hard-wired to the Deployment/StatefulSet/ReplicaSet/
+# ReplicationController GVK set and ERRORS on a Rollout ("resource <app>-<c> does not match a
+# config with the following GVK ...", #337, first hit by test tenant `computa`). A patch has no
+# such GVK restriction. Naming the kind also excludes the same-named Service (which has no
+# /spec/replicas). Base pins replicas:1, so `replace` always has a path to hit.
 patches:
 {%- for c in values.components %}
 {%- if c.buildType != "mobile-artifact" %}
   - target:
-{%- if values.single and values.progressiveDelivery %}
-      group: argoproj.io
-      kind: Rollout
-{%- else %}
       kind: Deployment
-{%- endif %}
       name: ${{ values.appName }}-${{ c.name }}
     patch: |
       - op: replace

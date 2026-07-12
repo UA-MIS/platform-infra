@@ -219,15 +219,13 @@ export function createComposeProjectAction(deps: ComposeProjectDeps) {
           z.string({ description: 'category/id of the mobile fragment (projectType mobile).' }).optional(),
         database: z =>
           z.enum(['host-mysql', 'host-postgres', 'bring-your-own', 'none']),
-        progressiveDelivery: z =>
-          z.boolean({
-            description:
-              'Opt-in (single-component "web" projects only — see docs/operator/' +
-              'progressive-delivery.md). When true, the shared contract renders the one ' +
-              'workload as an Argo Rollouts `Rollout` (simple canary) instead of a plain ' +
-              '`Deployment`. Ignored (treated as false) for frontend-backend/mobile layouts, ' +
-              'which always render plain Deployments — see values.single below.',
-          }).optional(),
+        // NOTE: progressive delivery is now an ENV-BASED chart default (prod overlay renders a
+        // single-component web app as an Argo Rollouts canary — ADR-037), NOT a compose input.
+        // The old `progressiveDelivery` boolean input was removed here. It is accepted-but-ignored
+        // for backward compatibility with any already-deployed template that still passes it:
+        // zod strips unknown keys, so an extra `progressiveDelivery` in the step input is harmless
+        // and NO Backstage rebuild is required for the env-based behavior (the chart, read at
+        // scaffold time, drives it entirely).
         appName: z => z.string(),
         team: z => z.string(),
         semester: z => z.string({ description: 'YYYY-(spring|summer|fall).' }),
@@ -293,11 +291,10 @@ export function createComposeProjectAction(deps: ComposeProjectDeps) {
         database: plan.database,
         dbWired: plan.dbWired,
         single: plan.single,
-        // Only meaningful (and only ever rendered) for a single-component web project —
-        // the shared contract's deployments.yaml gates on `values.single AND
-        // values.progressiveDelivery` together, so this being true on a frontend-backend/
-        // mobile plan is harmless (never read).
-        progressiveDelivery: i.progressiveDelivery ?? false,
+        // NOTE: `progressiveDelivery` is no longer passed into `values` — progressive delivery is
+        // now an env-based chart default (the prod overlay renders a single-component web app as a
+        // canary Rollout; dev/staging/preview stay plain Deployments — ADR-037). No template reads
+        // `values.progressiveDelivery` anymore, so nothing needs it here.
       };
 
       let fileCount = 0;

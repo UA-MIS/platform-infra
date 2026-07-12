@@ -1,20 +1,26 @@
 # Workloads — ONE per component in .devops/components.yaml (this file is a nunjucks loop
 # the Scaffolder expanded at create time; each component yields one manifest doc separated
-# by `---`). Every component renders a plain `Deployment` EXCEPT: a single-component web
-# project ("single" slot, values.single) with the "Progressive delivery (canary)" wizard
-# toggle on (values.progressiveDelivery) renders an Argo Rollouts `Rollout` instead — same
-# `replicas`/`selector`/`template` shape, same ReplicaSets underneath, just a canary
-# strategy instead of RollingUpdate. See docs/operator/progressive-delivery.md. Every other
-# component (any frontend-backend/mobile component, or a single project with the toggle
-# off) is completely unaffected — this is additive and off by default.
+# by `---`). This base ALWAYS renders a plain `Deployment` (rolling update) for every
+# component — it is exactly what dev / staging / preview deploy.
+#
+# PROGRESSIVE DELIVERY IS NOW AN ENV-BASED PLATFORM DEFAULT (no wizard toggle). The PROD
+# overlay (overlays/prod) is the ONLY place a workload becomes a canary: for a
+# single-component web project (values.single) it `$patch: delete`s this Deployment and adds
+# overlays/prod/rollout.yaml — an Argo Rollouts `Rollout` with an auto-completing canary
+# (25% -> pause 30s -> 50% -> pause 30s -> 100%). Same container spec / selector / pod
+# template shape, same one Service (services.yaml selects on name+component, so traffic routes
+# to the Rollout's pods). dev / staging / preview keep this plain Deployment. Multi-component
+# (frontend-backend / mobile) projects stay plain Deployments in EVERY env, prod included: the
+# Basic Canary approximates weight via ONE Service's stable/canary ReplicaSet ratio, which is a
+# single-component pattern. See docs/operator/progressive-delivery.md.
 #
 # Image: each container's `image:` is the GitOps image-tag SEAM (§4.1). The base pins
 # a per-component placeholder `<appName>-<component>:latest`; each overlay sets the
 # registry/tag via a kustomize `images:` override (one entry per component) driven by
 # promotion.yaml + the CI bump (dev=main git-describe, staging/prod=semver, preview=pull-<sha>).
-# On a Rollout, that same overlay-driven tag bump is what TRIGGERS the canary: Argo Rollouts
-# watches the pod template for a change and steps through `strategy.canary` instead of
-# replacing all Pods at once.
+# In prod, where overlays/prod swaps this Deployment for a Rollout, that same overlay-driven tag
+# bump is what TRIGGERS the canary: Argo Rollouts watches the pod template for a change and steps
+# through `strategy.canary` instead of replacing all Pods at once.
 #
 # Secret: APP_SECRET is sourced from the in-namespace Secret `<appName>-secret`, which
 # the External Secrets Operator materializes from Vault (ADR-030 B1). ALL components
@@ -27,13 +33,8 @@
 {%- for c in values.components %}
 {%- if c.buildType != "mobile-artifact" %}
 ---
-{%- if values.single and values.progressiveDelivery %}
-apiVersion: argoproj.io/v1alpha1
-kind: Rollout
-{%- else %}
 apiVersion: apps/v1
 kind: Deployment
-{%- endif %}
 metadata:
   name: ${{ values.appName }}-${{ c.name }}
   labels:
@@ -45,32 +46,6 @@ spec:
     matchLabels:
       app.kubernetes.io/name: ${{ values.appName }}
       app.kubernetes.io/component: ${{ c.name }}
-{%- if values.single and values.progressiveDelivery %}
-  # Basic Canary that AUTO-COMPLETES with NO human and NO kubectl plugin (Basic Canary =
-  # no traffic-routing plugin/service mesh wired up, so weight is approximated by the
-  # stable/canary ReplicaSet replica-count ratio behind the ONE Service both share, see
-  # services.yaml). Every new image bump steps 25% -> (30s) -> 50% -> (30s) -> 100%,
-  # auto-advancing on TIMED pauses (not an indefinite empty pause), then promotes to 100% and
-  # scales the old ReplicaSet to 0 on its own. scaleDownDelaySeconds is intentionally NOT
-  # set (default 30s), so the old revision is cleaned up promptly after promotion — no
-  # ImagePullBackOff pod left held forever. The FIRST-ever deploy on a fresh tenant SKIPS
-  # these steps and goes straight to 100% (Argo Rollouts has no prior stable revision to
-  # canary against yet), so a brand-new app comes up clean without a stuck initial rollout.
-  #
-  # Want a MANUAL hold gate? Replace a timed `pause` below with a bare `pause:` that has no
-  # `duration:` (an empty pause step pauses INDEFINITELY until promoted) and promote it with
-  # `kubectl argo rollouts promote ${{ values.appName }}-${{ c.name }} -n <team>-<env>`
-  # (requires the kubectl-argo-rollouts plugin installed locally). The DEFAULT here stays
-  # fully automatic — see docs/operator/progressive-delivery.md.
-  strategy:
-    canary:
-      steps:
-        - setWeight: 25
-        - pause: { duration: 30s }
-        - setWeight: 50
-        - pause: { duration: 30s }
-        - setWeight: 100
-{%- endif %}
   template:
     metadata:
       labels:
@@ -85,9 +60,11 @@ spec:
       # 1-replica dev/preview pod (or a cluster with fewer schedulable nodes than replicas)
       # still schedules fine — the scheduler just prefers a node not already running a same-
       # component pod. Self-selects on THIS workload's own name+component labels (the only
-      # labels on the pods, §3.1), and lives in the shared pod template so it governs BOTH the
-      # Deployment and the Rollout kinds. topologyKey is the node hostname — the failure domain
-      # for tenant workloads on this platform.
+      # labels on the pods, §3.1). It lives in the pod template, so it governs this Deployment
+      # AND the prod overlay's Rollout (overlays/prod/rollout.yaml copies this same template).
+      # `preferred` (not `required`) keeps it a no-op for the 1-replica dev/preview envs and
+      # only bites where replicas>1 (staging=2, prod=3). topologyKey is the node hostname — the
+      # failure domain for tenant workloads on this platform.
       affinity:
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
