@@ -59,7 +59,7 @@ spec:
         # A max-size build is an ~8Gi CO-PINNED pair (the containerMode:kubernetes
         # job-container pod 4Gi + the Kaniko step pod 4Gi, glued to ONE node by the RWO
         # `_work` Ceph-RBD PVC — see platform-services/arc/hook-template.yaml). The build
-        # POOL is TWO nodes: laptop-01 (DEDICATED to CI via the #372 taint, ~11.3Gi free
+        # POOL is TWO nodes: laptop-01 (DEDICATED to CI via the #374 taint, ~11.3Gi free
         # → fits exactly ONE 8Gi pair) and ua-mis-db-1 (~4.5Gi realistically free — it
         # also carries backstage/dex/db-tier — so it fits NO 8Gi pair today, only lighter
         # tenant builds). So the true simultaneous MAX-SIZE-build capacity is 1, with db1
@@ -71,12 +71,12 @@ spec:
         # (a kubelet ADMISSION reject, NOT a clean Pending) and FAILED the CI run. Set to
         # 2 (= pool cardinality): laptop-01 runs the one max-size build, the 2nd slot lets
         # a LIGHTER build use db1 (or Pend for laptop-01 if also max-size), and the 3rd,
-        # 4th… jobs QUEUE in GitHub Actions — the operator's "wait, don't fail". The 4Gi
-        # request + podAntiAffinity below guarantee at most ONE 8Gi pair per node, so the
-        # <=2 pods that DO spawn either place or stay Pending — never admission-OOM.
-        # (Ultra-safe alt = 1: pure serial, everything GHA-queues, no warm standby, db1
-        # unused — 2 keeps db1 usable + gives handoff while still below the OOM-race point.
-        # Raise when db1 sheds its DB tier or a 3rd build node joins `capstone.io/pool=build`.)
+        # 4th… jobs QUEUE in GitHub Actions — the operator's "wait, don't fail". #372's
+        # soft RAM-aware affinity + the 4Gi request guarantee at most ONE 8Gi pair per
+        # node, so the <=2 pods that DO spawn either place or stay Pending — never
+        # admission-OOM. (Ultra-safe alt = 1: pure serial, everything GHA-queues, no warm
+        # standby, db1 unused — 2 keeps db1 usable + gives handoff while still below the
+        # OOM-race point. Raise when db1 sheds its DB tier or a 3rd `pool=build` node joins.)
         minRunners: 0
         maxRunners: 2
 
@@ -113,44 +113,66 @@ spec:
             # retune the build tier later. Applied to the runner pod here and to the heavy
             # Kaniko step pod in platform-services/arc/hook-template.yaml.
             priorityClassName: capstone-ci-build
-            # --- Node placement for the RUNNER pod (CI-fast, #237/#297; BUILD POOL) ---
-            # Was pinned to the single node `ua-mis-db-1` via `capstone.io/ci-build=true`
-            # (#297) — a hard bottleneck: every CI job serialized onto one box. Switched
-            # to the POOL label `capstone.io/pool=build` (same convention as the Mac
-            # fleet's `capstone.io/pool=mac-debian`, see ansible/inventory/group_vars/
-            # mac_workers.yml) so ANY node carrying the label is a candidate — currently
-            # `ua-mis-db-1` (~7.5GiB allocatable) + `laptop-01` (Ryzen 7 8C/16T,
-            # ~14GiB allocatable), giving the scheduler two boxes to spread builds across
-            # instead of queuing on one. nodeSelector stays a HARD (required) constraint
-            # — it just now matches a set, not a singleton — so this supersedes the
-            # softer control-plane toleration/affinity below (still harmless no-ops:
-            # neither pool node carries the control-plane taint/label). laptop-01 is
-            # TEMPORARY (retires when a replacement mini PC arrives) — un-labeling it
-            # cleanly falls back to db1-only with no manifest change. NOTE: the actual
-            # Kaniko BUILD runs in a separate step pod (containerMode:kubernetes) whose
-            # placement is set in platform-services/arc/hook-template.yaml — the SAME
-            # nodeSelector is mirrored there (that is what makes the memory-hungry build
-            # land on a pool node too). Both are needed; this one only moves the
-            # lightweight runner pod. Nodes must be labeled live (not git-declared — db1
-            # was labeled the same way in #297; there is no Ansible/join automation for
-            # either db1 or laptop-01, unlike the Mac fleet):
-            #   kubectl label node ua-mis-db-1 capstone.io/pool=build --overwrite
-            #   kubectl label node laptop-01    capstone.io/pool=build --overwrite
-            nodeSelector:
-              capstone.io/pool: "build"
+            # --- Node placement for the RUNNER pod (CI-fast, #237/#297/#372; SOFT TIER) ---
+            # Mirrors the heavy Kaniko step pod's placement (platform-services/arc/
+            # hook-template.yaml) so the lightweight listener/runner pod follows the same
+            # tiered bias. HISTORY: HARD-pinned to db1 via capstone.io/ci-build (#297),
+            # then HARD-pinned to the pool via `nodeSelector: capstone.io/pool=build`.
+            # A HARD nodeSelector gives NO fallback when the pool nodes can't admit the
+            # request; #372 replaces it with a SOFT, RAM-aware tier bias fenced by a HARD
+            # candidate SET that only excludes nodes too small to build on.
+            #
+            # CANDIDATE SET (required, OR of two terms): capstone.io/pool=build (laptop-01
+            # + ua-mis-db-1) OR a control-plane OptiPlex (capstone-n1/2/3). EXCLUDES the
+            # 8GiB Mac workers (capstone.io/pool=mac-debian) and any future unlabeled node.
+            # Uses only labels that exist live → applies on the next ArgoCD sync, NO
+            # `kubectl label` step required.
+            #
+            # TIER BIAS (preferred, soft): laptop-01 (100) → ua-mis-db-1 (50) →
+            # OptiPlex (10). Prefers laptop, spills to db1, then an OptiPlex, but lands on
+            # ANY candidate that fits when the preferred tier is full.
             tolerations:
               - key: capstone.io/control-plane
                 operator: Equal
                 value: "true"
                 effect: PreferNoSchedule
+              # --- DEDICATE laptop-01 to CI (capacity fix, complements #372 soft affinity) ---
+              # laptop-01 (16GiB) is tainted `capstone.io/dedicated=ci-build:NoSchedule` so
+              # steady-state platform pods drain OFF and CI gets the near-full node. This
+              # toleration lets the RUNNER pod land on the tainted node; #372's weight-100
+              # "prefer laptop-01" affinity targets it. Mirrors the Kaniko step-pod placement
+              # in platform-services/arc/hook-template.yaml. Taint applied live by the operator
+              # AFTER this is synced. Undo: `kubectl taint node laptop-01
+              # capstone.io/dedicated=ci-build:NoSchedule-`.
+              - key: capstone.io/dedicated
+                operator: Equal
+                value: ci-build
+                effect: NoSchedule
             affinity:
               nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                    - matchExpressions:
+                        - { key: capstone.io/pool, operator: In, values: ["build"] }
+                    - matchExpressions:
+                        - { key: node-role.kubernetes.io/control-plane, operator: Exists }
                 preferredDuringSchedulingIgnoredDuringExecution:
+                  # PRIMARY — laptop-01 (pool=build, no ci-build label).
                   - weight: 100
                     preference:
                       matchExpressions:
-                        - key: node-role.kubernetes.io/control-plane
-                          operator: Exists
+                        - { key: capstone.io/pool, operator: In, values: ["build"] }
+                        - { key: capstone.io/ci-build, operator: DoesNotExist }
+                  # SECONDARY — ua-mis-db-1 (dedicated CI box, ci-build=true).
+                  - weight: 50
+                    preference:
+                      matchExpressions:
+                        - { key: capstone.io/ci-build, operator: In, values: ["true"] }
+                  # FALLBACK — control-plane OptiPlexes (last resort; tolerated above).
+                  - weight: 10
+                    preference:
+                      matchExpressions:
+                        - { key: node-role.kubernetes.io/control-plane, operator: Exists }
               # ── SOFT SPREAD runner pods across the build pool (node-GUIDED) ──────
               # One runner pod exists per in-flight build. Soft-prefer a pool node that
               # is NOT already running another runner pod (same `part-of` label this

@@ -32,23 +32,51 @@ data:
       # priorityclass-ci-build.yaml). Rides the hook's top-level PodSpec merge, same as
       # nodeSelector/tolerations below. The build waits for room, never evicts a workload.
       priorityClassName: capstone-ci-build
-      # Prefer the beefier control-plane OptiPlexes for the KANIKO BUILD pod, fall back
-      # to the Macs under load (CI-fast, #237). The build runs in THIS step pod (not the
-      # runner pod), so its node placement is set here. Mirrors the shared
-      # platform-services/arc/hook-template.yaml.
+      # Node placement for the KANIKO BUILD step pod (CI-fast, #237/#372; SOFT TIER).
+      # Mirrors the shared platform-services/arc/hook-template.yaml. SOFT, RAM-aware tier
+      # bias fenced by a HARD candidate SET so the build PREFERS laptop-01, spills to
+      # ua-mis-db-1, then a control-plane OptiPlex, but lands on ANY candidate that can
+      # admit its request when the preferred tier is full — and NEVER on the 8GiB Mac
+      # workers (too small for a 4Gi/8Gi build; note this replaces the previous "fall
+      # back to Macs" behaviour, which risked runtime OOM on a Mac). Uses only labels
+      # that exist live → applies on the next ArgoCD sync, no `kubectl label` step.
       tolerations:
         - key: capstone.io/control-plane
           operator: Equal
           value: "true"
           effect: PreferNoSchedule
+        # DEDICATE laptop-01 to CI: tolerate `capstone.io/dedicated=ci-build:NoSchedule`
+        # so this per-team Kaniko BUILD step pod can land on the CI-dedicated node.
+        # Mirrors platform-services/arc/hook-template.yaml; complements #372 affinity.
+        - key: capstone.io/dedicated
+          operator: Equal
+          value: ci-build
+          effect: NoSchedule
       affinity:
         nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - { key: capstone.io/pool, operator: In, values: ["build"] }
+              - matchExpressions:
+                  - { key: node-role.kubernetes.io/control-plane, operator: Exists }
           preferredDuringSchedulingIgnoredDuringExecution:
+            # PRIMARY — laptop-01 (pool=build, no ci-build label).
             - weight: 100
               preference:
                 matchExpressions:
-                  - key: node-role.kubernetes.io/control-plane
-                    operator: Exists
+                  - { key: capstone.io/pool, operator: In, values: ["build"] }
+                  - { key: capstone.io/ci-build, operator: DoesNotExist }
+            # SECONDARY — ua-mis-db-1 (dedicated CI box, ci-build=true).
+            - weight: 50
+              preference:
+                matchExpressions:
+                  - { key: capstone.io/ci-build, operator: In, values: ["true"] }
+            # FALLBACK — control-plane OptiPlexes (last resort; tolerated above).
+            - weight: 10
+              preference:
+                matchExpressions:
+                  - { key: node-role.kubernetes.io/control-plane, operator: Exists }
       # Resolve the Harbor registry host to Traefik IN-CLUSTER so the Kaniko PUSH
       # never traverses the Cloudflare edge (CF Free/Pro caps request bodies at 100MB
       # → a >100MB image layer 413s). Points the build pod straight at Traefik's
