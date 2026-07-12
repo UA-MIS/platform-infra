@@ -1,7 +1,16 @@
 # oauth2-proxy — the ONE shared SSO gate for every DB console (tenant-db-access
-# design, artifacts/research/tenant-db-access.md §3.2 option D). Federates to Dex as
-# the `db-console` staticClient (platform-services/dex/configmap.yaml) — same broker,
-# same "one GitHub OAuth app, N tools" model as ArgoCD/Harbor/Backstage.
+# design, artifacts/research/tenant-db-access.md §3.2 option D), the portal's
+# `/internal` route (platform-services/portal/middleware.yaml, `portal-internal-auth`
+# — the FIRST consumer of the unscoped "any UA-MIS member" pattern, PR #302) and,
+# since the non-prod-sso-gate PR, every non-prod tenant app URL (dev/staging/
+# preview) — reusing that SAME `portal-internal-auth` Middleware rather than
+# standing up a second near-identical one (see this dir's README "Consumers"
+# section). Federates to Dex as the `db-console` staticClient
+# (platform-services/dex/configmap.yaml) — same broker, same "one GitHub OAuth app,
+# N tools" model as ArgoCD/Harbor/Backstage. The staticClient/Ingress/hostname stay
+# named `db-console`/`db-auth` (not renamed to something generic) — it is still just
+# the OIDC round-trip target, nobody browses here directly, and renaming it would
+# touch the Dex redirectURI + GitHub OAuth app for zero functional benefit.
 #
 # THIS POD NEVER PROXIES REAL TRAFFIC. `--upstream=static://200` means it only ever
 # answers its own `/oauth2/*` endpoints (login, callback, and the auth-check
@@ -10,6 +19,9 @@
 # endpoint as a forwardAuth check, appending `?allowed_groups=UA-MIS:<team>` — so ONE
 # proxy instance enforces a DIFFERENT group per route without per-team Dex config
 # (Dex has no wildcard redirectURIs; see the Composition's ADMINER CONSOLE comments).
+# The portal's `/internal` route and non-prod app Ingresses call the SAME endpoint
+# with NO `allowed_groups` param (any UA-MIS org member — see
+# platform-services/portal/middleware.yaml's header for why that's correct).
 #
 # `--cookie-domain` + `--whitelist-domain` (each listed TWICE — dotted + bare apex):
 # the documented oauth2-proxy pattern for one proxy authenticating many subdomains —
@@ -51,7 +63,16 @@ metadata:
     platform.capstone/component: platform
     app.kubernetes.io/name: oauth2-proxy
 spec:
-  replicas: 1
+  # 1 -> 2 (non-prod-sso-gate PR): this proxy previously answered forwardAuth checks
+  # only for DB-console page loads (low, occasional traffic). Gating every non-prod
+  # tenant app URL (dev/staging/preview, ALL paths) means Traefik now calls
+  # /oauth2/auth on every request to those hosts — a much higher, steadier request
+  # rate. The check itself is cheap (session-cookie validation, no per-request
+  # upstream call), so this is headroom/HA, not a hard scaling requirement: 2
+  # replicas means a pod restart/reschedule no longer produces a window where every
+  # gated host's forwardAuth check fails closed. Still well within the existing tiny
+  # resource footprint (10m cpu / 32Mi mem request per pod, below).
+  replicas: 2
   selector:
     matchLabels:
       app.kubernetes.io/name: oauth2-proxy
