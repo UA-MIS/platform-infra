@@ -74,12 +74,13 @@ spec:
               type: RuntimeDefault
           containers:
             - name: cohort-cleanup
-              # Official Kubernetes-published kubectl image, digest-pinned. Served from
-              # registry.k8s.io (the canonical k8s registry) — NOT Docker Hub, so it is
-              # immune to Docker Hub anon pull-rate limits and the 2025 Bitnami catalog
-              # move that stopped publishing bitnami/kubectl:<ver> tags. Digest pin makes
-              # IfNotPresent safe (immutable) and matches the CI digest-pin posture.
-              image: registry.k8s.io/kubectl:v1.31.5@sha256:84f79685dae5370bbfbea3aba1c1df66365be899a73627af1d834693083828e8
+              # kubectl + a real shell (this job's `command` is ["/bin/sh", ...] running
+              # a shell script body). The distroless registry.k8s.io/kubectl image has NO
+              # /bin/sh, so it StartError'd (exec 128: stat /bin/sh: no such file or
+              # directory) — dead on arrival. alpine/k8s bundles a full shell + kubectl
+              # (+ jq/curl) and is the exact image the working crossplane-mr-prune CronJob
+              # uses (proven live on this cluster; its layers are already node-cached).
+              image: alpine/k8s:1.31.5
               imagePullPolicy: IfNotPresent
               securityContext:
                 allowPrivilegeEscalation: false
