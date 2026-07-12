@@ -7,11 +7,14 @@ category: static             # a standalone site with NO data backend
 language: html
 framework: none             # bare starter — no framework, no build step
 # A static site is a complete project on its own (the only component), so it fills the
-# `single` slot. The `static` slot is declared for descriptive grouping; the wizard's
-# functional slot for a standalone site is `single`.
+# `single` slot. It ALSO fills the `frontend` slot: a no-framework static site is a valid
+# "/" half of a frontend+backend split (its pages/JS call the backend over relative /api,
+# routed by the platform ingress exactly like the SPA frontends). The `static` slot is
+# declared for descriptive grouping (no wizard enum consumes it directly).
 slots:
   - static
   - single
+  - frontend
 defaultPort: 8080
 ingressPath: /              # single static site owns "/"
 needsDB: false              # static sites never use a database

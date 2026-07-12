@@ -228,18 +228,23 @@ spec:
                           title: Frontend
                           type: string
                           description: >-
-                            The SPA served at "/". Generated from the fragment library
-                            (frontend slot). Talks to the backend via relative /api calls.
+                            The component served at "/" — a framework SPA or a plain static
+                            site. Generated from the fragment library (frontend slot).
+                            Talks to the backend via relative /api calls. Fullstack
+                            frameworks (Next.js/Nuxt/SvelteKit) are NOT offered here — they
+                            own their own API, so they only make sense as a single component.
                           enum:
                             - frontend/angular
                             - frontend/react
                             - frontend/solid
                             - frontend/vue
+                            - static/bare-html
                           enumNames:
                             - 'Angular (TypeScript + Tailwind) SPA'
                             - 'React (Vite + TypeScript + Tailwind) SPA'
                             - 'SolidJS (Vite + TypeScript + Tailwind) SPA'
                             - 'Vue 3 (Vite + TypeScript + Tailwind) SPA'
+                            - 'Static HTML/CSS/JS site (no framework)'
                           default: frontend/react
                         backendFragment:
                           title: Backend
