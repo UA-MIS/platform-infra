@@ -149,6 +149,29 @@ spec:
             app:
               title: "The Process — UA-MIS Capstone Developer Portal"
               baseUrl: https://process.capstone.uamishub.com
+              # ── New-frontend-system extension overrides (MUST live HERE) ─────────────
+              # CRITICAL: the chart launches the backend with ONLY
+              # `--config /app/app-config-from-configmap.yaml` (this overlay) — it does NOT
+              # load the image's baked app-config.yaml. `app.extensions` is frontend config
+              # served to the browser AT RUNTIME from whatever the backend loaded, so an
+              # extension override that lives ONLY in the baked app-config.yaml never reaches
+              # the running app. That is exactly why `https://process.capstone.uamishub.com/`
+              # 404'd "someone dropped the mic": the home landing page
+              # (packages/app/src/modules/home, extension id `page:home`) was registered in
+              # App.tsx and defaults to its param path `/home`, but the baked
+              # `page:home -> path: /` override that moves it to the app root was dropped at
+              # runtime → `/` matched no route → NotFoundErrorPage. Mirror the baked
+              # app-config.yaml `app.extensions` block EXACTLY (same rule as auth/catalog/
+              # permission below). Takes effect on ArgoCD appConfig sync — NO image rebuild.
+              #   - page:home {path: /}  : mount the landing page at the root instead of /home.
+              #   - theme:app/{light,dark}: false : disable the stock Backstage themes so the
+              #     custom UA-MIS crimson/charcoal theme (themeModule) is the only one on offer.
+              extensions:
+                - page:home:
+                    config:
+                      path: /
+                - theme:app/light: false
+                - theme:app/dark: false
             organization:
               name: "UA-MIS"
             backend:
