@@ -1,0 +1,14 @@
+# Namespace for the cohort/preview garbage-collection CronJobs (DRAFT — not yet
+# reviewed/merged). These are platform-admin maintenance jobs (they delete tenant
+# namespaces + ArgoCD Applications), so they live in their own platform-owned ns,
+# NOT in any tenant namespace.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cohort-gc
+  labels:
+    platform.capstone/component: platform
+    # Enforce restricted Pod Security at the namespace level (the jobs run as a
+    # non-root, no-privilege, read-only-rootfs pod — see the CronJob securityContext).
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest

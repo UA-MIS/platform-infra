@@ -1,0 +1,65 @@
+# RBAC for the cohort-gc CronJobs (DRAFT). The jobs need to:
+#   - list namespaces (to find preview/cohort namespaces by label)
+#   - delete namespaces (cohort cleanup + preview teardown fallback)
+#   - list/delete ArgoCD Applications (preview teardown — deleting only the ns is
+#     futile while the owning App has selfHeal:true; the App must go first so its
+#     resources-finalizer cascades the ns).
+#   - GET/LIST (read-only) CapstoneTenant XRs + ApplicationSets — the cohort-cleanup
+#     orphan-before-delete pre-flight guard (2026-07-10 apply-fight discipline): it
+#     REFUSES to sweep while a live claim or parent ApplicationSet still owns the
+#     cohort's objects. Read-only — the guard never deletes claims/appsets (that is
+#     done via `git rm tenants/_claims/...`, so ArgoCD/Crossplane deprovision).
+#
+# Scope: cluster-wide (namespaces + CapstoneTenant XRs are cluster-scoped;
+# Applications/ApplicationSets live in argocd). This is a privileged maintenance
+# identity — kept OFF tenant runners and scoped to exactly these verbs. No
+# create/patch on workloads, no secret access, no delete on claims/appsets.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cohort-gc
+  namespace: cohort-gc
+  labels:
+    platform.capstone/component: platform
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cohort-gc
+  labels:
+    platform.capstone/component: platform
+rules:
+  # Find + delete tenant namespaces by label.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "delete"]
+  # Find + delete ArgoCD Applications (preview teardown — delete the App so its
+  # finalizer cascades the namespace; deleting the ns alone is reverted by selfHeal).
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    verbs: ["get", "list", "delete"]
+  # READ-ONLY guard inputs (cohort-cleanup orphan-before-delete pre-flight). NO delete:
+  # the job never removes claims/appsets — it only refuses to sweep while they're live.
+  # CapstoneTenant XR = the onboarding claim (ADR-031); removed via git rm, not here.
+  - apiGroups: ["platform.capstone.uamishub.com"]
+    resources: ["capstonetenants"]
+    verbs: ["get", "list"]
+  # Parent ApplicationSets (the env/preview generators the Composition fans out).
+  - apiGroups: ["argoproj.io"]
+    resources: ["applicationsets"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cohort-gc
+  labels:
+    platform.capstone/component: platform
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cohort-gc
+subjects:
+  - kind: ServiceAccount
+    name: cohort-gc
+    namespace: cohort-gc
