@@ -1,0 +1,22 @@
+# The DEDICATED TENANT Postgres tier's CRs (ADR-036). Source for
+# applicationsets/cnpg-tenant-cluster-app.yaml (sync-wave 1 — AFTER the CNPG
+# operator + Barman Cloud plugin, both wave 0, so the postgresql.cnpg.io +
+# barmancloud.cnpg.io CRDs exist before these objects are submitted). Same split
+# as platform-services/cnpg/cluster/ (capstone-pg) — this is its tenant sibling.
+#
+# No databases.yaml: tenant databases + login roles are created DYNAMICALLY by
+# provider-sql (ADR-033), not declared here. The only declarative object beyond
+# the Cluster/ObjectStore/ScheduledBackup is the provisioner role (roles.yaml).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - objectstore.yaml
+  - cluster.yaml
+  - scheduledbackup.yaml
+  - roles.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false

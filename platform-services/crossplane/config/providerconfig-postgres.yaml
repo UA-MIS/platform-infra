@@ -1,25 +1,37 @@
-# ProviderConfig for provider-sql — POSTGRES tier (ADR-033). Sibling of
+# ProviderConfig for provider-sql — POSTGRES tier (ADR-033 + ADR-036). Sibling of
 # providerconfig-sql.yaml (MariaDB/MySQL). provider-sql is ONE provider that speaks
 # mysql + postgresql; this second ProviderConfig lets a CapstoneTenant pick
-# `database: postgres` and be provisioned on the in-cluster CNPG cluster
-# (capstone-pg-rw.db-tier.svc.cluster.local, PG17).
+# `database: postgres` and be provisioned on the DEDICATED TENANT CNPG cluster
+# (ADR-036: capstone-tenant-pg-rw.db-tier.svc.cluster.local, PG17) — SEPARATE from
+# capstone-pg (Backstage/Harbor's control-plane DB) for blast-radius isolation.
+#
+# ⚠ The target endpoint lives INSIDE the sealed admin secret `db-tier-postgres-
+# admin` (creds/postgres-admin-creds-sealed.yaml), NOT in this object's spec — so
+# repointing from capstone-pg-rw (the ADR-033 shared-cluster interim) to
+# capstone-tenant-pg-rw is a RESEAL of that secret at the supervised ADR-036
+# cutover, not a change here. This object's spec (defaultDatabase/sslMode) is
+# unchanged by the repoint (the tenant cluster is also non-TLS and has the
+# `postgres` maintenance DB).
 #
 # Connects using a SCOPED admin credential — NOT the Postgres `postgres` superuser.
 # The provisioner role (`crossplane_provisioner`, the CNPG DatabaseRole in
-# platform-services/cnpg/cluster/roles.yaml) only has CREATEDB + CREATEROLE
+# platform-services/cnpg/tenant-cluster/roles.yaml) only has CREATEDB + CREATEROLE
 # (create/drop tenant databases and login roles, and — because CREATEROLE makes it
 # a member of the roles it creates — assign per-tenant database ownership +
 # delegate schema privileges). It is NOT a superuser (no SUPERUSER/REPLICATION/
-# BYPASSRLS) — verified live against capstone-pg.
+# BYPASSRLS) — the same least-privilege shape verified live against capstone-pg,
+# now on the dedicated capstone-tenant-pg cluster (ADR-036).
 #
-# STATUS: resealed against the in-cluster tier (docs/operator/
-# in-cluster-db-tier-runbook.md §4c) alongside the mysql ProviderConfig's cutover,
-# but there is no live Postgres tenant yet (zero postgresql.sql.crossplane.io
-# Database/Role/Grant claims), so this activates reconciliation for the first
-# time with no existing state to disturb. `platform-services/db-tier/netpol.yaml`
-# does NOT yet admit crossplane-system -> db-tier:5432 — add that ingress rule
-# (same pattern as the mysql:3306 rule) at the point a real Postgres tenant is
-# first provisioned.
+# STATUS (ADR-036): repoint from the ADR-033 interim (capstone-pg-rw, the shared
+# control-plane cluster) to the dedicated capstone-tenant-pg-rw is a supervised
+# reseal of db-tier-postgres-admin (endpoint + the tenant provisioner password) —
+# see creds/postgres-admin-creds-sealed.yaml + ADR-036 §Cutover. There is no live
+# Postgres tenant yet (zero postgresql.sql.crossplane.io Database/Role/Grant
+# claims), so this activates reconciliation for the first time with no existing
+# state to disturb. `platform-services/db-tier/netpol.yaml` NOW admits
+# crossplane-system -> db-tier:5432 (the crossplane-system ingress rule, added by
+# ADR-036 alongside the existing mysql:3306 rule), so provider-sql's admin session
+# to the tenant cluster is no longer blocked by default-deny.
 #
 # The referenced Secret `db-tier-postgres-admin` is materialized from the
 # SealedSecret in creds/postgres-admin-creds-sealed.yaml. provider-sql's

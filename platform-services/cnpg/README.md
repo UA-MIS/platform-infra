@@ -9,7 +9,8 @@ ArgoCD Application, same two-app CRD-then-CR split as `rook-ceph` / `cdi` / `kub
 | --- | --- | --- | --- |
 | (n/a — Helm chart, no git dir) | `applicationsets/cnpg-operator-app.yaml` | 0 | The CNPG operator (`cloudnative-pg` Helm chart) + its CRDs |
 | `barman-plugin/` | `applicationsets/cnpg-barman-plugin-app.yaml` | 0 | The Barman Cloud plugin (backup/WAL-archive sidecar manager) + its `ObjectStore` CRD |
-| `cluster/` | `applicationsets/cnpg-cluster-app.yaml` | 1 | The `Cluster` CR (`capstone-pg`, PG17 HA), its `ObjectStore`, `ScheduledBackup`, per-app `Database`/`DatabaseRole` CRs |
+| `cluster/` | `applicationsets/cnpg-cluster-app.yaml` | 1 | The **control-plane** `Cluster` CR (`capstone-pg`, PG17 HA), its `ObjectStore`, `ScheduledBackup`, per-app `Database`/`DatabaseRole` CRs (Backstage + Harbor + a provisioner-parity role) |
+| `tenant-cluster/` | `applicationsets/cnpg-tenant-cluster-app.yaml` | 1 | The **dedicated tenant** `Cluster` CR (`capstone-tenant-pg`, PG17 HA, ADR-036) + its `ObjectStore`/`ScheduledBackup` + the `crossplane_provisioner` `DatabaseRole` — hosts auto-provisioned per-(team,env) `host-postgres` tenant DBs (ADR-033), ISOLATED from the control-plane `capstone-pg`. No declarative per-tenant `Database` CRs — those are created dynamically by provider-sql. |
 
 The operator + plugin namespace (`cnpg-system`) and the Cluster's namespace
 (`db-tier`, shared with the MariaDB tier + the backup MinIO) ship via the flat,

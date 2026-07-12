@@ -1,3 +1,17 @@
+# ⚠ ADR-036 RESEAL PENDING (supervised cutover). The encrypted values BELOW are the
+# ADR-033 interim: endpoint=capstone-pg-rw.db-tier.svc.cluster.local (the shared
+# control-plane cluster). ADR-036 moves tenant Postgres to the DEDICATED
+# capstone-tenant-pg cluster, so at the supervised apply the OPERATOR must RESEAL
+# this SealedSecret with:
+#   endpoint=capstone-tenant-pg-rw.db-tier.svc.cluster.local  port=5432
+#   username=crossplane_provisioner
+#   password=<the capstone-tenant-pg provisioner password — the SAME value written
+#             to Vault platform/db/cnpg-tenant/crossplane-provisioner, which feeds
+#             the `capstone-tenant-pg-crossplane-provisioner` DatabaseRole's
+#             passwordSecret via platform-services/db-tier/externalsecrets.yaml>
+# Until then provider-sql keeps pointing at capstone-pg (harmless — zero live
+# Postgres tenant claims), so the repoint has no blast radius on existing state.
+#
 # Sealed against the IN-CLUSTER db-tier (docs/operator/in-cluster-db-tier-runbook.md
 # §4c, the tenant-DB migration cutover, PR completing the mysql-side repoint).
 # endpoint=capstone-pg-rw.db-tier.svc.cluster.local port=5432
