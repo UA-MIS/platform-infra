@@ -98,25 +98,12 @@ spec:
           type: string
           description: One-line description of your project (shown in the catalog).
           default: A UA-MIS capstone project.
-        # Progressive delivery (opt-in, single-component "web" projects only — see
-        # docs/operator/progressive-delivery.md). Off by default: your app deploys as a
-        # plain `Deployment`, byte-for-byte the existing golden path. Turning it on swaps
-        # the ONE workload for an Argo Rollouts `Rollout` with a simple canary strategy
-        # (25% -> pause -> 50% -> pause -> 100%) — every new image bump is progressively
-        # shifted instead of replaced all-at-once. Nothing else about your app changes
-        # (same Service/Ingress/probes/secret wiring); the platform already runs the Argo
-        # Rollouts controller cluster-wide, so no extra setup is needed. Silently ignored
-        # (always a plain Deployment) for frontend-backend and mobile projects for now —
-        # extend the same `{% if %}` in _fragments/_contract/.devops/chart/base/
-        # deployments.yaml if a multi-component team needs it.
-        progressiveDelivery:
-          title: Progressive delivery (canary)
-          type: boolean
-          description: >-
-            Single-component web projects only. Deploy as an Argo Rollouts canary
-            (25% -> pause -> 50% -> pause -> 100%) instead of a plain rolling-update
-            Deployment. Off by default — see docs/operator/progressive-delivery.md.
-          default: false
+        # NOTE: progressive delivery (canary) is NO LONGER a wizard toggle — it is an ENV-BASED
+        # platform default (ADR-037). dev/staging/preview deploy a plain rolling-update
+        # `Deployment`; PROD deploys a single-component web project as an auto-completing Argo
+        # Rollouts canary (25% -> pause -> 50% -> pause -> 100%). This is decided entirely in the
+        # shared contract's chart overlays (_fragments/_contract/.devops/chart/overlays/prod),
+        # so there is nothing for the student to choose. See docs/operator/progressive-delivery.md.
         # Per-PR preview environments (opt-in, security-gated). Off by default: only the
         # merge -> dev / tag -> staging / gate -> prod golden path runs, and NO preview
         # ApplicationSet is created. Turning it on flips spec.previewEnabled=true on the
@@ -455,11 +442,8 @@ spec:
         semesterDisplay: Capstone ${{ parameters.season }} ${{ parameters.year }}
         port: ${{ parameters.port }}
         description: ${{ parameters.description }}
-        # Progressive delivery opt-in (single-component "web" projects only, see the
-        # parameter above + docs/operator/progressive-delivery.md). Default false renders
-        # the exact same `kind: Deployment` as before this parameter existed; the compose
-        # engine only ever acts on it when the plan is single-component (values.single).
-        progressiveDelivery: ${{ parameters.progressiveDelivery }}
+        # (progressive delivery is env-based now — decided in the chart's prod overlay, not a
+        # compose input; ADR-037. Nothing to pass here.)
 
     # 3) Create UA-MIS/<repo>, push, protect main (PRs only — platform policy).
     - id: publish

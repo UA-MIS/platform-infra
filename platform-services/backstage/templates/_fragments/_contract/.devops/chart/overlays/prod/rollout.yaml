@@ -1,0 +1,152 @@
+# PROD-ONLY progressive-delivery workload (ADR-037 env-based canary policy). This file is
+# referenced by overlays/prod/kustomization.yaml ONLY for a single-component web project
+# (values.single); that same overlay `$patch: delete`s the base Deployment of the same name,
+# so prod runs this Argo Rollouts `Rollout` INSTEAD of the plain Deployment. dev / staging /
+# preview never reference this file — they keep the base Deployment (rolling update).
+#
+# The pod `template` below is a DELIBERATE MIRROR of base/deployments.yaml's pod template —
+# kustomize cannot retype a Deployment into a Rollout, so the Rollout must carry the full
+# container spec itself. KEEP THE POD TEMPLATE IN SYNC WITH base/deployments.yaml (container
+# image seam, env/PORT/APP_SECRET/DATABASE_URL wiring, probes, resources, securityContext,
+# serviceAccountName, automountServiceAccountToken, soft pod-antiAffinity). Both are rendered
+# once at scaffold time from the SAME `values`, so a fresh scaffold is always consistent; this
+# note guards future edits to the shared workload shape.
+#
+# Same selector + labels as the base Deployment/Service, so the ONE Service (services.yaml,
+# selecting on name+component — no rollouts-pod-template-hash) routes traffic to this Rollout's
+# stable+canary ReplicaSets. The prod overlay's JSON6902 replicas patch (#340) targets THIS
+# Rollout GVK (argoproj.io/Rollout) — the builtin `replicas:` transformer errors on a Rollout,
+# hence a patch — and the prod PDB (#346) selects these pods by label (kind-agnostic).
+{%- if values.single %}
+{%- for c in values.components %}
+{%- if c.buildType != "mobile-artifact" %}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: ${{ values.appName }}-${{ c.name }}
+  labels:
+    app.kubernetes.io/name: ${{ values.appName }}
+    app.kubernetes.io/component: ${{ c.name }}
+spec:
+  replicas: 1   # overlays/prod patches this to 3 (JSON6902 replace, targets the Rollout GVK).
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ${{ values.appName }}
+      app.kubernetes.io/component: ${{ c.name }}
+  # Basic Canary that AUTO-COMPLETES with NO human and NO kubectl plugin (Basic Canary =
+  # no traffic-routing plugin/service mesh wired up, so weight is approximated by the
+  # stable/canary ReplicaSet replica-count ratio behind the ONE Service both share, see
+  # ../../base/services.yaml). Every new image bump (the prod promote gate) steps
+  # 25% -> (30s) -> 50% -> (30s) -> 100%, auto-advancing on TIMED pauses (not an indefinite
+  # empty pause), then promotes to 100% and scales the old ReplicaSet to 0 on its own.
+  # scaleDownDelaySeconds is intentionally NOT set (default 30s), so the old revision is
+  # cleaned up promptly after promotion — no ImagePullBackOff pod left held forever. The
+  # FIRST-ever deploy on a fresh tenant SKIPS these steps and goes straight to 100% (Argo
+  # Rollouts has no prior stable revision to canary against yet), so a brand-new app comes up
+  # clean without a stuck initial rollout.
+  #
+  # Want a MANUAL hold gate? Replace a timed `pause` below with a bare `pause:` that has no
+  # `duration:` (an empty pause step pauses INDEFINITELY until promoted) and promote it with
+  # `kubectl argo rollouts promote ${{ values.appName }}-${{ c.name }} -n ${{ values.team }}-prod`
+  # (requires the kubectl-argo-rollouts plugin installed locally). The DEFAULT here stays
+  # fully automatic — see docs/operator/progressive-delivery.md.
+  strategy:
+    canary:
+      steps:
+        - setWeight: 25
+        - pause: { duration: 30s }
+        - setWeight: 50
+        - pause: { duration: 30s }
+        - setWeight: 100
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ${{ values.appName }}
+        app.kubernetes.io/component: ${{ c.name }}
+    spec:
+      serviceAccountName: ${{ values.appName }}
+      automountServiceAccountToken: false
+      # Soft (preferred) pod anti-affinity — MIRRORS base/deployments.yaml. `preferred` keeps
+      # it a no-op below replicas>1 and spreads prod's 3 replicas across nodes for drain/HA.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: ${{ values.appName }}
+                    app.kubernetes.io/component: ${{ c.name }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ${{ c.name }}
+          # SEAM: overlays override registry + tag via kustomize images: (entry name
+          # = `<appName>-<component>`, matching .devops/components.yaml `image`).
+          image: ${{ values.appName }}-${{ c.name }}:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: ${{ c.port }}
+          env:
+            # Container port — single source is this component's `port` in components.yaml.
+            - name: PORT
+              value: "${{ c.port }}"
+            # Proof-of-secret-path; optional + deletionPolicy Delete on the ExternalSecret
+            # means a fresh repo with nothing in Vault still starts (M4 zero-config).
+            - name: APP_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: ${{ values.appName }}-secret
+                  key: APP_SECRET
+                  optional: true
+{%- if c.needsDb %}
+            # DATABASE_URL — same source selection as base/deployments.yaml (ADR-033):
+            # auto-DB (mysql|postgres) -> `<appName>-db`; bring-your-own -> `<appName>-secret`.
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+{%- if values.database == 'mysql' or values.database == 'postgres' %}
+                  name: ${{ values.appName }}-db       # auto-DB: DSN assembled by database.externalsecret.yaml (ADR-033)
+{%- else %}
+                  name: ${{ values.appName }}-secret   # bring-your-own: DATABASE_URL set via the Secrets tab
+{%- endif %}
+                  key: DATABASE_URL
+                  optional: true
+{%- endif %}
+          # Probes hit the pod DIRECTLY (not via the Ingress), so every component
+          # serves /healthz at the container root regardless of its ingress `path`.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+{%- endif %}
+{%- endfor %}
+{%- endif %}

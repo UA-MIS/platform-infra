@@ -152,7 +152,8 @@ def compose(selection, out, *, app_name="demo-app", team="demo-team", port=8080,
         destination={"owner": "UA-MIS", "repo": app_name},
         components=plan["components"], database=plan["database"],
         dbWired=plan["dbWired"], single=plan["single"],
-        progressiveDelivery=False,
+        # (progressive delivery is now an env-based chart default — prod overlay only — so no
+        # `progressiveDelivery` value is needed here; no chart template references it. ADR-037.)
     )
 
     out = Path(out)

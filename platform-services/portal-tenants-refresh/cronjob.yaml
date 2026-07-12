@@ -1,0 +1,78 @@
+# ============================================================================
+# portal-tenants-refresh CronJob — keeps the apex portal's "Live on the platform"
+# list current as tenants come and go. Reads the live PROD Ingresses and republishes
+# the portal-tenants ConfigMap (see configmap.yaml for the script + rationale).
+#
+# schedule: every 10 min — a new tenant appears (or a torn-down one disappears)
+# within ~10 min, with no portal redeploy. Cheap (one short kubectl+jq pass).
+# concurrencyPolicy: Forbid — never two writers at once. backoffLimit: 1 — a failed
+# run just leaves the last good ConfigMap and the next tick re-converges.
+#
+# IMMEDIATE first population on deploy is handled by seed-job.yaml (a PostSync hook),
+# so the page is not empty while waiting for the first cron tick.
+# ============================================================================
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: portal-tenants-refresh
+  namespace: crossplane-system
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: portal-tenants-refresh
+spec:
+  schedule: "*/10 * * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 120
+      ttlSecondsAfterFinished: 3600
+      template:
+        metadata:
+          labels:
+            platform.capstone/component: platform
+            app.kubernetes.io/name: portal-tenants-refresh
+        spec:
+          serviceAccountName: portal-tenants-refresh
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            fsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: refresh
+              # kubectl + bash + jq, pinned to the cluster's server minor (v1.31.x) —
+              # same image the sibling crossplane-mr-prune CronJob uses.
+              image: alpine/k8s:1.31.5
+              command: ["/bin/bash", "/scripts/refresh.sh"]
+              env:
+                - name: HOME
+                  value: /tmp
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests: { cpu: "25m", memory: "48Mi" }
+                limits:   { cpu: "250m", memory: "128Mi" }
+              volumeMounts:
+                - name: script
+                  mountPath: /scripts
+                  readOnly: true
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: script
+              configMap:
+                name: portal-tenants-refresh-script
+                defaultMode: 0555
+            - name: tmp
+              emptyDir: {}
