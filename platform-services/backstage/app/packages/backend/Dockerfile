@@ -172,18 +172,20 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 # Disable the Node snapshot so the scaffolder's isolated-vm works, AND load the
-# OpenTelemetry auto-instrumentation register hook before the backend bundle starts
-# (OBSERVABILITY / traces first-producer, ADR-032). The register entrypoint reads ALL
-# of its config from OTEL_* env vars (exporter, endpoint, service name, sampler), which
-# the Helm values inject at deploy time (applicationsets/backstage-process-app.yaml
-# backstage.extraEnvVars) — so WHERE spans go and HOW MUCH is sampled is tunable with
-# no rebuild; only toggling instrumentation on/off touches this line. require-in-the-
-# middle patches the real node_modules (Backstage does NOT bundle its deps — it ships a
-# skeleton + `yarn workspaces focus --production`, so the http/pg/express libs stay
-# require()'d and are patchable). Baked here (not in Helm NODE_OPTIONS) so it can COEXIST
-# with --no-node-snapshot: a Helm-set NODE_OPTIONS would REPLACE this value wholesale and
-# silently drop --no-node-snapshot, breaking the scaffolder's isolated-vm.
-ENV NODE_OPTIONS="--no-node-snapshot --require @opentelemetry/auto-instrumentations-node/register"
+# OpenTelemetry bootstrap (instrumentation.js, COPYed below) before the backend bundle
+# starts (OBSERVABILITY / traces first-producer, ADR-032). That file wires a MINIMAL,
+# explicit instrumentation set (http + express only — NOT the auto-instrumentations-node
+# meta-package, whose ~80 deps bloated node_modules enough to OOM the Kaniko build) and
+# reads its exporter endpoint + service name + sampler from OTEL_* env, which the Helm
+# values inject at deploy time (applicationsets/backstage-process-app.yaml
+# backstage.extraEnvVars) — so WHERE spans go and HOW MUCH is sampled is tunable with no
+# rebuild. require-in-the-middle patches the real node_modules (Backstage does NOT bundle
+# its deps — it ships a skeleton + `yarn workspaces focus --production`, so the http/express
+# libs stay require()'d and are patchable). Baked here (not in Helm NODE_OPTIONS) so it can
+# COEXIST with --no-node-snapshot: a Helm-set NODE_OPTIONS would REPLACE this value wholesale
+# and silently drop --no-node-snapshot, breaking the scaffolder's isolated-vm. Absolute path
+# so the loader is independent of the extracted-bundle layout.
+ENV NODE_OPTIONS="--no-node-snapshot --require /app/instrumentation.js"
 
 # Manifests (yarn.lock + root package.json + each workspace package.json from the skeleton
 # tarball). No yarn command runs in this stage anymore (see HARDENING note above) — these
@@ -205,5 +207,11 @@ COPY --from=build --chown=node:node /app/examples ./examples
 # The built backend bundle + the baked app-config files.
 COPY --from=build --chown=node:node /app/packages/backend/dist/bundle/ ./
 COPY --from=build --chown=node:node /app/app-config*.yaml ./
+
+# The OpenTelemetry bootstrap loaded by NODE_OPTIONS --require above. Not part of the built
+# backend bundle (it lives at the backend package root, outside src/, so backstage-cli never
+# bundles it), so COPY it in explicitly. Absolute /app/instrumentation.js resolves its
+# requires against /app/node_modules (the production deps copied above).
+COPY --from=build --chown=node:node /app/packages/backend/instrumentation.js /app/instrumentation.js
 
 CMD ["node", "packages/backend", "--config", "app-config.yaml", "--config", "app-config.production.yaml"]

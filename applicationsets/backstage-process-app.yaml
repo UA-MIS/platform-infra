@@ -100,46 +100,34 @@ spec:
           # the envFrom key collision (Kubernetes: last envFrom source wins on
           # duplicate keys).
           # ── OpenTelemetry TRACES → the platform otel-collector (OBSERVABILITY, ADR-032) ──
-          # The Backstage image bakes `--require @opentelemetry/auto-instrumentations-node/
-          # register` into NODE_OPTIONS (packages/backend/Dockerfile); that hook reads its
-          # WHOLE config from these OTEL_* env vars, so endpoint + service name + sampler are
-          # tunable here with NO image rebuild. Backstage is "The Process" — the FIRST span
-          # producer wired to the otherwise-idle collector (Tempo had zero producers).
+          # The Backstage image bakes `--require /app/instrumentation.js` into NODE_OPTIONS
+          # (packages/backend/Dockerfile); that MINIMAL bootstrap (http + express only, NOT the
+          # auto-instrumentations-node meta-package) reads its endpoint + service name + sampler
+          # from these OTEL_* env vars, so they are tunable here with NO image rebuild. Backstage
+          # is "The Process" — the FIRST span producer wired to the otherwise-idle collector
+          # (Tempo had zero producers). Metrics/logs are NOT wired in the bootstrap at all
+          # (Prometheus is near-OOM; logs already flow via the Alloy DaemonSet → Loki), so no
+          # metrics/logs env is needed here.
           #
-          #   endpoint : the ONE canonical collector OTLP receiver. HTTP/4318 (not gRPC/4317)
-          #              — auto-instrumentations-node/register defaults to http/protobuf, and
-          #              4318 is the simplest, proxy-friendliest path. The collector re-exports
-          #              to tempo:4317 and applies its OWN 15% probabilistic_sampler on top.
+          #   endpoint : the ONE canonical collector OTLP receiver. HTTP/4318 (not gRPC/4317);
+          #              the exporter-trace-otlp-http exporter POSTs to <endpoint>/v1/traces.
+          #              The collector re-exports to tempo:4317 and applies its OWN 15%
+          #              probabilistic_sampler on top.
           #   sampler  : parentbased_traceidratio @ 0.5 — a SANE default, NOT always-on 100%
-          #              (Prometheus is near-OOM and span-metrics remote-write was deliberately
-          #              skipped, so trace volume is kept modest). Effective retention ≈ this ×
-          #              the collector's 15% ≈ 7.5%; fine for a low-traffic internal portal and
-          #              enough to populate Grafana → Drilldown → Traces. Bump OTEL_TRACES_
-          #              SAMPLER_ARG here (no rebuild) if a demo needs denser data. Tenant apps
-          #              should default LOWER (≈0.1) via the scaffolder template (follow-up).
-          #   metrics/logs EXPORTER = none : metrics would hammer the near-OOM Prometheus, and
-          #              logs already flow via the Alloy DaemonSet → Loki. Traces ONLY here.
-          #   OTEL_NODE_DISABLED_INSTRUMENTATIONS=fs : the fs auto-instrumentation is extremely
-          #              noisy (a span per file read) and low-value; disabling it is standard.
+          #              (trace volume kept modest). Effective retention ≈ this × the collector's
+          #              15% ≈ 7.5%; enough to populate Grafana → Drilldown → Traces on a low-
+          #              traffic internal portal. Bump OTEL_TRACES_SAMPLER_ARG here (no rebuild)
+          #              for a denser demo. Tenant apps should default LOWER (≈0.1) via the
+          #              scaffolder template (follow-up).
           extraEnvVars:
             - name: OTEL_SERVICE_NAME
               value: backstage-process
-            - name: OTEL_TRACES_EXPORTER
-              value: otlp
-            - name: OTEL_METRICS_EXPORTER
-              value: none
-            - name: OTEL_LOGS_EXPORTER
-              value: none
-            - name: OTEL_EXPORTER_OTLP_PROTOCOL
-              value: http/protobuf
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: http://otel-collector.monitoring.svc.cluster.local:4318
             - name: OTEL_TRACES_SAMPLER
               value: parentbased_traceidratio
             - name: OTEL_TRACES_SAMPLER_ARG
               value: "0.5"
-            - name: OTEL_NODE_DISABLED_INSTRUMENTATIONS
-              value: fs
           # OIDC client secret + backend signing key are env-injected from the
           # SealedSecret (platform-services/backstage/sealedsecret-oidc.yaml). That
           # Secret also still carries a legacy POSTGRES_PASSWORD key from the bundled-
