@@ -67,6 +67,18 @@ data:
           operator: Equal
           value: "true"
           effect: PreferNoSchedule
+        # --- DEDICATE laptop-01 to CI (capacity fix, complements #372's soft affinity) ---
+        # laptop-01 (16GiB) is tainted `capstone.io/dedicated=ci-build:NoSchedule` so
+        # steady-state platform pods drain OFF and the memory-hungry Kaniko BUILD step pod
+        # (8Gi limit) gets the near-full node. This toleration lets the build land on the
+        # tainted node; #372's weight-100 "prefer laptop-01" affinity then targets it.
+        # Taint applied live by the operator AFTER this toleration is synced (order matters
+        # — else builds are repelled too). Undo: `kubectl taint node laptop-01
+        # capstone.io/dedicated=ci-build:NoSchedule-`.
+        - key: capstone.io/dedicated
+          operator: Equal
+          value: ci-build
+          effect: NoSchedule
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
