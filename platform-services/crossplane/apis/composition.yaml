@@ -3531,7 +3531,22 @@ spec:
                     target:
                       name: db-console
                       creationPolicy: Owner
-                      deletionPolicy: Delete
+                      # Retain (the ESO default), NOT Delete. On a fresh tenant the
+                      # console leaf (tenants/<team>/console/database) and/or the
+                      # vault-tenant SecretStore are briefly absent/not-ready when this
+                      # ExternalSecret first reconciles (the Crossplane dependsOn on the
+                      # PushSecret Object only gates on the PushSecret RESOURCE existing,
+                      # not on ESO finishing the Vault write, and the SecretStore Object's
+                      # default SuccessfulCreate readiness is Ready-on-create, not
+                      # Ready-on-connected). With Delete, ESO treats that transient missing
+                      # leaf as "provider secret gone" -> silently DELETES the target and
+                      # reports SecretDeleted (a success state), so it will not retry until
+                      # refreshInterval (1h) -- leaving the db-console Deployment stuck in
+                      # CreateContainerConfigError ("secret db-console not found") for up to
+                      # an hour. Retain makes the same condition a SecretSyncedError, which
+                      # the controller requeues on backoff and re-enqueues when the
+                      # SecretStore goes Ready, so the secret materializes within minutes.
+                      deletionPolicy: Retain
                       template:
                         engineVersion: v2
                         data:
