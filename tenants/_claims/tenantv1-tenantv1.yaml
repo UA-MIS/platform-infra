@@ -1,0 +1,21 @@
+# Emitted by The Process scaffolder (capstone:emit-tenant-claim, ADR-031).
+# ONE CapstoneTenant XR — a reviewed-once Crossplane Composition expands it into
+# the full tenant (repo + Harbor + Vault + the k8s tenancy fence). No onboarding
+# PR, no operator make steps. De-provision = git rm this file.
+apiVersion: platform.capstone.uamishub.com/v1alpha1
+kind: CapstoneTenant
+metadata:
+  name: tenantv1-tenantv1
+  labels:
+    platform.capstone/team: "tenantv1"
+    platform.capstone/semester: "2026-summer"
+    platform.capstone/component: tenant
+spec:
+  team: "tenantv1"
+  appName: "tenantv1"
+  semester: "2026-summer"
+  githubTeam: "tenantv1"
+  port: 8080
+  previewEnabled: false
+  domain: "capstone.uamishub.com"
+  database: "none"
