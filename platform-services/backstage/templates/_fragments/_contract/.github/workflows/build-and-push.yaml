@@ -137,11 +137,23 @@ jobs:
             -c '
             set -eu;
             CFG="${DOCKER_CONFIG_DIR}/config.json";
-            if [ "${PUSH}" = "true" ] && [ ! -s "$CFG" ]; then
-              echo "ERROR: Harbor push credential not found at $CFG — the platform" \
-                   "runner must inject secret harbor-push (container-hook template)." \
-                   "Refusing an unauthenticated push." >&2;
-              exit 1;
+            if [ "${PUSH}" = "true" ]; then
+              i=0;
+              while [ ! -s "$CFG" ]; do
+                i=$((i+1));
+                if [ "$i" -gt 30 ]; then
+                  echo "ERROR: Harbor push credential still not injected at $CFG" \
+                       "after ~5min — the platform provisions harbor-push-<team>" \
+                       "asynchronously (CapstoneTenant -> robot -> PushSecret ->" \
+                       "Vault -> ESO sync); fresh-tenant provisioning may have failed." \
+                       "Refusing an unauthenticated push." >&2;
+                  exit 1;
+                fi;
+                echo "harbor-push cred not injected yet at $CFG; waiting for the" \
+                     "platform to provision it (attempt $i/30, sleeping 10s)..." >&2;
+                sleep 10;
+              done;
+              echo "harbor-push cred present at $CFG — proceeding with authenticated push.";
             fi;
             COMMON="--context=dir://${GITHUB_WORKSPACE}/${CONTEXT}
                     --dockerfile=${DOCKERFILE}
