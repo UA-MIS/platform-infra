@@ -183,6 +183,15 @@ spec:
         # picks it up via filters.topic.include — org-wide discovery with no topic
         # filter would ingest catalog-info.yaml from ANY of the org's other repos.
         topics: ['capstone-tenant']
+        # Set the repo Actions variable RUNNER_SCALE_SET so this tenant's CI runs on ITS
+        # OWN per-team runner scale-set (<team>-kaniko), which injects the tenant's own
+        # harbor-push-<team> cred. Without it the workflow's `${{ vars.RUNNER_SCALE_SET ||
+        # 'ua-mis-kaniko' }}` falls back to the SHARED ua-mis-kaniko runner (backstage's
+        # push cred) -> `UNAUTHORIZED: action: push` to <team>/<app>. Built into
+        # publish:github (@0.9.10 calls actions.createRepoVariable) — no Backstage rebuild;
+        # requires the platform GitHub App to have Actions Variables: read/write. (Fix A.)
+        repoVariables:
+          RUNNER_SCALE_SET: ${{ parameters.team }}-kaniko
         # Platform branch policy: PRs into main, no direct pushes.
         protectDefaultBranch: true
         requireCodeOwnerReviews: true

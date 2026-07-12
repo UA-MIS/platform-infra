@@ -84,6 +84,12 @@ if command -v yq >/dev/null 2>&1; then yq '.images' "${KUSTOMIZATION}"; else gre
 # (Harmless for the local/manual path — it's just a commit-message tag.)
 if [ "${COMMIT:-0}" = "1" ]; then
   echo "==> committing bump (GitOps signal)"
+  # ARC's container-hook runs git as a different UID than the checkout-dir owner, so git's
+  # dubious-ownership guard aborts the commit ("detected dubious ownership in repository").
+  # The runner is ephemeral, so whitelist the repo dir as safe before any git write. This
+  # also covers the `git push` the bump/promote workflow step runs after this script (same
+  # container/HOME -> the global config persists). (Fix C.)
+  git config --global --add safe.directory "${REPO_DIR}"
   git -C "${REPO_DIR}" add "${KUSTOMIZATION}"
   git -C "${REPO_DIR}" commit -m "ci: bump ${ENV} images to ${NEW_TAG} [skip ci]" \
     && echo "committed. ArgoCD will sync ${ENV} on next reconcile." \
