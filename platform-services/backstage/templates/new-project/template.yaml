@@ -34,7 +34,8 @@ metadata:
   description: >-
     Create a new UA-MIS capstone project. Pick what you're building (web app or mobile app),
     your frontend/backend language(s), and a database — The Process assembles a repo wired to
-    the platform golden path (PR -> preview, merge -> dev, tag -> staging, manual gate -> prod).
+    the platform golden path (merge -> dev, tag -> staging, manual gate -> prod; per-PR
+    preview environments are opt-in — enable them below).
   tags:
     - capstone
     - golden-path
@@ -115,6 +116,22 @@ spec:
             Single-component web projects only. Deploy as an Argo Rollouts canary
             (25% -> pause -> 50% -> pause -> 100%) instead of a plain rolling-update
             Deployment. Off by default — see docs/operator/progressive-delivery.md.
+          default: false
+        # Per-PR preview environments (opt-in, security-gated). Off by default: only the
+        # merge -> dev / tag -> staging / gate -> prod golden path runs, and NO preview
+        # ApplicationSet is created. Turning it on flips spec.previewEnabled=true on the
+        # emitted CapstoneTenant XR, which the Crossplane Composition gates the preview
+        # ApplicationSet behind (`{{- if $preview }}`, composition.yaml) — so every open PR
+        # is deployed to its own throwaway namespace (<team>-pr-<N>) and URL. Kept OFF by
+        # default because previews widen the tenant's exposure surface (SEC gate).
+        previewEnabled:
+          title: Per-PR preview environments
+          type: boolean
+          description: >-
+            Deploy every open pull request to its own throwaway preview environment at
+            https://<app-name>.pr-<N>.capstone.uamishub.com (torn down when the PR closes).
+            Security-gated and off by default — leave unchecked for the standard
+            merge -> dev / tag -> staging / manual-gate -> prod golden path.
           default: false
 
     # ----------------------------------------------------------------------------------
@@ -502,6 +519,12 @@ spec:
         # SLUG form (year-first, e.g. 2026-fall) — matches the XRD `semester` pattern.
         semester: ${{ parameters.year }}-${{ parameters.season | lower }}
         port: ${{ parameters.port }}
+        # Per-PR preview opt-in (security-gated, off by default). Passed straight through to
+        # the XR's spec.previewEnabled; the Crossplane Composition gates the preview
+        # ApplicationSet behind it (`{{- if $preview }}`). Without this input the action
+        # defaults previewEnabled=false, so NO tenant ever got previews (the wizard never
+        # exposed the switch). Zod input name `previewEnabled` — see emitTenantClaim.ts.
+        previewEnabled: ${{ parameters.previewEnabled }}
         # THE SEAM (ADR-035 §C): the wizard's RESOLVED DB mode (none|mysql|postgres) from compose ->
         # spec.database on the XR -> the Composition's auto-MySQL/PostgreSQL (ADR-033). NOT
         # parameters.database (the raw 4-way choice) — compose resolves the enum mapping.
@@ -552,7 +575,7 @@ spec:
         content: |
           Your repo **${{ parameters.appName }}** is live under UA-MIS. Now:
           1. Clone it and edit your code (`app/`, or `frontend/`+`backend/`) — leave `.devops/` alone.
-          2. Open a PR -> a **preview** environment is built automatically.
+          {% if parameters.previewEnabled %}2. Open a PR -> a **preview** environment is built automatically at `https://${{ parameters.appName }}.pr-<N>.capstone.uamishub.com` (you enabled per-PR previews).{% else %}2. Open a PR -> CI builds and checks run (per-PR **preview** environments are off — you did not enable them in the wizard).{% endif %}
           3. Merge to `main` -> **dev** auto-deploys.
           4. Tag `vX.Y.Z` -> **staging** auto-deploys; **prod** waits on the manual gate.
           Your app will be at `https://${{ parameters.appName }}.capstone.uamishub.com`.
