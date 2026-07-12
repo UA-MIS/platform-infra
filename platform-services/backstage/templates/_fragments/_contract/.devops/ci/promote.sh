@@ -84,4 +84,8 @@ echo "==> ${FROM} is live at ${LIVE_TAG} — promoting to ${TO}"
 
 # Hand off to bump-image.sh for the write (+ COMMIT=1 commit). COMMIT, if set
 # in this process's environment, is inherited by the child automatically.
-"${SCRIPT_DIR}/bump-image.sh" "${TO}" "${LIVE_TAG}"
+# Invoke via `sh` (not a direct exec) so it works even when the shipped script lacks the
+# execute bit: the compose action ships .devops/ci VERBATIM via fs.outputFile at mode 644,
+# so a direct `"${SCRIPT_DIR}/bump-image.sh"` fails "Permission denied" in a real tenant
+# repo. The workflow + RUNBOOK invoke every script as `sh …` for the same reason.
+sh "${SCRIPT_DIR}/bump-image.sh" "${TO}" "${LIVE_TAG}"
