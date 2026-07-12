@@ -41,18 +41,27 @@ deployments.yaml`).
   manifests as before this change.
 - **On, single-component "web" project only:** the one component's manifest
   renders `kind: Rollout` (`apiVersion: argoproj.io/v1alpha1`) with a **Basic
-  Canary** strategy:
+  Canary** strategy that **auto-completes** — no human, no kubectl plugin:
 
   ```yaml
   strategy:
     canary:
       steps:
         - setWeight: 25
-        - pause: {}
+        - pause: { duration: 30s }
         - setWeight: 50
-        - pause: {}
-        # (implicit 100% + rollout complete once the last pause is promoted)
+        - pause: { duration: 30s }
+        - setWeight: 100
+        # rollout completes at 100%, then scales the old ReplicaSet to 0
+        # after scaleDownDelaySeconds (default 30s — not overridden).
   ```
+
+  The pauses are **timed** (`duration: 30s`), so each image bump steps
+  25% → 50% → 100% and promotes on its own — the old revision's ReplicaSet is
+  scaled to 0 automatically once it reaches 100%. Nothing parks at a canary step
+  waiting for a human. The **first-ever** deploy on a fresh tenant skips the steps
+  entirely (Argo Rollouts has no prior stable revision to canary against) and comes
+  up straight at 100%, so a brand-new app is never stuck at an initial rollout.
 
   The gate is `values.single AND values.progressiveDelivery` (both must be true) —
   a frontend-backend or mobile project always gets plain Deployments even with the
@@ -90,27 +99,67 @@ via-a-separate-plugin). Without a routing plugin, Argo Rollouts approximates eac
 `setWeight` by the **replica-count ratio** between the canary and stable
 ReplicaSets, both selected by the one Service (`services.yaml` — unchanged). That's
 weaker than exact traffic-percentage shaping, but it's a real, working canary
-(new Pods created and observed before old ones are removed, and `pause: {}` gives
-an operator a manual gate) with zero extra infrastructure — the right "simple
-canary" for a first opt-in demo. Wiring a Traefik-native (or Gateway API) traffic
-split is a documented follow-up, not blocking.
+(new Pods created and observed before old ones are removed, and the timed pauses
+give a real, observable rollout window) with zero extra infrastructure — the right
+"simple canary" for a first opt-in demo. Wiring a Traefik-native (or Gateway API)
+traffic split is a documented follow-up, not blocking.
 
-## Promoting / aborting a paused Rollout
+## Default: auto-completing canary (no human needed)
+
+The default strategy uses **timed** pauses (`pause: { duration: 30s }`), so a
+Rollout advances 25% → 50% → 100% and completes **on its own** — no operator, no
+`kubectl argo rollouts` plugin required. Once it reaches 100% the old revision's
+ReplicaSet is scaled to 0 automatically (default `scaleDownDelaySeconds` 30s, not
+overridden). You can still watch it if you have the plugin:
 
 ```bash
-# watch a Rollout's progress
+# watch a Rollout's progress (optional; needs the kubectl-argo-rollouts plugin)
 kubectl argo rollouts get rollout <name> -n <team>-<env> --watch
 
-# promote past the current pause (advance to the next step)
+# or plain kubectl, no plugin:
+kubectl get rollout <name> -n <team>-<env> -w
+```
+
+## Opting into a MANUAL hold gate
+
+If a team wants a human approval gate on a step (hold the canary until someone
+promotes it), replace a timed pause with a **bare** `pause: {}` (no `duration:`),
+which pauses **indefinitely** until promoted, in their
+`.devops/chart/base/deployments.yaml`:
+
+```yaml
+      steps:
+        - setWeight: 25
+        - pause: {}            # HOLD here until an operator promotes
+        - setWeight: 50
+        - pause: { duration: 30s }
+        - setWeight: 100
+```
+
+Then install the [`kubectl-argo-rollouts`](https://argoproj.github.io/argo-rollouts/installation/#kubectl-plugin-installation)
+plugin and drive it by hand:
+
+```bash
+# promote past the current (indefinite) pause — advance to the next step
 kubectl argo rollouts promote <name> -n <team>-<env>
 
 # abort and roll back to the last stable ReplicaSet
 kubectl argo rollouts abort <name> -n <team>-<env>
 ```
 
-`pause: {}` (no `duration:`) pauses **indefinitely** until promoted — the canary
-never auto-completes on its own. That's a deliberate default for a first opt-in:
-add a `duration:` to auto-promote after a timeout once a team trusts the pattern.
+Because the plugin is **not** installed on the platform by default, a bare
+`pause: {}` that no one promotes will park the Rollout forever (the old failure
+mode) — that is why the shipped default is fully automatic and this hold gate is
+strictly opt-in per team.
+
+### Metrics-gated promotion (later)
+
+The natural next step beyond a timed pause is an **analysis-based gate**: an
+`AnalysisTemplate` (the CRD is already installed with the controller) that queries
+a Prometheus SLO (error rate / latency) at each step and auto-promotes only if the
+canary is healthy, auto-aborting otherwise. That needs stable per-workload SLO
+queries from observability (Track-3) and is tracked in Follow-ups below — not wired
+into the default chart yet.
 
 ## Tenancy / RBAC
 
