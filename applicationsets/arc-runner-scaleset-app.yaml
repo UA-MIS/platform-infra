@@ -116,6 +116,24 @@ spec:
                       matchExpressions:
                         - key: node-role.kubernetes.io/control-plane
                           operator: Exists
+              # ── SOFT SPREAD runner pods across the build pool (node-GUIDED) ──────
+              # One runner pod exists per in-flight build. Soft-prefer a pool node that
+              # is NOT already running another runner pod (same `part-of` label this
+              # scale-set stamps on its own pods) so two concurrent builds' runners land
+              # on different pool nodes when both are free — the scheduler load-balances
+              # within the pool instead of stacking. `preferred` (never blocks: a
+              # single-node pool or one-free-node still schedules); topologyKey per-node
+              # scales to N pool nodes with no edit. The heavy Kaniko step-pod carries the
+              # SAME anti-affinity + a 4Gi request (platform-services/arc/hook-template.yaml)
+              # — that request is the HARD anti-OOM backstop; this is the SOFT steer.
+              podAntiAffinity:
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 100
+                    podAffinityTerm:
+                      labelSelector:
+                        matchLabels:
+                          app.kubernetes.io/part-of: gha-runner-scale-set
+                      topologyKey: kubernetes.io/hostname
             securityContext:
               runAsNonRoot: true
               runAsUser: 1001
@@ -151,34 +169,31 @@ spec:
                     mountPath: /home/runner/pod-templates
                     readOnly: true
                 resources:
-                  # RESOURCE KNOB — LIMIT raised to 8Gi (was 6Gi, which still OOM-killed
-                  # the larger node_modules build — PR #329) to match the Kaniko WORKLOAD
-                  # step-pod ceiling (platform-services/arc/hook-template.yaml), so
-                  # nothing on this scaleset is capped below the memory a Backstage yarn
-                  # build peaks at. REQUEST is a MODEST 1Gi (not raised to ~4Gi):
-                  # this listener/orchestration pod's real usage is a few hundred Mi, and
-                  # nodeSelector now pins EVERY pod this scaleset creates — this runner
-                  # pod, the job-container pod (checkout/resolve, containerMode:
-                  # kubernetes' `container:` — see workflow), AND the Kaniko step-pod
-                  # (hook-template.yaml's "$job" resources apply to BOTH job-container
-                  # AND step pods per runner-container-hooks' mergeContainerWithOptions,
-                  # confirmed against actions/runner-container-hooks source) — onto a
-                  # SINGLE pool node (whichever of db1 ~7.5Gi / laptop-01 ~14Gi
-                  # allocatable the scheduler picks for that pod; the pool can now spread
-                  # a build's 3 pods across nodes, but nothing GUARANTEES that — treat
-                  # worst case as all 3 landing on one node). All 3 can be co-resident
-                  # for most of a build. Requesting ~4Gi on each would sum to ~12Gi of
-                  # scheduler-admission requests — more than db1's ~7.5Gi allocatable
-                  # alone -> the step-pod would Pend forever there (insufficient memory),
-                  # defeating the fix (laptop-01's ~14Gi has headroom for that sum, but
-                  # requests still must fit the SMALLEST pool member since nodeSelector
-                  # doesn't guarantee which node). Keeping requests low + limits high
-                  # (burstable) lets the Kaniko step-pod actually USE up to 8Gi at
-                  # runtime (fixing the OOM, which at 6Gi still killed the larger build,
-                  # not an under-provisioned request) without over-committing either pool
-                  # node's scheduling budget (1Gi + 2Gi job + 2Gi kaniko = 5Gi worst-case
-                  # sum on db1 ~7.5Gi allocatable). CPU is left unchanged — memory is the
-                  # fix; the runner is not CPU-bound and the Kaniko step-pod keeps its
+                  # RESOURCE KNOB — LIMIT stays 8Gi (was 6Gi, which still OOM-killed the
+                  # larger node_modules build — PR #329/#334) to match the Kaniko WORKLOAD
+                  # step-pod ceiling (platform-services/arc/hook-template.yaml), so nothing
+                  # on this scaleset is capped below the memory a Backstage yarn build
+                  # peaks at. REQUEST stays a MODEST 1Gi and is DELIBERATELY NOT raised to
+                  # ~4Gi: this is the listener/orchestration pod (runs run.sh; real usage a
+                  # few hundred Mi) — it does NO build work, so reserving 4Gi here would be
+                  # pure waste and would eat into the pool's build-scheduling budget. The
+                  # build's memory is carried by the `$job` pair in hook-template.yaml (the
+                  # job-container pod + the Kaniko step-pod), whose REQUEST was raised
+                  # 2Gi → 4Gi in THIS same change. That is the lever that stops the OOM:
+                  # the scheduler admits by request, and 4Gi on the job+kaniko pair (RWO
+                  # `_work` PVC co-pins them = 8Gi together on one node) means laptop-01's
+                  # ~11.3Gi build-free memory holds exactly ONE build's heavy pair, so a
+                  # SECOND concurrent build cannot co-pack there — it spreads to the other
+                  # pool node (podAntiAffinity above) or WAITS, instead of both bursting to
+                  # 8Gi and OOM-ing the node (the incident: "requested 2Gi, used 13.4Gi,
+                  # capacity 14.7Gi" on laptop-01). See the full one-build-per-node math in
+                  # platform-services/arc/hook-template.yaml. Worst-case scheduler-admission
+                  # sum for a whole build now = runner 1Gi + job 4Gi + kaniko 4Gi = 9Gi:
+                  # fits laptop-01 (~11.3Gi free), does NOT fit ua-mis-db-1 (~7.5Gi alloc,
+                  # ~4.5Gi free — it also hosts backstage/dex/db-tier) so a 2nd heavy build
+                  # waits for laptop-01 rather than co-packing; db1 still takes lighter
+                  # tenant builds when it has room. CPU is unchanged — memory is the fix;
+                  # the runner is not CPU-bound and the Kaniko step-pod keeps its
                   # (unbounded) CPU so builds are not throttled.
                   requests: { cpu: "250m", memory: "1Gi" }
                   limits:   { cpu: "2",    memory: "8Gi" }

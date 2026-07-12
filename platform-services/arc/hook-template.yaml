@@ -69,6 +69,27 @@ data:
                 matchExpressions:
                   - key: node-role.kubernetes.io/control-plane
                     operator: Exists
+        # ── SOFT SPREAD across the build pool (node-GUIDED-not-BOUND) ──────────────
+        # Prefer to place this build's job/step pod on a pool node that is NOT already
+        # anchoring ANOTHER build's runner pod. The runner pods (arc-runner-scaleset-
+        # app.yaml) carry `app.kubernetes.io/part-of: gha-runner-scale-set`; one runner
+        # pod exists per in-flight build, so avoiding runner pods = avoiding other
+        # builds. `preferred` (soft), so with only one pool node free (or on a
+        # single-node pool) it never blocks scheduling — it only breaks ties toward the
+        # emptier node when both are available, letting the scheduler genuinely load-
+        # balance within the pool. topologyKey is per-node; scales to N pool nodes with
+        # no edit. (Repulsion from this build's OWN runner is harmless: runner and
+        # job/step share no volume, and the RWO `_work` PVC already co-pins job+step.)
+        # The 4Gi request below is the HARD backstop against OOM co-packing; this
+        # anti-affinity is the SOFT steer that spreads builds when both nodes are free.
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/part-of: gha-runner-scale-set
+                topologyKey: kubernetes.io/hostname
       # Resolve the Harbor registry host to Traefik IN-CLUSTER so the Kaniko PUSH
       # never traverses the Cloudflare edge (CF Free/Pro caps request bodies at 100MB
       # → a >100MB image layer 413s). The public host externally resolves to the
@@ -88,37 +109,52 @@ data:
             - harbor.capstone.uamishub.com
       containers:
         - name: "$job"
-          # RESOURCE KNOB (OOM fix) — `$job` is the runner-container-hooks placeholder
-          # matched against EVERY pod this template patches: both the containerMode:
-          # kubernetes job-container pod (prepare-job — e.g. the workflow's `container:
-          # image: node:24-trixie` running checkout/resolve) AND each `uses: docker://`
-          # container-action step's own pod (run-container-step — e.g. the Kaniko
-          # build), confirmed against actions/runner-container-hooks source
-          # (mergeContainerWithOptions DIRECTLY OVERWRITES, not deep-merges,
-          # unrecognized fields like `resources`). The Kaniko step-pod is the one that
-          # actually runs `yarn install` + `tsc` + the filesystem snapshot (~6Gi peak,
-          # per the OOM investigation above the executor invocation in
-          # backstage-process-build-push.yaml) — it was previously UNSET (no limit at
-          # all), letting the in-memory snapshot/cache grow until the node OOM-killed
-          # the pod. LIMIT is raised to 8Gi here (6Gi still OOM-killed the larger
-          # node_modules build — see PR #329; matches the runner pod's ceiling in
-          # arc-runner-scaleset-app.yaml) so that pod can burst to the memory a Backstage
-          # yarn+tsc+full-fs-snapshot build peaks at, with headroom (the operator has
-          # confirmed RAM is not the constraint). REQUEST is a MODEST 2Gi (not ~4Gi):
-          # this same block also sizes the much-lighter job-container pod, and BOTH pods
-          # (plus the runner pod) now land on a pool node (nodeSelector below — db1
-          # ~7.5Gi allocatable or laptop-01 ~14Gi; the scheduler decides, not guaranteed
-          # to spread) and can be co-resident. Worst case all 3 on db1 sums 2Gi + 2Gi +
-          # 1Gi = 5Gi of admission requests < db1's ~7.5Gi allocatable, so nothing Pends;
-          # a 2Gi request (vs the old 512Mi) also makes this heavy pod a LESS likely
-          # kernel-OOM victim under node pressure (protected up to its request). NOTE on
-          # db1: an 8Gi LIMIT exceeds db1's ~7.5Gi allocatable, so a build that lands on
-          # db1 can never actually reach 8Gi — it is effectively node-capped there and
-          # only one heavy build fits at a time; that is acceptable (maxRunners is small,
-          # builds are serial in practice, and laptop-01 ~14Gi has full 8Gi headroom).
-          # See the matching note in arc-runner-scaleset-app.yaml.
+          # RESOURCE KNOB (OOM fix + anti-co-pack) — `$job` is the runner-container-hooks
+          # placeholder matched against EVERY pod this template patches: both the
+          # containerMode:kubernetes job-container pod (prepare-job — e.g. the workflow's
+          # `container: image: node:24-trixie` running checkout/resolve) AND each
+          # `uses: docker://` container-action step's own pod (run-container-step — e.g.
+          # the Kaniko build), confirmed against actions/runner-container-hooks source
+          # (mergeContainerWithOptions DIRECTLY OVERWRITES, not deep-merges, unrecognized
+          # fields like `resources`). The Kaniko step-pod is the one that actually runs
+          # `yarn install` + `tsc` + the filesystem snapshot (~6Gi peak, per the OOM
+          # investigation above the executor invocation in
+          # backstage-process-build-push.yaml). LIMIT stays 8Gi (6Gi still OOM-killed the
+          # larger node_modules build — PR #329/#334; matches the runner pod's ceiling in
+          # arc-runner-scaleset-app.yaml).
+          #
+          # ── REQUEST raised 2Gi → 4Gi (node-GUIDED-not-BOUND incident) ──────────────
+          # The OOM that triggered this was NOT an under-limit; it was the SCHEDULER
+          # OVERPACKING laptop-01. The scheduler admits by REQUEST: at a 2Gi request the
+          # job+kaniko pair of a build reserves only ~4Gi, so TWO concurrent builds' heavy
+          # pairs (~8Gi of requests) fit on laptop-01's ~11.3Gi build-free memory — the
+          # scheduler co-packs them, then BOTH burst toward the 8Gi limit and the kubelet
+          # OOM-rejects (observed: "requested 2Gi, used 13.4Gi, capacity 14.7Gi"). Raising
+          # the request to 4Gi makes the scheduler reserve real memory so it will NOT admit
+          # a second heavy build onto a node already running one:
+          #   • The job-container + Kaniko step of ONE build share the RWO `_work` Ceph-RBD
+          #     PVC (kubernetesModeWorkVolumeClaim, ReadWriteOnce) → they are PINNED to the
+          #     SAME node. Their combined request is 4Gi + 4Gi = 8Gi.
+          #   • laptop-01 (~14.72GiB alloc, ~3.4Gi non-build baseline → ~11.3Gi free once
+          #     Prometheus is off it, see kube-prometheus-stack-app.yaml): one build's 8Gi
+          #     pair fits (≈2.3Gi spare) but a SECOND build's 8Gi pair does not (2.3 < 8) →
+          #     the scheduler refuses to co-pack, and the 2nd build spreads to the other
+          #     pool node (podAntiAffinity below) or WAITS (Pends) instead of OOMing.
+          #   • ua-mis-db-1 (~7.5GiB alloc, and it also hosts backstage/dex/db-tier so
+          #     only ~4.5Gi is realistically free) cannot hold an 8Gi pair — so under load
+          #     a 2nd heavy build waits for laptop-01 rather than landing on db1. That is
+          #     the intended "at most one heavy build per node, else wait" behaviour, and
+          #     it is SAFE (maxRunners is small, builds are serial in practice). db1 still
+          #     serves lighter tenant builds whenever it has the room. When db1 is freed
+          #     of its DB tier (or a larger build node joins the `capstone.io/pool=build`
+          #     set) this same sizing spreads two builds across the pool with no change.
+          # 4Gi is the smallest round request that makes 2×(job+kaniko) exceed laptop-01's
+          # build-free memory (2 builds would need ~16Gi of requests > ~11.3Gi) — i.e. the
+          # threshold that flips co-packing into spread/wait. The runner pod (a light
+          # listener, arc-runner-scaleset-app.yaml) is intentionally NOT raised to 4Gi —
+          # it does no build work; only THIS `$job` pair carries the build's memory.
           resources:
-            requests: { memory: "2Gi" }
+            requests: { memory: "4Gi" }
             limits:   { memory: "8Gi" }
           volumeMounts:
             - name: harbor-push

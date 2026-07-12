@@ -137,25 +137,29 @@ spec:
             podMonitorSelectorNilUsesHelmValues: false
             probeSelectorNilUsesHelmValues: false
             ruleSelectorNilUsesHelmValues: false
-            # ── OOM-headroom bump (paired with the laptop-01 nodeSelector below) ──
-            # The 2048Mi/2560Mi pair below was chronically near-OOM: live RSS was
-            # ~2418Mi (`kubectl top`), ~94% of the 2560Mi limit — one WAL-replay or
-            # compaction spike from an OOMKill. Now that this pod is PINNED to
-            # laptop-01 (nodeSelector below) — a ~16GB / 14.72GiB-allocatable box
-            # with ~11GiB of that still unreserved — we have room to give it real
-            # headroom instead of running it on the edge.
+            # ── OOM-headroom sizing (paired with the capstone-n3 nodeSelector below) ──
+            # The 2048Mi/2560Mi pair was chronically near-OOM: live RSS ~2418Mi
+            # (`kubectl top`), ~94% of the 2560Mi limit — one WAL-replay or compaction
+            # spike from an OOMKill. This 3Gi/6Gi pair (kept from #327) gives real
+            # headroom. The pod now lands on capstone-n3, a control-plane OptiPlex
+            # (~14.72GiB allocatable) that at move time sat ~53% used (~6.9Gi free by
+            # request) — the roomiest of the three CP nodes (n1 ~68%, n2 ~66%).
             #   request 3Gi  — reserves comfortably above the ~2.4Gi steady-state
             #                  working set; steady-state RSS sits ~600Mi under the
             #                  reservation so the scheduler protects it from evict.
             #   limit   6Gi  — a burst ceiling for WAL replay / block compaction,
-            #                  ~2.5x steady state. Deliberately NOT larger: laptop-01
-            #                  is ALSO in the CI build pool (capstone.io/pool=build)
-            #                  where Kaniko bursts to ~6Gi. Sizing prom's limit at 6Gi
-            #                  keeps the worst-case double-peak (prom 6Gi + a 6Gi
-            #                  Kaniko build + ~3.4Gi node baseline ≈ 15Gi) within the
-            #                  node's physical ceiling rather than guaranteeing an OOM.
-            #                  Steady state the node sits ~25% used, so this is slack,
-            #                  not overcommit that bites day to day.
+            #                  ~2.5x steady state. On n3 the steady footprint is
+            #                  ~10.5Gi/14.72Gi (~71%) and a rare WAL-replay burst to
+            #                  6Gi peaks ~95% briefly — acceptable for a single-replica,
+            #                  quorum-free pod; n3 co-hosts control-plane components so
+            #                  the burst is monitored (see runbook). NOT sized larger.
+            #   ⚠ WHY n3, not laptop-01 (#327 → this change): laptop-01 is ALSO the CI
+            #     build node (capstone.io/pool=build) where a Kaniko build bursts to
+            #     ~6-8Gi. Prometheus (3Gi/6Gi) + a heavy build on the SAME ~14.7Gi box
+            #     drove the kubelet OOM that rejected a runner pod ("requested 2Gi, used
+            #     13.4Gi, capacity 14.7Gi" on laptop-01). Moving Prometheus onto the
+            #     idle-est control-plane node ends that fight and frees laptop-01 for
+            #     builds. n3's PreferNoSchedule control-plane taint is tolerated below.
             # (Goldilocks/VPA still can't see this StatefulSet — it's owned by the
             # `Prometheus` CRD, ConfigUnsupported/NoPodsMatched — so `kubectl top` is
             # ground truth here, not a VPA target.)
@@ -232,34 +236,40 @@ spec:
                 operator: Equal
                 value: "true"
                 effect: PreferNoSchedule
-            # ── HARD PIN to laptop-01 (OOM-relief follow-up) ──────────────────────
-            # Pin this single-replica Prometheus onto laptop-01, a ~16GB /
-            # 14.72GiB-allocatable worker with ~11GiB still unreserved — the roomiest
-            # eligible box for the 3Gi/6Gi memory profile above. `nodeSelector` is a
-            # HARD filter (not the soft `affinity` steering above), so the pod lands
-            # here deterministically.
+            # ── HARD PIN to capstone-n3 (moved OFF the CI build node laptop-01) ────
+            # Pin this single-replica Prometheus onto capstone-n3, a control-plane
+            # OptiPlex (~14.72GiB allocatable) that sat ~53% used at move time — the
+            # roomiest of the three CP nodes (n1 ~68%, n2 ~66%) and NOT a member of the
+            # CI build pool. `nodeSelector` is a HARD filter (not the soft `affinity`
+            # steering above), so the pod lands here deterministically.
             #
-            # The #316 `affinity:` (soft anti-affinity away from Vault/CNPG/MariaDB)
-            # and the control-plane `tolerations:` above are KEPT ON PURPOSE even
-            # though this hard nodeSelector makes them inert while the pin is in
-            # place (with exactly one candidate node the soft preferences never come
-            # into play, and laptop-01 carries no control-plane taint). Retaining
-            # them means that when the pin is later removed — see the caveat below —
-            # #316's intended soft-steering behaviour is restored by that single
-            # deletion, with no second edit needed. They cost nothing to leave here.
+            # ⚠ WHY MOVED (was laptop-01, #327): laptop-01 is the fast CI BUILD node
+            #   (capstone.io/pool=build). Running a 3Gi/6Gi Prometheus AND a Kaniko
+            #   build (bursts ~6-8Gi) on the same ~14.7Gi box drove the kubelet OOM that
+            #   rejected a runner pod ("requested 2Gi, used 13.4Gi, capacity 14.7Gi").
+            #   Monitoring and CI were fighting for the same RAM. Moving Prometheus onto
+            #   the idle-est CONTROL-PLANE node ends that fight and hands laptop-01 back
+            #   to builds. n3 carries the `capstone.io/control-plane=true:PreferNoSchedule`
+            #   taint — the `tolerations:` above (kept from #316) is REQUIRED for the pod
+            #   to schedule here; verify it is present if you re-touch this block.
             #
-            # ⚠ TEMPORARY-NODE CAVEAT: laptop-01 is a stopgap worker. A hostname pin
-            #   means if laptop-01 drains/leaves the cluster, this pod goes Pending
-            #   (its Ceph RBD PVC is RWO/replica-3 and survives node loss, so the
-            #   DATA is safe — but nothing will schedule the pod until a node named
-            #   laptop-01 exists again OR this selector is changed/removed). When the
-            #   permanent mini-PC arrives: either (a) repin — swap this hostname to
-            #   the new node's `kubernetes.io/hostname`, sync, pod moves; or (b) drop
-            #   this `nodeSelector:` block entirely to hand scheduling back to the
-            #   #316 soft-affinity + toleration (retained above). Either is a one-line
-            #   change; the PVC reattaches wherever the pod next lands.
+            # The #316 `affinity:` (soft anti-affinity away from Vault/CNPG/MariaDB) is
+            # KEPT ON PURPOSE even though this hard nodeSelector makes it inert while the
+            # pin is in place (one candidate node → soft preferences never fire). n3 runs
+            # no Vault/CNPG/MariaDB pod today, so there is no conflict. Retaining it means
+            # dropping the nodeSelector later restores #316 soft-steering with no 2nd edit.
+            #
+            # ⚠ NODE CAVEAT: a hostname pin means if capstone-n3 drains/leaves, this pod
+            #   goes Pending (its Ceph RBD PVC is RWO/replica-3 and survives node loss, so
+            #   the DATA is safe — but nothing schedules the pod until a node named
+            #   capstone-n3 exists again OR this selector changes). To rebalance: either
+            #   (a) repin — swap this hostname to another roomy node + toleration if it is
+            #   control-plane-tainted; or (b) drop this `nodeSelector:` block entirely to
+            #   hand scheduling back to the #316 soft-affinity + toleration (retained
+            #   above). Either is a one-line change; the PVC reattaches where the pod lands
+            #   (brief WAL-replay restart on any move — expected, not data loss).
             nodeSelector:
-              kubernetes.io/hostname: laptop-01
+              kubernetes.io/hostname: capstone-n3
             # TSDB on a Ceph RBD PVC (replica-3, survives node loss; same SC as
             # Harbor/Vault). 20Gi holds ~15d of platform-scale metrics comfortably.
             storageSpec:
