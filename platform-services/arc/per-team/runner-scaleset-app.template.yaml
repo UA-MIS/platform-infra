@@ -60,6 +60,13 @@ spec:
                 operator: Equal
                 value: "true"
                 effect: PreferNoSchedule
+              # DEDICATE laptop-01 to CI: tolerate `capstone.io/dedicated=ci-build:NoSchedule`
+              # so this per-team RUNNER pod can land on the CI-dedicated node. Mirrors
+              # per-team/hook-template.template.yaml; complements #372 affinity.
+              - key: capstone.io/dedicated
+                operator: Equal
+                value: ci-build
+                effect: NoSchedule
             affinity:
               nodeAffinity:
                 preferredDuringSchedulingIgnoredDuringExecution:

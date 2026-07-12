@@ -37,6 +37,13 @@ data:
           operator: Equal
           value: "true"
           effect: PreferNoSchedule
+        # DEDICATE laptop-01 to CI: tolerate `capstone.io/dedicated=ci-build:NoSchedule`
+        # so this per-team Kaniko BUILD step pod can land on the CI-dedicated node.
+        # Mirrors platform-services/arc/hook-template.yaml; complements #372 affinity.
+        - key: capstone.io/dedicated
+          operator: Equal
+          value: ci-build
+          effect: NoSchedule
       affinity:
         nodeAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
