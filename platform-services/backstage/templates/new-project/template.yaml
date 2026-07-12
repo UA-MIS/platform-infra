@@ -153,7 +153,10 @@ spec:
                 layout:
                   oneOf:
                     # ---- web / single ----
-                    - required: [singleFragment, database]
+                    # `database` is intentionally NOT required at this level — it is offered
+                    # (and required) ONLY for needsDB fragments via the dependencies block
+                    # below, and is absent entirely for DB-less frontend/static fragments.
+                    - required: [singleFragment]
                       properties:
                         layout:
                           enum: [single]
@@ -205,20 +208,57 @@ spec:
                             - 'Static HTML/CSS/JS site (no framework)'
                             - 'React static site (Vite + React Router, no backend)'
                           default: backend/fastapi
-                        database:
-                          title: Database
-                          type: string
-                          description: >-
-                            host-mysql and host-postgres each auto-provision a per-environment
-                            database for you. Pick bring-your-own to set DATABASE_URL yourself via
-                            the Secrets tab, or none for a DB-less stack (e.g. the static site).
-                          enum: [host-mysql, host-postgres, bring-your-own, none]
-                          enumNames:
-                            - 'Auto MySQL (host-mysql) — provisioned for you'
-                            - 'Auto PostgreSQL (host-postgres) — provisioned for you'
-                            - 'Bring your own (set DATABASE_URL in the Secrets tab)'
-                            - 'None'
-                          default: host-mysql
+                      # The Database question applies ONLY to fragments whose fragment.yaml sets
+                      # needsDB:true (all backend/*, all fullstack/*, and blank/bring-your-own).
+                      # Frontends (frontend/angular) and static sites (static/*) never read
+                      # DATABASE_URL, so the picker is HIDDEN for them. Pure rjsf schema-dependency
+                      # (the `database` property exists ONLY in the needsDB branch) — no custom
+                      # field extension, so this stays a catalog-refresh change (no image rebuild).
+                      dependencies:
+                        singleFragment:
+                          oneOf:
+                            # DB-less single-app fragments — no database question offered.
+                            - properties:
+                                singleFragment:
+                                  enum:
+                                    - frontend/angular
+                                    - static/bare-html
+                                    - static/react-static
+                            # needsDB single-app fragments — offer the database question.
+                            - required: [database]
+                              properties:
+                                singleFragment:
+                                  enum:
+                                    - backend/django
+                                    - backend/dotnet-aspnet
+                                    - backend/express
+                                    - backend/fastapi
+                                    - backend/flask
+                                    - backend/go
+                                    - backend/laravel
+                                    - backend/nestjs
+                                    - backend/node-bare
+                                    - backend/rails
+                                    - backend/rust-axum
+                                    - backend/spring-boot
+                                    - blank/bring-your-own
+                                    - fullstack/nextjs
+                                    - fullstack/nuxt
+                                    - fullstack/sveltekit
+                                database:
+                                  title: Database
+                                  type: string
+                                  description: >-
+                                    host-mysql and host-postgres each auto-provision a per-environment
+                                    database for you. Pick bring-your-own to set DATABASE_URL yourself via
+                                    the Secrets tab, or none for a DB-less stack (e.g. the static site).
+                                  enum: [host-mysql, host-postgres, bring-your-own, none]
+                                  enumNames:
+                                    - 'Auto MySQL (host-mysql) — provisioned for you'
+                                    - 'Auto PostgreSQL (host-postgres) — provisioned for you'
+                                    - 'Bring your own (set DATABASE_URL in the Secrets tab)'
+                                    - 'None'
+                                  default: host-mysql
                     # ---- web / frontend + backend ----
                     - required: [frontendFragment, backendFragment, database]
                       properties:
