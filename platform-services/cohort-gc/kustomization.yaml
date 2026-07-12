@@ -1,0 +1,11 @@
+# cohort-gc — platform garbage-collection CronJobs (DRAFT).
+# Deployed as `platform-svc-cohort-gc` by the platform-services ApplicationSet
+# (a git directory generator over platform-services/*; any dir with a
+# kustomization.yaml becomes one Application). See applicationsets/platform-services-appset.yaml.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - rbac.yaml
+  - preview-ttl-cronjob.yaml
+  - cohort-cleanup-cronjob.yaml
