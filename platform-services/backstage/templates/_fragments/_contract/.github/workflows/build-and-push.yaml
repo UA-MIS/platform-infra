@@ -72,6 +72,13 @@ jobs:
     runs-on: ${{ vars.RUNNER_SCALE_SET || 'ua-mis-kaniko' }}
     container:
       image: node:24-trixie-slim
+    # actions:read + pull-requests:write are for the BEST-EFFORT queue-status step below
+    # (read this run's queue timing; post the sticky "you were in a queue" PR comment). It
+    # fails open, so if these aren't granted it just degrades to a generic note.
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
     outputs:
       ENV: ${{ steps.img.outputs.ENV }}
       REGISTRY: ${{ steps.img.outputs.REGISTRY }}
@@ -86,6 +93,20 @@ jobs:
           # fetch-depth: 0 = full history + ALL TAGS — REQUIRED for resolve-image.sh's
           # `git describe --tags` (Deploy Model A readable dev tag).
           fetch-depth: 0
+      - name: Queue status — report how long you waited + your position
+        # OPERATOR UX. A QUEUED Actions job runs NO code until a runner picks it up
+        # (builds run 2-at-a-time — maxRunners:2 on the Kaniko scale set — so overflow
+        # WAITS in GitHub Actions), so this can't announce position WHILE waiting; the
+        # instant a runner starts this FIRST job it reports (to the run Summary + a sticky
+        # PR comment) how long the build queued and how many of THIS repo's builds were
+        # ahead of it. BEST-EFFORT + fail-open — never fails the build; degrades to a
+        # generic note without actions:read / pull-requests:write.
+        if: ${{ always() }}
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: node .devops/ci/queue-status.mjs
       - name: Resolve image identity (env + tag + push) from promotion.yaml
         id: img
         env:

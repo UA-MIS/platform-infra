@@ -124,6 +124,15 @@ jobs:
     # curl yq. -slim ships neither git nor curl.
     container:
       image: node:24-trixie
+    # actions:read + pull-requests:write are for the BEST-EFFORT queue-status step
+    # below (read this run's queue timing; post the sticky "you were in a queue" PR
+    # comment). Both are capped by the CALLER's grant — a caller that hasn't been
+    # re-synced to grant them just makes queue-status degrade to a generic note; it
+    # never fails. contents:read is what checkout needs.
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
     outputs:
       # The build job COMPOSES the full image ref per component from these:
       #   IMAGE = <REGISTRY>/<matrix.image (leaf)>:<TAG>
@@ -158,6 +167,23 @@ jobs:
         # @v1 into .devops/ci, so CI runs the ONE central, component-aware script set — a
         # script fix ships once (no per-repo drift). No cross-repo token (composite action).
         uses: UA-MIS/platform-infra/.github/actions/tenant-ci-scripts@v1
+
+      - name: Queue status — report how long you waited + your position
+        # OPERATOR UX (the "you were in a queue, #N in line" ask). A QUEUED Actions job
+        # runs NO code until a runner picks it up (builds run 2-at-a-time — maxRunners:2
+        # on the Kaniko scale set — so overflow WAITS in GitHub Actions with no pod), so
+        # this cannot announce position WHILE waiting. Instead, the instant a runner
+        # starts this FIRST job, it reports to the run Summary and (on PRs) a sticky PR
+        # comment how long the build sat in the queue and how many of THIS repo's builds
+        # were ahead of it. BEST-EFFORT + fail-open: it never fails the build; without
+        # actions:read / pull-requests:write (see the job permissions) it degrades to a
+        # generic "builds run 2 at a time" note. Script installed centrally just above.
+        if: ${{ always() }}
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: node .devops/ci/queue-status.mjs
 
       - name: Resolve image identity from promotion.yaml (tag/env/push/registry)
         id: resolve
