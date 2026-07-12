@@ -1,0 +1,46 @@
+# PriorityClass for CI BUILD pods (queue-not-fail, never-evict) — the scheduling
+# stance behind the operator rule: "if there's no room for a max-size build and runs
+# are in progress, the build WAITS, it does not fail." Referenced by:
+#   - the org-wide runner pod   (applicationsets/arc-runner-scaleset-app.yaml)
+#   - the org-wide Kaniko step pod (platform-services/arc/hook-template.yaml)
+#   - the per-team templates    (platform-services/arc/per-team/*.template.yaml)
+#
+# STANCE — value 0 (CO-EQUAL with every platform pod, which carry no class → priority 0)
+# + preemptionPolicy: Never. Deliberately NOT higher and NOT lower:
+#   • Never preempt: a build must never EVICT a running workload. Evicting a platform pod
+#     would harm the platform; evicting another build would FAIL that run mid-flight —
+#     both violate "wait, don't fail". So a burst of queued builds can only sit Pending /
+#     GHA-queued until real room frees, never cascade-preempt best-effort tenant pods.
+#   • Co-equal (0), not negative: at a NEGATIVE priority a pending platform pod (priority
+#     0, default PreemptLowerPriority) could preempt a RUNNING build to grab room →
+#     the build pod is evicted → the CI run fails. Equal priority forbids that (preemption
+#     only targets STRICTLY-lower pods), so a build that has been placed runs to the end.
+#   • Named class = consistent, reviewable scheduler treatment + a single knob to retune
+#     the build tier later (and it future-proofs: if a negative best-effort tier is added,
+#     builds still won't preempt it, because Never).
+#
+# The class does NOT by itself convert admission-OOM into Pending — that is done by
+# capped maxRunners (GHA-layer queue) + accurate 4Gi requests + the #372 laptop
+# dedication (drains platform pods off the build node so the scheduler's requestable
+# view matches the kubelet's real memory, killing the scheduler↔kubelet race). This
+# class is the SAFETY layer: whatever queues, nothing gets evicted to force room.
+#
+# ⚠ APPLY ORDER: a pod naming a missing PriorityClass is REJECTED by admission (a hard
+# fail — the opposite of the goal). This object ships in the platform-svc-arc app; the
+# runner/step pods that reference it are created on-demand (minRunners: 0), so ArgoCD
+# has synced this tiny object long before the first post-merge build. sync-wave "-5"
+# applies it early within the app for extra safety.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: capstone-ci-build
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"   # create the class before any pod references it
+value: 0
+globalDefault: false
+preemptionPolicy: Never
+description: >-
+  CI build pods (ARC runner + Kaniko step). Co-equal priority, never preempts:
+  builds wait for capacity and never evict a running workload.
