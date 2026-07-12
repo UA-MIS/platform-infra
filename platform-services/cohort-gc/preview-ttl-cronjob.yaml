@@ -82,8 +82,11 @@ spec:
               args:
                 - |
                   echo "==> preview-ttl: TTL_HOURS=$TTL_HOURS DRY_RUN=$DRY_RUN"
-                  CUTOFF=$(date -u -d "-${TTL_HOURS} hours" +%s 2>/dev/null \
-                    || date -u -v-"${TTL_HOURS}"H +%s)
+                  # The alpine/k8s image ships BusyBox `date`, which supports NEITHER
+                  # GNU relative `-d "-N hours"` NOR BSD `-v` (both exit 1). Compute the
+                  # cutoff with pure POSIX epoch arithmetic instead (BusyBox-safe):
+                  NOW=$(date -u +%s)
+                  CUTOFF=$(( NOW - TTL_HOURS * 3600 ))
                   echo "==> deleting previews created before epoch $CUTOFF"
 
                   # List preview namespaces: name + creationTimestamp (RFC3339).
@@ -91,9 +94,12 @@ spec:
                     -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.metadata.creationTimestamp}{"\n"}{end}' \
                   | while read -r NS TS; do
                       [ -z "$NS" ] && continue
-                      CREATED=$(date -u -d "$TS" +%s 2>/dev/null || echo 0)
+                      # RFC3339 UTC (e.g. 2026-07-12T16:00:00Z) → epoch. BusyBox parses a
+                      # fixed layout via strptime: `date -D FMT -d TIME`. Strip the trailing
+                      # Z and match a Z-less format so there's no literal to trip on.
+                      CREATED=$(date -u -D '%Y-%m-%dT%H:%M:%S' -d "${TS%Z}" +%s 2>/dev/null || echo 0)
                       if [ "$CREATED" -gt 0 ] && [ "$CREATED" -lt "$CUTOFF" ]; then
-                        AGE_H=$(( ( $(date -u +%s) - CREATED ) / 3600 ))
+                        AGE_H=$(( ( NOW - CREATED ) / 3600 ))
                         echo "==> EXPIRED: ns=$NS age=${AGE_H}h (App=$NS)"
                         if [ "$DRY_RUN" = "true" ]; then
                           echo "    [dry-run] would: kubectl -n argocd delete application $NS ; kubectl delete ns $NS"

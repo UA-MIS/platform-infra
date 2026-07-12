@@ -90,6 +90,8 @@ readOnlyRootFilesystem + /tmp lesson). Namespace enforces PSA `restricted`.
       correct). Same for `applicationsets.argoproj.io` (guard read).
 - [ ] Decide preview-TTL behavior under the live `pullRequest` generator (safety-net
       vs primary) — see §1.
-- [ ] `date -d`/`date -v` portability: the script tries GNU then BSD `date`; the pinned
-      `registry.k8s.io/kubectl` image is Debian-based (GNU coreutils supports `-d`); the
-      `-v` fallback is belt-and-suspenders.
+- [x] `date` portability: fixed for BusyBox. The `alpine/k8s` image's BusyBox `date`
+      supports NEITHER GNU `-d "-N hours"` NOR BSD `-v` (both exit 1 — dead on every run,
+      even DRY_RUN). The cutoff now uses POSIX epoch arithmetic (`NOW - TTL_HOURS*3600`)
+      and each ns timestamp is parsed with BusyBox strptime (`date -D '%Y-%m-%dT%H:%M:%S'
+      -d "${TS%Z}"`). No GNU-only or BSD-only `date` flags remain.
