@@ -130,6 +130,14 @@ spec:
                 name: {{ $team | quote }}
                 public: false
                 vulnerabilityScanning: true       # auto_scan (verify field name vs CRD)
+                # On teardown, force-delete all repositories so Harbor doesn't refuse to
+                # delete a non-empty project ("project <team> is not empty, please set
+                # force_delete to TRUE to clean all repositories"). Any tenant that ever
+                # built an image has repos here; without this the Project MR hangs
+                # Ready=False (Deleting) forever and, via the claim's foregroundDeletion,
+                # wedges the entire CapstoneTenant teardown. Field confirmed against the
+                # live CRD: project.harbor.crossplane.io/v1alpha1 spec.forProvider.forceDestroy.
+                forceDestroy: true
               providerConfigRef:
                 name: default
             ---
