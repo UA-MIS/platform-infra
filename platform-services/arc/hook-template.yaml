@@ -31,6 +31,16 @@ metadata:
 data:
   content: |
     spec:
+      # --- Scheduling priority for the KANIKO BUILD pod (queue-not-fail, never-evict) --
+      # capstone-ci-build (platform-services/arc/priorityclass-ci-build.yaml): value 0,
+      # preemptionPolicy Never. The heavy build pod thus NEVER preempts/evicts a platform
+      # pod, and at co-equal priority is never evicted mid-build either → a placed build
+      # runs to completion; an unplaceable one WAITS (Pending), never fails another
+      # workload to force room. runner-container-hooks merges this template's top-level
+      # PodSpec fields verbatim (same path the working nodeSelector/tolerations/affinity/
+      # hostAliases ride), so priorityClassName propagates onto the generated step pod.
+      # Mirrored on the runner pod in applicationsets/arc-runner-scaleset-app.yaml.
+      priorityClassName: capstone-ci-build
       # --- Node placement for the KANIKO BUILD pod (CI-fast, #237/#297; BUILD POOL) ---
       # In containerMode:kubernetes the Kaniko build runs HERE (this step pod), NOT on
       # the runner pod — so the build's node placement is governed by THIS template, not

@@ -41,7 +41,11 @@ spec:
           name: arc-gha-rs-controller
           namespace: arc-system
         minRunners: 0
-        maxRunners: 3
+        # maxRunners = OPERATOR-QUEUE lever: jobs beyond it wait "Waiting for a runner"
+        # IN GitHub Actions (no pod → no OOM). Mirrors the org-wide set (3→2, see
+        # applicationsets/arc-runner-scaleset-app.yaml) — cap to the build pool's real
+        # simultaneous capacity so excess QUEUES instead of spawning unplaceable pods.
+        maxRunners: 2
         containerMode:
           type: "kubernetes"
           kubernetesModeWorkVolumeClaim:
@@ -52,6 +56,10 @@ spec:
                 storage: "5Gi"
         template:
           spec:
+            # CI build priority: co-equal, never-preempt (see the shared scale set +
+            # platform-services/arc/priorityclass-ci-build.yaml). Builds wait for room,
+            # never evict a running workload.
+            priorityClassName: capstone-ci-build
             # Prefer the beefier control-plane OptiPlexes over the 2-core Macs (CI-fast,
             # #237). Mirrors the org-wide scale set (applicationsets/arc-runner-scaleset-app.yaml)
             # and the build step-pod placement in per-team/hook-template.template.yaml.
