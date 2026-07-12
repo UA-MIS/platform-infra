@@ -24,12 +24,18 @@ resources:
   # base is optional + deletionPolicy Delete so a fresh repo with no Vault value still
   # deploys — M4 zero-config).
   - app-secret.externalsecret.yaml
-{%- if values.database == 'mysql' %}
-  # Auto-DB DATABASE_URL ExternalSecret (ADR-033 / #146). Present ONLY for tenant
-  # database: mysql — assembles the mysql:// DSN from the Crossplane-provisioned parts in
+{%- if values.database == 'mysql' or values.database == 'postgres' %}
+  # Auto-DB DATABASE_URL ExternalSecret (ADR-033 / #146). Present for BOTH auto-DB
+  # engines (database: mysql OR postgres) — assembles the engine DSN (mysql:// or
+  # postgresql://, chosen by values.database) from the Crossplane-provisioned parts in
   # Vault (tenants/${{ values.team }}/<env>/database) into the Secret `${{ values.appName }}-db`,
-  # which the base Deployment envs into DATABASE_URL. A bring-your-own / postgres / none
-  # stack omits this file entirely (the DATABASE_URL, if any, rides app-secret instead).
+  # which the base Deployment envs into DATABASE_URL. This gate MUST match
+  # database.externalsecret.yaml's own body guard AND the base Deployment's DATABASE_URL
+  # source selection (deployments.yaml: `<app>-db` for mysql|postgres) — a mysql-only gate
+  # here (the pre-fix bug) left postgres tenants with the Deployment pointing at an
+  # <app>-db Secret this file never created, so DATABASE_URL was silently unset and the
+  # app never connected to its provisioned DB. A bring-your-own / none stack omits this
+  # file entirely (the DATABASE_URL, if any, rides app-secret instead).
   - database.externalsecret.yaml
 {%- endif %}
   # harbor-pull image-pull cred (SA imagePullSecrets:[harbor-pull], #C3) is NOT shipped by
