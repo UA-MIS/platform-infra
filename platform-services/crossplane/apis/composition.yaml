@@ -333,6 +333,10 @@ spec:
                       # kind as Deployment above): a team MAY run a Rollout instead of a
                       # Deployment in its own namespace; never a cluster-scoped object.
                       - { group: argoproj.io, kind: Rollout }
+                      # PodDisruptionBudget (policy/v1) — tenant HA; #346 adds one to
+                      # the staging/prod overlays (overlays/{staging,prod}/pdb.yaml).
+                      # Namespaced + tenancy-safe like the kinds above.
+                      - { group: policy, kind: PodDisruptionBudget }
                     roles:
                       - name: developer
                         description: {{ printf "Team %s developers — sync/get own apps only." $team | quote }}
