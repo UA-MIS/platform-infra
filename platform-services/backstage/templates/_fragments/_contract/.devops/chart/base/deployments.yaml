@@ -68,6 +68,25 @@ spec:
     spec:
       serviceAccountName: ${{ values.appName }}
       automountServiceAccountToken: false
+      # Soft (preferred) pod anti-affinity — SPREAD this component's replicas across nodes so
+      # a single node failure/drain can't take the whole app down, WITHOUT hard-blocking
+      # scheduling on a small/single-node situation. `preferred` (not `required`) means a
+      # 1-replica dev/preview pod (or a cluster with fewer schedulable nodes than replicas)
+      # still schedules fine — the scheduler just prefers a node not already running a same-
+      # component pod. Self-selects on THIS workload's own name+component labels (the only
+      # labels on the pods, §3.1), and lives in the shared pod template so it governs BOTH the
+      # Deployment and the Rollout kinds. topologyKey is the node hostname — the failure domain
+      # for tenant workloads on this platform.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: ${{ values.appName }}
+                    app.kubernetes.io/component: ${{ c.name }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532

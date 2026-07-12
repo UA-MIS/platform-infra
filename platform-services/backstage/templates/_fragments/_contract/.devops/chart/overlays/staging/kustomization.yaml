@@ -12,6 +12,10 @@ kind: Kustomization
 namespace: ${{ values.team }}-staging
 resources:
   - ../../base
+  # PodDisruptionBudget(s) — one per component. Shipped ONLY in staging/prod (replicas>1);
+  # maxUnavailable:1 keeps a node drain/upgrade from evicting every replica of an app at once
+  # (workload-level HA). dev/preview (1 replica) omit this file. See pdb.yaml.
+  - pdb.yaml
   # Per-tenant ESO store + SA (vault-tenant / eso-tenant, scoped to this team's
   # Vault path) — the tenant half of the ADR-030 B1 secrets contract.
   - secretstore.yaml
