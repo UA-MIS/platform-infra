@@ -1,0 +1,188 @@
+# The prune logic, mounted read-only into the CronJob pod. Editing this script is a
+# reviewable git diff; the CronJob picks up the new version on its next scheduled run.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: crossplane-mr-prune-script
+  namespace: crossplane-system
+  labels:
+    platform.capstone/component: platform
+data:
+  prune.sh: |
+    #!/usr/bin/env bash
+    # ========================================================================
+    # Stale-Crossplane-Managed-Resource prune (apiserver-memory reclaim /
+    # teardown-residue cleanup). See ../README.md for the full design.
+    #
+    # SAFETY MODEL (false-negative-safe — "when unsure, DON'T prune"):
+    #   * DRY_RUN=1 by default: logs every candidate, DELETES NOTHING.
+    #   * An MR is an ORPHAN only if its owning CapstoneTenant XR NO LONGER
+    #     EXISTS (the crossplane.io/composite label AND the CapstoneTenant
+    #     ownerReference must AGREE, and neither may name a live tenant).
+    #   * A live tenant's MRs are NEVER touched — even if the MR is failing.
+    #   * SHARED-TEAM GUARD (mirrors the 2026-07-10 duplicate-claim incident
+    #     runbook — "orphan-before-delete / don't prune shared"): if the
+    #     orphan's XR name maps to a team a DIFFERENT live tenant still uses,
+    #     SKIP and warn — deleting it could cascade-delete a shared namespace /
+    #     Harbor project / Vault policy out from under the live tenant.
+    #   * Finalizers are NEVER force-removed: deleting the MR normally lets the
+    #     provider clean up the external resource (Harbor robot / Vault role /
+    #     DB) — the RBAC grants no patch/update verb, so it structurally cannot.
+    # ========================================================================
+    set -euo pipefail
+
+    DRY_RUN="${DRY_RUN:-1}"                              # 1 = report only (default). 0 = enforce (delete).
+    STUCK_THRESHOLD_HOURS="${STUCK_THRESHOLD_HOURS:-24}" # deletion-stuck reporting threshold
+
+    # The exact composed-MR kinds the CapstoneTenant Composition renders
+    # (resource.group form — fully qualified so vault.upbound.io /
+    # sql.crossplane.io sub-group collisions on generic kind names can't
+    # mis-target, e.g. authbackendroles.<many>.vault.upbound.io).
+    KINDS=(
+      objects.kubernetes.crossplane.io
+      projects.project.harbor.crossplane.io
+      robotaccounts.robotaccount.harbor.crossplane.io
+      policies.vault.vault.upbound.io
+      authbackendroles.kubernetes.vault.upbound.io
+      databases.mysql.sql.crossplane.io
+      users.mysql.sql.crossplane.io
+      grants.mysql.sql.crossplane.io
+      roles.postgresql.sql.crossplane.io
+      databases.postgresql.sql.crossplane.io
+      grants.postgresql.sql.crossplane.io
+    )
+
+    log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+
+    if [ "$DRY_RUN" = "0" ]; then
+      MODE="ENFORCE (deletes orphaned MRs)"
+    else
+      MODE="DRY-RUN (reports only, deletes nothing)"
+    fi
+    log "=== crossplane-mr-prune start | mode=${MODE} | stuck-threshold=${STUCK_THRESHOLD_HOURS}h ==="
+
+    # --- ABORT GUARD: the CapstoneTenant CRD must exist. If we cannot positively
+    #     read the live-tenant set, we must NOT conclude everything is orphaned. ---
+    if ! kubectl get crd capstonetenants.platform.capstone.uamishub.com >/dev/null 2>&1; then
+      log "ABORT: CapstoneTenant CRD not found — cannot determine live tenants; refusing to prune."
+      exit 1
+    fi
+
+    LIVE_TENANTS_FILE="$(mktemp)"; LIVE_TEAMS_FILE="$(mktemp)"
+    trap 'rm -f "$LIVE_TENANTS_FILE" "$LIVE_TEAMS_FILE"' EXIT
+
+    if ! kubectl get capstonetenants.platform.capstone.uamishub.com \
+          -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
+          > "$LIVE_TENANTS_FILE" 2>/dev/null; then
+      log "ABORT: failed to list CapstoneTenants — refusing to prune."
+      exit 1
+    fi
+    kubectl get capstonetenants.platform.capstone.uamishub.com \
+      -o jsonpath='{range .items[*]}{.spec.team}{"\n"}{end}' 2>/dev/null \
+      | grep -v '^$' | sort -u > "$LIVE_TEAMS_FILE" || true
+
+    sed -i '/^$/d' "$LIVE_TENANTS_FILE" || true
+    LIVE_COUNT="$(wc -l < "$LIVE_TENANTS_FILE" | tr -d ' ')"
+    log "live CapstoneTenants: ${LIVE_COUNT} [$(paste -sd, "$LIVE_TENANTS_FILE")]"
+    log "live teams:            [$(paste -sd, "$LIVE_TEAMS_FILE")]"
+
+    is_live_tenant() { grep -Fxq "$1" "$LIVE_TENANTS_FILE"; }
+
+    # Shared-team guard: does XR-name $1 belong to a team a live tenant still uses?
+    # XR names are "<team>-<app>", so an orphan named "<liveteam>-*" (or exactly
+    # "<liveteam>") shares a team with a still-live tenant. False positives err
+    # toward SKIP (safe: leave for a human).
+    shares_live_team() {
+      local key="$1" t
+      while IFS= read -r t; do
+        [ -z "$t" ] && continue
+        [ "$key" = "$t" ] && return 0
+        case "$key" in "${t}-"*) return 0;; esac
+      done < "$LIVE_TEAMS_FILE"
+      return 1
+    }
+
+    declare -A ORPHAN_BY_KIND SKIP_SHARED_BY_KIND CONFLICT_BY_KIND STUCK_BY_KIND
+    total_orphan=0; total_skip_shared=0; total_conflict=0; total_stuck=0; total_deleted=0; total_scanned=0
+
+    for kind in "${KINDS[@]}"; do
+      # One TSV row per MR: name, composite-label, CapstoneTenant-owner, stuckHours(-1 if not deleting).
+      rows="$(kubectl get "$kind" -o json 2>/dev/null | jq -r '
+        .items[] |
+        [ .metadata.name,
+          (.metadata.labels["crossplane.io/composite"] // ""),
+          ([ (.metadata.ownerReferences // [])[] | select(.kind=="CapstoneTenant") | .name ][0] // ""),
+          (if .metadata.deletionTimestamp
+             then ((now - (.metadata.deletionTimestamp | fromdateiso8601)) / 3600 | floor)
+             else -1 end)
+        ] | @tsv' 2>/dev/null || true)"
+
+      [ -z "$rows" ] && continue
+
+      while IFS=$'\t' read -r name composite owner stuckhrs; do
+        [ -z "$name" ] && continue
+        total_scanned=$((total_scanned+1))
+
+        # Not a CapstoneTenant composite at all -> never our business.
+        if [ -z "$composite" ] && [ -z "$owner" ]; then
+          continue
+        fi
+        # Label and ownerRef disagree about the owner -> ambiguous, skip.
+        if [ -n "$composite" ] && [ -n "$owner" ] && [ "$composite" != "$owner" ]; then
+          log "SKIP(conflict) ${kind}/${name}: label=${composite} ownerRef=${owner} disagree"
+          CONFLICT_BY_KIND[$kind]=$(( ${CONFLICT_BY_KIND[$kind]:-0} + 1 )); total_conflict=$((total_conflict+1))
+          continue
+        fi
+        key="${composite:-$owner}"
+
+        # Owning tenant still exists -> LIVE, never touch (even if the MR is failing).
+        if is_live_tenant "$key"; then
+          continue
+        fi
+        # Owning XR is gone, but its TEAM is still live via another tenant -> shared, skip.
+        if shares_live_team "$key"; then
+          log "SKIP(shared-team) ${kind}/${name}: owner XR '${key}' gone but team still live — leave for human"
+          SKIP_SHARED_BY_KIND[$kind]=$(( ${SKIP_SHARED_BY_KIND[$kind]:-0} + 1 )); total_skip_shared=$((total_skip_shared+1))
+          continue
+        fi
+
+        # --- ORPHAN ---
+        reason="owner CapstoneTenant '${key}' no longer exists"
+        stuck_note=""
+        if [ "$stuckhrs" != "-1" ]; then
+          if [ "$stuckhrs" -ge "$STUCK_THRESHOLD_HOURS" ]; then
+            stuck_note=" [STUCK-DELETING ${stuckhrs}h — provider finalizer blocked]"
+            STUCK_BY_KIND[$kind]=$(( ${STUCK_BY_KIND[$kind]:-0} + 1 )); total_stuck=$((total_stuck+1))
+          else
+            stuck_note=" [deleting ${stuckhrs}h]"
+          fi
+        fi
+        ORPHAN_BY_KIND[$kind]=$(( ${ORPHAN_BY_KIND[$kind]:-0} + 1 )); total_orphan=$((total_orphan+1))
+
+        if [ "$DRY_RUN" = "0" ]; then
+          log "PRUNE ${kind}/${name}: ${reason}${stuck_note}"
+          if kubectl delete "$kind" "$name" --wait=false >/dev/null 2>&1; then
+            total_deleted=$((total_deleted+1))
+          else
+            log "  WARN: delete failed for ${kind}/${name} (will retry next run)"
+          fi
+        else
+          log "WOULD-PRUNE ${kind}/${name}: ${reason}${stuck_note}"
+        fi
+      done <<< "$rows"
+    done
+
+    log "=== summary ==="
+    log "scanned MRs: ${total_scanned}"
+    for kind in "${KINDS[@]}"; do
+      o=${ORPHAN_BY_KIND[$kind]:-0}; s=${SKIP_SHARED_BY_KIND[$kind]:-0}; c=${CONFLICT_BY_KIND[$kind]:-0}; k=${STUCK_BY_KIND[$kind]:-0}
+      if [ "$o" -ne 0 ] || [ "$s" -ne 0 ] || [ "$c" -ne 0 ] || [ "$k" -ne 0 ]; then
+        log "  ${kind}: orphan=${o} stuck=${k} skip_shared=${s} conflict=${c}"
+      fi
+    done
+    if [ "$DRY_RUN" = "0" ]; then
+      log "TOTAL orphan=${total_orphan} deleted=${total_deleted} stuck=${total_stuck} skip_shared=${total_skip_shared} conflict=${total_conflict}"
+    else
+      log "TOTAL would-prune=${total_orphan} (stuck=${total_stuck}) skip_shared=${total_skip_shared} conflict=${total_conflict} | DRY-RUN: nothing deleted"
+    fi
+    log "=== crossplane-mr-prune done ==="
