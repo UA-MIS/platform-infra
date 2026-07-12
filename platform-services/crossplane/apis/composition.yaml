@@ -3554,7 +3554,7 @@ spec:
                           key: {{ printf "tenants/%s/console/database" $team | quote }}
                           property: port
             ---
-            # Deployment: dockette/adminer:pgsql -- identical pod spec to the retired per-env consoles
+            # Deployment: dockette/adminer:postgres -- identical pod spec to the retired per-env consoles
             # (see git history for the non-root-UID / adminer-plugins emptyDir
             # rationale), plus the adminer.css mount.
             apiVersion: kubernetes.crossplane.io/v1alpha1
@@ -3607,7 +3607,7 @@ spec:
                       spec:
                         containers:
                           - name: adminer
-                            image: dockette/adminer:pgsql
+                            image: dockette/adminer:postgres
                             imagePullPolicy: IfNotPresent
                             env:
                               - name: ADMINER_PLUGIN_AUTOLOGIN
