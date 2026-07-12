@@ -922,7 +922,12 @@ spec:
                     labels:
                       platform.capstone/component: platform
                   spec:
-                    refreshInterval: "1h"
+                    # 1m (was 1h): the robot token (attribute.secret) lands a beat AFTER
+                    # the RobotAccount connection secret is created, so the FIRST push
+                    # errors ("secret key attribute.secret does not exist"). A short refresh
+                    # retries within ~1m so the cred reaches Vault with no manual force-sync
+                    # nudge (the tenant-onboarding push-cred race, Fix B).
+                    refreshInterval: "1m"
                     secretStoreRefs:
                       - name: vault-push
                         kind: SecretStore
@@ -958,7 +963,9 @@ spec:
                     labels:
                       platform.capstone/component: platform
                   spec:
-                    refreshInterval: "1h"
+                    # 1m (was 1h): same first-reconcile race as harbor-push above — retry
+                    # fast so the pull cred reaches Vault without a manual nudge (Fix B).
+                    refreshInterval: "1m"
                     secretStoreRefs:
                       - name: vault-push
                         kind: SecretStore
@@ -1083,7 +1090,11 @@ spec:
                       platform.capstone/component: platform
                       platform.capstone/team: {{ $team | quote }}
                   spec:
-                    refreshInterval: "1h"
+                    # 1m (was 1h): consumer side of the push-cred chain — read the token
+                    # out of Vault fast once the PushSecret above lands it, so the runner's
+                    # harbor-push-<team> imagePullSecret materializes within ~1-2m of tenant
+                    # creation with no manual force-sync (Fix B, end-to-end).
+                    refreshInterval: "1m"
                     secretStoreRef:
                       name: vault-backend
                       kind: ClusterSecretStore
