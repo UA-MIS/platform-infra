@@ -192,10 +192,22 @@ spec:
                       case "$CODE" in
                         200) echo "    label removed (HTTP 200) — generator will now prune app=$NAME for good" ;;
                         404) echo "    label already absent (HTTP 404) — treating as done" ;;
-                        *)   echo "    ⚠ label removal FAILED (HTTP $CODE): $(cat /tmp/resp.json 2>/dev/null)" >&2 ;;
+                        # Record the failure OUTSIDE the pipeline subshell (flag file) so the
+                        # job can exit non-zero after the scan — the LOUD-death contract
+                        # (README: "exits non-zero LOUD, never a silent no-death"). Typical
+                        # cause: HTTP 403 because the ua-mis-backstage App installation still
+                        # has Pull requests: Read (needs Write for label management).
+                        *)   echo "    ⚠ label removal FAILED (HTTP $CODE): $(cat /tmp/resp.json 2>/dev/null)" >&2
+                             touch /tmp/reap-failed ;;
                       esac
                     done
                   rm -f "$PEM"
+                  if [ -f /tmp/reap-failed ]; then
+                    echo "FATAL: one or more label removals FAILED (see ⚠ above) — the 12h" \
+                         "hard death was NOT enforced for those previews. Most likely the" \
+                         "ua-mis-backstage App installation lacks 'Pull requests: Write'." >&2
+                    exit 13
+                  fi
                   echo "==> preview-ttl: done"
               volumeMounts:
                 - name: tmp
