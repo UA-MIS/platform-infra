@@ -15,7 +15,7 @@
 # readOnlyRootFilesystem. nginx.conf keeps nginx's pid, temp paths, and logs off the
 # read-only rootfs (under /dev/shm + stdout/stderr), so it runs clean with no writable volume.
 
-FROM nginx:1.27-alpine
+FROM nginx:1.29-alpine
 
 # Our config: foreground nginx, pid/temp under /dev/shm, listen on the app port, static
 # multi-page serving + /healthz. nginx.conf lives at the skeleton root, OUTSIDE public/, so
