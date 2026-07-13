@@ -108,4 +108,14 @@ spec:
             capabilities:
               drop:
                 - ALL
+          volumeMounts:
+            # Writable /tmp under the read-only root fs — JVM/embedded-Tomcat (and other
+            # runtimes) create temp files at startup; without this the pod crash-loops on
+            # "Unable to create tempDir ... Read-only file system". emptyDir is pod-scoped
+            # scratch, so readOnlyRootFilesystem hardening stays fully intact.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
 {%- endfor %}
