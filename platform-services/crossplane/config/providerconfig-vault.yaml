@@ -30,14 +30,20 @@ spec:
   # absence caused `spec.address: Required value`. Per the CRD: a URL with scheme +
   # host + port and NO path.
   address: "https://vault.vault.svc.cluster.local:8200"
-  # The in-cluster Vault serves a self-signed-CA cert. The provider now VERIFIES it:
+  # The in-cluster Vault serves a self-signed-CA cert. The provider VERIFIES it:
   # the DeploymentRuntimeConfig in providers/provider-vault.yaml mounts the vault-ca
   # ConfigMap into the provider Pod and sets VAULT_CACERT, which the Upjet vault
   # provider's Vault API client (terraform-provider-vault `ca_cert_file` <- VAULT_CACERT)
-  # uses to validate the server cert. So skip_tls_verify is false — the provider will
+  # uses to validate the server cert. TLS verification is ON — the provider will
   # REFUSE a cert it cannot chain to that CA (no MITM window). Requires the vault-ca
-  # ConfigMap present in crossplane-system (it is) and a provider Pod restart on apply.
-  skip_tls_verify: false
+  # ConfigMap present in crossplane-system (it is).
+  #
+  # NOTE (drift cleanup): `skip_tls_verify: false` was previously stated explicitly
+  # here, but ArgoCD's ServerSideApply machinery prunes the false-valued boolean
+  # from the apply (verified via managedFields: argocd-controller's fieldset never
+  # contained it), so the field never landed on the live object and the app sat
+  # perpetually OutOfSync on it. The field is OMITTED instead: absent ==
+  # provider default `false` == verify TLS — identical semantics, zero drift.
   credentials:
     source: Secret
     secretRef:

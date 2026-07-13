@@ -153,6 +153,18 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: spire-server   # server + controller-manager land here; agent/CSI-driver render into spire-system (explicit per-resource namespace in the chart's own templates)
+  # Drift cleanup: the API server normalizes StatefulSet volumeClaimTemplates by
+  # stamping `apiVersion: v1` / `kind: PersistentVolumeClaim` into each template.
+  # The chart (correctly) omits them, but volumeClaimTemplates is an ATOMIC list,
+  # so the SSA-predicted state can never match and spire-server sat perpetually
+  # OutOfSync. Ignore is scoped to exactly those two normalized fields — a real
+  # VCT change (size, storageClass, accessModes) still shows as a diff.
+  ignoreDifferences:
+    - group: apps
+      kind: StatefulSet
+      jqPathExpressions:
+        - '.spec.volumeClaimTemplates[].apiVersion'
+        - '.spec.volumeClaimTemplates[].kind'
   syncPolicy:
     automated:
       prune: true
@@ -160,6 +172,7 @@ spec:
     syncOptions:
       - CreateNamespace=false   # spire-system + spire-server ns ship via platform-services/spire
       - ServerSideApply=true
+      - RespectIgnoreDifferences=true   # keep the API-server-stamped VCT fields out of the apply
     retry:
       limit: 5
       backoff: { duration: 10s, factor: 2, maxDuration: 5m }
