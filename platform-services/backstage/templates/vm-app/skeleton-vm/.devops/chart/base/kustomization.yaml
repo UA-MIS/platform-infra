@@ -16,6 +16,7 @@ labels:
 resources:
   - virtualmachine.yaml
   - service.yaml
+  - ssh-service.yaml
   - ingress.yaml
 
 # Package cloud-init.yaml into the Secret the VM references (cloudInitNoCloud.secretRef).

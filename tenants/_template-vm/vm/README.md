@@ -17,7 +17,8 @@ deliberately separate from the container tenant tiers (`../namespaces/*.yaml`).
 
 | File | Purpose |
 | --- | --- |
-| `appproject-vm.yaml` | the VM-tier tenancy fence — a SEPARATE AppProject `__TEAM__-vm` that whitelists `VirtualMachine`/`VirtualMachineInstance`/`DataVolume` and targets only `__TEAM__-vm-*` namespaces. `clusterResourceWhitelist: []`. |
+| `appproject-vm.yaml` | the VM-tier tenancy fence — a SEPARATE AppProject `__TEAM__-vm` that whitelists `VirtualMachine`/`VirtualMachineInstance`/`DataVolume` (+ the cloud-init `Secret`) and targets only `__TEAM__-vm-*` namespaces. `clusterResourceWhitelist: []`. |
+| `applicationset-vm.yaml` | the VM env ApplicationSet — a single-env (prod) `matrix(list × git-files promotion.yaml)` App that syncs the APP repo's `.devops/chart/overlays/prod` VM chart into `__TEAM__-vm-prod` under project `__TEAM__-vm`. **Without this the VM tier is a fence + namespace with nothing inside it** (the #376 onboarding bug). The VM analogue of `../_template/applicationset-envs.yaml`. |
 | `namespaces/vm-prod.yaml` | `__TEAM__-vm-prod` Namespace at **PSA `baseline`** (not restricted) + VM-sized ResourceQuota + LimitRange + 4 NetworkPolicies (default-deny, Traefik ingress, DNS egress, importer image-pull) + VM-aware Role/RoleBinding. |
 
 The security rationale, blast-radius analysis, and the post-install deny-test plan
@@ -61,12 +62,17 @@ Same as the parent template: `__TEAM__`, `__APPNAME__`, `__SEMESTER__`. Substitu
 half-replaced). The team group `__TEAM__-developers` is the same subject used by the
 container tier.
 
-## Follow-up wiring (out of scope for this PR — tracked in ADR-032)
+## Follow-up wiring (tracked in ADR-032)
 
-- **Scaffolder `layout: vm`** + `skeleton-vm/` + `render-tenant` emitting this tier
-  (companion §4).
-- **A VM env ApplicationSet** pinning `project: __TEAM__-vm` and destination
-  `__TEAM__-vm-prod` to deploy the team's `VirtualMachine` from their `.devops/`
-  overlay (the container `applicationset-envs.yaml` targets the restricted tiers).
+- **Scaffolder `layout: vm`** — DONE: the `vm-app` Backstage template's
+  `capstone:render-tenant` step points its `templateUrl` at **this** blueprint
+  (`tenants/_template-vm`, not `tenants/_template`), so a VM tenant renders ONLY the
+  VM tier — no container envs/preview appset to render-fail on a `layout: vm`
+  promotion.yaml (the other half of the #376 bug).
+- **VM env ApplicationSet** — DONE: `applicationset-vm.yaml` (above).
+- **Team SSH access + clone-and-run + pet-vs-immutable disk** — see
+  `artifacts/design/decisions/adr-032a-vm-tenant-access-ux.md` (this PR's companion
+  design; cloud-init `ssh_authorized_keys` + per-tenant SSH Service are implemented
+  in `skeleton-vm/`; the public SSH transport is an operator decision).
 - **Platform install** of `virt-operator` + `cdi-operator` as pinned ArgoCD apps.
 - **Live-migration** (CephFS RWX) — deferred; node drain cold-restarts VMs.

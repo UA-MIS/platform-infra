@@ -79,8 +79,28 @@ spec:
       kind: ServiceAccount
     - group: networking.k8s.io
       kind: Ingress
-    # Secrets stay encrypted-at-rest only (raw Secret ABSENT — platform controllers
-    # mint it), exactly as in the container project.
+    # cloud-init userdata Secret. KubeVirt's cloudInitNoCloud.secretRef reads a RAW
+    # Secret (key `userdata`); it cannot take a ConfigMap for userData. The VM chart's
+    # kustomize secretGenerator emits `<app>-cloudinit` as exactly this kind, so the VM
+    # tier MUST permit it or ArgoCD refuses to create it ("Secret is not permitted in
+    # project __TEAM__-vm") and the virt-launcher pod hangs mounting a missing volume.
+    # This mirrors the FIRST live VM tenant (team-tenantvm, PR #376), which had to
+    # hand-add this same grant — the template now carries it so the NEXT VM tenant does
+    # not break identically.
+    # SECURITY TRADEOFF (ADR-032 re-review — flagged for the security track): unlike the
+    # container tier (secrets ONLY via ESO/SealedSecret), this lets a team ship a
+    # plaintext Secret in git for cloud-init. The cloud-init body is NON-secret bootstrap
+    # (a web-server unit + an SSH PUBLIC key — see the skeleton cloud-init.yaml), so the
+    # exposure is low; but the STRICTER alternative that keeps raw Secret ABSENT is to
+    # INLINE cloud-init as spec...volumes[].cloudInitNoCloud.userData in the
+    # VirtualMachine (no Secret object at all) — a VM-chart change touching BOTH this
+    # blueprint's contract AND the skeleton-vm chart. RECOMMENDATION: keep the whitelist
+    # now (template == proven tenant, no divergence-bug risk); track inline-userData as
+    # the security-track hardening follow-up (ADR-032 §Secret handling).
+    - group: ''
+      kind: Secret
+    # Encrypted-at-rest secret kinds (SealedSecret / ExternalSecret — platform
+    # controllers mint runtime creds), exactly as in the container project.
     - group: bitnami.com
       kind: SealedSecret
     - group: external-secrets.io
