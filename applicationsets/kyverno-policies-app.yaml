@@ -37,6 +37,22 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: kyverno   # ClusterPolicy is cluster-scoped; namespace is a harmless default.
+  # Drift cleanup: Kyverno's mutating webhook injects field DEFAULTS into every
+  # ClusterPolicy rule (skipBackgroundRequests, validate.allowExistingViolations,
+  # verifyImages required/useCache/verifyDigest/signatureAlgorithm). spec.rules is
+  # an ATOMIC list, so under ServerSideApply the predicted state can never contain
+  # them and the app sat perpetually OutOfSync. Ignores are scoped to EXACTLY the
+  # webhook-defaulted fields — any real rule change still shows as a diff.
+  ignoreDifferences:
+    - group: kyverno.io
+      kind: ClusterPolicy
+      jqPathExpressions:
+        - '.spec.rules[].skipBackgroundRequests'
+        - '.spec.rules[].validate.allowExistingViolations'
+        - '.spec.rules[].verifyImages[].required'
+        - '.spec.rules[].verifyImages[].useCache'
+        - '.spec.rules[].verifyImages[].verifyDigest'
+        - '.spec.rules[].verifyImages[].attestors[].entries[].signatureAlgorithm'
   syncPolicy:
     automated:
       prune: true
@@ -44,6 +60,7 @@ spec:
     syncOptions:
       - CreateNamespace=false
       - ServerSideApply=true
+      - RespectIgnoreDifferences=true   # keep the webhook-owned defaults out of the apply
     retry:
       limit: 5
       backoff: { duration: 10s, factor: 2, maxDuration: 5m }

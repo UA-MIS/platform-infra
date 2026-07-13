@@ -71,6 +71,23 @@ spec:
           # picked up by this glob, ns + secrets only, same split as harbor/vault/eso).
           - path: platform-services/cnpg
             exclude: true
+          # EXCLUDE vpa-policies/ + crossplane-mr-prune/ (ArgoCD drift cleanup):
+          # both dirs already have DEDICATED Applications
+          # (applicationsets/vpa-platform-policies-app.yaml — sync-wave 1 after
+          # the VPA CRDs; applicationsets/crossplane-mr-prune-app.yaml — its own
+          # review surface, destination crossplane-system). Without these
+          # excludes the glob ALSO generated platform-svc-vpa-policies /
+          # platform-svc-crossplane-mr-prune, i.e. TWO Applications managing the
+          # SAME live objects — each sync flipped the tracking-id annotation to
+          # its own name, so one app of each pair was chronically OutOfSync (the
+          # exact double-management the kyverno-policies exclude above calls out
+          # as "unaddressed"; addressed now). The dedicated apps stay; the
+          # svc-* duplicates are pruned by the generator (non-cascading — see
+          # syncPolicy.preserveResourcesOnDeletion below).
+          - path: platform-services/vpa-policies
+            exclude: true
+          - path: platform-services/crossplane-mr-prune
+            exclude: true
           # NOTE (P5/M1, D-046): platform-services/backstage IS generated as
           # `platform-svc-backstage` (ns + the REAL sealed secrets: backstage-process-secrets
           # / backstage-postgresql / harbor-pull) — the prereqs the dedicated chart app
@@ -81,6 +98,16 @@ spec:
           # into backstage/app/ (the in-repo Backstage source), and the dir's
           # kustomization lists only the ns + sealed secrets as resources — so the app
           # source is not applied here.
+  # Non-cascading prune of generator-removed Applications (ArgoCD drift cleanup):
+  # when a directory stops matching the glob (deleted, or excluded above — this
+  # change excludes vpa-policies/ + crossplane-mr-prune/), the appset controller
+  # deletes the generated Application WITHOUT the resources-finalizer cascade, so
+  # the LIVE objects survive and their dedicated/successor Application adopts them
+  # in place. Trade-off (accepted): a dir removed WITHOUT a successor app leaves
+  # its live objects orphaned for manual cleanup — for this platform that beats a
+  # glob/exclude edit being able to delete a live service.
+  syncPolicy:
+    preserveResourcesOnDeletion: true
   template:
     metadata:
       name: 'platform-svc-{{.path.basename}}'
@@ -101,6 +128,30 @@ spec:
         # (CRDs, ClusterIssuers) ignore it. Using kube-system (always present)
         # avoids creating empty, unused per-service namespaces.
         namespace: kube-system
+      # Drift cleanup — two classes of MUTATION-INJECTED defaults that ArgoCD's
+      # ServerSideApply-predicted state can never contain (both live in ATOMIC
+      # lists, so per-item webhook/API-server additions read as a permanent diff):
+      #   1. ESO's webhook defaults every ExternalSecret spec.data[].remoteRef
+      #      (conversionStrategy/decodingStrategy/metadataPolicy/nullBytePolicy)
+      #      — kept svc-backstage / svc-db-admin / svc-db-tier chronically OutOfSync.
+      #   2. The API server stamps apiVersion/kind into StatefulSet
+      #      volumeClaimTemplates — kept svc-monitoring (tempo) OutOfSync.
+      # Class-level on purpose (this ONE template emits every platform-svc-* app;
+      # any future dir with an ExternalSecret/StatefulSet inherits the fix), but
+      # scoped to EXACTLY the injected fields — real spec changes still diff.
+      ignoreDifferences:
+        - group: external-secrets.io
+          kind: ExternalSecret
+          jqPathExpressions:
+            - '.spec.data[].remoteRef.conversionStrategy'
+            - '.spec.data[].remoteRef.decodingStrategy'
+            - '.spec.data[].remoteRef.metadataPolicy'
+            - '.spec.data[].remoteRef.nullBytePolicy'
+        - group: apps
+          kind: StatefulSet
+          jqPathExpressions:
+            - '.spec.volumeClaimTemplates[].apiVersion'
+            - '.spec.volumeClaimTemplates[].kind'
       syncPolicy:
         automated:
           prune: true
@@ -109,6 +160,7 @@ spec:
           # No CreateNamespace: services that need a namespace ship their own
           # Namespace object (cert-manager); the rest target kube-system.
           - ServerSideApply=true   # large CRDs (cert-manager) need SSA
+          - RespectIgnoreDifferences=true   # keep the ignored (webhook-owned) fields out of the apply
         retry:
           limit: 5
           backoff: { duration: 5s, factor: 2, maxDuration: 3m }

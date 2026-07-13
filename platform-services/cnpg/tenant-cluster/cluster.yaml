@@ -94,6 +94,10 @@ spec:
 
   plugins:
     - name: barman-cloud.cloudnative-pg.io
+      # `enabled: true` is EXPLICIT (the CNPG webhook's default) — spec.plugins
+      # is an atomic list, so the webhook-added default left this app perpetually
+      # OutOfSync under ServerSideApply. See cnpg/cluster/cluster.yaml (same fix).
+      enabled: true
       isWALArchiver: true
       parameters:
         barmanObjectName: capstone-tenant-pg-backup-store   # objectstore.yaml

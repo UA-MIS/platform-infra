@@ -94,6 +94,12 @@ spec:
 
   plugins:
     - name: barman-cloud.cloudnative-pg.io
+      # `enabled: true` is EXPLICIT (it is the CNPG webhook's default) because
+      # spec.plugins is an ATOMIC list: ArgoCD's ServerSideApply-predicted state
+      # replaces the whole entry, the webhook re-adds the default, and the app
+      # sat perpetually OutOfSync on this one field. Stating the default in git
+      # makes desired == live. (Drift-cleanup; same fix in tenant-cluster/.)
+      enabled: true
       isWALArchiver: true
       parameters:
         barmanObjectName: capstone-pg-backup-store   # platform-services/cnpg/cluster/objectstore.yaml

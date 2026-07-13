@@ -14,8 +14,13 @@
 # Selects the demo Job's pod (spire-demo ns, label app.kubernetes.io/name=spire-demo-client,
 # ServiceAccount spire-demo-client) and mints it:
 #   spiffe://capstone.internal/ns/spire-demo/sa/spire-demo-client
-# (the chart's DEFAULT spiffeIDTemplate — ns/<namespace>/sa/<service-account> — is
-# left as-is; no custom spiffeIDTemplate override needed for this baseline.)
+# spiffeIDTemplate is REQUIRED by the ClusterSPIFFEID CRD — the earlier revision
+# omitted it assuming a chart-side default, but that default only applies to
+# CHART-generated ClusterSPIFFEIDs, not to the API: admission rejected this object
+# with `spec.spiffeIDTemplate: Required value` and platform-svc-spire sat
+# perpetually OutOfSync/SyncFailed on it (drift cleanup). The template below is
+# the same ns/<namespace>/sa/<service-account> shape the chart uses for its own
+# objects (see the live spire-server-spire-default ClusterSPIFFEID).
 #
 # className MUST match spire-server.controllerManager.className in
 # applicationsets/spire-app.yaml ("capstone") — the controller-manager runs with
@@ -29,6 +34,7 @@ metadata:
     platform.capstone/component: platform
 spec:
   className: capstone
+  spiffeIDTemplate: spiffe://{{ .TrustDomain }}/ns/{{ .PodMeta.Namespace }}/sa/{{ .PodSpec.ServiceAccountName }}
   namespaceSelector:
     matchExpressions:
       - key: kubernetes.io/metadata.name
