@@ -33,7 +33,8 @@
 # secret `argocd-repo-creds-uamis` (keys githubAppID / githubAppInstallationID /
 # githubAppPrivateKey — the SAME App+secret the preview generator uses to list PRs);
 # the cohort-gc SA is granted GET on exactly that one secret (rbac.yaml). No reusable
-# minter exists in-repo, so the JWT (RS256) dance is hand-rolled here (openssl+curl+jq,
+# minter exists in-repo, so the JWT (RS256) dance is hand-rolled here (python3-ctypes→
+# libcrypto (the image has NO openssl CLI — verified live) + curl + jq,
 # all in the alpine/k8s image). ⚠ The App INSTALLATION must have `Pull requests: Write`
 # (label management) — it is provisioned today with Pull requests: Read for the
 # generator's LIST. Grant write on the ua-mis-backstage App installation or the label
@@ -75,14 +76,17 @@ spec:
           containers:
             - name: preview-ttl
               # kubectl + a real shell (this job's `command` is ["/bin/sh", ...] running
-              # a shell script body) PLUS openssl/curl/jq for the GitHub App JWT mint +
-              # label-strip API calls. The distroless registry.k8s.io/kubectl image has NO
-              # /bin/sh, so it StartError'd (exec 128: stat /bin/sh: no such file or
-              # directory) — dead on arrival. alpine/k8s bundles a full shell + kubectl +
-              # openssl + jq + curl and is the exact image the working crossplane-mr-prune
-              # CronJob uses (proven live on this cluster; its layers are already
-              # node-cached). The script preflights all four tools and fails LOUD if any
-              # is absent, so an image regression can never become a silent no-death.
+              # a shell script body) PLUS curl/jq + an RS256 signer for the GitHub App
+              # JWT mint + label-strip API calls. The distroless registry.k8s.io/kubectl
+              # image has NO /bin/sh, so it StartError'd (exec 128: stat /bin/sh: no such
+              # file or directory) — dead on arrival. alpine/k8s bundles a full shell +
+              # kubectl + jq + curl + python3 and is the exact image the working
+              # crossplane-mr-prune CronJob uses (proven live on this cluster; its layers
+              # are already node-cached). ⚠ It does NOT ship the openssl CLI (verified
+              # live — `command -v openssl` fails in-image), so the RS256 sign uses
+              # python3-ctypes against the image's libcrypto.so.3 (see the mint step).
+              # The script preflights every tool and fails LOUD if any is absent, so an
+              # image regression can never become a silent no-death.
               image: alpine/k8s:1.31.5
               imagePullPolicy: IfNotPresent
               securityContext:
@@ -102,12 +106,15 @@ spec:
                 - |
                   echo "==> preview-ttl: TTL_HOURS=$TTL_HOURS DRY_RUN=$DRY_RUN"
 
-                  # Preflight — the JWT mint needs openssl (RS256 sign) + curl + jq; the
-                  # reaper needs kubectl + base64. Fail LOUD if the image ever lacks one
-                  # (never a silent no-death).
-                  for BIN in openssl curl jq kubectl base64; do
+                  # Preflight — the JWT mint needs python3+libcrypto (RS256 sign; the image
+                  # has NO openssl CLI — verified live, README open-item resolved) + curl +
+                  # jq; the reaper needs kubectl + base64. Fail LOUD if the image ever
+                  # lacks one (never a silent no-death).
+                  for BIN in python3 curl jq kubectl base64; do
                     command -v "$BIN" >/dev/null 2>&1 || { echo "FATAL: required tool '$BIN' not in image" >&2; exit 10; }
                   done
+                  python3 -c 'import ctypes; ctypes.CDLL("libcrypto.so.3")' \
+                    || { echo "FATAL: python3 cannot load libcrypto.so.3 (needed for RS256)" >&2; exit 10; }
 
                   # The alpine/k8s image ships BusyBox `date`, which supports NEITHER
                   # GNU relative `-d "-N hours"` NOR BSD `-v` (both exit 1). Compute the
@@ -133,13 +140,46 @@ spec:
 
                   # --- Mint a GitHub App INSTALLATION token (org-wide write; a CronJob has
                   #     no per-repo GITHUB_TOKEN). Hand-rolled JWT (RS256) — no reusable
-                  #     minter exists in-repo. base64URL = std base64, no-wrap, +/→-_, no '='. ---
-                  b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+                  #     minter exists in-repo. base64URL = std base64, no-wrap, +/→-_, no '='.
+                  #     ⚠ The alpine/k8s image ships NO openssl CLI (verified live — the
+                  #     "confirm openssl" README open-item came back NEGATIVE), so the RS256
+                  #     signature calls the image's libcrypto.so.3 (guaranteed present — curl
+                  #     links it) from python3 via ctypes: standard one-shot EVP_DigestSign
+                  #     over the PKCS#1v1.5/SHA-256 signing input. Signature verified against
+                  #     a real `openssl dgst -verify` on a throwaway key, both locally and
+                  #     from inside this exact image on-cluster. ---
+                  b64url() { base64 | tr -d '\n' | tr '+/' '-_' | tr -d '='; }
+                  cat > /tmp/rs256.py <<'PYEOF'
+                  import base64, ctypes, sys
+                  lc = ctypes.CDLL("libcrypto.so.3")
+                  lc.BIO_new_mem_buf.restype = ctypes.c_void_p
+                  lc.BIO_new_mem_buf.argtypes = [ctypes.c_char_p, ctypes.c_int]
+                  lc.PEM_read_bio_PrivateKey.restype = ctypes.c_void_p
+                  lc.PEM_read_bio_PrivateKey.argtypes = [ctypes.c_void_p] * 4
+                  lc.EVP_MD_CTX_new.restype = ctypes.c_void_p
+                  lc.EVP_sha256.restype = ctypes.c_void_p
+                  lc.EVP_DigestSignInit.restype = ctypes.c_int
+                  lc.EVP_DigestSignInit.argtypes = [ctypes.c_void_p] * 5
+                  lc.EVP_DigestSign.restype = ctypes.c_int
+                  lc.EVP_DigestSign.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.POINTER(ctypes.c_size_t), ctypes.c_char_p, ctypes.c_size_t]
+                  pem = open(sys.argv[1], "rb").read()
+                  data = sys.stdin.buffer.read()
+                  bio = lc.BIO_new_mem_buf(pem, len(pem))
+                  key = lc.PEM_read_bio_PrivateKey(bio, None, None, None) if bio else None
+                  if not key: sys.exit("FATAL: private-key PEM parse failed")
+                  ctx = lc.EVP_MD_CTX_new()
+                  if not ctx or lc.EVP_DigestSignInit(ctx, None, lc.EVP_sha256(), None, key) != 1: sys.exit("FATAL: EVP_DigestSignInit failed")
+                  n = ctypes.c_size_t(0)
+                  if lc.EVP_DigestSign(ctx, None, ctypes.byref(n), data, len(data)) != 1: sys.exit("FATAL: EVP_DigestSign (size) failed")
+                  buf = ctypes.create_string_buffer(n.value)
+                  if lc.EVP_DigestSign(ctx, buf, ctypes.byref(n), data, len(data)) != 1: sys.exit("FATAL: EVP_DigestSign failed")
+                  sys.stdout.write(base64.urlsafe_b64encode(buf.raw[: n.value]).rstrip(b"=").decode())
+                  PYEOF
                   HEADER=$(printf '%s' '{"alg":"RS256","typ":"JWT"}' | b64url)
                   IAT=$(( NOW - 60 )); EXP=$(( NOW + 540 ))
                   PAYLOAD=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$IAT" "$EXP" "$APP_ID" | b64url)
                   SIGNING_INPUT="${HEADER}.${PAYLOAD}"
-                  SIG=$(printf '%s' "$SIGNING_INPUT" | openssl dgst -sha256 -sign "$PEM" -binary | b64url)
+                  SIG=$(printf '%s' "$SIGNING_INPUT" | python3 /tmp/rs256.py "$PEM")
                   JWT="${SIGNING_INPUT}.${SIG}"
                   TOKEN=$(curl -sS -X POST \
                     -H "Authorization: Bearer $JWT" \

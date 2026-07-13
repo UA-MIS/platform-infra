@@ -29,12 +29,14 @@ Two platform garbage-collection jobs that lean on the universal tenant labels
   creation/revival, by design.)
 - **GitHub auth:** a CronJob has no per-repo `GITHUB_TOKEN`, and the label strip spans
   every tenant repo, so it mints a `ua-mis-backstage` GitHub App **installation token**
-  (hand-rolled RS256 JWT → `/app/installations/<id>/access_tokens`, openssl+curl+jq in
-  the `alpine/k8s` image). It **reuses** the already-sealed App creds in the `argocd`
+  (hand-rolled RS256 JWT → `/app/installations/<id>/access_tokens`; the `alpine/k8s`
+  image ships NO openssl CLI — verified live — so the signature is python3-ctypes →
+  the image's `libcrypto.so.3`, plus curl+jq). It **reuses** the already-sealed App creds in the `argocd`
   secret `argocd-repo-creds-uamis` (the same App+secret the generator uses to list PRs)
   via a scoped, single-secret cross-namespace read (see RBAC). **⚠ The App installation
   must have `Pull requests: Write`** (label management); it is provisioned with `Read`
-  for the generator's list — grant write or the strip fails LOUD (exit 12).
+  for the generator's list — grant write or the strip fails LOUD (403 → exit 13; the
+  token itself still mints fine with `Read`, so the failure is at the label DELETE).
 
 ## 2. cohort-cleanup (`cohort-cleanup-cronjob.yaml`)
 - **`suspend: true`** — never fires automatically. Graduating a cohort is a
@@ -93,9 +95,12 @@ readOnlyRootFilesystem + /tmp lesson). Namespace enforces PSA `restricted`.
       (currently `Read` for the generator's PR list). Without it preview-ttl mints the
       token fine but the label-strip `DELETE .../labels/preview` returns 403 and the job
       exits LOUD — the preview would not hard-die. This is the one external prerequisite.
-- [ ] Confirm the `alpine/k8s:1.31.5` image ships the `openssl` CLI (the JWT mint needs
-      RS256 signing). The job preflights `openssl/curl/jq/kubectl/base64` and exits 10 if
-      any is missing, so a regression is loud — but verify on first real run.
+- [x] ~~Confirm the `alpine/k8s:1.31.5` image ships the `openssl` CLI~~ — verified live:
+      it does NOT (preflight exited 10 on the first smoke run). The RS256 sign now uses
+      python3-ctypes → the image's `libcrypto.so.3` (signature verified against
+      `openssl dgst -verify` both locally and from inside the image on-cluster). The job
+      preflights `python3/curl/jq/kubectl/base64` + a libcrypto load and exits 10 if any
+      is missing, so a regression stays loud.
 - [ ] Flip `preview-ttl` `DRY_RUN` → `false` once the human confirms the label-strip
       selection on a real >12h preview. **`DRY_RUN=false` (ENFORCING) is set here** — dry-run
       first by patching the CronJob env if you want to observe a cycle before enforcing.
