@@ -1178,6 +1178,50 @@ spec:
                   data:
                     content: |
                       spec:
+                        # --- Node placement for the KANIKO BUILD step pod (#372/#374; SOFT TIER) ---
+                        # MUST mirror platform-services/arc/per-team/hook-template.template.yaml
+                        # (the reviewed source of truth). WITHOUT these two fields the step pod
+                        # has NO toleration for laptop-01's `capstone.io/dedicated=ci-build:NoSchedule`
+                        # taint (#374) and NO nodeAffinity (#372) → it is REPELLED off the dedicated
+                        # CI node onto the small Mac workers. runner-container-hooks merges these
+                        # top-level PodSpec fields verbatim onto the generated step pod.
+                        tolerations:
+                          - key: capstone.io/control-plane
+                            operator: Equal
+                            value: "true"
+                            effect: PreferNoSchedule
+                          # DEDICATE laptop-01 to CI: tolerate the #374 taint so the Kaniko BUILD
+                          # step pod CAN land on the CI-dedicated node; #372 affinity then targets it.
+                          - key: capstone.io/dedicated
+                            operator: Equal
+                            value: ci-build
+                            effect: NoSchedule
+                        affinity:
+                          nodeAffinity:
+                            # HARD candidate SET (excludes the 8GiB Mac workers — too small for a
+                            # 4Gi/8Gi build): pool=build (laptop-01 + ua-mis-db-1) OR a control-plane
+                            # OptiPlex. Ample fallback (5 candidate nodes) so builds never queue.
+                            requiredDuringSchedulingIgnoredDuringExecution:
+                              nodeSelectorTerms:
+                                - matchExpressions:
+                                    - { key: capstone.io/pool, operator: In, values: ["build"] }
+                                - matchExpressions:
+                                    - { key: node-role.kubernetes.io/control-plane, operator: Exists }
+                            # SOFT tier bias: laptop-01 (100) → ua-mis-db-1 (50) → OptiPlex (10).
+                            preferredDuringSchedulingIgnoredDuringExecution:
+                              - weight: 100
+                                preference:
+                                  matchExpressions:
+                                    - { key: capstone.io/pool, operator: In, values: ["build"] }
+                                    - { key: capstone.io/ci-build, operator: DoesNotExist }
+                              - weight: 50
+                                preference:
+                                  matchExpressions:
+                                    - { key: capstone.io/ci-build, operator: In, values: ["true"] }
+                              - weight: 10
+                                preference:
+                                  matchExpressions:
+                                    - { key: node-role.kubernetes.io/control-plane, operator: Exists }
                         # ⚠ HARDCODED Traefik ClusterIP — keep in sync with the shared
                         # platform-services/arc/hook-template.yaml (single source).
                         hostAliases:
@@ -1330,6 +1374,51 @@ spec:
                                   storage: "5Gi"
                           template:
                             spec:
+                              # --- Node placement for the RUNNER pod (#372/#374; SOFT TIER) ---
+                              # MUST mirror platform-services/arc/per-team/runner-scaleset-app.template.yaml
+                              # (the reviewed source of truth). WITHOUT these the runner pod has NO
+                              # toleration for laptop-01's `capstone.io/dedicated=ci-build:NoSchedule`
+                              # taint (#374) and NO nodeAffinity (#372), so it is REPELLED off the
+                              # dedicated CI node onto the small Mac workers — leaving the fast 16GiB
+                              # laptop idle while builds pile onto the 8GiB Macs. gha-runner-scale-set
+                              # passes template.spec.{tolerations,affinity} straight onto the runner pod.
+                              tolerations:
+                                - key: capstone.io/control-plane
+                                  operator: Equal
+                                  value: "true"
+                                  effect: PreferNoSchedule
+                                # DEDICATE laptop-01 to CI: tolerate the #374 taint so the runner pod
+                                # CAN land on the CI-dedicated node; #372 affinity then targets it.
+                                - key: capstone.io/dedicated
+                                  operator: Equal
+                                  value: ci-build
+                                  effect: NoSchedule
+                              affinity:
+                                nodeAffinity:
+                                  # HARD candidate SET (excludes the 8GiB Mac workers): pool=build
+                                  # (laptop-01 + ua-mis-db-1) OR a control-plane OptiPlex. 5 candidate
+                                  # nodes → ample fallback, builds never queue when laptop is busy.
+                                  requiredDuringSchedulingIgnoredDuringExecution:
+                                    nodeSelectorTerms:
+                                      - matchExpressions:
+                                          - { key: capstone.io/pool, operator: In, values: ["build"] }
+                                      - matchExpressions:
+                                          - { key: node-role.kubernetes.io/control-plane, operator: Exists }
+                                  # SOFT tier bias: laptop-01 (100) → ua-mis-db-1 (50) → OptiPlex (10).
+                                  preferredDuringSchedulingIgnoredDuringExecution:
+                                    - weight: 100
+                                      preference:
+                                        matchExpressions:
+                                          - { key: capstone.io/pool, operator: In, values: ["build"] }
+                                          - { key: capstone.io/ci-build, operator: DoesNotExist }
+                                    - weight: 50
+                                      preference:
+                                        matchExpressions:
+                                          - { key: capstone.io/ci-build, operator: In, values: ["true"] }
+                                    - weight: 10
+                                      preference:
+                                        matchExpressions:
+                                          - { key: node-role.kubernetes.io/control-plane, operator: Exists }
                               securityContext:
                                 runAsNonRoot: true
                                 runAsUser: 1001
