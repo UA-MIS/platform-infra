@@ -59,6 +59,18 @@ spec:
               port: http
             initialDelaySeconds: 1
             periodSeconds: 5
+          # startupProbe GATES the liveness probe until the app has actually come up.
+          # Slow cold starts (a JVM backend under the 500m CPU limit takes 18-26s to
+          # serve /healthz) otherwise eat one liveness SIGTERM (exit 143) restart on
+          # every new pod. failureThreshold 30 x periodSeconds 2 allows up to 60s of
+          # startup with fast (2s) detection; liveness (below) only starts counting
+          # after the first startup success.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
           livenessProbe:
             httpGet:
               path: /healthz
