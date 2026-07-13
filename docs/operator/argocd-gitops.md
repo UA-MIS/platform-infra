@@ -253,6 +253,42 @@ No ingress exception is required.
 > is active today. If one is ever added, add a **bypass/service-token policy for
 > the path `/api/webhook`** or GitHub deliveries will 302 to the Access login.
 
+### Step 0 — bootstrap patch mode on the live `argocd-secret` (one-time, required)
+
+> **Why this is needed and why the manifest alone can't do it.** The patch
+> SealedSecret carries `sealedsecrets.bitnami.com/patch: "true"` on its
+> `spec.template.metadata.annotations`, but the v0.37 controller does **not** read
+> that flag from the SealedSecret — it reads it off the **live target Secret it
+> fetches** before deciding to patch, manage, or refuse
+> (`pkg/controller/controller.go`: `!IsControlledBy(secret,ss) &&
+> !isAnnotatedToBeManaged(secret) && !isAnnotatedToBePatched(secret)` → error).
+> `argocd-secret` was created by the ArgoCD **install**, so it has no
+> ownerReference and no annotation, and the controller refuses with:
+> `failed update: Resource "argocd-secret" already exists and is not managed by
+> SealedSecret`. The template annotation only takes effect *after* that guard
+> passes, so it can never bootstrap itself — the operator must annotate the live
+> Secret **once**:
+
+```bash
+kubectl annotate secret argocd-secret -n argocd sealedsecrets.bitnami.com/patch=true
+```
+
+> **Safe by construction.** `kubectl annotate` is a **metadata-only merge** — it
+> writes one annotation and touches **no `data` key**, so `admin.password` /
+> `admin.passwordMtime` / `server.secretkey` (and `tls.crt`/`tls.key` if present)
+> are untouched. On the next reconcile the controller enters the **patch** branch:
+> it deep-copies the live Secret, sets **only** `webhook.github.secret` from the
+> unseal, merges the template labels/annotations (re-writing `patch=true`, so it
+> stays sticky), and — because we use `patch`, **not** `managed` — adds **no**
+> ownerReference, leaving `argocd-secret` install-owned and safe from any
+> SealedSecret delete-cascade. Do this **before** (or right after) the reseal in
+> Step 1; order between Step 0 and the reseal doesn't matter, but the key won't
+> land until **both** are done.
+>
+> **Verify patch mode took:** `kubectl get sealedsecret argocd-secret -n argocd
+> -o jsonpath='{.status.conditions[?(@.type=="Synced")].status}'` should flip from
+> `False` (the "not managed" error) to `True`.
+
 ### Step 1 — reseal the shared secret (operator, fish shell)
 
 The committed `sealedsecret-webhook.yaml` ships a **placeholder** ciphertext; it
