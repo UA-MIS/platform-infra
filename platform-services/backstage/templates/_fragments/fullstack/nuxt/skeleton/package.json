@@ -13,14 +13,19 @@
     "db:migrate": "drizzle-kit migrate"
   },
   "dependencies": {
-    "drizzle-orm": "^0.45.0",
-    "mysql2": "^3.22.0",
-    "nuxt": "^3.21.0",
-    "vue": "^3.5.0",
+    "drizzle-orm": "^0.45.2",
+    "mysql2": "^3.22.6",
+    "nuxt": "^3.21.8",
+    "vue": "^3.5.39",
     "vue-router": "^4.5.0"
   },
   "devDependencies": {
-    "drizzle-kit": "^0.31.0",
+    "drizzle-kit": "^0.31.10",
     "typescript": "^5.7.0"
+  },
+  "overrides": {
+    "@esbuild-kit/core-utils": {
+      "esbuild": "^0.25.0"
+    }
   }
 }
