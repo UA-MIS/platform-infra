@@ -109,7 +109,7 @@ schematic re-cut + a 3-node rolling reboot). See ADR-032 §5 and the kvm-spike.
 `deny-test.sh` automates the **SEC-011-style VM-tier deny-test**
 (`artifacts/reviews/kubevirt-vm-tier-security-review.md` §6, checks **T1–T13**).
 It is the **security gate that must PASS before any team is onboarded onto the VM
-tier**. It renders the real `tenants/_template/vm/*` blueprint for a throwaway
+tier**. It renders the real `tenants/_template-vm/vm/*` blueprint for a throwaway
 team (`TEAM=denytest`) into a scratch namespace, runs every allow/deny assertion
 (one colored PASS/FAIL line per check, tagged with its T-number), prints a
 summary, and **exits non-zero if any check fails**. It is idempotent and

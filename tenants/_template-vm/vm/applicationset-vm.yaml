@@ -1,0 +1,106 @@
+# ============================================================================
+# VM ApplicationSet (ADR-032 §6c) — the piece that ACTUALLY DEPLOYS the team's
+# KubeVirt VirtualMachine into the <team>-vm-prod tier. This is the VM analogue of
+# ../applicationset-envs.yaml; without it the VM tier is a fence + namespace with
+# NOTHING inside it (the onboarding bug this file fixes: appproject-vm + vm-prod
+# existed, but no App ever synced the repo's VM chart, so no VirtualMachine /
+# DataVolume / VMI was ever created — the first VM tenant, team-tenantvm, only
+# worked because PR #376 hand-added this file to its rendered dir).
+#
+# Tokens: __TEAM__ (project/namespace/labels), __APPNAME__ (the app repo,
+# UA-MIS/<appName> — the repoURL, NOT <team>), __SEMESTER__. Substitute
+# __APPNAME__ BEFORE __TEAM__ (a __TEAM__-prefixed appName would otherwise be
+# half-replaced) — same ordering rule as the rest of the blueprint.
+#
+# HOW IT DIFFERS FROM applicationset-envs.yaml (deliberately, per ADR-032):
+#   - SINGLE environment (prod). A lifted legacy app is ONE self-contained VM;
+#     the app repo's promotion.yaml (`layout: vm`) defines only environments.prod.
+#     So the list generator contributes exactly one element (env: prod) instead of
+#     dev/staging/prod — matrixing dev/staging against a prod-only promotion.yaml is
+#     precisely what made the CONTAINER envs appset render-fail when it was copied
+#     into a VM tenant (the second half of the #376 onboarding bug, now structurally
+#     prevented: a VM tenant is rendered from THIS blueprint (tenants/_template-vm),
+#     which carries no container envs/preview appset at all).
+#   - destination = __TEAM__-vm-prod  (baseline-PSA VM tier), project = __TEAM__-vm
+#     (the VM-kind AppProject fence) — NOT the container project/namespaces. The
+#     overlay's own `namespace:` (.devops/chart/overlays/prod) matches this.
+#   - NO preview/PR generator and NO kustomize image override — the "image" is a
+#     CDI-imported OS disk, not a container build (nothing to tag/push).
+#   - NO non-prod SSO gate — a VM is a single public prod app, exactly like a
+#     container prod env (which is also ungated).
+#
+# Reads the SAME canonical promotion.yaml from the app repo via a git-files
+# generator (ADR-008), so the per-env `overlay` + `gate` drive the Application —
+# identical mechanism to the container envs appset, single env.
+# ============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: __TEAM__-vm-envs
+  namespace: argocd
+  labels:
+    platform.capstone/team: __TEAM__
+    platform.capstone/semester: __SEMESTER__
+    platform.capstone/component: tenant
+    platform.capstone/tier: vm
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - matrix:
+        generators:
+          # 1) the single stable VM environment.
+          - list:
+              elements:
+                - env: prod
+          # 2) the CANONICAL promotion.yaml from the APP repo (ADR-008). Its
+          #    top-level keys (layout/environments) become root template params.
+          - git:
+              repoURL: https://github.com/UA-MIS/__APPNAME__
+              revision: HEAD
+              files:
+                - path: .devops/promotion.yaml
+  template:
+    metadata:
+      name: '__TEAM__-vm-{{.env}}'
+      labels:
+        platform.capstone/team: __TEAM__
+        platform.capstone/semester: __SEMESTER__
+        platform.capstone/env: '{{.env}}'
+        platform.capstone/tier: vm
+    spec:
+      project: __TEAM__-vm
+      source:
+        repoURL: https://github.com/UA-MIS/__APPNAME__
+        targetRevision: HEAD
+        # overlay is the FULL repo-relative path per the §4.1 schema
+        # (".devops/chart/overlays/prod") — used verbatim.
+        path: '{{ (index .environments .env).overlay }}'
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: '__TEAM__-vm-{{.env}}'
+  # Per-env sync policy from promotion.yaml's `gate`. `auto` => prune+selfHeal
+  # ("merge -> it runs"); `manual` => no automated block. The vm-prod namespace
+  # (baseline PSA + VM quota + AppProject) is created by the vm/namespaces bundle,
+  # so CreateNamespace=false here.
+  templatePatch: |
+    {{- $gate := (index .environments .env).gate }}
+    spec:
+    {{- if eq $gate "auto" }}
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=false
+        retry:
+          limit: 5
+          backoff:
+            duration: 5s
+            factor: 2
+            maxDuration: 3m
+    {{- else }}
+      syncPolicy:
+        syncOptions:
+          - CreateNamespace=false
+    {{- end }}

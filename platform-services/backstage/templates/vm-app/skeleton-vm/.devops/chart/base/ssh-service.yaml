@@ -1,0 +1,35 @@
+# SSH Service (ADR-032a) — the in-cluster target for TEAM SSH access to this VM.
+#
+# A VM tenant is a PET dev-VM: the team SSHes in (standard client), clones their app
+# repo, and runs their stack. This ClusterIP Service selects the VM's virt-launcher
+# pod by the KubeVirt domain label (masquerade networking puts the guest behind the
+# launcher pod IP) and forwards :22 -> the guest sshd.
+#
+# This Service is TRANSPORT-AGNOSTIC on purpose: it is the single stable in-cluster
+# endpoint that whichever PUBLIC SSH path the platform adopts points at —
+#   - a Traefik IngressRouteTCP on a per-tenant TCP entrypoint (native `ssh -p 22NN`),
+#   - a Cloudflare Tunnel `ssh://` public-hostname (browser SSH / `cloudflared access`),
+#   - or a per-VM LoadBalancer once the fleet has a routable public IP.
+# The public transport is an operator/security-track decision (see
+# artifacts/design/decisions/adr-032a-vm-tenant-access-ux.md); this Service is the
+# app-layer half that is the same regardless of which is chosen. It exposes nothing
+# publicly by itself (ClusterIP) — the tenant NetworkPolicy already permits ingress
+# to the VM from the ingress tier (kube-system/Traefik) only.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${{ values.appName }}-ssh
+  labels:
+    app.kubernetes.io/name: ${{ values.appName }}
+    platform.capstone/access: ssh
+spec:
+  type: ClusterIP
+  selector:
+    # Same launcher-pod selector as the HTTP Service — KubeVirt sets this label on the
+    # VMI's virt-launcher pod from the VM template's metadata.labels.
+    kubevirt.io/domain: ${{ values.appName }}
+  ports:
+    - name: ssh
+      port: 22
+      targetPort: 22
+      protocol: TCP

@@ -7,7 +7,7 @@
 #
 # This script is the SECURITY GATE that must PASS before any team is onboarded
 # onto the KubeVirt VM tier. It renders the VM-tier blueprint
-# (tenants/_template/vm/*) for a throwaway team into a scratch namespace, runs
+# (tenants/_template-vm/vm/*) for a throwaway team into a scratch namespace, runs
 # every allow/deny assertion from the review's T1..T13 matrix, prints one
 # colored PASS/FAIL line per check (tagged with its T-number), a summary, and
 # exits NON-ZERO if any check fails. It is idempotent and self-cleaning: a trap
@@ -67,11 +67,11 @@ DV_SOURCE_URL="${DV_SOURCE_URL:-docker://quay.io/kubevirt/cirros-container-disk-
 # Resolve repo root so we render the REAL blueprint, not a copy.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
-if [ ! -f "$REPO_ROOT/tenants/_template/vm/namespaces/vm-prod.yaml" ]; then
+if [ ! -f "$REPO_ROOT/tenants/_template-vm/vm/namespaces/vm-prod.yaml" ]; then
   REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || echo "$REPO_ROOT")"
 fi
-VM_NS_TPL="$REPO_ROOT/tenants/_template/vm/namespaces/vm-prod.yaml"
-VM_PROJ_TPL="$REPO_ROOT/tenants/_template/vm/appproject-vm.yaml"
+VM_NS_TPL="$REPO_ROOT/tenants/_template-vm/vm/namespaces/vm-prod.yaml"
+VM_PROJ_TPL="$REPO_ROOT/tenants/_template-vm/vm/appproject-vm.yaml"
 
 K() { kubectl --context "$CTX" "$@"; }
 

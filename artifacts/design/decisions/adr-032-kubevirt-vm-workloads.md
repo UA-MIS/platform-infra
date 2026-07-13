@@ -170,7 +170,11 @@ Specific sub-decisions (all detailed + justified in the companion doc):
 6. **CI for VMs.** No-op the build, or offer optional disk-image baking? Sequence against the
    reusable-CI work (#125).
 7. **`virtctl` / console access.** How do students get serial/VNC console + SSH under the RBAC
-   model (no cluster-admin)? Backstage integration vs `virtctl`.
+   model (no cluster-admin)? Backstage integration vs `virtctl`. **→ RESOLVED / refined in
+   ADR-032a** (`adr-032a-vm-tenant-access-ux.md`): key-based SSH from a standard client is the
+   daily path (console/VNC is break-glass), with the public SSH transport an operator decision;
+   ADR-032a also defines the clone-and-run (pet-VM) model, the pet-vs-immutable disk stance, and
+   the VM teardown ledger.
 
 ## Component-version summary (Context7 `/kubevirt/user-guide`, verified 2026-06-28)
 

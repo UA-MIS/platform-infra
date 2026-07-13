@@ -16,12 +16,25 @@
 # (key `userdata`), which the VirtualMachine references via cloudInitNoCloud.secretRef.
 # ============================================================================
 
-# Console/VNC login for debugging via `virtctl console`/`virtctl vnc` (access is
-# RBAC-scoped per the platform). CHANGE this password before you rely on it.
-password: changeme-on-first-edit
-chpasswd:
-  expire: false
-ssh_pwauth: true
+# ── TEAM ACCESS — key-based SSH (ADR-032a) ──────────────────────────────────
+# A VM tenant is a PET dev-VM: you SSH in from any laptop with a STANDARD ssh
+# client, clone your app repo, and run your stack here. cloud-init installs your
+# team's SSH PUBLIC key (the scaffolder `sshPubKey` input) into the default cloud
+# user's ~/.ssh/authorized_keys, and password login is turned OFF (key-only — no
+# `changeme` password to leak). The default user is distro-specific: `fedora` on the
+# default Fedora cloud image, `ubuntu`/`debian` on those images.
+#
+#   ssh <cloud-user>@<your public SSH endpoint>        # see the repo README
+#
+# ADD MORE KEYS: append to `ssh_authorized_keys` below, or uncomment `ssh_import_id`
+# to pull teammates' keys from GitHub (https://github.com/<user>.keys).
+ssh_pwauth: false
+disable_root: true
+ssh_authorized_keys:
+  - ${{ values.sshPubKey }}
+# ssh_import_id:
+#   - gh:your-github-username
+#   - gh:teammate-github-username
 
 # A self-contained hello page + a systemd unit that serves it with python3 (present in
 # Fedora/Ubuntu cloud images — distro-agnostic, no package install needed). Swap this

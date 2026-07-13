@@ -40,10 +40,12 @@
 #   4b. capstone:harbor-onboard — create the team's Harbor project (idempotent). For the
 #      no-build VM path this is OPTIONAL home for a private containerDisk; kept so a team
 #      that later bakes/pushes its own disk image (v2.1) needs no extra onboarding.
-#   5a. capstone:render-tenant — render tenants/team-<name>/ from the canonical
-#      tenants/_template/ blueprint (which the platform security track extends with the
-#      <team>-vm-<env> tier: baseline PSA + the VM-kind AppProject whitelist + the VM
-#      env ApplicationSet — ADR-032 §2/§6b/§6c). render-tenant itself is unchanged.
+#   5a. capstone:render-tenant — render tenants/team-<name>/ from the DEDICATED VM
+#      blueprint tenants/_template-vm/ (baseline-PSA <team>-vm-prod tier + the VM-kind
+#      AppProject whitelist + the VM env ApplicationSet — ADR-032 §2/§6b/§6c). The action
+#      is shared + unchanged; only the templateUrl differs from the container templates
+#      (which point at tenants/_template). A VM tenant renders ONLY the VM tier — no
+#      container envs/preview appset (the #376 onboarding bug, structurally fixed here).
 #   5b. publish:github:pull-request — open the REVIEW-GATED onboarding PR to
 #      platform-infra. Merging is the grant (D-049); a student never mints cluster RBAC.
 #
@@ -52,7 +54,7 @@
 #   VM-kind whitelist (kubevirt.io/VirtualMachine + cdi.kubevirt.io/DataVolume), and the
 #   VM env ApplicationSet (destination namespace <team>-vm-<env>, reading THIS repo's
 #   .devops/promotion.yaml) are owned by the platform security/devops track in
-#   tenants/_template/. This template's app overlay sets `namespace: <team>-vm-<env>` so
+#   tenants/_template-vm/. This template's app overlay sets `namespace: <team>-vm-<env>` so
 #   the VM workload lands in that tier; the contract between the two is ADR-032.
 #
 # ⚠ PREREQUISITE (ADR-032 open Q1 — BLOCKING for go-live, NOT for this template):
@@ -141,6 +143,7 @@ spec:
     - title: Virtual machine
       required:
         - baseImage
+        - sshPubKey
       properties:
         # BRING-YOUR-OWN / IMPORTED DISK IMAGE (ADR-032 §1, §4). The "image" is a whole
         # OS disk CDI imports into a PVC — NOT a container build. Point this at:
@@ -200,6 +203,23 @@ spec:
           default: 8080
           minimum: 1
           maximum: 65535
+        # SSH PUBLIC key for team access (ADR-032a). A VM tenant is a PET dev-VM: the
+        # team SSHes in with a STANDARD ssh client, clones their app repo, and runs their
+        # stack there. cloud-init installs THIS public key into the guest's
+        # ~/.ssh/authorized_keys and DISABLES password login (key-only). This is a PUBLIC
+        # key — safe to hold in the repo/manifest (it is not a secret). Paste your team's
+        # shared key, or a personal key; add more later by editing cloud-init.yaml
+        # (`ssh_authorized_keys:`) or via `ssh_import_id: [gh:<github-username>]`.
+        sshPubKey:
+          title: SSH public key
+          type: string
+          description: >-
+            Your OpenSSH PUBLIC key (the contents of e.g. ~/.ssh/id_ed25519.pub — starts
+            with `ssh-ed25519` or `ssh-rsa`). Installed into the VM so you can `ssh` in
+            from any laptop with a standard client. Password login is turned OFF once a
+            key is set. This is a public key — safe to store in git.
+          pattern: '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256|sk-ssh-ed25519@openssh.com|sk-ecdsa-sha2-nistp256@openssh.com) [A-Za-z0-9+/=]+( .*)?$'
+          ui:help: 'Run `cat ~/.ssh/id_ed25519.pub` (or generate one with `ssh-keygen -t ed25519`) and paste the single-line output.'
 
     # NOTE (same as new-capstone-project): there is intentionally NO repoUrl input — the
     # repo is created at github.com/UA-MIS/<appName> (owner fixed; repo name = app name),
@@ -243,6 +263,7 @@ spec:
           memoryGi: ${{ parameters.memoryGi }}
           diskGi: ${{ parameters.diskGi }}
           port: ${{ parameters.port }}
+          sshPubKey: ${{ parameters.sshPubKey }}
           destination: ${{ ("github.com?owner=UA-MIS&repo=" + parameters.appName) | parseRepoUrl }}
         # ⚠ INDENTATION IS LOAD-BEARING (new-capstone-project lesson): this key MUST be
         # nested under `input:` (8-space indent, a sibling of url:/values:). Misplaced at
@@ -318,21 +339,47 @@ spec:
     # the VM tier. The merge is the gate.
     # =====================================================================
 
-    # 5a) Render the tenant manifests from the SINGLE canonical blueprint
-    #     tenants/_template/ (D-M4-2: render, do NOT fork). VERBATIM inputs from
-    #     new-capstone-project — the action is shared and unchanged. The VM-tier
-    #     additions (<team>-vm-<env> namespace, VM-kind AppProject whitelist, VM env
-    #     ApplicationSet) live in _template, owned by the security/devops track
-    #     (ADR-032) — so a single render emits both the container fence AND the VM tier.
+    # 5a) Render the tenant manifests from the DEDICATED VM blueprint
+    #     tenants/_template-vm/ (D-M4-2: render, do NOT fork; the action is shared and
+    #     UNCHANGED — only the templateUrl differs from the container templates, which
+    #     point at tenants/_template). A VM tenant must render ONLY the VM tier:
+    #     _template-vm carries the VM AppProject + the <team>-vm-prod namespace + the VM
+    #     env ApplicationSet, and NONE of the container envs/preview appsets. Pointing at
+    #     the container _template instead is exactly what broke the first VM tenant
+    #     (team-tenantvm, #376): the container envs appset render-failed on a `layout:
+    #     vm` prod-only promotion.yaml, and no VM ApplicationSet existed to deploy the VM.
+    #     Because capstone:render-tenant reads the blueprint at this git URL at scaffold
+    #     time (not from the Backstage image), switching blueprints needs NO image rebuild.
     - id: render-tenant
-      name: Render tenant manifests (tenants/team-<name>/)
+      name: Render VM tenant manifests (tenants/team-<name>/)
       action: capstone:render-tenant
       input:
-        templateUrl: https://github.com/UA-MIS/platform-infra/tree/main/tenants/_template
+        templateUrl: https://github.com/UA-MIS/platform-infra/tree/main/tenants/_template-vm
         team: ${{ parameters.team }}
         appName: ${{ parameters.appName }}
         semester: ${{ parameters.year }}-${{ parameters.season | lower }}
         targetPath: ./tenant-pr
+
+    # 5a-bis) Emit the VM-tenant TEARDOWN LEDGER marker into the SAME onboarding PR
+    #     (ADR-032a). Writes tenants/_vm-claims/<team>-<app>.yaml — an inert marker (NOT a
+    #     Crossplane XR, NOT applied to the cluster; _vm-claims is excluded from every
+    #     tenant generator) that makes this VM tenant VISIBLE to the Backstage teardown UI.
+    #     Without it a VM tenant can be created but never torn down through the portal:
+    #     capstone-tenants-backend listTenants enumerates only tenants/_claims/*.yaml
+    #     (Crossplane claims), and a VM tenant has none (it deploys from the git-directory
+    #     generator over tenants/team-<team>/vm/). Rendered into ./tenant-pr so the PR diff
+    #     carries both tenants/team-<team>/ AND the ledger marker. NO Backstage rebuild —
+    #     a git-served skeleton, exactly like render-tenant's blueprint.
+    - id: fetch-vm-ledger
+      name: Emit VM teardown ledger (tenants/_vm-claims/)
+      action: fetch:template
+      input:
+        url: ./skeleton-vm-ledger
+        targetPath: ./tenant-pr
+        values:
+          team: ${{ parameters.team }}
+          appName: ${{ parameters.appName }}
+          semester: ${{ parameters.year }}-${{ parameters.season | lower }}
 
     # 5b) Open the review-gated onboarding PR to platform-infra. Uses the PLATFORM
     #     GitHub App token (NOT the student's), so ANY signed-in UA-MIS member can OPEN
@@ -360,8 +407,8 @@ spec:
           **no Dockerfile / no image build**. The disk is imported by CDI from
           `${{ parameters.baseImage }}` and cloud-init brings the app up on first boot.
 
-          This PR adds `tenants/team-${{ parameters.team }}/` (rendered from the canonical
-          `tenants/_template/` blueprint). **Merging is the grant**: on merge the
+          This PR adds `tenants/team-${{ parameters.team }}/` (rendered from the dedicated
+          `tenants/_template-vm/` VM blueprint). **Merging is the grant**: on merge the
           `tenants-appset` git generator reconciles the team's namespaces + ApplicationSets,
           including the **`${{ parameters.team }}-vm-prod`** VM tier
           (`baseline` PSA + the VM-sized quota + the AppProject whitelist for
@@ -378,6 +425,8 @@ spec:
           - [ ] The VM tier namespace is `baseline` PSA (NOT `restricted` — virt-launcher
                 needs it) and carries a VM-sized ResourceQuota (ADR-032 §2d/§6c).
           - [ ] `__TEAM__`/`__SEMESTER__` fully substituted (no leftover tokens).
+          - [ ] The VM teardown ledger `tenants/_vm-claims/${{ parameters.team }}-${{ parameters.appName }}.yaml`
+                is present (makes this VM tenant visible + tear-down-able in the portal — ADR-032a).
 
           ### Operator steps (run AFTER merge)
           ```bash
@@ -431,6 +480,14 @@ spec:
           4. Merge to `main` — once the onboarding PR below is merged, ArgoCD deploys your
              VirtualMachine; CDI imports the disk and cloud-init runs your app on first boot.
           Your VM will be reachable at `https://${{ parameters.appName }}.capstone.uamishub.com`.
+
+          **SSH in (pet dev-VM).** Your VM is a real machine you own: `ssh` in with a
+          **standard client** using the key you provided (no VPN, no extra tooling), then
+          `git clone` your app repo and run your stack right on the box. cloud-init installs
+          your public key and turns password login OFF. The exact SSH endpoint (host/port)
+          is finalized by the platform — see the onboarding PR / platform docs (ADR-032a).
+          Your rootdisk **persists across reboots** (it is a pet, not immutable) — but note
+          in-VM changes are NOT in git, so push anything you want to keep back to the repo.
 
           **Two things are gated:** (a) a **platform onboarding PR** was opened against
           `UA-MIS/platform-infra` to stand up your team's VM tier (link above) — a reviewer
