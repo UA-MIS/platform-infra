@@ -1,6 +1,6 @@
 # Runtime dependencies (baked into the image — see Dockerfile). Pinned for reproducible
 # builds; bump deliberately.
-Django==5.1.4
+Django==5.1.15
 djangorestframework==3.15.2
 gunicorn==23.0.0
 dj-database-url==2.3.0

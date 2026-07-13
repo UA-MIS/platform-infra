@@ -3,5 +3,5 @@
 # tests can import the app + use the Flask test client. Keep test deps OUT of
 # requirements.txt so the runtime image stays lean.
 -r requirements.txt
-pytest==8.3.4
+pytest==9.0.3
 ruff==0.8.4
