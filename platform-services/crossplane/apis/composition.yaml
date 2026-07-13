@@ -886,6 +886,19 @@ spec:
                             owner: UA-MIS
                             repo: {{ $app | quote }}
                             appSecretName: argocd-repo-creds-uamis
+                            # LABEL GATE (the 12h HARD-DEATH contract) — keep in LOCKSTEP with
+                            # tenants/_template/applicationset-preview.yaml (full rationale in
+                            # its header). A preview exists IFF the PR carries the `preview`
+                            # label: CI (re-)adds it on every PR-triggered build
+                            # (.github/workflows/tenant-build.yaml), and the cohort-gc
+                            # preview-ttl CronJob REMOVES it from a >12h preview's PR — the
+                            # generator ANDs the labels listed here, so the label-less PR then
+                            # yields NO element and `prune:true` tears the App+ns down for
+                            # GOOD (a raw App delete is futile; the generator would recreate
+                            # it within `requeueAfterSeconds` while the PR is open). The ONLY
+                            # revival is re-running CI, which re-adds the label.
+                            labels:
+                              - preview
                           requeueAfterSeconds: 120
                     template:
                       metadata:
