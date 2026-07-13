@@ -168,6 +168,41 @@ jobs:
         # script fix ships once (no per-repo drift). No cross-repo token (composite action).
         uses: UA-MIS/platform-infra/.github/actions/tenant-ci-scripts@v1
 
+      - name: Ensure the `preview` label is on the PR (12h hard-death revival hook)
+        # PREVIEW LIFECYCLE (operator contract): a preview env exists IFF its PR carries
+        # the `preview` label (tenants/_template/applicationset-preview.yaml gates the
+        # pullRequest generator on it). The cohort-gc preview-ttl CronJob HARD-KILLS a
+        # preview at 12h by REMOVING that label; the generator then prunes the App for
+        # good and will NOT recreate it while the PR sits open. The ONLY revival path is
+        # RE-RUNNING CI — so this step (re-)adds the label on every PR-triggered build.
+        # Opening a PR, pushing to it, or re-running this workflow all land here and
+        # (re)create/revive the preview. Idempotent: adding a present label is a no-op.
+        # BEST-EFFORT + fail-open (like queue-status) — a preview is a convenience, never
+        # a gate; without pull-requests:write it degrades to a notice, never fails the build.
+        if: ${{ github.event_name == 'pull_request' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -eu
+          API="https://api.github.com/repos/${OWNER_REPO}"
+          H_AUTH="Authorization: Bearer ${GH_TOKEN}"
+          H_ACC="Accept: application/vnd.github+json"
+          H_VER="X-GitHub-Api-Version: 2022-11-28"
+          # 1) Ensure the label EXISTS in the repo (the add-labels endpoint does not
+          #    reliably auto-create). POST /labels is a no-op-with-422 if it already
+          #    exists, so ignore a non-2xx here.
+          curl -sS -o /dev/null -X POST -H "$H_AUTH" -H "$H_ACC" -H "$H_VER" \
+            "${API}/labels" \
+            -d '{"name":"preview","color":"0e8a16","description":"Ephemeral preview env (12h TTL; re-run CI to revive)"}' || true
+          # 2) Add the label to THIS PR (idempotent — GitHub de-dupes).
+          curl -sS -o /dev/null -w 'add-label HTTP %{http_code}\n' -X POST -H "$H_AUTH" -H "$H_ACC" -H "$H_VER" \
+            "${API}/issues/${PR_NUMBER}/labels" \
+            -d '{"labels":["preview"]}'
+          echo "==> ensured 'preview' label on ${OWNER_REPO}#${PR_NUMBER} — preview env will be (re)created/revived"
+
       - name: Queue status — report how long you waited + your position
         # OPERATOR UX (the "you were in a queue, #N in line" ask). A QUEUED Actions job
         # runs NO code until a runner picks it up (builds run 2-at-a-time — maxRunners:2

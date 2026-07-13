@@ -9,6 +9,11 @@
 #     REFUSES to sweep while a live claim or parent ApplicationSet still owns the
 #     cohort's objects. Read-only — the guard never deletes claims/appsets (that is
 #     done via `git rm tenants/_claims/...`, so ArgoCD/Crossplane deprovision).
+#   - GET (read-only) exactly ONE secret in the `argocd` namespace
+#     (argocd-repo-creds-uamis) — the preview-ttl 12h hard-death enforcer mints a
+#     ua-mis-backstage GitHub App installation token from it to strip the `preview`
+#     label off expired PRs (preview-ttl-cronjob.yaml). Scoped to that single secret
+#     NAME via a namespaced Role+RoleBinding below (NOT a cluster-wide secrets grant).
 #
 # Scope: cluster-wide (namespaces + CapstoneTenant XRs are cluster-scoped;
 # Applications/ApplicationSets live in argocd). This is a privileged maintenance
@@ -59,6 +64,41 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: cohort-gc
+subjects:
+  - kind: ServiceAccount
+    name: cohort-gc
+    namespace: cohort-gc
+---
+# Namespaced grant: let the cohort-gc SA READ exactly the ONE argocd-namespace secret
+# holding the ua-mis-backstage GitHub App creds, so preview-ttl can mint an installation
+# token to strip the `preview` label off expired PRs. Scoped to that single resourceName
+# (least privilege — NOT a blanket secrets read). The `platform` AppProject permits any
+# namespace (namespace:'*'), so shipping an argocd-namespace object from this cohort-gc
+# dir is allowed. Reuses the already-sealed secret — no second copy / no reseal needed.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cohort-gc-read-gh-app
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["argocd-repo-creds-uamis"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cohort-gc-read-gh-app
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cohort-gc-read-gh-app
 subjects:
   - kind: ServiceAccount
     name: cohort-gc

@@ -15,7 +15,7 @@ ApplicationSets. **No imperative `kubectl`, no cluster-admin action.**
 | `namespaces/prod.yaml` | same, `<team>-prod`, higher quota ceiling | §3.2 |
 | `namespaces/preview.yaml` | `<team>-pr-<n>` guardrails (half quota), applied per preview | §3.2, §2.4 |
 | `applicationset-envs.yaml` | matrix (env list × git-files read of the app repo's `promotion.yaml`) → dev/staging/prod Apps; per-env `gate` drives sync policy (prod manual-gated) | §2.3, §4, ADR-008 |
-| `applicationset-preview.yaml` | LIVE ArgoCD `pullRequest` generator → one ephemeral `<team>-pr-<n>` preview App per open PR (auto-pruned on close) | §2.4, D-009 |
+| `applicationset-preview.yaml` | LIVE ArgoCD `pullRequest` generator → one ephemeral `<team>-pr-<n>` preview App per open PR **labelled `preview`** (auto-pruned on close OR on label removal). The label gate is the 12h HARD-DEATH mechanism: the cohort-gc `preview-ttl` CronJob strips the label at 12h so the generator prunes the App for good; re-running CI re-adds the label to revive. | §2.4, D-009 |
 
 > **⚠ Preview previews are DRAFT — security review + cred provisioning gated.** The
 > `pullRequest` generator (a) reuses PR #120's `argocd-repo-creds-uamis` GitHub-App
@@ -24,8 +24,11 @@ ApplicationSets. **No imperative `kubectl`, no cluster-admin action.**
 > live tenant the security review MUST resolve: per-PR guardrails via a platform-project
 > guardrails App (the team AppProject can't create Quota/NetworkPolicy/RBAC); per-PR ESO
 > SA→Vault binding; the `*.pr-*.<domain>` wildcard TLS; and the static `pr-1` collision
-> (coordinate with the pr-1 removal). The ≤12h stale-preview TTL is the cohort-gc
-> `preview-ttl` CronJob (PR #104). See the header of `applicationset-preview.yaml`.
+> (coordinate with the pr-1 removal). The **12h HARD-DEATH** is enforced by the cohort-gc
+> `preview-ttl` CronJob: it strips the `preview` label (which the generator requires) off
+> any preview whose App is >12h old, so the App is pruned and does NOT recreate while the
+> PR sits open — the only revival is re-running CI (which re-adds the label). See the
+> header of `applicationset-preview.yaml` and `platform-services/cohort-gc/README.md`.
 
 > **No `promotion.yaml` here (ADR-008 / D-011).** The single trigger→target
 > mapping lives canonically in the APP repo at `<appName>/.devops/promotion.yaml`
