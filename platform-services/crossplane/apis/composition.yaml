@@ -2625,11 +2625,16 @@ spec:
                    steady-state reconcile; (d) ORDERING — Database.owner references the
                    Role, which may not exist on the first reconcile; Crossplane retries so
                    it converges, but verify no permanent error; (e) the provisioner login
-                   needs CREATEDB + CREATEROLE (so it can create the DB, the role, AND
-                   assign the DB's ownership to that role — CREATEROLE auto-grants
-                   membership); (f) REDUNDANCY — since the Role OWNS the DB it already
-                   holds these privileges, so the Grant may reconcile to a no-op; if it
-                   ever shows a perpetual diff, drop it (owner alone suffices). (g) PG15+
+                   is SUPERUSER on this DEDICATED tenant-only cluster (tenant-cluster/
+                   roles.yaml) — it therefore creates the role, creates the DB OWNED BY that
+                   role, AND (critically) can DROP the DB on teardown. Postgres allows
+                   DROP DATABASE only to the owner or a superuser, so a non-super provisioner
+                   that merely holds CREATEROLE membership in the owner role can CREATE but
+                   NOT DROP (42501) — which wedged the first PG teardown; superuser closes
+                   both create and drop with zero isolation cost (apps stay non-super); (f)
+                   REDUNDANCY — since the Role OWNS the DB it already holds these privileges,
+                   so the Grant may reconcile to a no-op; if it ever shows a perpetual diff,
+                   drop it (owner alone suffices). (g) PG15+
                    locks down the `public` schema (no implicit CREATE for non-owners); the
                    role owning the DATABASE does not by itself own `public`. If apps write
                    to `public`, a follow-up may need a schema-level Grant or
@@ -2659,37 +2664,21 @@ spec:
               providerConfigRef:
                 name: db-tier-postgres
             ---
-            # Role-membership grant: make the provider admin role `crossplane_provisioner`
-            # a MEMBER of the per-env owner Role, so it can `SET ROLE` to it and thereby run
-            # `CREATE DATABASE ... OWNER <teamDb>_<env>` on the Database below. provider-sql
-            # connects as `crossplane_provisioner` (ProviderConfig db-tier-postgres, secret
-            # db-tier-postgres-admin key `username`), which is NOT a superuser, so without
-            # this membership PG rejects the owned CREATE DATABASE with
-            #   pq: must be able to SET ROLE "<teamDb>_<env>" (42501)
-            # and the Database never creates -> every dependent Grant then cascade-fails with
-            # `database "<...>" does not exist`. (MySQL's CREATE DATABASE has no SET-ROLE
-            # requirement, so this path was never exercised until the first live PG tenant.)
-            # This is the membership form of the CRD (role + memberOf), NOT the db-privilege
-            # form (role + database + privileges) the Grants below use. crossplane_provisioner
-            # created the per-env Role via CREATEROLE, so on PG16+ (this tier is PG17) it holds
-            # ADMIN OPTION on that role and may grant it to itself; the grant's default
-            # `WITH SET TRUE` is exactly what enables `SET ROLE` -> no `withOption` needed
-            # (`withOption: ADMIN` would only permit re-granting the membership onward, which
-            # we don't want). Ordering-safe: Crossplane reconciles each MR independently and
-            # retries, so once BOTH the Role and this membership exist the owned Database
-            # converges regardless of render order (no hard dependency deadlock).
-            apiVersion: postgresql.sql.crossplane.io/v1alpha1
-            kind: Grant
-            metadata:
-              annotations:
-                {{ setResourceNameAnnotation (printf "sql-provmember-%s" $e.name) }}
-            spec:
-              forProvider:
-                role: crossplane_provisioner       # the provider admin login role
-                memberOf: {{ $dbName | quote }}    # the per-env owner Role (name == dbName)
-              providerConfigRef:
-                name: db-tier-postgres
-            ---
+            # NOTE (TENANT-PG-DROP fix): PR #366 previously minted a MEMBERSHIP Grant here
+            # (crossplane_provisioner memberOf <teamDb>_<env>) so the NON-superuser provisioner
+            # could `SET ROLE` and run `CREATE DATABASE ... OWNER <teamDb>_<env>`. That made
+            # CREATE work but left teardown DEAD-LOCKED: Postgres allows `DROP DATABASE` only to
+            # the OWNER or a SUPERUSER — membership in the owner role is NOT enough, and
+            # provider-sql does not SET ROLE before dropping — so the first PG teardown wedged on
+            #   delete failed: cannot drop database: pq: must be owner of database <db> (42501).
+            # Fix: `crossplane_provisioner` is now SUPERUSER on the DEDICATED, tenant-only
+            # `capstone-tenant-pg` cluster (platform-services/cnpg/tenant-cluster/roles.yaml).
+            # A superuser creates an owned DB directly (no SET-ROLE membership needed) AND can
+            # DROP it, so CREATE and DROP both close automatically. The #366 membership Grant is
+            # therefore REMOVED (redundant under superuser; it only added an MR that had to be
+            # pruned on every teardown). Isolation is unchanged: tenant apps still connect as
+            # their own login-only, non-super per-env Role below, scoped by role/grant.
+            #
             # The per-env database, OWNED by the tenant Role (team owns its own DB).
             apiVersion: postgresql.sql.crossplane.io/v1alpha1
             kind: Database

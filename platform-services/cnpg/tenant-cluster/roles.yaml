@@ -1,14 +1,36 @@
 # The ONE declarative role on `capstone-tenant-pg` (ADR-036): the Crossplane
 # provisioner login that provider-sql's `db-tier-postgres` ProviderConfig
-# authenticates as. Mirrors `capstone-pg-crossplane-provisioner`
-# (platform-services/cnpg/cluster/roles.yaml) EXACTLY — LOGIN CREATEDB CREATEROLE,
-# NOT SUPERUSER (no SUPERUSER/REPLICATION/BYPASSRLS) — but is a SEPARATE identity
-# on a SEPARATE cluster with a SEPARATE password (ADR-036 isolation goal): a
-# leaked tenant-cluster provisioner credential MUST NOT authenticate to
-# `capstone-pg` (the control-plane DB). Hence a distinct passwordSecret sourced
-# from a distinct Vault leaf — see platform-services/db-tier/externalsecrets.yaml
+# authenticates as. It is a SEPARATE identity on a SEPARATE cluster with a
+# SEPARATE password (ADR-036 isolation goal): a leaked tenant-cluster provisioner
+# credential MUST NOT authenticate to `capstone-pg` (the control-plane DB). Hence
+# a distinct passwordSecret sourced from a distinct Vault leaf — see
+# platform-services/db-tier/externalsecrets.yaml
 # (`cnpg-tenant-crossplane-provisioner-credentials`, Vault
 # `platform/db/cnpg-tenant/crossplane-provisioner`).
+#
+# SUPERUSER — INTENTIONAL DIVERGENCE from `capstone-pg-crossplane-provisioner`
+# (platform-services/cnpg/cluster/roles.yaml), which stays NON-superuser (LOGIN
+# CREATEDB CREATEROLE). Rationale (ADR-036 privilege note / TENANT-PG-DROP fix):
+# `capstone-tenant-pg` is DEDICATED and ISOLATED to tenant databases — it holds NO
+# platform data (Backstage/Harbor live on `capstone-pg`). A non-superuser
+# provisioner can CREATE a database owned by a tenant role (via CREATEROLE
+# membership, PR #366) but CANNOT DROP it: Postgres permits `DROP DATABASE` only to
+# the database OWNER or a SUPERUSER — being a *member* of the owner role is NOT
+# sufficient, and provider-sql never `SET ROLE`s before dropping. Result: creation
+# worked, teardown dead-locked with `must be owner of database <db> (42501)` on the
+# first-ever PG tenant teardown (tenantv2). Making the provisioner SUPERUSER *on
+# this dedicated cluster only* lets both CREATE and DROP "just work" and breaks NO
+# tenant-to-tenant isolation: tenant apps still connect as their own non-super,
+# login-only per-env role (provider-sql `Role`, login:true), scoped by role/grant.
+# The blast radius of a leaked provisioner credential is unchanged in KIND (already
+# CREATEDB/CREATEROLE across the whole tenant tier); it only gains DROP/superuser on
+# the SAME tenant-only cluster it already fully administers. Because superuser now
+# creates an owned DB directly, PR #366's separate provider-membership Grant in the
+# Composition is removed (superuser needs no SET-ROLE membership to own-create).
+# Security-track / ADR follow-up: record this privilege elevation in ADR-036.
+#
+# CNPG (which connects to the cluster as the `postgres` superuser) applies this via
+# ALTER ROLE ... SUPERUSER; the flip is idempotent and safe on the live role.
 #
 # The SAME password must also be sealed into `db-tier-postgres-admin`
 # (crossplane-system) with endpoint=capstone-tenant-pg-rw at the supervised
@@ -34,7 +56,7 @@ spec:
     name: capstone-tenant-pg
   name: crossplane_provisioner
   login: true
-  superuser: false
+  superuser: true            # dedicated tenant-only cluster — enables DROP DATABASE on teardown (see header)
   createdb: true
   createrole: true
   databaseRoleReclaimPolicy: retain
