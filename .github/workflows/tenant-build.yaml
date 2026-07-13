@@ -484,6 +484,19 @@ jobs:
                "— Harbor cred expected at ${DOCKER_CONFIG_DIR}/config.json in the Kaniko step pod"
 
       # --- Kaniko build as a container-action STEP (its own pod; shared _work) ---
+      # SNAPSHOT SPEED (COMMON args below) — Kaniko's default snapshotter content-hashes
+      # every file after each layer (O(bytes)); for a heavy frontend it hashes the whole
+      # freshly-`npm install`ed node_modules twice, wedging for 20-30 min on slow-disk
+      # workers (e.g. the 8GB Mac fallback runners). `.dockerignore` can't help — those
+      # files are CREATED inside the image by the RUN, not carried in the context. Two
+      # safe, universal flags fix it (applies to ALL stages incl. the build stage):
+      #   --snapshot-mode=redo — hash file METADATA (mtime/size/mode) not content
+      #                          (O(files)); the dominant win, correct for npm builds.
+      #   --use-new-run        — detect RUN changes without a full-FS snapshot.
+      # NOT --single-snapshot: it collapses all changes into one layer (killing Harbor
+      # push-time layer dedup for components that ship deps in the runtime image) and its
+      # win overlaps redo — a per-image tuning knob, not a good default for this shared
+      # reusable workflow. --reproducible is kept (D-030 supply-chain property).
       # SECURITY — preview (pull_request) PUSHES untrusted PR code, authenticated by
       # the SAME least-privilege harbor-push robot (pull+push on THIS team's OWN
       # Harbor project only). The tag is pull-<head-sha>, DISJOINT from dev's
@@ -509,6 +522,8 @@ jobs:
                     --dockerfile=${DOCKERFILE}
                     --destination=${IMAGE}
                     --reproducible
+                    --snapshot-mode=redo
+                    --use-new-run
                     --verbosity=info";
             if [ "${PUSH}" = "true" ]; then
               echo "==> building + pushing ${IMAGE}";
