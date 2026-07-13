@@ -1,0 +1,68 @@
+# ============================================================================
+# PostSync hook — seeds/refreshes the portal-tenants ConfigMap IMMEDIATELY whenever
+# this app syncs, so the apex portal is populated the moment it deploys (rather than
+# waiting up to 10 min for the first CronJob tick). Runs the exact same script.
+#
+# PostSync (not Sync): guarantees the ServiceAccount + RBAC (normal resources) are
+# already applied and healthy before this hook Job runs. hook-delete-policy
+# BeforeHookCreation replaces the prior hook Job on each sync (avoids Job immutability
+# errors on re-sync). This is a one-shot seed; ongoing freshness is the CronJob.
+# ============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: portal-tenants-seed
+  namespace: crossplane-system
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: portal-tenants-refresh
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 120
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        platform.capstone/component: platform
+        app.kubernetes.io/name: portal-tenants-refresh
+    spec:
+      serviceAccountName: portal-tenants-refresh
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: refresh
+          image: alpine/k8s:1.31.5
+          command: ["/bin/bash", "/scripts/refresh.sh"]
+          env:
+            - name: HOME
+              value: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests: { cpu: "25m", memory: "48Mi" }
+            limits:   { cpu: "250m", memory: "128Mi" }
+          volumeMounts:
+            - name: script
+              mountPath: /scripts
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: script
+          configMap:
+            name: portal-tenants-refresh-script
+            defaultMode: 0555
+        - name: tmp
+          emptyDir: {}

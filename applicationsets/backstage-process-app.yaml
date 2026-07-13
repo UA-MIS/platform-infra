@@ -70,7 +70,7 @@ spec:
             # until the first build lands; the CI build tags by commit SHA.
             registry: harbor.capstone.uamishub.com
             repository: backstage/backstage-process
-            tag: a57f92c25162 # Hardened+themed image: hardened backend Dockerfile (#300, toolchain removed), UA-MIS theme + golden-path landing page (#282), labmx membership fix (#299), GitHub Component discovery provider (#301). Built from main commit f353012 via backstage-process-build-push; digest sha256:95f1cd6fc9360ec017834cfa04c0cbad812fad0e386e699e96026162e6288b44. MANUAL bump (not the usual CI `bump-portal` auto-bump): the gate's `/additions/vulnerabilities` call 403s on a separate CI-robot permission bug (fix in a parallel PR); this ships the already-verified image in the meantime, next build after the robot fix auto-bumps normally. Supply-chain-gate clean: admin-verified Trivy scan's only Criticals are the 2 documented-accepted, unfixable base-image CVEs (CVE-2026-42496, CVE-2026-8376 — perl-base, Essential Debian pkg, no upstream fix), both on accepted-cves.txt (#306). FULL 12-char short-sha (CI tags with `git rev-parse | cut -c1-12`). prev: 3b39d66f39c1 (P5 Secrets-UX on ESO+Vault, #106/#108); 251ce97987db (#98 scaffolder route); ca6ce4e9784d (M3+M4 PR #94).
+            tag: 61844c1bd54d # Hardened+themed image: hardened backend Dockerfile (#300, toolchain removed), UA-MIS theme + golden-path landing page (#282), labmx membership fix (#299), GitHub Component discovery provider (#301). Built from main commit f353012 via backstage-process-build-push; digest sha256:95f1cd6fc9360ec017834cfa04c0cbad812fad0e386e699e96026162e6288b44. MANUAL bump (not the usual CI `bump-portal` auto-bump): the gate's `/additions/vulnerabilities` call 403s on a separate CI-robot permission bug (fix in a parallel PR); this ships the already-verified image in the meantime, next build after the robot fix auto-bumps normally. Supply-chain-gate clean: admin-verified Trivy scan's only Criticals are the 2 documented-accepted, unfixable base-image CVEs (CVE-2026-42496, CVE-2026-8376 — perl-base, Essential Debian pkg, no upstream fix), both on accepted-cves.txt (#306). FULL 12-char short-sha (CI tags with `git rev-parse | cut -c1-12`). prev: 3b39d66f39c1 (P5 Secrets-UX on ESO+Vault, #106/#108); 251ce97987db (#98 scaffolder route); ca6ce4e9784d (M3+M4 PR #94).
             pullPolicy: IfNotPresent
             # Pull from the private Harbor `backstage` project via a robot
             # imagePullSecret (`harbor-pull`, minted at go-live by `make harbor-robot
@@ -304,6 +304,14 @@ spec:
             # integration) MUST live HERE, not only in the baked file. Mirror the baked
             # blocks exactly.
             catalog:
+              # MIRROR of app-config.production.yaml's catalog.orphanStrategy (the pod loads
+              # ONLY this Helm appConfig overlay). Auto-prune ORPHANED entities — a
+              # Component/Location whose emitting provider stopped yielding it. Second half of
+              # the teardown "ghost tenant" fix: teardown strips the `capstone-tenant` topic so
+              # the github.tenants provider drops the repo (and archived repos are already
+              # excluded), orphaning the tenant's Component; default `keep` would leave it in the
+              # catalog forever (why torn-down tenants lingered). `delete` prunes it next cycle.
+              orphanStrategy: delete
               rules:
                 - allow: [Component, System, API, Resource, Location, Template, Group, User]
               locations:

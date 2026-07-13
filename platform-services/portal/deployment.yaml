@@ -96,6 +96,16 @@ spec:
               subPath: default.conf
               mountPath: /etc/nginx/conf.d/default.conf
               readOnly: true
+            # The DYNAMIC "Live on the platform" data — the portal-tenants ConfigMap
+            # (published by platform-services/portal-tenants-refresh) mounted as a
+            # WHOLE dir (NOT subPath) so ConfigMap updates propagate to the running
+            # pods WITHOUT a restart. `optional: true` (volume below) lets the pod
+            # start before the first refresh run has created it. nginx serves it at
+            # /data/tenants.json; index.html fetches that same-origin (no CORS, no
+            # auth, no upstream call — the file is local to the pod).
+            - name: portal-tenants
+              mountPath: /usr/share/nginx/html/data
+              readOnly: true
             - name: tmp
               mountPath: /tmp
             - name: var-cache-nginx
@@ -106,6 +116,13 @@ spec:
         - name: portal-site
           configMap:
             name: portal-site
+        # Controller-owned ConfigMap (published by portal-tenants-refresh). optional:
+        # true so the pod starts even before the first refresh has created it — nginx
+        # then 404s /data/tenants.json and the page's JS falls back to its empty state.
+        - name: portal-tenants
+          configMap:
+            name: portal-tenants
+            optional: true
         - name: tmp
           emptyDir: {}
         - name: var-cache-nginx

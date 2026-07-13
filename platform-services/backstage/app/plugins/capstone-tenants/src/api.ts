@@ -40,6 +40,11 @@ export interface TeardownResult {
   claimPath: string;
   /** Whether the app repo was archived. */
   repoArchived: boolean;
+  /**
+   * Whether the `capstone-tenant` topic was stripped from the app repo so catalog discovery
+   * stops re-registering the Component (the "ghost tenant" cure). Optional for back-compat.
+   */
+  topicStripped?: boolean;
 }
 
 export interface CapstoneTenantsApi {

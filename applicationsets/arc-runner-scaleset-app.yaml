@@ -50,10 +50,35 @@ spec:
           namespace: arc-system
 
         # --- SCALE FROM ZERO: no idle runners burning the box; cap the burst.
-        #     maxRunners is the RESOURCE KNOB — 3 on the local k3d laptop; raise on
-        #     real hardware (Phase-4). minRunners 0 = pods only exist during a job. ---
+        #     maxRunners is the CONCURRENCY KNOB and the OPERATOR-QUEUE lever: it caps
+        #     how many jobs the listener pulls off GitHub's queue at once. Jobs beyond
+        #     it stay "Waiting for a runner" IN GitHub Actions — a real QUEUE, with NO
+        #     pod created (so nothing can OOM). minRunners 0 = pods only exist per job.
+        #
+        # ── 3 → 2: right-size to REAL simultaneous max-size-build capacity ──────────
+        # A max-size build is an ~8Gi CO-PINNED pair (the containerMode:kubernetes
+        # job-container pod 4Gi + the Kaniko step pod 4Gi, glued to ONE node by the RWO
+        # `_work` Ceph-RBD PVC — see platform-services/arc/hook-template.yaml). The build
+        # POOL is TWO nodes: laptop-01 (DEDICATED to CI via the #374 taint, ~11.3Gi free
+        # → fits exactly ONE 8Gi pair) and ua-mis-db-1 (~4.5Gi realistically free — it
+        # also carries backstage/dex/db-tier — so it fits NO 8Gi pair today, only lighter
+        # tenant builds). So the true simultaneous MAX-SIZE-build capacity is 1, with db1
+        # as opportunistic headroom for lighter builds.
+        #
+        # maxRunners was 3 on a 2-node pool: the 3rd runner could only ever spawn a pod
+        # that no node could place — which, under the scheduler↔kubelet race on an
+        # over-committed node, is exactly what surfaced as `phase=Failed reason=OutOfmemory`
+        # (a kubelet ADMISSION reject, NOT a clean Pending) and FAILED the CI run. Set to
+        # 2 (= pool cardinality): laptop-01 runs the one max-size build, the 2nd slot lets
+        # a LIGHTER build use db1 (or Pend for laptop-01 if also max-size), and the 3rd,
+        # 4th… jobs QUEUE in GitHub Actions — the operator's "wait, don't fail". #372's
+        # soft RAM-aware affinity + the 4Gi request guarantee at most ONE 8Gi pair per
+        # node, so the <=2 pods that DO spawn either place or stay Pending — never
+        # admission-OOM. (Ultra-safe alt = 1: pure serial, everything GHA-queues, no warm
+        # standby, db1 unused — 2 keeps db1 usable + gives handoff while still below the
+        # OOM-race point. Raise when db1 sheds its DB tier or a 3rd `pool=build` node joins.)
         minRunners: 0
-        maxRunners: 3
+        maxRunners: 2
 
         # --- containerMode KUBERNETES: workflow job steps run as separate K8s PODS,
         #     NO dind, NO docker socket, NOT privileged — the rootless model Kaniko
@@ -78,6 +103,16 @@ spec:
         #     restricted posture via the controller.) ---
         template:
           spec:
+            # --- Scheduling priority for CI (queue-not-fail, never-evict) ------------
+            # capstone-ci-build (platform-services/arc/priorityclass-ci-build.yaml) is a
+            # co-equal-priority (value 0), NON-preempting (preemptionPolicy: Never) class.
+            # It NEVER evicts a running workload — not a platform pod (which would harm the
+            # platform) and, at equal priority, not another build (which would FAIL that
+            # run mid-flight). So a burst of queued builds can only WAIT for room, never
+            # cascade-preempt. Named class = consistent scheduler treatment + one place to
+            # retune the build tier later. Applied to the runner pod here and to the heavy
+            # Kaniko step pod in platform-services/arc/hook-template.yaml.
+            priorityClassName: capstone-ci-build
             # --- Node placement for the RUNNER pod (CI-fast, #237/#297/#372; SOFT TIER) ---
             # Mirrors the heavy Kaniko step pod's placement (platform-services/arc/
             # hook-template.yaml) so the lightweight listener/runner pod follows the same

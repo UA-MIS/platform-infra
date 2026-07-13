@@ -43,7 +43,9 @@ jobs:
     # caller's grant, so this must be write here; the reusable workflow's build job
     # downgrades itself back to contents: read.
     permissions:
-      contents: write
+      contents: write       # bump-dev pushes the dev overlay-tag commit to main
+      actions: read         # queue-status reads this run's queue timing + depth
+      pull-requests: write  # queue-status posts the sticky "you were in a queue" PR comment
     # secrets: inherit passes the caller's secrets (incl. GITHUB_TOKEN) through. The
     # Harbor push cred is NOT a GitHub secret — the ARC runner's container-hook
     # injects it as a Kubernetes secret — so no secret is listed explicitly.

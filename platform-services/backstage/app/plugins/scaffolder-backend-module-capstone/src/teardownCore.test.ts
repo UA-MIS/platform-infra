@@ -31,6 +31,12 @@ const octokitCalls = {
   createRef: jest.fn<Promise<any>, any[]>(async () => ({})),
   deleteFile: jest.fn<Promise<any>, any[]>(async () => ({})),
   update: jest.fn<Promise<any>, any[]>(async () => ({})),
+  getAllTopics: jest.fn<Promise<any>, any[]>(async () => ({
+    data: { names: ['capstone-tenant', 'nodejs'] },
+  })),
+  replaceAllTopics: jest.fn<Promise<any>, any[]>(async () => ({
+    data: { names: ['nodejs'] },
+  })),
   pullsCreate: jest.fn<Promise<any>, any[]>(async (opts: { head: string }) => ({
     data: { html_url: `https://github.com/UA-MIS/platform-infra/pull/${opts.head}` },
   })),
@@ -42,6 +48,8 @@ jest.mock('@octokit/rest', () => ({
       getContent: octokitCalls.getContent,
       deleteFile: octokitCalls.deleteFile,
       update: octokitCalls.update,
+      getAllTopics: octokitCalls.getAllTopics,
+      replaceAllTopics: octokitCalls.replaceAllTopics,
     },
     git: { getRef: octokitCalls.getRef, createRef: octokitCalls.createRef },
     pulls: { create: octokitCalls.pullsCreate },
@@ -146,6 +154,13 @@ beforeEach(() => {
   octokitCalls.pullsCreate.mockImplementation(async (opts: { head: string }) => ({
     data: { html_url: `https://github.com/UA-MIS/platform-infra/pull/${opts.head}` },
   }));
+  // App repo carries the `capstone-tenant` topic by default (the state a live tenant is in).
+  octokitCalls.getAllTopics.mockImplementation(async () => ({
+    data: { names: ['capstone-tenant', 'nodejs'] },
+  }));
+  octokitCalls.replaceAllTopics.mockImplementation(async () => ({
+    data: { names: ['nodejs'] },
+  }));
 });
 
 describe('teardownCore authz (admin-only, fails closed)', () => {
@@ -227,6 +242,54 @@ describe('teardownTenant (admin)', () => {
     expect(res.repoArchived).toBe(false);
     // No archive when not requested.
     expect(octokitCalls.update).not.toHaveBeenCalled();
+    // ...but the `capstone-tenant` topic is stripped UNCONDITIONALLY (ghost-tenant cure).
+    expect(res.topicStripped).toBe(true);
+    expect(octokitCalls.replaceAllTopics).toHaveBeenCalledWith(
+      expect.objectContaining({ repo: 'swamiapp', names: ['nodejs'] }),
+    );
+  });
+
+  it('ghost-tenant cure: strips the `capstone-tenant` topic from the app repo on every teardown', async () => {
+    serveLedger();
+    const deps = makeDeps([ADMIN_GROUP]);
+    await teardownTenant(deps, {
+      credentials: CREDS,
+      name: 'swami-swamiapp',
+      confirmName: 'swami-swamiapp',
+    });
+    expect(octokitCalls.getAllTopics).toHaveBeenCalledWith(
+      expect.objectContaining({ repo: 'swamiapp' }),
+    );
+    // The remaining topics are preserved; only `capstone-tenant` is removed.
+    expect(octokitCalls.replaceAllTopics).toHaveBeenCalledWith(
+      expect.objectContaining({ owner: 'UA-MIS', repo: 'swamiapp', names: ['nodejs'] }),
+    );
+  });
+
+  it('does NOT call replaceAllTopics when the repo never had the topic (nothing to strip)', async () => {
+    serveLedger();
+    octokitCalls.getAllTopics.mockResolvedValue({ data: { names: ['nodejs'] } });
+    const deps = makeDeps([ADMIN_GROUP]);
+    const res = await teardownTenant(deps, {
+      credentials: CREDS,
+      name: 'swami-swamiapp',
+      confirmName: 'swami-swamiapp',
+    });
+    expect(octokitCalls.replaceAllTopics).not.toHaveBeenCalled();
+    expect(res.topicStripped).toBe(false);
+  });
+
+  it('is non-fatal if the topic strip fails (teardown PR still succeeds)', async () => {
+    serveLedger();
+    octokitCalls.replaceAllTopics.mockRejectedValue(new Error('topic boom'));
+    const deps = makeDeps([ADMIN_GROUP]);
+    const res = await teardownTenant(deps, {
+      credentials: CREDS,
+      name: 'swami-swamiapp',
+      confirmName: 'swami-swamiapp',
+    });
+    expect(res.pullRequestUrl).toContain('/pull/');
+    expect(res.topicStripped).toBe(false);
   });
 
   it('re-enforces type-to-confirm server-side: mismatch -> InputError, no delete', async () => {
@@ -269,9 +332,15 @@ describe('teardownTenant (admin)', () => {
       expect.objectContaining({ repo: 'swamiapp', archived: true }),
     );
     expect(res.repoArchived).toBe(true);
+    // The topic strip MUST happen BEFORE the archive (an archived repo is read-only and its
+    // topics can no longer be changed). Assert call ordering via invocationCallOrder.
+    const stripOrder = octokitCalls.replaceAllTopics.mock.invocationCallOrder[0];
+    const archiveOrder = octokitCalls.update.mock.invocationCallOrder[0];
+    expect(stripOrder).toBeLessThan(archiveOrder);
+    expect(res.topicStripped).toBe(true);
   });
 
-  it('is non-fatal if the app-repo archive fails (teardown PR still succeeds)', async () => {
+  it('is non-fatal if the app-repo archive fails (teardown PR still succeeds; topic still stripped)', async () => {
     serveLedger();
     octokitCalls.update.mockRejectedValue(new Error('archive boom'));
     const deps = makeDeps([ADMIN_GROUP]);
@@ -283,6 +352,8 @@ describe('teardownTenant (admin)', () => {
     });
     expect(res.pullRequestUrl).toContain('/pull/');
     expect(res.repoArchived).toBe(false);
+    // The strip runs before the archive, so it still succeeds even though archive threw.
+    expect(res.topicStripped).toBe(true);
   });
 });
 

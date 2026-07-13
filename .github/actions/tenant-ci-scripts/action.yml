@@ -46,5 +46,9 @@ runs:
           cp "${GITHUB_ACTION_PATH}/scripts/${s}" "$dst/${s}"
           chmod +x "$dst/${s}"
         done
+        # queue-status.mjs — the operator "you were in a queue" reporter (node, run via
+        # `node .devops/ci/queue-status.mjs`, not chmod-exec'd). Same central-override
+        # model as the shell scripts above, so a wording/logic fix ships once at @v1.
+        cp "${GITHUB_ACTION_PATH}/scripts/queue-status.mjs" "$dst/queue-status.mjs"
         echo "installed canonical platform CI scripts into ${dst} (override per-repo copies):"
-        ls -l "$dst"/resolve-image.sh "$dst"/resolve-components.sh "$dst"/bump-image.sh
+        ls -l "$dst"/resolve-image.sh "$dst"/resolve-components.sh "$dst"/bump-image.sh "$dst"/queue-status.mjs

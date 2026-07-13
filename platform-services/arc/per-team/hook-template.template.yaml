@@ -28,6 +28,10 @@ metadata:
 data:
   content: |
     spec:
+      # CI build priority: co-equal, never-preempt (platform-services/arc/
+      # priorityclass-ci-build.yaml). Rides the hook's top-level PodSpec merge, same as
+      # nodeSelector/tolerations below. The build waits for room, never evicts a workload.
+      priorityClassName: capstone-ci-build
       # Node placement for the KANIKO BUILD step pod (CI-fast, #237/#372; SOFT TIER).
       # Mirrors the shared platform-services/arc/hook-template.yaml. SOFT, RAM-aware tier
       # bias fenced by a HARD candidate SET so the build PREFERS laptop-01, spills to

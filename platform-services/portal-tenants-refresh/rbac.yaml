@@ -1,0 +1,74 @@
+# ============================================================================
+# The refresher's authority — hand-curated, minimal. NEVER cluster-admin, NEVER `*`.
+# ============================================================================
+# It can do exactly two things:
+#   1. get/list Ingresses cluster-wide (ClusterRole) — to find every tenant's live
+#      PROD front door. These objects, and the hostnames in them, are already public
+#      (they ARE the public URLs); listing them leaks nothing.
+#   2. get/create/update/patch the SINGLE `portal-tenants` ConfigMap in the portal
+#      namespace (Role, namespace-scoped, name is not restricted by RBAC but the
+#      script only ever touches that one name) — to publish the rendered list.
+# No delete anywhere, no access to Secrets, no write outside that one ConfigMap.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: portal-tenants-refresh
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: portal-tenants-refresh
+rules:
+  # Read the live PROD ingresses (the "live on the platform" set). Read-only.
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: portal-tenants-refresh
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: portal-tenants-refresh
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: portal-tenants-refresh
+subjects:
+  - kind: ServiceAccount
+    name: portal-tenants-refresh
+    namespace: crossplane-system
+---
+# Namespace-scoped WRITE, confined to the portal namespace. This is the only place the
+# refresher can create/update a ConfigMap (it only ever writes `portal-tenants`).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: portal-tenants-writer
+  namespace: portal
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: portal-tenants-refresh
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create", "update", "patch"]
+---
+# Bind the crossplane-system SA to that portal-namespace write Role (RoleBinding
+# subjects may reference a ServiceAccount in another namespace).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: portal-tenants-writer
+  namespace: portal
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: portal-tenants-refresh
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: portal-tenants-writer
+subjects:
+  - kind: ServiceAccount
+    name: portal-tenants-refresh
+    namespace: crossplane-system

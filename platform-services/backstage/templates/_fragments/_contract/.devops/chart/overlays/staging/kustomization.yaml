@@ -74,20 +74,15 @@ images:
 {%- endif %}
 {%- endfor %}
 # Per-component replica count via a JSON6902 `op: replace` (NOT the builtin `replicas:`
-# transformer, which is hard-wired to Deployment/StatefulSet/ReplicaSet/RC and ERRORS on a
-# progressive-delivery argoproj.io/Rollout — #337). Target kind is branched on the SAME
-# condition deployments.yaml uses so it always matches the rendered workload (and excludes
-# the same-named Service). Base pins replicas:1, so `replace` always has a path to hit.
+# transformer, which ERRORS on the PROD overlay's argoproj.io/Rollout — #337; the patch form is
+# kept uniform across overlays). staging is ALWAYS a plain Deployment (progressive delivery is
+# prod-only, ADR-037), so the target is always kind: Deployment. Naming the kind also excludes
+# the same-named Service. Base pins replicas:1, so `replace` always has a path to hit.
 patches:
 {%- for c in values.components %}
 {%- if c.buildType != "mobile-artifact" %}
   - target:
-{%- if values.single and values.progressiveDelivery %}
-      group: argoproj.io
-      kind: Rollout
-{%- else %}
       kind: Deployment
-{%- endif %}
       name: ${{ values.appName }}-${{ c.name }}
     patch: |
       - op: replace

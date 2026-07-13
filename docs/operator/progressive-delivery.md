@@ -1,8 +1,15 @@
-# Progressive delivery (Argo Rollouts, opt-in canary)
+# Progressive delivery (Argo Rollouts) — env-based prod canary
 
-Every golden-path app still deploys as a plain `Deployment` — this is **additive**.
-Argo Rollouts is a cluster-wide **platform capability** a team can opt into per app;
-nothing existing changes.
+Progressive delivery is now an **env-based platform default (ADR-037)**, not a wizard
+toggle. Every scaffolded app gets it automatically, in exactly one place:
+
+- **dev / staging / preview** deploy a plain rolling-update **`Deployment`** — fast,
+  no canary, no "why is my rollout paused?" confusion.
+- **prod** deploys a **single-component web** project as an auto-completing Argo
+  Rollouts **canary** (`Rollout`): 25% → pause 30s → 50% → pause 30s → 100%.
+
+There is nothing for a team to choose — the old "Progressive delivery (canary)"
+checkbox has been removed from the "New Project" wizard.
 
 ## What's installed
 
@@ -25,107 +32,98 @@ merge, same as every prior chart-repo add) + a sync-wave-0 Application.
 - The controller only reconciles objects of `kind: Rollout`. A plain `Deployment`
   is completely unaffected whether or not the controller is installed or running.
 
-## Tenant opt-in — the scaffolder toggle
+## How the env-based policy is wired (the chart)
 
-The **live** golden-path scaffolder is the unified **"New Project"** wizard
-(`platform-services/backstage/templates/new-project/template.yaml`, ADR-034 — the
-only two registered templates are "New Project" and "New Capstone VM", see
-`platform-services/backstage/catalog/all.yaml`). Its **"Progressive delivery
-(canary)"** checkbox, default **off**, is wired through `capstone:compose-project`
-into the ONE shared contract every fragment renders
-(`platform-services/backstage/templates/_fragments/_contract/.devops/chart/base/
-deployments.yaml`).
+It is decided entirely in the ONE shared contract every fragment renders
+(`platform-services/backstage/templates/_fragments/_contract/.devops/chart`), so it
+needs **no Backstage rebuild** — the chart is read at scaffold time:
 
-- **Off (default), or a frontend-backend/mobile project:** `deployments.yaml`
-  renders `kind: Deployment` for every component — byte-for-byte the same
-  manifests as before this change.
-- **On, single-component "web" project only:** the one component's manifest
-  renders `kind: Rollout` (`apiVersion: argoproj.io/v1alpha1`) with a **Basic
-  Canary** strategy that **auto-completes** — no human, no kubectl plugin:
+- **`base/deployments.yaml`** — ALWAYS a plain `Deployment` per component. This is
+  what dev / staging / preview deploy, byte-for-byte a rolling update.
+- **`overlays/prod/rollout.yaml`** — the auto-completing canary `Rollout` (below).
+  Rendered only for a single-component web project (`values.single`).
+- **`overlays/prod/kustomization.yaml`** — for a single-component project it
+  references `rollout.yaml` **and** `$patch: delete`s the base `Deployment` of the
+  same name, so prod runs the `Rollout` **instead of** the Deployment. The same one
+  `Service` (selecting on `app.kubernetes.io/name` + `component`, no
+  `rollouts-pod-template-hash`) routes traffic to the Rollout's stable + canary
+  ReplicaSets, so nothing else changes. dev / staging / preview never reference
+  `rollout.yaml`.
+- The per-component replicas patch (#340) targets the `argoproj.io/Rollout` GVK in
+  prod (the builtin kustomize `replicas:` transformer errors on a Rollout) and the
+  `Deployment` everywhere else; the prod/staging **PDB** (#346) and soft
+  pod-antiAffinity are HA features tied to **replicas > 1** (staging = 2, prod = 3),
+  independent of the Deployment-vs-Rollout choice.
 
-  ```yaml
-  strategy:
-    canary:
-      steps:
-        - setWeight: 25
-        - pause: { duration: 30s }
-        - setWeight: 50
-        - pause: { duration: 30s }
-        - setWeight: 100
-        # rollout completes at 100%, then scales the old ReplicaSet to 0
-        # after scaleDownDelaySeconds (default 30s — not overridden).
-  ```
+**Multi-component (frontend-backend / mobile) projects stay plain Deployments in
+EVERY env, prod included.** The Basic Canary approximates traffic weight via one
+Service's stable/canary ReplicaSet ratio, which is a single-component pattern — see
+the follow-up below to extend it.
 
-  The pauses are **timed** (`duration: 30s`), so each image bump steps
-  25% → 50% → 100% and promotes on its own — the old revision's ReplicaSet is
-  scaled to 0 automatically once it reaches 100%. Nothing parks at a canary step
-  waiting for a human. The **first-ever** deploy on a fresh tenant skips the steps
-  entirely (Argo Rollouts has no prior stable revision to canary against) and comes
-  up straight at 100%, so a brand-new app is never stuck at an initial rollout.
+### The prod canary (auto-completes, no human, no plugin)
 
-  The gate is `values.single AND values.progressiveDelivery` (both must be true) —
-  a frontend-backend or mobile project always gets plain Deployments even with the
-  checkbox on, because there's no single obvious "one representative workload" to
-  convert there yet (see the follow-up below). Every other file is untouched —
-  `services.yaml`, `ingress.yaml`, `serviceaccount.yaml`, the overlays,
-  `promotion.yaml`, and the CI scripts don't know or care whether a component is a
-  `Deployment` or a `Rollout`. A `Rollout` is a drop-in replacement: same
-  `replicas`/`selector`/`template` shape, same ReplicaSets underneath, same Service
-  selecting on `app.kubernetes.io/name`.
+`overlays/prod/rollout.yaml` renders a `Rollout` (`apiVersion:
+argoproj.io/v1alpha1`) with a **Basic Canary** strategy that **auto-completes**:
 
-Not offered for the frontend-backend/mobile layouts yet — extend the same
-`{% if %}` in `_fragments/_contract/.devops/chart/base/deployments.yaml` (per
-component, using each component's own `c.name`) if a multi-component team needs it.
+```yaml
+strategy:
+  canary:
+    steps:
+      - setWeight: 25
+      - pause: { duration: 30s }
+      - setWeight: 50
+      - pause: { duration: 30s }
+      - setWeight: 100
+      # rollout completes at 100%, then scales the old ReplicaSet to 0 after
+      # scaleDownDelaySeconds (default 30s — not overridden).
+```
 
-> The template.yaml/skeleton files under `templates/new-capstone-project*/` are
-> **legacy, retired, not registered** in the catalog (kept on disk only as a
-> fallback — see the `all.yaml` comment). They do NOT carry this toggle; don't
-> confuse them with the live `new-project` template above.
+The pauses are **timed** (`duration: 30s`), so each prod image bump (the
+promote-to-prod gate) steps 25% → 50% → 100% and promotes on its own — the old
+revision's ReplicaSet is scaled to 0 automatically once it reaches 100%. Nothing
+parks at a canary step waiting for a human. The **first-ever** prod deploy on a fresh
+tenant skips the steps entirely (Argo Rollouts has no prior stable revision to canary
+against) and comes up straight at 100%, so a brand-new app is never stuck at an
+initial rollout.
 
-### Enabling it on an existing (already-scaffolded) app
-
-The toggle only affects the scaffolder at create time. An existing team can opt in
-by hand-editing their own `.devops/chart/base/deployments.yaml`: swap
-`apiVersion: apps/v1` / `kind: Deployment` for `apiVersion: argoproj.io/v1alpha1` /
-`kind: Rollout` on their component and add the `strategy.canary` block above (or
-copy it from a fresh scaffold with the checkbox on). No platform-side change is
-required — the controller already watches every namespace.
-
-### Why "Basic Canary" (no traffic-routing plugin)
-
-The platform's ingress is Traefik, which Argo Rollouts has no native
-traffic-routing integration for (its plugins target Istio/SMI/Nginx/ALB/Traefik-
-via-a-separate-plugin). Without a routing plugin, Argo Rollouts approximates each
-`setWeight` by the **replica-count ratio** between the canary and stable
-ReplicaSets, both selected by the one Service (`services.yaml` — unchanged). That's
-weaker than exact traffic-percentage shaping, but it's a real, working canary
-(new Pods created and observed before old ones are removed, and the timed pauses
-give a real, observable rollout window) with zero extra infrastructure — the right
-"simple canary" for a first opt-in demo. Wiring a Traefik-native (or Gateway API)
-traffic split is a documented follow-up, not blocking.
-
-## Default: auto-completing canary (no human needed)
-
-The default strategy uses **timed** pauses (`pause: { duration: 30s }`), so a
-Rollout advances 25% → 50% → 100% and completes **on its own** — no operator, no
-`kubectl argo rollouts` plugin required. Once it reaches 100% the old revision's
-ReplicaSet is scaled to 0 automatically (default `scaleDownDelaySeconds` 30s, not
-overridden). You can still watch it if you have the plugin:
+You can still watch it if you have the plugin:
 
 ```bash
 # watch a Rollout's progress (optional; needs the kubectl-argo-rollouts plugin)
-kubectl argo rollouts get rollout <name> -n <team>-<env> --watch
+kubectl argo rollouts get rollout <name> -n <team>-prod --watch
 
 # or plain kubectl, no plugin:
-kubectl get rollout <name> -n <team>-<env> -w
+kubectl get rollout <name> -n <team>-prod -w
 ```
 
-## Opting into a MANUAL hold gate
+### Why "Basic Canary" (no traffic-routing plugin)
+
+The platform's ingress is Traefik, which Argo Rollouts has no native traffic-routing
+integration for. Without a routing plugin, Argo Rollouts approximates each `setWeight`
+by the **replica-count ratio** between the canary and stable ReplicaSets, both
+selected by the one Service (`base/services.yaml` — unchanged). That's weaker than
+exact traffic-percentage shaping, but it's a real, working canary (new Pods created
+and observed before old ones are removed, and the timed pauses give a real,
+observable rollout window) with zero extra infrastructure. Wiring a Traefik-native
+(or Gateway API) traffic split is a documented follow-up, not blocking.
+
+## Existing tenants are unaffected (new-tenants-forward)
+
+This is a change to the scaffolder's shared contract, read at **create time**.
+Already-scaffolded tenant repos keep whatever chart they were created with — nothing
+in a running cluster changes on merge. Only projects scaffolded **after** this lands
+get the env-based prod canary. An existing single-component team can adopt it by hand,
+in their own repo, by copying `overlays/prod/rollout.yaml` from a fresh scaffold and
+adding the `rollout.yaml` resource + the base-`Deployment` `$patch: delete` to their
+`overlays/prod/kustomization.yaml`. No platform-side change is required — the
+controller already watches every namespace.
+
+## Opting into a MANUAL hold gate (per team, prod)
 
 If a team wants a human approval gate on a step (hold the canary until someone
 promotes it), replace a timed pause with a **bare** `pause: {}` (no `duration:`),
-which pauses **indefinitely** until promoted, in their
-`.devops/chart/base/deployments.yaml`:
+which pauses **indefinitely** until promoted, in their own
+`overlays/prod/rollout.yaml`:
 
 ```yaml
       steps:
@@ -140,26 +138,25 @@ Then install the [`kubectl-argo-rollouts`](https://argoproj.github.io/argo-rollo
 plugin and drive it by hand:
 
 ```bash
-# promote past the current (indefinite) pause — advance to the next step
-kubectl argo rollouts promote <name> -n <team>-<env>
-
-# abort and roll back to the last stable ReplicaSet
-kubectl argo rollouts abort <name> -n <team>-<env>
+kubectl argo rollouts promote <name> -n <team>-prod   # advance past the indefinite pause
+kubectl argo rollouts abort   <name> -n <team>-prod   # roll back to the last stable ReplicaSet
 ```
 
 Because the plugin is **not** installed on the platform by default, a bare
-`pause: {}` that no one promotes will park the Rollout forever (the old failure
-mode) — that is why the shipped default is fully automatic and this hold gate is
-strictly opt-in per team.
+`pause: {}` that no one promotes will park the Rollout forever — that is why the
+shipped default is fully automatic and this hold gate is strictly opt-in per team.
 
-### Metrics-gated promotion (later)
+## NEXT: metrics-gated canary (`AnalysisTemplate`) — ADR-037
 
-The natural next step beyond a timed pause is an **analysis-based gate**: an
-`AnalysisTemplate` (the CRD is already installed with the controller) that queries
-a Prometheus SLO (error rate / latency) at each step and auto-promotes only if the
-canary is healthy, auto-aborting otherwise. That needs stable per-workload SLO
-queries from observability (Track-3) and is tracked in Follow-ups below — not wired
-into the default chart yet.
+The prod canary today catches **crash / failed-health-check** regressions (a bad
+image never passes readiness, so the Rollout stalls and never promotes). The powerful
+next step is a metrics-gated **`AnalysisTemplate`** (the CRD is already installed):
+Prometheus **SLO queries** (error rate, p95 latency) evaluated at each canary step
+that **auto-abort** a canary showing an error-rate/latency regression and **auto-promote**
+only a healthy one — catching *behavioral* regressions a health check can't see. That
+needs stable per-workload SLO queries from observability (Track-3) and is tracked as
+ADR-037's follow-up (see `artifacts/design/decisions/adr-037-*`). Not wired into the
+default chart yet.
 
 ## Tenancy / RBAC
 
@@ -174,16 +171,17 @@ namespaced objects:
   path (`capstone:render-tenant`, OPERATIONS §4.4) still documented for VM
   workloads; kept in sync for consistency even though the wizard no longer uses it.
 
-Whitelisting costs nothing for teams who never create a `Rollout` — ArgoCD only
-enforces the allow list against resources actually present in an Application's
-rendered manifests. A team can run a `Rollout` **instead of** a `Deployment` in its
-own namespace; never a cluster-scoped object.
+Whitelisting costs nothing for teams whose prod is a plain `Deployment` (multi-component,
+or any env that isn't prod) — ArgoCD only enforces the allow list against resources
+actually present in an Application's rendered manifests. A team runs a `Rollout`
+**instead of** a `Deployment` in its own prod namespace; never a cluster-scoped object.
 
 ## Follow-ups (not in this change)
 
+- **`AnalysisTemplate`-driven metrics-gated canary** (auto-promote/abort on Prometheus
+  SLOs) once observability (Track-3) has stable per-workload SLO queries — ADR-037.
 - Publish the `argo-rollouts` dashboard behind Traefik + OIDC.
 - A Traefik-native (or Gateway API) traffic-routing plugin for exact
   percentage-based weighting instead of the replica-ratio approximation.
-- Extend the canary opt-in to the frontend-backend (`skeleton-multi`) layout.
-- `AnalysisTemplate`-driven automated promotion/rollback (metrics-gated canary)
-  once observability (Track-3) has stable per-workload SLO queries to gate on.
+- Extend the prod canary to the frontend-backend (multi-component) layout
+  (per-component Rollouts behind each component's own Service).

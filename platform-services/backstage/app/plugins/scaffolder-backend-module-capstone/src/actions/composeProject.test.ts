@@ -319,14 +319,14 @@ describe('capstone:compose-project', () => {
     expect(ctx.output).toHaveBeenCalledWith('fileCount', contract.length + FASTAPI.length - 1);
   });
 
-  it('progressive delivery: single + toggle on renders the REAL deployments.yaml as an Argo Rollouts Rollout with a canary strategy', async () => {
-    // Exercises the actual on-disk shared contract (not the minimal CONTRACT mock above) so
-    // this proves the real `{% if values.single and values.progressiveDelivery %}` gate in
-    // .devops/chart/base/deployments.yaml, not just a test fixture.
+  it('progressive delivery (env-based): single-component base deployments.yaml is ALWAYS a plain Deployment (never a Rollout)', async () => {
+    // Env-based progressive delivery (ADR-037): the base workload every env starts from is a
+    // plain rolling-update Deployment. The canary lives ONLY in the prod overlay (next test).
+    // Exercises the actual on-disk shared contract (not the minimal CONTRACT mock above).
     const contract = await readContractWithReaderQuirk(CONTRACT_DIR);
     const reader = treeReader({ '/_contract': contract, '/backend/fastapi': asEntries(FASTAPI) });
     const action = createComposeProjectAction({ reader });
-    const ws = mockDir.resolve('ws-pd-on');
+    const ws = mockDir.resolve('ws-pd-base');
     await fs.ensureDir(ws);
     const ctx = createMockActionContext({
       input: {
@@ -335,37 +335,29 @@ describe('capstone:compose-project', () => {
         layout: 'single' as const,
         singleFragment: 'backend/fastapi',
         database: 'none' as const,
-        progressiveDelivery: true,
       },
       workspacePath: ws,
     });
 
     await action.handler(ctx);
 
-    const rendered = await fs.readFile(path.join(ws, '.devops/chart/base/deployments.yaml'), 'utf8');
-    expect(rendered).toContain('kind: Rollout');
-    expect(rendered).toContain('apiVersion: argoproj.io/v1alpha1');
-    // `setWeight: 25` only appears in the actual rendered strategy.canary block (never in
-    // prose comments, unlike the word "canary" alone), so it's an unambiguous structural marker.
-    expect(rendered).toContain('setWeight: 25');
-    // The canary must AUTO-COMPLETE: timed pauses (`duration: 30s`) that advance on their
-    // own and a terminal `setWeight: 100`, and NO bare indefinite `pause: {}` (which would
-    // park the rollout forever with no argo-rollouts plugin to promote it — the #meow bug).
-    expect(rendered).toContain('duration: 30s');
-    expect(rendered).toContain('setWeight: 100');
-    expect(rendered).not.toContain('pause: {}');
-    expect(rendered).not.toContain('kind: Deployment');
-    expect(rendered).not.toContain('apiVersion: apps/v1');
+    const base = await fs.readFile(path.join(ws, '.devops/chart/base/deployments.yaml'), 'utf8');
+    expect(base).toContain('kind: Deployment');
+    expect(base).toContain('apiVersion: apps/v1');
+    // No canary/Rollout in the base — it is prod-overlay-only now.
+    expect(base).not.toContain('kind: Rollout');
+    expect(base).not.toContain('argoproj.io/v1alpha1');
+    expect(base).not.toContain('setWeight: 25');
   });
 
-  it('progressive delivery: default (toggle omitted) still renders the REAL deployments.yaml as a plain Deployment', async () => {
-    // The toggle is optional on the action input (Backstage sends parameters.progressiveDelivery
-    // as a real boolean, but this guards the action's own default so a caller that omits it
-    // entirely — e.g. an older cached template render — never silently gets a Rollout).
+  it('progressive delivery (env-based): single-component PROD overlay swaps the Deployment for an auto-completing canary Rollout', async () => {
+    // The prod overlay ADDS rollout.yaml (the canary Rollout) and $patch:deletes the base
+    // Deployment of the same name, so ONLY the Rollout runs in prod. Same Service selector, so
+    // traffic routes. dev/staging/preview keep the plain Deployment.
     const contract = await readContractWithReaderQuirk(CONTRACT_DIR);
     const reader = treeReader({ '/_contract': contract, '/backend/fastapi': asEntries(FASTAPI) });
     const action = createComposeProjectAction({ reader });
-    const ws = mockDir.resolve('ws-pd-default');
+    const ws = mockDir.resolve('ws-pd-prod');
     await fs.ensureDir(ws);
     const ctx = createMockActionContext({
       input: {
@@ -374,24 +366,52 @@ describe('capstone:compose-project', () => {
         layout: 'single' as const,
         singleFragment: 'backend/fastapi',
         database: 'none' as const,
-        // progressiveDelivery intentionally omitted
       },
       workspacePath: ws,
     });
 
     await action.handler(ctx);
 
-    const rendered = await fs.readFile(path.join(ws, '.devops/chart/base/deployments.yaml'), 'utf8');
-    expect(rendered).toContain('kind: Deployment');
-    expect(rendered).toContain('apiVersion: apps/v1');
-    expect(rendered).not.toContain('kind: Rollout');
-    expect(rendered).not.toContain('argoproj.io/v1alpha1');
-    expect(rendered).not.toContain('setWeight: 25');
+    // The prod overlay ships the canary Rollout.
+    const rollout = await fs.readFile(
+      path.join(ws, '.devops/chart/overlays/prod/rollout.yaml'), 'utf8');
+    expect(rollout).toContain('kind: Rollout');
+    expect(rollout).toContain('apiVersion: argoproj.io/v1alpha1');
+    // `setWeight: 25` only appears in the actual rendered strategy.canary block (never in prose
+    // comments, unlike the word "canary" alone), so it's an unambiguous structural marker.
+    expect(rollout).toContain('setWeight: 25');
+    // The canary must AUTO-COMPLETE: timed pauses (`duration: 30s`) that advance on their own
+    // and a terminal `setWeight: 100`, and NO bare indefinite `pause: {}` (which would park the
+    // rollout forever with no argo-rollouts plugin to promote it).
+    expect(rollout).toContain('duration: 30s');
+    expect(rollout).toContain('setWeight: 100');
+    expect(rollout).not.toContain('pause: {}');
+
+    // The prod kustomization deletes the base Deployment (so only the Rollout remains) and
+    // references rollout.yaml.
+    const prodKz = await fs.readFile(
+      path.join(ws, '.devops/chart/overlays/prod/kustomization.yaml'), 'utf8');
+    expect(prodKz).toContain('rollout.yaml');
+    expect(prodKz).toContain('$patch: delete');
+    // The #340 replicas patch must target the Rollout GVK in prod (the builtin transformer
+    // errors on a Rollout), so a Rollout tenant's prod overlay stays buildable.
+    expect(prodKz).toContain('group: argoproj.io');
+    expect(prodKz).toContain('kind: Rollout');
+
+    // dev/staging/preview stay plain Deployments — no Rollout, no canary, no rollout.yaml ref.
+    for (const env of ['dev', 'staging', 'preview']) {
+      const kz = await fs.readFile(
+        path.join(ws, `.devops/chart/overlays/${env}/kustomization.yaml`), 'utf8');
+      expect(kz).not.toContain('rollout.yaml');
+      expect(kz).not.toContain('group: argoproj.io');
+      expect(kz).toContain('kind: Deployment');
+    }
   });
 
-  it('progressive delivery: toggle on but frontend-backend layout still renders plain Deployments for both components', async () => {
-    // values.single is false for FE+BE, so the contract's gate (`values.single AND
-    // values.progressiveDelivery`) must stay off even though the caller asked for the toggle.
+  it('progressive delivery (env-based): frontend-backend stays plain Deployments in EVERY env, prod included (no Rollout)', async () => {
+    // values.single is false for FE+BE, so the prod overlay does NOT delete Deployments or ship
+    // a Rollout — multi-component apps stay plain Deployments everywhere (the Basic Canary is a
+    // single-Service, single-component pattern). rollout.yaml renders comment-only + unreferenced.
     const contract = await readContractWithReaderQuirk(CONTRACT_DIR);
     const reader = treeReader({
       '/_contract': contract,
@@ -409,18 +429,28 @@ describe('capstone:compose-project', () => {
         frontendFragment: 'frontend/react',
         backendFragment: 'backend/express',
         database: 'none' as const,
-        progressiveDelivery: true,
       },
       workspacePath: ws,
     });
 
     await action.handler(ctx);
 
-    const rendered = await fs.readFile(path.join(ws, '.devops/chart/base/deployments.yaml'), 'utf8');
-    const deploymentCount = (rendered.match(/kind: Deployment/g) || []).length;
+    const base = await fs.readFile(path.join(ws, '.devops/chart/base/deployments.yaml'), 'utf8');
+    const deploymentCount = (base.match(/kind: Deployment/g) || []).length;
     expect(deploymentCount).toBe(2);
-    expect(rendered).not.toContain('kind: Rollout');
-    expect(rendered).not.toContain('setWeight: 25');
+    expect(base).not.toContain('kind: Rollout');
+
+    // The prod overlay must NOT convert a multi-component app: no Deployment delete, no rollout ref.
+    const prodKz = await fs.readFile(
+      path.join(ws, '.devops/chart/overlays/prod/kustomization.yaml'), 'utf8');
+    expect(prodKz).not.toContain('rollout.yaml');
+    expect(prodKz).not.toContain('$patch: delete');
+    expect(prodKz).not.toContain('group: argoproj.io');
+    // rollout.yaml still renders (contract file) but contains no actual Rollout for FE+BE.
+    const rollout = await fs.readFile(
+      path.join(ws, '.devops/chart/overlays/prod/rollout.yaml'), 'utf8');
+    expect(rollout).not.toContain('kind: Rollout');
+    expect(rollout).not.toContain('setWeight: 25');
   });
 
   it('copies a binary fragment file (a committed .pyc) byte-for-byte instead of nunjucks-rendering it', async () => {

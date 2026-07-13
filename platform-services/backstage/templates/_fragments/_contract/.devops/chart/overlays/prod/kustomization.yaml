@@ -14,9 +14,18 @@ kind: Kustomization
 namespace: ${{ values.team }}-prod
 resources:
   - ../../base
+{%- if values.single %}
+  # ENV-BASED PROGRESSIVE DELIVERY (ADR-037): a single-component web project runs an Argo
+  # Rollouts canary in PROD instead of the base Deployment. rollout.yaml adds the Rollout; the
+  # `patches:` block below `$patch: delete`s the base Deployment of the same name so ONLY the
+  # Rollout remains (kustomize can't retype a Deployment). dev/staging/preview never reference
+  # rollout.yaml — they keep the base Deployment. Multi-component prod keeps Deployments too.
+  - rollout.yaml
+{%- endif %}
   # PodDisruptionBudget(s) — one per component. Shipped ONLY in staging/prod (replicas>1);
   # maxUnavailable:1 keeps a node drain/upgrade from evicting every replica of an app at once
-  # (workload-level HA). dev/preview (1 replica) omit this file. See pdb.yaml.
+  # (workload-level HA). dev/preview (1 replica) omit this file. Kind-agnostic (selects pod
+  # labels), so it governs the prod Rollout's pods too. See pdb.yaml.
   - pdb.yaml
   # Per-tenant ESO store + SA (vault-tenant / eso-tenant, scoped to this team's
   # Vault path) — the tenant half of the ADR-030 B1 secrets contract.
@@ -79,14 +88,31 @@ images:
 # Prod runs more replicas; quota ceiling is higher (§3.2).
 # Per-component replica count via a JSON6902 `op: replace` (NOT the builtin `replicas:`
 # transformer, which is hard-wired to Deployment/StatefulSet/ReplicaSet/RC and ERRORS on a
-# progressive-delivery argoproj.io/Rollout — #337). Target kind is branched on the SAME
-# condition deployments.yaml uses so it always matches the rendered workload (and excludes
-# the same-named Service). Base pins replicas:1, so `replace` always has a path to hit.
+# progressive-delivery argoproj.io/Rollout — #337). In PROD a single-component web project's
+# workload is a Rollout (env-based progressive delivery, ADR-037), so its replicas patch
+# targets the Rollout GVK; every other case (multi-component prod, and dev/staging/preview)
+# targets the base Deployment. Naming the kind also excludes the same-named Service. Base pins
+# replicas:1, so `replace` always has a path to hit.
 patches:
+{%- if values.single %}
+  # Delete the base Deployment of each component (single-component prod runs the Rollout from
+  # rollout.yaml instead — ADR-037). kustomize keys Deployment vs Rollout separately by GVK, so
+  # deleting the Deployment leaves only the Rollout of the same name.
+{%- for c in values.components %}
+{%- if c.buildType != "mobile-artifact" %}
+  - patch: |
+      $patch: delete
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: ${{ values.appName }}-${{ c.name }}
+{%- endif %}
+{%- endfor %}
+{%- endif %}
 {%- for c in values.components %}
 {%- if c.buildType != "mobile-artifact" %}
   - target:
-{%- if values.single and values.progressiveDelivery %}
+{%- if values.single %}
       group: argoproj.io
       kind: Rollout
 {%- else %}
