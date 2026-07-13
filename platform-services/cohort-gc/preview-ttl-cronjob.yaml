@@ -1,30 +1,46 @@
-# Preview-TTL CronJob (DRAFT — design, not yet reviewed/merged).
+# Preview-TTL CronJob — the 12h HARD-DEATH enforcer for ephemeral previews.
 #
-# PURPOSE: reap ephemeral PREVIEW environments older than a TTL (default 12h) so
-# stale per-PR previews don't accumulate namespaces/quota. Previews are
-# <team>-pr-<n> namespaces carrying `platform.capstone/env: preview`, created by
-# each tenant's `<team>-preview` ApplicationSet (tenants/_template/applicationset-preview.yaml).
+# PURPOSE: a preview environment HARD-DIES at TTL_HOURS (default 12h) measured from
+# its CREATION, EVEN IF the PR is still open. Previews are <team>-pr-<n> Applications
+# (label `platform.capstone/env: preview`) rendered by each tenant's `<team>-preview`
+# ApplicationSet (tenants/_template/applicationset-preview.yaml), whose pullRequest
+# generator creates a preview IFF the PR carries the `preview` label.
 #
-# ⚠ WHY IT DELETES THE ArgoCD APPLICATION, NOT JUST THE NAMESPACE:
-# the preview App has syncPolicy.automated.selfHeal:true + prune:true, and the
-# ApplicationSet owns it. Deleting only the namespace is futile — ArgoCD recreates
-# it on the next sync. So the job deletes the App named `<ns>` (the appset template
-# names the App identically to the ns: `__TEAM__-pr-{{.number}}`); the App's
-# `resources-finalizer.argocd.argoproj.io` then cascades the namespace + workloads.
+# ⚠ WHY IT REMOVES THE `preview` LABEL FROM THE PR — NOT `kubectl delete` THE App:
+# the preview App has selfHeal:true + prune:true and the ApplicationSet OWNS it, so
+# deleting the App (or its namespace) is FUTILE — the generator recreates it within
+# `requeueAfterSeconds` (~120s) as long as the PR is open. A TRUE hard cap therefore
+# has to remove the generator's INPUT: the `preview` label. Once the label is gone the
+# generator drops the element -> `prune:true` tears the App + namespace down -> and it
+# does NOT come back, because a label-less PR yields no generator element. This is what
+# makes 12h a hard death instead of "lives as long as the PR is open".
 #
-# ⚠ INTERACTION WITH THE LIVE PR GENERATOR (post-v1): once previews come from the
-# ArgoCD `pullRequest` generator, that generator is the PRIMARY lifecycle owner —
-# it deletes the App when the PR closes. If the TTL deletes an App that the
-# generator STILL wants (PR still open but preview >12h), the ApplicationSet will
-# RECREATE it within minutes. So this TTL is a SAFETY NET for orphaned/long-lived
-# previews, not the primary teardown. For it to truly remove an actively-generated
-# preview, pair it with a max-PR-age in the generator, OR scope this job to delete
-# only previews whose owning ApplicationSet element is gone. v1 ships with an EMPTY
-# list generator (no live previews), so today this job is a no-op guard; it becomes
-# load-bearing when live previews are wired. (Documented seam, like the appset.)
+# REVIVAL is intentionally the SAME action as creation: RE-RUN CI. The tenant build
+# (.github/workflows/tenant-build.yaml) re-adds the `preview` label on every
+# PR-triggered run, so re-running the CI job re-creates the preview with a FRESH 12h
+# window. (A normal mid-life push also runs CI and re-asserts the label, but the App's
+# creationTimestamp is unchanged while it stays alive, so a push does NOT extend the
+# 12h — the cap is per creation/revival, by design.)
 #
-# DRY-RUN: set DRY_RUN=true to log what WOULD be deleted without deleting. Now
-# "false" (ENFORCING) — the human reviewed a dry-run and flipped it at go-live.
+# HOW IT MAPS App -> PR: the appset names each App `<team>-pr-<n>` (PR number = the
+# trailing digits) and its source.repoURL is `https://github.com/UA-MIS/<appName>`
+# (owner/repo). The job reads both off the Application object; age = the App's
+# creationTimestamp.
+#
+# GITHUB AUTH: removing a label across ANY tenant repo needs org-wide write, and a
+# CronJob has no per-repo GITHUB_TOKEN — so it mints a `ua-mis-backstage` GitHub App
+# INSTALLATION token. It REUSES the already-sealed App creds in the `argocd` namespace
+# secret `argocd-repo-creds-uamis` (keys githubAppID / githubAppInstallationID /
+# githubAppPrivateKey — the SAME App+secret the preview generator uses to list PRs);
+# the cohort-gc SA is granted GET on exactly that one secret (rbac.yaml). No reusable
+# minter exists in-repo, so the JWT (RS256) dance is hand-rolled here (openssl+curl+jq,
+# all in the alpine/k8s image). ⚠ The App INSTALLATION must have `Pull requests: Write`
+# (label management) — it is provisioned today with Pull requests: Read for the
+# generator's LIST. Grant write on the ua-mis-backstage App installation or the label
+# strip fails (the job exits non-zero LOUD, never a silent no-death).
+#
+# DRY-RUN: set DRY_RUN=true to log which previews WOULD have their label stripped,
+# without calling the API. "false" = ENFORCING.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -59,11 +75,14 @@ spec:
           containers:
             - name: preview-ttl
               # kubectl + a real shell (this job's `command` is ["/bin/sh", ...] running
-              # a shell script body). The distroless registry.k8s.io/kubectl image has NO
+              # a shell script body) PLUS openssl/curl/jq for the GitHub App JWT mint +
+              # label-strip API calls. The distroless registry.k8s.io/kubectl image has NO
               # /bin/sh, so it StartError'd (exec 128: stat /bin/sh: no such file or
-              # directory) — dead on arrival. alpine/k8s bundles a full shell + kubectl
-              # (+ jq/curl) and is the exact image the working crossplane-mr-prune CronJob
-              # uses (proven live on this cluster; its layers are already node-cached).
+              # directory) — dead on arrival. alpine/k8s bundles a full shell + kubectl +
+              # openssl + jq + curl and is the exact image the working crossplane-mr-prune
+              # CronJob uses (proven live on this cluster; its layers are already
+              # node-cached). The script preflights all four tools and fails LOUD if any
+              # is absent, so an image regression can never become a silent no-death.
               image: alpine/k8s:1.31.5
               imagePullPolicy: IfNotPresent
               securityContext:
@@ -82,37 +101,113 @@ spec:
               args:
                 - |
                   echo "==> preview-ttl: TTL_HOURS=$TTL_HOURS DRY_RUN=$DRY_RUN"
+
+                  # Preflight — the JWT mint needs openssl (RS256 sign) + curl + jq; the
+                  # reaper needs kubectl + base64. Fail LOUD if the image ever lacks one
+                  # (never a silent no-death).
+                  for BIN in openssl curl jq kubectl base64; do
+                    command -v "$BIN" >/dev/null 2>&1 || { echo "FATAL: required tool '$BIN' not in image" >&2; exit 10; }
+                  done
+
                   # The alpine/k8s image ships BusyBox `date`, which supports NEITHER
                   # GNU relative `-d "-N hours"` NOR BSD `-v` (both exit 1). Compute the
                   # cutoff with pure POSIX epoch arithmetic instead (BusyBox-safe):
                   NOW=$(date -u +%s)
                   CUTOFF=$(( NOW - TTL_HOURS * 3600 ))
-                  echo "==> deleting previews created before epoch $CUTOFF"
+                  echo "==> hard-killing previews created before epoch $CUTOFF (>${TTL_HOURS}h old)"
 
-                  # List preview namespaces: name + creationTimestamp (RFC3339).
-                  kubectl get ns -l platform.capstone/env=preview \
-                    -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.metadata.creationTimestamp}{"\n"}{end}' \
-                  | while read -r NS TS; do
-                      [ -z "$NS" ] && continue
+                  # --- Read the ua-mis-backstage GitHub App creds. REUSE the already-sealed
+                  #     argocd repo-creds secret (no second copy); the cohort-gc SA is granted
+                  #     GET on exactly this one secret in the argocd ns (rbac.yaml). ---
+                  SECRET_NS=argocd
+                  SECRET_NAME=argocd-repo-creds-uamis
+                  APP_ID=$(kubectl -n "$SECRET_NS" get secret "$SECRET_NAME" -o jsonpath='{.data.githubAppID}' | base64 -d)
+                  INSTALL_ID=$(kubectl -n "$SECRET_NS" get secret "$SECRET_NAME" -o jsonpath='{.data.githubAppInstallationID}' | base64 -d)
+                  PEM=/tmp/gh-app-key.pem
+                  kubectl -n "$SECRET_NS" get secret "$SECRET_NAME" -o jsonpath='{.data.githubAppPrivateKey}' | base64 -d > "$PEM"
+                  if [ -z "$APP_ID" ] || [ -z "$INSTALL_ID" ] || [ ! -s "$PEM" ]; then
+                    echo "FATAL: could not read GitHub App creds from ${SECRET_NS}/${SECRET_NAME}" \
+                         "(keys githubAppID/githubAppInstallationID/githubAppPrivateKey)." >&2
+                    exit 11
+                  fi
+
+                  # --- Mint a GitHub App INSTALLATION token (org-wide write; a CronJob has
+                  #     no per-repo GITHUB_TOKEN). Hand-rolled JWT (RS256) — no reusable
+                  #     minter exists in-repo. base64URL = std base64, no-wrap, +/→-_, no '='. ---
+                  b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+                  HEADER=$(printf '%s' '{"alg":"RS256","typ":"JWT"}' | b64url)
+                  IAT=$(( NOW - 60 )); EXP=$(( NOW + 540 ))
+                  PAYLOAD=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$IAT" "$EXP" "$APP_ID" | b64url)
+                  SIGNING_INPUT="${HEADER}.${PAYLOAD}"
+                  SIG=$(printf '%s' "$SIGNING_INPUT" | openssl dgst -sha256 -sign "$PEM" -binary | b64url)
+                  JWT="${SIGNING_INPUT}.${SIG}"
+                  TOKEN=$(curl -sS -X POST \
+                    -H "Authorization: Bearer $JWT" \
+                    -H "Accept: application/vnd.github+json" \
+                    -H "X-GitHub-Api-Version: 2022-11-28" \
+                    "https://api.github.com/app/installations/${INSTALL_ID}/access_tokens" \
+                    | jq -r '.token // empty')
+                  if [ -z "$TOKEN" ]; then
+                    echo "FATAL: failed to mint installation token for app_id=${APP_ID}" \
+                         "install=${INSTALL_ID} — check the App installation + that it has" \
+                         "'Pull requests: Write' (label management) permission." >&2
+                    exit 12
+                  fi
+                  echo "==> minted installation token (redacted); scanning previews..."
+
+                  # --- Reap: list preview Applications, strip the 'preview' label from any
+                  #     whose App is older than the cutoff. Age = App creationTimestamp (a
+                  #     mid-life push does NOT reset it → 12h hard cap per creation/revival). ---
+                  kubectl -n argocd get applications -l platform.capstone/env=preview \
+                    -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.metadata.creationTimestamp}{"|"}{.spec.source.repoURL}{"\n"}{end}' \
+                  | while IFS='|' read -r NAME TS URL; do
+                      [ -z "$NAME" ] && continue
                       # RFC3339 UTC (e.g. 2026-07-12T16:00:00Z) → epoch. BusyBox parses a
                       # fixed layout via strptime: `date -D FMT -d TIME`. Strip the trailing
                       # Z and match a Z-less format so there's no literal to trip on.
                       CREATED=$(date -u -D '%Y-%m-%dT%H:%M:%S' -d "${TS%Z}" +%s 2>/dev/null || echo 0)
-                      if [ "$CREATED" -gt 0 ] && [ "$CREATED" -lt "$CUTOFF" ]; then
-                        AGE_H=$(( ( NOW - CREATED ) / 3600 ))
-                        echo "==> EXPIRED: ns=$NS age=${AGE_H}h (App=$NS)"
-                        if [ "$DRY_RUN" = "true" ]; then
-                          echo "    [dry-run] would: kubectl -n argocd delete application $NS ; kubectl delete ns $NS"
-                        else
-                          # Delete the owning ArgoCD App first (finalizer cascades the ns).
-                          kubectl -n argocd delete application "$NS" --ignore-not-found --wait=false || true
-                          # Fallback: delete the ns directly in case no App backs it.
-                          kubectl delete ns "$NS" --ignore-not-found --wait=false || true
-                        fi
-                      else
-                        echo "==> keep: ns=$NS (within TTL)"
+                      if [ "$CREATED" -le 0 ] || [ "$CREATED" -ge "$CUTOFF" ]; then
+                        echo "==> keep: app=$NAME (within TTL)"
+                        continue
                       fi
+                      AGE_H=$(( ( NOW - CREATED ) / 3600 ))
+                      # PR number = trailing digits after '-pr-'; repo = owner/repo from source.
+                      NUM=$(printf '%s' "$NAME" | sed -n 's/.*-pr-\([0-9][0-9]*\)$/\1/p')
+                      OWNER_REPO=$(printf '%s' "$URL" | sed -E 's#^https?://github.com/##; s#\.git$##')
+                      if [ -z "$NUM" ] || [ -z "$OWNER_REPO" ]; then
+                        echo "==> SKIP: app=$NAME — could not derive PR number ('$NUM') /" \
+                             "repo ('$OWNER_REPO') from name/repoURL='$URL'" >&2
+                        continue
+                      fi
+                      echo "==> EXPIRED: app=$NAME age=${AGE_H}h -> strip 'preview' label from ${OWNER_REPO}#${NUM}"
+                      if [ "$DRY_RUN" = "true" ]; then
+                        echo "    [dry-run] would: DELETE https://api.github.com/repos/${OWNER_REPO}/issues/${NUM}/labels/preview"
+                        continue
+                      fi
+                      CODE=$(curl -sS -o /tmp/resp.json -w '%{http_code}' -X DELETE \
+                        -H "Authorization: Bearer $TOKEN" \
+                        -H "Accept: application/vnd.github+json" \
+                        -H "X-GitHub-Api-Version: 2022-11-28" \
+                        "https://api.github.com/repos/${OWNER_REPO}/issues/${NUM}/labels/preview" || echo 000)
+                      case "$CODE" in
+                        200) echo "    label removed (HTTP 200) — generator will now prune app=$NAME for good" ;;
+                        404) echo "    label already absent (HTTP 404) — treating as done" ;;
+                        # Record the failure OUTSIDE the pipeline subshell (flag file) so the
+                        # job can exit non-zero after the scan — the LOUD-death contract
+                        # (README: "exits non-zero LOUD, never a silent no-death"). Typical
+                        # cause: HTTP 403 because the ua-mis-backstage App installation still
+                        # has Pull requests: Read (needs Write for label management).
+                        *)   echo "    ⚠ label removal FAILED (HTTP $CODE): $(cat /tmp/resp.json 2>/dev/null)" >&2
+                             touch /tmp/reap-failed ;;
+                      esac
                     done
+                  rm -f "$PEM"
+                  if [ -f /tmp/reap-failed ]; then
+                    echo "FATAL: one or more label removals FAILED (see ⚠ above) — the 12h" \
+                         "hard death was NOT enforced for those previews. Most likely the" \
+                         "ua-mis-backstage App installation lacks 'Pull requests: Write'." >&2
+                    exit 13
+                  fi
                   echo "==> preview-ttl: done"
               volumeMounts:
                 - name: tmp

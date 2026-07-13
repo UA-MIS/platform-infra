@@ -2,13 +2,22 @@
 # Ephemeral PREVIEW ApplicationSet (§2.4, D-009) — LIVE PR generator.
 # Tokens: __TEAM__, __APPNAME__ (the app repo, UA-MIS/<appName>), __SEMESTER__.
 #
-# WHAT THIS DOES: one ephemeral preview environment PER OPEN PULL REQUEST on the
-# team's app repo. The ArgoCD `pullRequest` generator lists the repo's open PRs via
-# the GitHub API and renders one Application per PR -> ephemeral <team>-pr-<n> ns ->
-# the App is auto-deleted when the PR closes/merges (the generator drops the
-# element), and `prune: true` then tears the namespace down. No custom teardown
-# controller (§2.4). A ≤12h TTL backstop for stale/orphaned previews lives in the
-# cohort-gc preview-ttl CronJob (PR #104).
+# WHAT THIS DOES: one ephemeral preview environment per open PR THAT CARRIES THE
+# `preview` LABEL on the team's app repo. The ArgoCD `pullRequest` generator lists
+# the repo's open PRs via the GitHub API, FILTERS to those labelled `preview` (see
+# the `labels:` gate below), and renders one Application per matching PR -> ephemeral
+# <team>-pr-<n> ns -> the App is auto-deleted when the PR closes/merges OR loses the
+# `preview` label (the generator drops the element), and `prune: true` then tears the
+# namespace down. No custom teardown controller (§2.4).
+#
+# 12h HARD DEATH (operator contract — a preview HARD-DIES at 12h, PR open or not):
+# the cohort-gc preview-ttl CronJob measures each preview App's age from its
+# creationTimestamp and, at >12h, REMOVES the `preview` label from the owning PR via
+# the GitHub API. Because this generator requires the label, dropping it drops the
+# element -> the App is pruned and does NOT recreate (unlike a raw App delete, which
+# the generator would recreate within `requeueAfterSeconds` while the PR is open).
+# The ONLY revival path is re-running CI, which re-adds the label (tenant-build.yaml).
+# See platform-services/cohort-gc/preview-ttl-cronjob.yaml.
 #
 # ⚠⚠⚠ DRAFT — DO NOT MERGE WITHOUT SECURITY REVIEW. Enabling this generator makes
 # UNTRUSTED PR code build+push a preview image (see the app repo's
@@ -69,12 +78,24 @@ spec:
           # githubAppInstallationID / githubAppPrivateKey (context7-verified). The
           # App installation needs Pull requests: Read + Contents: Read on UA-MIS.
           appSecretName: argocd-repo-creds-uamis
-          # OPT-IN GATE (optional, RECOMMENDED by the security review): uncomment to
-          # only create a preview for PRs carrying the `preview` label, so untrusted
-          # code isn't built+deployed on EVERY PR. Left OFF by default to match the
-          # "auto preview on every PR" v1 scope; the reviewer may require it on.
-          # labels:
-          #   - preview
+          # LABEL GATE (ENABLED — the 12h HARD-DEATH contract, D-0xx). A preview
+          # exists IFF the PR carries the `preview` label. The pullRequest generator
+          # ANDs every label listed here, so a PR with no `preview` label yields NO
+          # element and thus NO Application (and `prune:true` tears down any that
+          # existed). This is what makes the TTL a TRUE hard cap: the preview-ttl
+          # CronJob reaps a >12h preview by REMOVING this label from the PR (not by
+          # deleting the App — a delete is futile, the generator recreates it within
+          # `requeueAfterSeconds` while the PR is still open). Once the label is gone
+          # the generator drops the element and the App is pruned for good; it does
+          # NOT come back while the PR sits open and label-less. The ONLY way to
+          # revive a dead preview is to RE-RUN CI (the tenant build re-adds the
+          # `preview` label — see .github/workflows/tenant-build.yaml), which is
+          # exactly the operator's "re-run the CI job to keep it up" intent.
+          # SECURITY BONUS: untrusted PR code is no longer built+deployed on EVERY
+          # PR — only on explicitly-labelled ones — narrowing the exposure the header
+          # BLOCKERS describe.
+          labels:
+            - preview
         # Re-list interval. 120s balances preview latency against the GitHub API
         # rate limit of the SHARED org App (every tenant's generator polls it; 30s
         # would exhaust the budget at cohort scale). The low-latency upgrade is an

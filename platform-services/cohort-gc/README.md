@@ -8,20 +8,33 @@ Two platform garbage-collection jobs that lean on the universal tenant labels
 `tenants/_template/`). Deployed as `platform-svc-cohort-gc` via the
 `platform-services` ApplicationSet (directory generator over `platform-services/*`).
 
-## 1. preview-ttl (`preview-ttl-cronjob.yaml`)
-- **Schedule:** hourly. Reaps preview namespaces (`platform.capstone/env=preview`,
-  named `<team>-pr-<n>`) older than `TTL_HOURS` (default **12h**).
-- **Deletes the ArgoCD Application first**, then the namespace. Deleting only the
-  ns is futile while the owning App has `selfHeal:true` — the App's
-  `resources-finalizer` cascades the ns. The appset names the App == the ns
-  (`<team>-pr-<n>`), so the App name is the ns name.
-- **⚠ Safety-net, not primary teardown:** when live previews come from the ArgoCD
-  `pullRequest` generator (post-v1), THAT generator owns the lifecycle (deletes on
-  PR-close). If the TTL deletes an App the generator still wants (PR open but
-  preview > TTL), the ApplicationSet recreates it. So pair the TTL with a max-PR-age
-  in the generator, or scope the job to orphaned Apps only. **v1 ships an EMPTY
-  preview list generator → this job is a no-op guard today**; it becomes
-  load-bearing when live PR previews are wired.
+## 1. preview-ttl (`preview-ttl-cronjob.yaml`) — the 12h HARD-DEATH enforcer
+- **Schedule:** hourly. A preview HARD-DIES at `TTL_HOURS` (default **12h**) measured
+  from CREATION, **even if the PR is still open**. It scans preview Applications
+  (`platform.capstone/env=preview`, named `<team>-pr-<n>`) and acts on any whose App
+  `creationTimestamp` is older than the cutoff.
+- **Removes the `preview` LABEL from the PR — it does NOT `kubectl delete` the App.**
+  The appset's `pullRequest` generator creates a preview IFF the PR carries the
+  `preview` label. Deleting the App is futile (`selfHeal`/`prune` + generator recreate
+  it within ~120s while the PR is open); removing the label removes the generator's
+  INPUT, so the element is dropped, `prune:true` tears the App+ns down, and it does
+  **not** come back. That is what makes 12h a hard cap instead of "lives while the PR
+  is open".
+- **App → PR mapping:** PR number = the trailing digits of the App name (`<team>-pr-<n>`);
+  repo = `spec.source.repoURL` (`https://github.com/UA-MIS/<appName>` → `UA-MIS/<appName>`).
+- **Revival = re-run CI.** `.github/workflows/tenant-build.yaml` re-adds the `preview`
+  label on every PR-triggered run, so re-running the CI job re-creates the preview with
+  a FRESH 12h window. (A mid-life push also re-asserts the label but does not reset the
+  live App's `creationTimestamp`, so a push does not extend the 12h — the cap is per
+  creation/revival, by design.)
+- **GitHub auth:** a CronJob has no per-repo `GITHUB_TOKEN`, and the label strip spans
+  every tenant repo, so it mints a `ua-mis-backstage` GitHub App **installation token**
+  (hand-rolled RS256 JWT → `/app/installations/<id>/access_tokens`, openssl+curl+jq in
+  the `alpine/k8s` image). It **reuses** the already-sealed App creds in the `argocd`
+  secret `argocd-repo-creds-uamis` (the same App+secret the generator uses to list PRs)
+  via a scoped, single-secret cross-namespace read (see RBAC). **⚠ The App installation
+  must have `Pull requests: Write`** (label management); it is provisioned with `Read`
+  for the generator's list — grant write or the strip fails LOUD (exit 12).
 
 ## 2. cohort-cleanup (`cohort-cleanup-cronjob.yaml`)
 - **`suspend: true`** — never fires automatically. Graduating a cohort is a
@@ -62,8 +75,12 @@ Two platform garbage-collection jobs that lean on the universal tenant labels
 `namespaces` (get/list/delete) + `applications.argoproj.io` (get/list/delete), plus
 **read-only** `capstonetenants.platform.capstone.uamishub.com` (get/list) and
 `applicationsets.argoproj.io` (get/list) for the orphan-before-delete pre-flight guard.
-No delete on claims/appsets (those go via `git rm`), no workload create/patch, no
-secret access. Privileged maintenance identity — keep it off tenant runners.
+Plus a **namespaced `Role`+`RoleBinding` in the `argocd` namespace**
+(`cohort-gc-read-gh-app`) granting `get` on **exactly one** secret
+(`argocd-repo-creds-uamis`, via `resourceNames`) — the GitHub App creds preview-ttl
+mints its installation token from. No blanket secret read, no delete on claims/appsets
+(those go via `git rm`), no workload create/patch. Privileged maintenance identity —
+keep it off tenant runners.
 
 ## Pod security
 Both jobs run `runAsNonRoot:65532`, `readOnlyRootFilesystem:true`,
@@ -72,8 +89,16 @@ because kubectl needs a writable cache/config dir (the harbor-onboarding
 readOnlyRootFilesystem + /tmp lesson). Namespace enforces PSA `restricted`.
 
 ## Open items for review before go-live
-- [ ] Flip `preview-ttl` `DRY_RUN` → `false` once the human confirms the selection
-      logic on a real preview (none exist in v1 yet). **Kept `DRY_RUN=true` here.**
+- [ ] **Grant `Pull requests: Write` on the `ua-mis-backstage` App installation**
+      (currently `Read` for the generator's PR list). Without it preview-ttl mints the
+      token fine but the label-strip `DELETE .../labels/preview` returns 403 and the job
+      exits LOUD — the preview would not hard-die. This is the one external prerequisite.
+- [ ] Confirm the `alpine/k8s:1.31.5` image ships the `openssl` CLI (the JWT mint needs
+      RS256 signing). The job preflights `openssl/curl/jq/kubectl/base64` and exits 10 if
+      any is missing, so a regression is loud — but verify on first real run.
+- [ ] Flip `preview-ttl` `DRY_RUN` → `false` once the human confirms the label-strip
+      selection on a real >12h preview. **`DRY_RUN=false` (ENFORCING) is set here** — dry-run
+      first by patching the CronJob env if you want to observe a cycle before enforcing.
 - [ ] Flip `cohort-cleanup` `suspend: true` → `false` (or run on-demand) only after the
       CLAIM-first order + apply-fight guard are validated. **Kept `suspend: true` here.**
 - [x] Kubectl image is `registry.k8s.io/kubectl:v1.31.5@sha256:84f79685…` (official k8s
@@ -88,8 +113,9 @@ readOnlyRootFilesystem + /tmp lesson). Namespace enforces PSA `restricted`.
 - [ ] Confirm the ArgoCD Application CRD group is `argoproj.io` for `applications`
       in this cluster's Argo version (RBAC + kubectl calls assume it — reviewer verified
       correct). Same for `applicationsets.argoproj.io` (guard read).
-- [ ] Decide preview-TTL behavior under the live `pullRequest` generator (safety-net
-      vs primary) — see §1.
+- [x] preview-TTL behavior under the live `pullRequest` generator DECIDED: it is the
+      PRIMARY 12h hard-death, enforced by stripping the `preview` label (which the
+      generator requires) rather than deleting the App (futile — recreated). See §1.
 - [x] `date` portability: fixed for BusyBox. The `alpine/k8s` image's BusyBox `date`
       supports NEITHER GNU `-d "-N hours"` NOR BSD `-v` (both exit 1 — dead on every run,
       even DRY_RUN). The cutoff now uses POSIX epoch arithmetic (`NOW - TTL_HOURS*3600`)
