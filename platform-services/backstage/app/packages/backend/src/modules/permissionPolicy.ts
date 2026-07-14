@@ -62,20 +62,23 @@ export class CapstoneTeamPermissionPolicy implements PermissionPolicy {
 
     // 2. CATALOG ENTITIES — conditional filter: the actor may read/act on an entity if
     //    EITHER (a) its spec.owner is one of their ownershipEntityRefs (owned Components/
-    //    APIs/Systems/Templates — the per-team boundary, the spine), OR (b) it is a User or
-    //    Group entity (the org graph). The org graph is non-sensitive (who's on which team)
-    //    and a user MUST be able to read their OWN User/Group entities — otherwise, under
-    //    permission.enabled, isEntityOwner alone DENIES them (a github-org User has no
-    //    `ownedBy` relation, so `isEntityOwner` never matches it) → broken profile page /
-    //    "my groups", and any code path that reads the user's own entity as the USER
-    //    principal fails. The owned-boundary (a) still scopes the entities that actually
-    //    matter (Components/APIs/templates per ADR-029 §6.2). With empty ownershipRefs this
-    //    still resolves to "User/Group only" (NOT ALLOW-all) — the spine stays closed.
+    //    APIs/Systems — the per-team boundary, the spine), OR (b) it is a User or Group
+    //    entity (the org graph), OR (c) it is a Template (shared scaffolder templates are
+    //    visible to all uamis org members; only platform team can edit them via spec.owner).
+    //    The org graph is non-sensitive (who's on which team) and a user MUST be able to
+    //    read their OWN User/Group entities — otherwise, under permission.enabled,
+    //    isEntityOwner alone DENIES them (a github-org User has no `ownedBy` relation, so
+    //    `isEntityOwner` never matches it) → broken profile page / "my groups", and any
+    //    code path that reads the user's own entity as the USER principal fails. The
+    //    owned-boundary (a) still scopes the entities that actually matter (Components/APIs
+    //    per ADR-029 §6.2). With empty ownershipRefs this still resolves to "User/Group/
+    //    Template only" (NOT ALLOW-all) — the spine stays closed.
     if (isResourcePermission(request.permission, RESOURCE_TYPE_CATALOG_ENTITY)) {
       return createCatalogConditionalDecision(request.permission, {
         anyOf: [
           catalogConditions.isEntityOwner({ claims: ownershipRefs }),
           catalogConditions.isEntityKind({ kinds: ['User', 'Group'] }),
+          catalogConditions.isEntityKind({ kinds: ['Template'] }),
         ],
       });
     }
