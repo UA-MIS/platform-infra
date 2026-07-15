@@ -6,7 +6,8 @@
 # entities"). So the runner-netpol's ipBlock allows do NOT match under Cilium:
 #   - the apiserver (10.96.0.1:443 via 10.96.0.0/12) -> denied
 #   - harbor-core (push/pull, svc :80 -> pod :8080 via 10.96.0.0/12) -> denied
-# This CNP adds those two as entity/endpoint selectors. The k8s runner-netpol
+#   - vault-unsealer (seal-status/unseal, svc+pod :8200 via 10.96.0.0/12) -> denied
+# This CNP adds those as entity/endpoint selectors. The k8s runner-netpol
 # (default-deny + DNS via namespaceSelector + the external-:443 allow) stays in
 # force (CNP + NetworkPolicy are additive/OR). DNS is also re-allowed here
 # explicitly (toEndpoints kube-dns) so the runner CNP is self-contained.
@@ -95,4 +96,26 @@ spec:
       toPorts:
         - ports:
             - port: "8443"
+              protocol: TCP
+    # vault-unsealer (seal-status GET + unseal PUT) — the `unseal-vault` GitHub
+    # Actions job's own target (capstone-ops-secrets repo, button + */10m cron;
+    # docs/operator/runbooks.md (D); fix for the 2026-07-13 sealed-unsealer
+    # incident). Labels match the hashicorp/vault chart's standard pod labels
+    # (same scheme the MAIN vault's own podAntiAffinity self-selects with —
+    # applicationsets/vault-app.yaml), with instance=vault-unsealer for THIS
+    # release (releaseName in applicationsets/vault-unsealer-app.yaml). PORT =
+    # the pod's actual listener :8200 — no svc->pod translation gotcha here
+    # (unlike Traefik above), the unsealer binds :8200 directly. Narrow by
+    # endpoint label, NOT `cluster` — no cross-tenant opening. Symmetric
+    # ingress allow lives in
+    # hardening/netpol-controlplane/vault-unsealer-netpol.yaml.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: vault-unsealer
+            app.kubernetes.io/name: vault
+            app.kubernetes.io/instance: vault-unsealer
+            component: server
+      toPorts:
+        - ports:
+            - port: "8200"
               protocol: TCP

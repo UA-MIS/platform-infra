@@ -144,13 +144,21 @@ kubectl -n vault exec -it vault-0 -- vault operator raft list-peers   # confirm 
 
 | Material | Where | Needed for |
 | --- | --- | --- |
-| **Unsealer Shamir shares (5, threshold 3) + unsealer root token** | offline (password manager / sealed medium) | unseal the unsealer after its rare restarts; rotate the `autounseal` key |
+| **Unsealer Shamir shares (5, threshold 3) + unsealer root token** | offline (password manager / sealed medium) **AND** `vault/unsealer-keys.txt` in the private `capstone-ops-secrets` repo (Shamir shares only, NOT the root token — see below) | unseal the unsealer after its rare restarts; rotate the `autounseal` key |
 | **Main Vault recovery keys + root token** | offline | `operator` ops (rekey, generate-root), snapshot-restore login |
 | `autounseal` token | only in the `vault-transit-unseal-token` k8s Secret (periodic, auto-renewed) | the seal — rotate by minting a new token and re-applying the Secret |
 
-**Never commit any of the above to git.** Treat the unsealer Shamir keys and the
-main Vault recovery keys exactly like the Sealed Secrets sealing key and the
-sops/age key in the handoff vault (`docs/OPERATIONS-AND-HANDOFF.md` §5).
+**Never commit any of the above to git — with ONE deliberate, scoped exception:**
+the unsealer's 5 Shamir shares (only — never its root token, never the main
+Vault's recovery keys) also live in plaintext in `vault/unsealer-keys.txt` in
+the private `capstone-ops-secrets` repo, read by the `unseal-vault` GitHub
+Actions automation (button + `*/10m` cron — [Runbooks (D)](runbooks.md)). This
+is an operator decision, not an oversight: this platform's ~3-person staff
+turns over every year, and GitHub Actions Secrets are write-only (a successor
+can't read them back to hand off or recover). See `unseal-vault.yaml`'s header
+comment for the full trade-off. Everything else in this table stays
+offline-only, exactly like the Sealed Secrets sealing key and the sops/age key
+in the handoff vault (`docs/OPERATIONS-AND-HANDOFF.md` §5).
 
 ---
 
