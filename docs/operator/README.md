@@ -149,7 +149,15 @@ Ceph-level or cluster-wide failure doesn't take the backups down with it. →
 **[dr-backup.md](dr-backup.md)** (architecture, day-2 checks, and the **tested-restore
 drill an operator must run** to actually prove this works).
 
-### 4.8 Multi-cluster (scaffolding, inert)
+### 4.8 VM tenant SSH access
+
+VM (KubeVirt) tenants SSH into their VM over the existing Cloudflare Tunnel (no new
+infra, $0, Zero Trust free tier) — but the Cloudflare Public Hostname route + Access
+application that front each tenant's `ssh.<app>.capstone.uamishub.com` are
+**dashboard steps done by hand per tenant** (the tunnel is token-based/remotely-managed,
+so there's no git-side ingress config for it). → **[vm-ssh-cloudflare-access.md](vm-ssh-cloudflare-access.md)**.
+
+### 4.9 Multi-cluster (scaffolding, inert)
 
 Only one physical cluster exists today. An ArgoCD `clusters`-generator ApplicationSet
 is wired and ready for a future second cluster (the planned homelab k3s) but produces
@@ -206,5 +214,6 @@ These are **live-verified** weak spots a successor should close:
 | [db-tier-runbook.md](../db-tier-runbook.md) · [db-tier-provisioner-setup.md](db-tier-provisioner-setup.md) | Off-cluster Postgres/MariaDB tier |
 | [in-cluster-db-tier-runbook.md](in-cluster-db-tier-runbook.md) | The in-cluster CNPG/MariaDB tier — Vault wiring + the pg_dump/mysqldump cutover from `ua-mis-db-1` and the bundled per-app subcharts |
 | [vm-path-harbor-provisioner.md](vm-path-harbor-provisioner.md) | KubeVirt VM scaffolder wiring |
+| [vm-ssh-cloudflare-access.md](vm-ssh-cloudflare-access.md) | VM tenant SSH via Cloudflare Tunnel — per-tenant dashboard checklist + connect commands |
 | [multi-cluster.md](multi-cluster.md) | Multi-cluster scaffolding (ApplicationSet cluster generator, inert until a 2nd cluster is registered) |
 | [gotchas-and-lessons.md](gotchas-and-lessons.md) | Process-layer war stories |
