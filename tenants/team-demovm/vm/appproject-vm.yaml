@@ -1,0 +1,124 @@
+# ============================================================================
+# VM-TIER AppProject — the tenancy fence for KubeVirt workloads (ADR-032). *** GATE ***
+# Tokens: demovm, demovm, 2026-summer.
+#
+# A SEPARATE AppProject from the team's container project, by design. This is
+# defense-in-depth: VM kinds (VirtualMachine/DataVolume) are whitelisted ONLY in
+# this project, whose destinations are ONLY the `demovm-vm-*` baseline-PSA
+# namespaces. So even at the GitOps layer — not just Pod Security Admission — a
+# team cannot create a VM in their `restricted` container namespaces, and cannot
+# create container Deployments in their relaxed VM namespace. The privilege
+# relaxation and the VM kinds travel together, fenced to one place.
+#
+# SECURITY CONTRACT (parallels tenants/_template/appproject.yaml):
+#   - sourceRepos: ONLY the team's app repo + platform-infra (same as container).
+#   - destinations: ONLY demovm-vm-* on the in-cluster API. Cannot target another
+#     team's namespace, the container namespaces, or another cluster.
+#   - clusterResourceWhitelist: EMPTY. VirtualMachine, VirtualMachineInstance, and
+#     DataVolume are ALL namespaced, so NO cluster-scope grant is needed — the hard
+#     tenancy boundary (no CRDs/ClusterRoles/PVs/Namespaces) is preserved verbatim.
+#   - namespaceResourceWhitelist: the VM kinds + ONLY the networking/config/secret
+#     kinds a VM needs to be reachable and configured. Deliberately ABSENT vs the
+#     container project: Deployment / ReplicaSet / HorizontalPodAutoscaler — the
+#     baseline-PSA namespace must host VMs, not become a home for arbitrary
+#     relaxed-privilege containers.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: demovm-vm
+  namespace: argocd
+  labels:
+    platform.capstone/team: demovm
+    platform.capstone/semester: 2026-summer
+    platform.capstone/component: tenant
+    platform.capstone/tier: vm
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: "VM-tier project for team demovm (2026-summer). KubeVirt workloads only; baseline-PSA namespaces; no cluster-scoped resources."
+
+  # --- source repos: the team's app repo + platform-infra (identical to container) ---
+  sourceRepos:
+    - https://github.com/UA-MIS/demovm
+    - https://github.com/UA-MIS/demovm.git
+    - https://github.com/UA-MIS/platform-infra
+    - https://github.com/UA-MIS/platform-infra.git
+
+  # --- destinations: ONLY this team's VM namespaces on the in-cluster API ---------
+  # `vm-prod` is the default single VM home; the `demovm-vm-*` wildcard also
+  # covers an opt-in `demovm-vm-dev` without an AppProject edit.
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: demovm-vm-prod
+    - server: https://kubernetes.default.svc
+      namespace: demovm-vm-*
+
+  # --- cluster-scoped resources: NONE. Hard tenancy boundary, unchanged. ----------
+  # All VM kinds are namespaced; no cluster-scope grant is required. (KubeVirt/CDI
+  # CRDs + the KubeVirt CR are installed by the PLATFORM, not by tenants.)
+  clusterResourceWhitelist: []
+
+  # --- namespaced resources: VM kinds + only what a VM needs to run/serve ---------
+  namespaceResourceWhitelist:
+    # VM workload kinds (ADR-032 §2c). VirtualMachineInstance is normally created by
+    # the controller from the VirtualMachine, but is whitelisted so a team may also
+    # declare a bare VMI and so ArgoCD does not flag the controller-created VMI as
+    # an out-of-whitelist resource during pruning/diff.
+    - group: kubevirt.io
+      kind: VirtualMachine
+    - group: kubevirt.io
+      kind: VirtualMachineInstance
+    - group: cdi.kubevirt.io
+      kind: DataVolume
+    # Networking + config so the VM gets a URL and first-boot setup.
+    - group: ''
+      kind: ConfigMap
+    - group: ''
+      kind: Service
+    - group: ''
+      kind: ServiceAccount
+    - group: networking.k8s.io
+      kind: Ingress
+    # cloud-init userdata Secret. KubeVirt's cloudInitNoCloud.secretRef reads a RAW
+    # Secret (key `userdata`); it cannot take a ConfigMap for userData. The VM chart's
+    # kustomize secretGenerator emits `<app>-cloudinit` as exactly this kind, so the VM
+    # tier MUST permit it or ArgoCD refuses to create it ("Secret is not permitted in
+    # project demovm-vm") and the virt-launcher pod hangs mounting a missing volume.
+    # This mirrors the FIRST live VM tenant (team-tenantvm, PR #376), which had to
+    # hand-add this same grant — the template now carries it so the NEXT VM tenant does
+    # not break identically.
+    # SECURITY TRADEOFF (ADR-032 re-review — flagged for the security track): unlike the
+    # container tier (secrets ONLY via ESO/SealedSecret), this lets a team ship a
+    # plaintext Secret in git for cloud-init. The cloud-init body is NON-secret bootstrap
+    # (a web-server unit + an SSH PUBLIC key — see the skeleton cloud-init.yaml), so the
+    # exposure is low; but the STRICTER alternative that keeps raw Secret ABSENT is to
+    # INLINE cloud-init as spec...volumes[].cloudInitNoCloud.userData in the
+    # VirtualMachine (no Secret object at all) — a VM-chart change touching BOTH this
+    # blueprint's contract AND the skeleton-vm chart. RECOMMENDATION: keep the whitelist
+    # now (template == proven tenant, no divergence-bug risk); track inline-userData as
+    # the security-track hardening follow-up (ADR-032 §Secret handling).
+    - group: ''
+      kind: Secret
+    # Encrypted-at-rest secret kinds (SealedSecret / ExternalSecret — platform
+    # controllers mint runtime creds), exactly as in the container project.
+    - group: bitnami.com
+      kind: SealedSecret
+    - group: external-secrets.io
+      kind: ExternalSecret
+    - group: external-secrets.io
+      kind: SecretStore
+    # NOTE — deliberately NOT whitelisted: Deployment, ReplicaSet,
+    # HorizontalPodAutoscaler (container workloads belong in the restricted tiers),
+    # VirtualMachineInstanceMigration (live-migration deferred — needs CephFS RWX,
+    # ADR-032 open Q3), and any cluster-scoped kind.
+
+  # --- ArgoCD RBAC role for the team (parallels the container project) -------------
+  roles:
+    - name: developer
+      description: "Team demovm developers — sync/get own VM apps only."
+      policies:
+        - p, proj:demovm-vm:developer, applications, get, demovm-vm/*, allow
+        - p, proj:demovm-vm:developer, applications, sync, demovm-vm/*, allow
+        # Explicitly NO delete, NO override, NO action/* — least privilege.
+      groups:
+        - demovm-developers
