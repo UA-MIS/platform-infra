@@ -427,6 +427,10 @@ spec:
           - [ ] `__TEAM__`/`__SEMESTER__` fully substituted (no leftover tokens).
           - [ ] The VM teardown ledger `tenants/_vm-claims/${{ parameters.team }}-${{ parameters.appName }}.yaml`
                 is present (makes this VM tenant visible + tear-down-able in the portal — ADR-032a).
+          - [ ] `tenants/team-${{ parameters.team }}/vm/namespaces/vm-prod.yaml` carries the
+                `allow-ingress-cloudflared-ssh` NetworkPolicy (port 22, from ns `cloudflared`)
+                alongside the Traefik/HTTP one — the SSH transport's in-cluster half
+                (ADR-032a D2).
 
           ### Operator steps (run AFTER merge)
           ```bash
@@ -453,6 +457,18 @@ spec:
             && git add tenants/team-${{ parameters.team }}/harbor-pull-vm-prod-sealed.yaml \
             && git commit -m "harbor pull robot (vm): team-${{ parameters.team }}"
           ```
+
+          **3) SSH public transport (ADR-032a D2) — Cloudflare dashboard steps, NOT
+          git** (the tunnel is token-based/remotely-managed; there is no in-cluster
+          `ingress:` config to commit for this). Full steps: `docs/operator/vm-ssh-cloudflare-access.md`. Summary:
+          - Zero Trust → Networks → Tunnels → platform tunnel → Public Hostname → Add:
+            subdomain `ssh.${{ parameters.appName }}`, domain `capstone.uamishub.com`,
+            Type `SSH`, URL
+            `${{ parameters.appName }}-ssh.${{ parameters.team }}-vm-prod.svc.cluster.local:22`.
+          - Zero Trust → Access → Applications → Add → Self-hosted, domain
+            `ssh.${{ parameters.appName }}.capstone.uamishub.com`, policy Allow =
+            team-${{ parameters.team }}'s UA-MIS emails.
+          - Confirm the CNAME Cloudflare auto-creates for that hostname in DNS.
 
           > **No CI push robot** — the VM path has no Kaniko build (ADR-032 §6 CI). The
           > only image work, if any, is an OPTIONAL future disk-bake pipeline (v2.1).
@@ -484,8 +500,16 @@ spec:
           **SSH in (pet dev-VM).** Your VM is a real machine you own: `ssh` in with a
           **standard client** using the key you provided (no VPN, no extra tooling), then
           `git clone` your app repo and run your stack right on the box. cloud-init installs
-          your public key and turns password login OFF. The exact SSH endpoint (host/port)
-          is finalized by the platform — see the onboarding PR / platform docs (ADR-032a).
+          your public key and turns password login OFF. Public SSH rides the platform's
+          existing Cloudflare Tunnel (ADR-032a D2, $0, no LoadBalancer) at
+          `ssh.${{ parameters.appName }}.capstone.uamishub.com`, gated by a Cloudflare
+          Access login — connect with `ssh -o ProxyCommand='cloudflared access ssh
+          --hostname ssh.${{ parameters.appName }}.capstone.uamishub.com'
+          <cloud-user>@ssh.${{ parameters.appName }}.capstone.uamishub.com`, or just open
+          that URL in a browser for a zero-install rendered terminal. This route is wired
+          by an **operator dashboard step after your onboarding PR merges** (see the PR
+          checklist below / `docs/operator/vm-ssh-cloudflare-access.md`) — until then your
+          VM is reachable at its HTTP URL but not over SSH.
           Your rootdisk **persists across reboots** (it is a pet, not immutable) — but note
           in-VM changes are NOT in git, so push anything you want to keep back to the repo.
 

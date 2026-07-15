@@ -1,6 +1,6 @@
 # ADR-032a — What a "VM tenant" IS: SSH access, clone-and-run, and the pet-vs-immutable disk
 
-- **Status:** Proposed (design stub — needs operator decisions on the marked items). Amends **ADR-032** (resolves its open Q7 "console/SSH access"; refines the §Runtime model disk lifecycle).
+- **Status:** Proposed (design stub — needs operator decisions on the marked items). **D2 (SSH transport) RESOLVED 2026-07-14** — see the note under D2; D3/D4 remain open. Amends **ADR-032** (resolves its open Q7 "console/SSH access"; refines the §Runtime model disk lifecycle).
 - **Date:** 2026-07-12
 - **Repo:** platform-infra
 - **Deciders:** operator (Clayton) + security track; drafted by architect
@@ -51,6 +51,25 @@ Every option below points at the **same per-tenant `ClusterIP` SSH Service** (`<
 
 **OPERATOR DECISION (D2):** pick the public TCP entrypoint for path A — **Cloudflare Spectrum** (paid, keeps the Cloudflare edge model, `ssh host:22`), **or** a routable public IP on the fleet post-apartment-wifi (free, needs port-forward + a Traefik TCP entrypoint range) — or run with **C** indefinitely. Until then, **C** is live-able.
 
+> **RESOLVED — 2026-07-14.** Operator directive: "ssh method doesn't matter as long as
+> it's the easiest/cheapest." That is **Option C** (Cloudflare Access browser SSH),
+> shipped alongside **Option D** (`cloudflared access ssh` as a native-client
+> `ProxyCommand`) as an opt-in for anyone who installs the `cloudflared` binary — both
+> ride the same Cloudflare Tunnel `ssh://` Public Hostname + Access application, so
+> offering both costs nothing extra. **Not adopted:** A/B/E (all need a public TCP
+> entrypoint the deployment network doesn't have, or a bastion component with no net
+> win over A). Ships: the `allow-ingress-cloudflared-ssh` NetworkPolicy (port 22 from
+> ns `cloudflared`) in `tenants/_template-vm/vm/namespaces/vm-prod.yaml` (applies to
+> every future VM tenant at onboarding time — no live VM tenant exists to backport as
+> of this writing, `team-tenantvm` was torn down for a clean re-test the same day),
+> onboarding-PR checklist/operator-steps updates, and end-user docs, in the PR that
+> added this note. The Cloudflare Public Hostname + Access
+> application themselves remain per-tenant **dashboard** steps (the tunnel is
+> token-based/remotely-managed — no git-side ingress config exists to template) — see
+> `docs/operator/vm-ssh-cloudflare-access.md` for the operator checklist. Revisit A
+> only if native `ssh <host>:22` (no `-p`, no ProxyCommand) becomes a hard requirement
+> and the team is willing to pay for Spectrum or the fleet gets a routable public IP.
+
 ### D3 — Clone-and-run: cloud-init bootstraps the MACHINE; the team clones + runs (true pet)
 
 cloud-init installs the **runtime prerequisites** (git, the language toolchain, sshd, the team's key) and prints an MOTD; the team **SSHes in and `git clone`s their app repo and runs it** — matching "a machine they SSH into, clone their app repo onto, and run their stack there" verbatim. Default = the team clones (using their own GitHub creds at the terminal), so **no repo deploy-key/token lives in the VM**.
@@ -98,6 +117,12 @@ This is the one rebuild in the whole VM-tenant workstream; it is small and local
 ## What this PR implements vs. defers
 
 - **Implemented (unambiguous, git-served, NO Backstage rebuild):** `sshPubKey` wizard input; cloud-init `ssh_authorized_keys` + `ssh_pwauth: false`; per-tenant `<app>-ssh` ClusterIP Service; the `_vm-claims/` teardown-ledger emit (`skeleton-vm-ledger` + `fetch-vm-ledger` step + the ledger dir/README); this ADR.
-- **Deferred to operator/security decision:** D2 public SSH transport (A vs C vs $), D3 auto-clone deploy-key, D4 standalone-DataVolume pet disk (with `Prune=false`, not PV `Retain`).
+- **D2 resolved (this PR, 2026-07-14):** public SSH transport = Cloudflare Tunnel SSH
+  (Option C interim + Option D opt-in), reusing the existing $0 tunnel — see the
+  RESOLVED note under D2 and `docs/operator/vm-ssh-cloudflare-access.md`. The
+  in-cluster half (netpol + docs + onboarding-PR checklist) is git-served; the
+  Cloudflare Public Hostname + Access application are still a per-tenant **operator
+  dashboard step** (not automatable without a Cloudflare API token in-hand).
+- **Deferred to operator/security decision:** D3 auto-clone deploy-key, D4 standalone-DataVolume pet disk (with `Prune=false`, not PV `Retain`).
 - **Deferred to a deliberate backend rebuild (specified in §D6):** `listTenants`/`teardownTenant` consuming the `_vm-claims/` ledger + Git-Trees directory removal. This is the ONE rebuild in the workstream.
 - None of the deferred items blocks the Part-A structural fix, the key-based-auth baseline, or the ledger emit.

@@ -13,8 +13,19 @@
 # The public transport is an operator/security-track decision (see
 # artifacts/design/decisions/adr-032a-vm-tenant-access-ux.md); this Service is the
 # app-layer half that is the same regardless of which is chosen. It exposes nothing
-# publicly by itself (ClusterIP) — the tenant NetworkPolicy already permits ingress
-# to the VM from the ingress tier (kube-system/Traefik) only.
+# publicly by itself (ClusterIP) — the tenant NetworkPolicy permits ingress to the VM
+# from the ingress tier (kube-system/Traefik, HTTP) AND from the `cloudflared`
+# namespace on :22 only (SSH).
+#
+# RESOLVED (ADR-032a D2, cheapest/easiest): the shipped public path is the
+# **Cloudflare Tunnel `ssh://` route** — reuses the existing $0 tunnel, no
+# LoadBalancer, no paid Spectrum. A Cloudflare Tunnel Public Hostname
+# (`ssh.${{ values.appName }}.capstone.uamishub.com`, Service type SSH) points
+# DIRECTLY at this Service, fronted by a Cloudflare Access application (Zero Trust
+# free tier). That Public Hostname + Access app are Cloudflare-dashboard steps (the
+# tunnel is token-based/remotely-managed, so there is no in-cluster ingress config to
+# template for the route itself) — see docs/operator/vm-ssh-cloudflare-access.md for
+# the exact steps and the two documented end-user connect commands.
 apiVersion: v1
 kind: Service
 metadata:

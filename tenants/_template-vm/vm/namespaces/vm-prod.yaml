@@ -148,7 +148,7 @@ spec:
         cpu: "4"
         memory: 6Gi        # accommodates a ~4-5Gi guest + virt-launcher overhead
 ---
-# NetworkPolicy 1/4 — DEFAULT-DENY ingress + egress. Same posture as every tenant
+# NetworkPolicy 1/5 — DEFAULT-DENY ingress + egress. Same posture as every tenant
 # tier: selects all pods (KubeVirt passes VM labels through to the virt-launcher
 # pod, so podSelector:{} covers the VM too — KubeVirt netpol docs), denies all
 # until the allowances below add back the minimum. Cross-team traffic is denied by
@@ -169,7 +169,7 @@ spec:
     - Ingress
     - Egress
 ---
-# NetworkPolicy 2/4 — allow ingress from Traefik (kube-system) + intra-namespace.
+# NetworkPolicy 2/5 — allow ingress from Traefik (kube-system) + intra-namespace.
 # Gives the VM its standard `<app>.prod.capstone.uamishub.com` URL via a Service ->
 # virt-launcher pod (masquerade NAT puts the guest behind the launcher pod IP, so
 # ordinary Service/Ingress/netpol apply unchanged — ADR-032 §2b).
@@ -200,7 +200,48 @@ spec:
     - from:
         - podSelector: {}
 ---
-# NetworkPolicy 3/4 — allow egress to cluster DNS + intra-namespace ONLY. The VM
+# NetworkPolicy 3/5 — allow ingress on :22 from the `cloudflared` namespace ONLY —
+# the SSH transport (ADR-032a D2, resolved: Cloudflare Tunnel SSH, Option C/D,
+# $0/no-LoadBalancer). cloudflared proxies a per-tenant Cloudflare Tunnel Public
+# Hostname (`ssh.<app>.capstone.uamishub.com`, Service type SSH, fronted by a
+# Cloudflare Access application) DIRECTLY to this Service (`<app>-ssh` :22) —
+# bypassing Traefik entirely, because SSH carries no Host header to route on and so
+# cannot ride the shared HTTP tunnel route every other service uses. Scoped to port
+# 22 only (not a blanket cloudflared admit) and to the `cloudflared` namespace by
+# name — same isolation pattern as the Traefik admit above, applied to the one other
+# pod now allowed to originate traffic into this tier.
+#
+# The Cloudflare-side Public Hostname route + Access application that front this
+# hostname are dashboard/operator steps, NOT a git change — the tunnel is
+# token-based/remotely-managed (platform-services/cloudflared/deployment.yaml has no
+# mounted `ingress:` config for cloudflared to read), so there is no in-cluster
+# config to template for the route itself. See
+# docs/operator/vm-ssh-cloudflare-access.md for the exact per-tenant steps + the two
+# documented end-user connect commands.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-cloudflared-ssh
+  namespace: __TEAM__-vm-prod
+  labels:
+    platform.capstone/team: __TEAM__
+    platform.capstone/semester: __SEMESTER__
+    platform.capstone/env: prod
+    platform.capstone/tier: vm
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cloudflared
+      ports:
+        - protocol: TCP
+          port: 22
+---
+# NetworkPolicy 4/5 — allow egress to cluster DNS + intra-namespace ONLY. The VM
 # guest (virt-launcher) gets NO external egress and NO API-server egress by default
 # — identical to the container tiers (least privilege). A lifted legacy app that
 # legitimately needs to call OUT to a specific external service is an explicit,
@@ -235,7 +276,7 @@ spec:
     - to:
         - podSelector: {}
 ---
-# NetworkPolicy 4/4 — CDI IMPORTER disk-fetch egress, SCOPED TO THE IMPORTER POD.
+# NetworkPolicy 5/5 — CDI IMPORTER disk-fetch egress, SCOPED TO THE IMPORTER POD.
 # The CDI importer pod (created transiently in THIS namespace to populate the
 # DataVolume PVC) is the ONLY pod that needs to reach a disk-image source. We scope
 # this allow to the importer's well-known label so the running VM guest does NOT
