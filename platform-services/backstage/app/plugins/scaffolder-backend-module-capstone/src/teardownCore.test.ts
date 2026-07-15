@@ -6,6 +6,9 @@
  *  - the type-to-confirm guard is re-enforced server-side (confirmName mismatch -> InputError),
  *  - a non-existent claim -> NotFoundError (never an empty PR),
  *  - archiveRepo optionally archives the app repo (non-fatal if it fails).
+ *  - VM tenants (ADR-032a §D5/§D6): listTenants also scans `_vm-claims/`, tagging rows
+ *    `layout: 'vm'`; teardownTenant removes the marker + the whole `tenants/team-<team>/` tree
+ *    via the Git Trees API (one commit, both changes) instead of deleteFile.
  */
 import { AuthorizeResult } from '@backstage/plugin-permission-common';
 import { InputError, NotAllowedError, NotFoundError } from '@backstage/errors';
@@ -40,6 +43,19 @@ const octokitCalls = {
   pullsCreate: jest.fn<Promise<any>, any[]>(async (opts: { head: string }) => ({
     data: { html_url: `https://github.com/UA-MIS/platform-infra/pull/${opts.head}` },
   })),
+  // VM teardown (Git Trees API) — getCommit/getTree/createTree/createCommit.
+  getCommit: jest.fn<Promise<any>, any[]>(async () => ({
+    data: { tree: { sha: 'basetreesha' } },
+  })),
+  getTree: jest.fn<Promise<any>, any[]>(async () => ({
+    data: { truncated: false, tree: VM_TEAM_TREE_ENTRIES },
+  })),
+  createTree: jest.fn<Promise<any>, any[]>(async () => ({
+    data: { sha: 'newtreesha' },
+  })),
+  createCommit: jest.fn<Promise<any>, any[]>(async () => ({
+    data: { sha: 'newcommitsha' },
+  })),
 };
 jest.mock('@octokit/rest', () => ({
   Octokit: jest.fn().mockImplementation(() => ({
@@ -51,7 +67,14 @@ jest.mock('@octokit/rest', () => ({
       getAllTopics: octokitCalls.getAllTopics,
       replaceAllTopics: octokitCalls.replaceAllTopics,
     },
-    git: { getRef: octokitCalls.getRef, createRef: octokitCalls.createRef },
+    git: {
+      getRef: octokitCalls.getRef,
+      createRef: octokitCalls.createRef,
+      getCommit: octokitCalls.getCommit,
+      getTree: octokitCalls.getTree,
+      createTree: octokitCalls.createTree,
+      createCommit: octokitCalls.createCommit,
+    },
     pulls: { create: octokitCalls.pullsCreate },
   })),
 }));
@@ -61,6 +84,26 @@ import { listTenants, teardownTenant } from './teardownCore';
 
 const ADMIN_GROUP = 'group:default/labmx';
 const CLAIMS_DIR = 'tenants/_claims';
+const VM_CLAIMS_DIR = 'tenants/_vm-claims';
+const VM_TEAM_TREE = 'tenants/team-teamx';
+
+/**
+ * The recursive base-tree listing `git.getTree` returns for VM teardown — files under the VM
+ * team's tree (mirrors the real teardown/tenantvm removal: README.md + vm/{README,
+ * applicationset-vm,appproject-vm}.yaml + vm/namespaces/vm-prod.yaml), PLUS an unrelated
+ * sibling team's file (must survive filtering) and the marker blob itself (present in the base
+ * tree, confirming the filter doesn't double-count it).
+ */
+const VM_TEAM_TREE_ENTRIES = [
+  { path: `${VM_TEAM_TREE}/README.md`, type: 'blob', sha: 'sha-readme' },
+  { path: `${VM_TEAM_TREE}/vm/README.md`, type: 'blob', sha: 'sha-vm-readme' },
+  { path: `${VM_TEAM_TREE}/vm/applicationset-vm.yaml`, type: 'blob', sha: 'sha-appset' },
+  { path: `${VM_TEAM_TREE}/vm/appproject-vm.yaml`, type: 'blob', sha: 'sha-appproj' },
+  { path: `${VM_TEAM_TREE}/vm/namespaces/vm-prod.yaml`, type: 'blob', sha: 'sha-ns' },
+  { path: 'tenants/team-otherteam/README.md', type: 'blob', sha: 'sha-other' },
+  { path: `${VM_CLAIMS_DIR}/teamx-vmapp.yaml`, type: 'blob', sha: 'sha-marker' },
+  { path: 'tenants', type: 'tree', sha: 'sha-tenants-tree' },
+];
 
 const CREDS: any = {
   $$type: '@backstage/BackstageCredentials',
@@ -94,13 +137,46 @@ const FILE_BODIES: Record<string, string> = {
   [`${CLAIMS_DIR}/acme-web.yaml`]: claimYaml('acme', 'web', '2026-fall'),
 };
 
-/** getContent serving the claims dir listing + each file body; 404 for anything else. */
+/** A `_vm-claims/<team>-<app>.yaml` marker, matching the vm-app template's emitted schema. */
+function vmMarkerYaml(
+  team: string,
+  app: string,
+  semester: string,
+  teardownPath = `tenants/team-${team}`,
+): string {
+  return [
+    'apiVersion: platform.capstone/v1',
+    'kind: VmTenantLedger',
+    'metadata:',
+    `  name: ${team}-${app}`,
+    `team: ${team}`,
+    `appName: ${app}`,
+    `semester: "${semester}"`,
+    'layout: vm',
+    `teardownPath: ${teardownPath}`,
+    '',
+  ].join('\n');
+}
+
+const DIR_ENTRIES_VM = [
+  { name: 'teamx-vmapp.yaml', type: 'file', path: `${VM_CLAIMS_DIR}/teamx-vmapp.yaml` },
+  { name: 'README.md', type: 'file', path: `${VM_CLAIMS_DIR}/README.md` },
+];
+
+const FILE_BODIES_VM: Record<string, string> = {
+  [`${VM_CLAIMS_DIR}/teamx-vmapp.yaml`]: vmMarkerYaml('teamx', 'vmapp', '2026-fall'),
+};
+
+/** getContent serving BOTH ledger dir listings + every file body; 404 for anything else. */
 function serveLedger() {
   octokitCalls.getContent.mockImplementation(async (opts: any) => {
     if (opts.path === CLAIMS_DIR) {
       return { data: DIR_ENTRIES } as any;
     }
-    const body = FILE_BODIES[opts.path];
+    if (opts.path === VM_CLAIMS_DIR) {
+      return { data: DIR_ENTRIES_VM } as any;
+    }
+    const body = FILE_BODIES[opts.path] ?? FILE_BODIES_VM[opts.path];
     if (body !== undefined) {
       return {
         data: {
@@ -161,6 +237,18 @@ beforeEach(() => {
   octokitCalls.replaceAllTopics.mockImplementation(async () => ({
     data: { names: ['nodejs'] },
   }));
+  octokitCalls.getCommit.mockImplementation(async () => ({
+    data: { tree: { sha: 'basetreesha' } },
+  }));
+  octokitCalls.getTree.mockImplementation(async () => ({
+    data: { truncated: false, tree: VM_TEAM_TREE_ENTRIES },
+  }));
+  octokitCalls.createTree.mockImplementation(async () => ({
+    data: { sha: 'newtreesha' },
+  }));
+  octokitCalls.createCommit.mockImplementation(async () => ({
+    data: { sha: 'newcommitsha' },
+  }));
 });
 
 describe('teardownCore authz (admin-only, fails closed)', () => {
@@ -194,11 +282,15 @@ describe('teardownCore authz (admin-only, fails closed)', () => {
 });
 
 describe('listTenants (admin)', () => {
-  it('lists only live claims — excludes _* samples, README, and non-yaml', async () => {
+  it('lists live CONTAINER claims — excludes _* samples, README, and non-yaml — tagged layout: container', async () => {
     serveLedger();
     const deps = makeDeps([ADMIN_GROUP]);
     const tenants = await listTenants(deps, { credentials: CREDS });
-    expect(tenants.map(t => t.name).sort()).toEqual(['acme-web', 'swami-swamiapp']);
+    const containerNames = tenants
+      .filter(t => t.layout !== 'vm')
+      .map(t => t.name)
+      .sort();
+    expect(containerNames).toEqual(['acme-web', 'swami-swamiapp']);
     const swami = tenants.find(t => t.name === 'swami-swamiapp')!;
     expect(swami).toMatchObject({
       team: 'swami',
@@ -206,10 +298,34 @@ describe('listTenants (admin)', () => {
       semester: '2026-summer',
       database: 'mysql',
       claimPath: `${CLAIMS_DIR}/swami-swamiapp.yaml`,
+      layout: 'container',
+      teardownPaths: [`${CLAIMS_DIR}/swami-swamiapp.yaml`],
     });
   });
 
-  it('returns [] when the ledger dir does not exist (404)', async () => {
+  it('ALSO lists live VM tenants from _vm-claims, tagged layout: vm with the marker + team tree in teardownPaths', async () => {
+    serveLedger();
+    const deps = makeDeps([ADMIN_GROUP]);
+    const tenants = await listTenants(deps, { credentials: CREDS });
+    expect(tenants.map(t => t.name).sort()).toEqual([
+      'acme-web',
+      'swami-swamiapp',
+      'teamx-vmapp',
+    ]);
+    const vmTenant = tenants.find(t => t.name === 'teamx-vmapp')!;
+    expect(vmTenant).toMatchObject({
+      team: 'teamx',
+      appName: 'vmapp',
+      semester: '2026-fall',
+      claimPath: `${VM_CLAIMS_DIR}/teamx-vmapp.yaml`,
+      layout: 'vm',
+      teardownPaths: [`${VM_CLAIMS_DIR}/teamx-vmapp.yaml`, VM_TEAM_TREE],
+    });
+    // VM markers don't declare a database — the field stays undefined (no 'none' placeholder).
+    expect(vmTenant.database).toBeUndefined();
+  });
+
+  it('returns [] when neither ledger dir exists (404 on both)', async () => {
     octokitCalls.getContent.mockImplementation(async () => {
       const e = new Error('Not Found') as Error & { status: number };
       e.status = 404;
@@ -217,6 +333,26 @@ describe('listTenants (admin)', () => {
     });
     const deps = makeDeps([ADMIN_GROUP]);
     expect(await listTenants(deps, { credentials: CREDS })).toEqual([]);
+  });
+
+  it('still lists container tenants when only the VM ledger dir is missing (404 on _vm-claims)', async () => {
+    octokitCalls.getContent.mockImplementation(async (opts: any) => {
+      if (opts.path === CLAIMS_DIR) {
+        return { data: DIR_ENTRIES } as any;
+      }
+      const body = FILE_BODIES[opts.path];
+      if (body !== undefined) {
+        return {
+          data: { sha: `sha-${opts.path}`, content: Buffer.from(body, 'utf8').toString('base64') },
+        } as any;
+      }
+      const e = new Error('Not Found') as Error & { status: number };
+      e.status = 404;
+      throw e;
+    });
+    const deps = makeDeps([ADMIN_GROUP]);
+    const tenants = await listTenants(deps, { credentials: CREDS });
+    expect(tenants.map(t => t.name).sort()).toEqual(['acme-web', 'swami-swamiapp']);
   });
 });
 
@@ -357,6 +493,163 @@ describe('teardownTenant (admin)', () => {
   });
 });
 
+describe('teardownTenant — VM tenants (ADR-032a §D5/§D6, Git Trees API)', () => {
+  it('removes the marker + the whole team tree in ONE commit (not deleteFile) and returns the PR URL', async () => {
+    serveLedger();
+    const deps = makeDeps([ADMIN_GROUP]);
+    const res = await teardownTenant(deps, {
+      credentials: CREDS,
+      name: 'teamx-vmapp',
+      confirmName: 'teamx-vmapp',
+    });
+
+    // Never uses the single-file delete path.
+    expect(octokitCalls.deleteFile).not.toHaveBeenCalled();
+
+    // Reads the base commit's tree, then the full recursive tree off that sha.
+    expect(octokitCalls.getCommit).toHaveBeenCalledWith(
+      expect.objectContaining({ commit_sha: 'basesha' }),
+    );
+    expect(octokitCalls.getTree).toHaveBeenCalledWith(
+      expect.objectContaining({ tree_sha: 'basetreesha', recursive: 'true' }),
+    );
+
+    // The new tree removes the marker + every blob under tenants/team-teamx/ — and NOTHING else
+    // (the sibling tenants/team-otherteam/ file must survive).
+    expect(octokitCalls.createTree).toHaveBeenCalledTimes(1);
+    const treeCall = octokitCalls.createTree.mock.calls[0][0];
+    expect(treeCall.base_tree).toBe('basetreesha');
+    const removedPaths = treeCall.tree.map((e: any) => e.path).sort();
+    expect(removedPaths).toEqual(
+      [
+        `${VM_CLAIMS_DIR}/teamx-vmapp.yaml`,
+        `${VM_TEAM_TREE}/README.md`,
+        `${VM_TEAM_TREE}/vm/README.md`,
+        `${VM_TEAM_TREE}/vm/applicationset-vm.yaml`,
+        `${VM_TEAM_TREE}/vm/appproject-vm.yaml`,
+        `${VM_TEAM_TREE}/vm/namespaces/vm-prod.yaml`,
+      ].sort(),
+    );
+    expect(removedPaths).not.toContain('tenants/team-otherteam/README.md');
+    // Every entry deletes the blob (sha: null), never re-adds content.
+    for (const entry of treeCall.tree) {
+      expect(entry.sha).toBeNull();
+      expect(entry.type).toBe('blob');
+    }
+
+    // One commit off the base sha, pointed at by a NEW branch ref (not deleteFile's own commit).
+    expect(octokitCalls.createCommit).toHaveBeenCalledWith(
+      expect.objectContaining({ tree: 'newtreesha', parents: ['basesha'] }),
+    );
+    expect(octokitCalls.createRef).toHaveBeenCalledWith(
+      expect.objectContaining({ sha: 'newcommitsha' }),
+    );
+
+    expect(res.pullRequestUrl).toContain('/pull/');
+    expect(res.claimPath).toBe(`${VM_CLAIMS_DIR}/teamx-vmapp.yaml`);
+    expect(res.teardownPaths.sort()).toEqual(
+      [
+        `${VM_CLAIMS_DIR}/teamx-vmapp.yaml`,
+        `${VM_TEAM_TREE}/README.md`,
+        `${VM_TEAM_TREE}/vm/README.md`,
+        `${VM_TEAM_TREE}/vm/applicationset-vm.yaml`,
+        `${VM_TEAM_TREE}/vm/appproject-vm.yaml`,
+        `${VM_TEAM_TREE}/vm/namespaces/vm-prod.yaml`,
+      ].sort(),
+    );
+  });
+
+  it('strips the capstone-tenant topic from the VM tenant app repo (same ghost-tenant cure)', async () => {
+    serveLedger();
+    const deps = makeDeps([ADMIN_GROUP]);
+    const res = await teardownTenant(deps, {
+      credentials: CREDS,
+      name: 'teamx-vmapp',
+      confirmName: 'teamx-vmapp',
+    });
+    expect(octokitCalls.getAllTopics).toHaveBeenCalledWith(
+      expect.objectContaining({ repo: 'vmapp' }),
+    );
+    expect(res.topicStripped).toBe(true);
+  });
+
+  it('archives the VM tenant app repo when archiveRepo=true', async () => {
+    serveLedger();
+    const deps = makeDeps([ADMIN_GROUP]);
+    const res = await teardownTenant(deps, {
+      credentials: CREDS,
+      name: 'teamx-vmapp',
+      confirmName: 'teamx-vmapp',
+      archiveRepo: true,
+    });
+    expect(octokitCalls.update).toHaveBeenCalledWith(
+      expect.objectContaining({ repo: 'vmapp', archived: true }),
+    );
+    expect(res.repoArchived).toBe(true);
+  });
+
+  it('re-enforces type-to-confirm server-side for VM tenants too: mismatch -> InputError, no commit', async () => {
+    serveLedger();
+    const deps = makeDeps([ADMIN_GROUP]);
+    await expect(
+      teardownTenant(deps, {
+        credentials: CREDS,
+        name: 'teamx-vmapp',
+        confirmName: 'wrong-name',
+      }),
+    ).rejects.toThrow(InputError);
+    expect(octokitCalls.createTree).not.toHaveBeenCalled();
+    expect(octokitCalls.createCommit).not.toHaveBeenCalled();
+  });
+
+  it('fails CLOSED rather than removing a partial tree when GitHub truncates the recursive listing', async () => {
+    serveLedger();
+    octokitCalls.getTree.mockResolvedValue({
+      data: { truncated: true, tree: VM_TEAM_TREE_ENTRIES },
+    });
+    const deps = makeDeps([ADMIN_GROUP]);
+    await expect(
+      teardownTenant(deps, {
+        credentials: CREDS,
+        name: 'teamx-vmapp',
+        confirmName: 'teamx-vmapp',
+      }),
+    ).rejects.toThrow(/truncated/i);
+    expect(octokitCalls.createTree).not.toHaveBeenCalled();
+    expect(octokitCalls.pullsCreate).not.toHaveBeenCalled();
+  });
+
+  it('falls back to NotFoundError when neither a claim nor a VM marker exists for the name', async () => {
+    serveLedger();
+    const deps = makeDeps([ADMIN_GROUP]);
+    await expect(
+      teardownTenant(deps, {
+        credentials: CREDS,
+        name: 'ghost-app',
+        confirmName: 'ghost-app',
+      }),
+    ).rejects.toThrow(NotFoundError);
+    expect(octokitCalls.deleteFile).not.toHaveBeenCalled();
+    expect(octokitCalls.createTree).not.toHaveBeenCalled();
+  });
+
+  it('prefers the CONTAINER claim over a same-named VM marker (container ledger checked first)', async () => {
+    // Give 'swami-swamiapp' BOTH a container claim (from serveLedger) and — hypothetically — a
+    // VM marker would never coexist in practice, but this locks in the dispatch order so a
+    // future change can't silently flip priority.
+    serveLedger();
+    const deps = makeDeps([ADMIN_GROUP]);
+    const res = await teardownTenant(deps, {
+      credentials: CREDS,
+      name: 'swami-swamiapp',
+      confirmName: 'swami-swamiapp',
+    });
+    expect(octokitCalls.deleteFile).toHaveBeenCalledTimes(1);
+    expect(octokitCalls.createTree).not.toHaveBeenCalled();
+    expect(res.claimPath).toBe(`${CLAIMS_DIR}/swami-swamiapp.yaml`);
+  });
+});
+
 // ── resolveActorGroups against a REALISTIC catalog (filter semantics actually evaluated) ──
 //
 // Regression coverage for the live-data bug found investigating "labmx sees an empty secrets
@@ -424,6 +717,10 @@ describe('requireAdmin (realistic catalog filter evaluation)', () => {
       auth: { getOwnServiceCredentials: jest.fn(async () => ({ token: 'svc' })) },
     };
     const tenants = await listTenants(deps, { credentials: CCSMITH33 });
-    expect(tenants.map(t => t.name).sort()).toEqual(['acme-web', 'swami-swamiapp']);
+    expect(tenants.map(t => t.name).sort()).toEqual([
+      'acme-web',
+      'swami-swamiapp',
+      'teamx-vmapp',
+    ]);
   });
 });
