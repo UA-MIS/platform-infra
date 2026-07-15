@@ -1220,17 +1220,18 @@ spec:
                                     - { key: capstone.io/pool, operator: In, values: ["build"] }
                                 - matchExpressions:
                                     - { key: node-role.kubernetes.io/control-plane, operator: Exists }
-                            # SOFT tier bias: laptop-01 (100) → ua-mis-db-1 (50) → OptiPlex (10).
+                            # SOFT tier bias: laptop-01 (100, matched directly by its own
+                            # ci-build=true label — the DEDICATED CI node) → any other
+                            # build-pool node e.g. ua-mis-db-1 (50) → OptiPlex (10).
                             preferredDuringSchedulingIgnoredDuringExecution:
                               - weight: 100
                                 preference:
                                   matchExpressions:
-                                    - { key: capstone.io/pool, operator: In, values: ["build"] }
-                                    - { key: capstone.io/ci-build, operator: DoesNotExist }
+                                    - { key: capstone.io/ci-build, operator: In, values: ["true"] }
                               - weight: 50
                                 preference:
                                   matchExpressions:
-                                    - { key: capstone.io/ci-build, operator: In, values: ["true"] }
+                                    - { key: capstone.io/pool, operator: In, values: ["build"] }
                               - weight: 10
                                 preference:
                                   matchExpressions:
@@ -1417,17 +1418,18 @@ spec:
                                           - { key: capstone.io/pool, operator: In, values: ["build"] }
                                       - matchExpressions:
                                           - { key: node-role.kubernetes.io/control-plane, operator: Exists }
-                                  # SOFT tier bias: laptop-01 (100) → ua-mis-db-1 (50) → OptiPlex (10).
+                                  # SOFT tier bias: laptop-01 (100, matched directly by its own
+                                  # ci-build=true label — the DEDICATED CI node) → any other
+                                  # build-pool node e.g. ua-mis-db-1 (50) → OptiPlex (10).
                                   preferredDuringSchedulingIgnoredDuringExecution:
                                     - weight: 100
                                       preference:
                                         matchExpressions:
-                                          - { key: capstone.io/pool, operator: In, values: ["build"] }
-                                          - { key: capstone.io/ci-build, operator: DoesNotExist }
+                                          - { key: capstone.io/ci-build, operator: In, values: ["true"] }
                                     - weight: 50
                                       preference:
                                         matchExpressions:
-                                          - { key: capstone.io/ci-build, operator: In, values: ["true"] }
+                                          - { key: capstone.io/pool, operator: In, values: ["build"] }
                                     - weight: 10
                                       preference:
                                         matchExpressions:
