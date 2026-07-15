@@ -19,6 +19,20 @@
 > the dotted form fails the HTTPS/Access handshake (`SSL_ERROR_NO_CYPHER_OVERLAP`). This
 > doc (and ADR-032a / PR #402) previously specified the wrong dotted form; it is corrected
 > throughout. The automation always emits the hyphenated form.
+>
+> ## ⚠ SSH-over-Access NEEDS the short-lived certificate CA (ADR-039) — route + Access app are NOT enough
+> The tunnel route + Access app (ADR-038) get the login page working, but **SSH itself
+> does not complete** until the guest trusts Cloudflare's **short-lived SSH certificate
+> CA**. A live test (2026-07-15) confirmed: with a key-only guest, `cloudflared access ssh`
+> returns `Connection closed by UNKNOWN port 65535` and the browser terminal cannot
+> authenticate — Cloudflare presents **no user key**, so a key-only sshd rejects both.
+> The fix (ADR-039): after Access auth, Cloudflare mints a **short-lived cert** signed by a
+> **per-Access-app CA**; the guest sshd trusts that CA (`TrustedUserCAKeys`), so the cert
+> authenticates the browser terminal AND the CLI with no password and no user key. The
+> per-app CA is minted + logged by the reconciler; the operator **pastes it into the
+> tenant's cloud-init once** (§"Per-tenant SSH certificate CA" below). The old framing that
+> "pasting `sshPubKey` is all you need" is true **only for the key-only fallback** (direct/
+> bastion) — the Access browser/CLI path needs the CA.
 
 **Audience:** platform operator (holds the Cloudflare account/API token). The **manual**
 steps in this doc are Cloudflare **dashboard** writes; the **automated** path (ADR-038)
@@ -128,6 +142,56 @@ with Zero Trust / Tunnels / Access permissions (the account holding the existing
    that tenant (check the onboarding-PR checklist item); an Access **login page with
    no further prompt** working but SSH itself failing usually means the Public
    Hostname's Service URL/port is wrong.
+
+## Per-tenant SSH certificate CA (ADR-039) — the step that makes SSH actually work
+
+This is the **one per-tenant action** that turns a rendered VM from "Access login works but
+SSH won't connect" into a working browser terminal + `cloudflared access ssh`. Do it **once
+per VM tenant, during onboarding**, after the reconciler has created the Access app. (It is
+lossless if done before the team stores data — the VM is recreated.)
+
+**Why it is needed (short version):** the guest ships key-only; Cloudflare presents no user
+key; so cert auth is the only credential the Access browser/CLI path can use. The guest must
+trust the per-app CA. See the ADR-039 callout at the top of this doc.
+
+**Prereq:** the one-time cf-vm-access setup is done (`platform-services/cf-vm-access/README.md`)
+so the reconciler is running and has created this tenant's Access app.
+
+1. **Read the CA public key the reconciler minted for this app.** The reconciler ensures a
+   per-app short-lived-cert CA (`POST /accounts/<id>/access/apps/<app_id>/ca`) and logs its
+   public key (logged even under `DRY_RUN=1`, since the read is safe):
+   ```bash
+   export KUBECONFIG=clusters/real-talos/talos-kubeconfig
+   kubectl -n cloudflared logs -l app.kubernetes.io/name=cf-vm-access-reconciler --tail=300 \
+     | grep -A1 "CA public key for ssh-<appName>"
+   # -> ecdsa-sha2-nistp256 AAAA... open-ssh-ca@cloudflareaccess.org
+   ```
+   (Or read it straight from Cloudflare: Zero Trust → Access → Service credentials → SSH →
+   the certificate for this app → **CA public key**. Same value.) It is a **public** key —
+   safe to commit.
+
+2. **Paste it into the tenant repo's cloud-init** and commit. In `UA-MIS/<appName>`, edit
+   `.devops/chart/base/cloud-init.yaml` → the `/etc/ssh/cf_access_ca.pub` `write_files` block
+   → replace the empty CA line (below the `#` comment lines) with the pubkey from step 1.
+   Commit + open the PR (the tenant repo is PR-protected); merge it.
+
+3. **Recreate the VM so first boot bakes the CA.** cloud-init runs only on first boot, so
+   delete the `VirtualMachine` and let ArgoCD/GitOps recreate it:
+   ```bash
+   kubectl -n <team>-vm-prod delete virtualmachine <appName>   # GitOps recreates it
+   ```
+   Do this during onboarding, before the team stores data (the root disk is a pet — recreate
+   wipes it). After the VM is back up, cloud-init has written `/etc/ssh/cf_access_ca.pub` and
+   the sshd drop-in, and sshd trusts the CA.
+
+4. **Smoke-test** with either connect UX below. `cloudflared access ssh` should now open a
+   session (no `Connection closed by UNKNOWN port 65535`), and the browser terminal should
+   log you straight in as the cloud user after the Access login — no key prompt.
+
+> **Making this zero-touch (follow-up, not done):** the one manual paste exists because the
+> per-app CA does not exist until the Access app does (after first boot) and a VM guest can't
+> read the cluster API. The clean fix is to have the reconciler (or a GitHub Action keyed on
+> its log) **auto-commit the CA into the tenant repo** with a scoped token. Flagged in ADR-039.
 
 ## Connect — two documented UXes (give both to the team)
 

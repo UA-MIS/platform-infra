@@ -19,6 +19,12 @@
 #      platform.capstone/ssh-access-emails on the Service). SSH has no OIDC of its
 #      own, so Access is the only auth in front of the hostname (sshd is key-only
 #      as a backstop).
+#   3. a per-app SHORT-LIVED-CERT CA (ADR-039) for that Access app, and LOGS its
+#      public key. The guest sshd must trust this CA for SSH-over-Access to complete
+#      (browser terminal + `cloudflared access ssh`); the operator pastes the logged
+#      pubkey into the tenant's cloud-init (/etc/ssh/cf_access_ca.pub). This is what
+#      turns the key-only guest (which rejects both Access paths) into one that
+#      accepts Cloudflare-minted certs. See _ensure_app_ca + the operator doc.
 # TEARDOWN is automatic: when a VM tenant is torn down its namespace (and the ssh
 # Service) is deleted, so the Service disappears from the desired set and the
 # reconciler REMOVES the stale tunnel rule + Access app on its next pass.
@@ -212,6 +218,43 @@ def _ensure_policy(app_id, emails):
     cf("POST", f"/accounts/{ACCOUNT_ID}/access/apps/{app_id}/policies", body)
 
 
+def _ensure_app_ca(app_id, hostname):
+    """Ensure the app's SHORT-LIVED-CERT CA exists and LOG its public key (ADR-039).
+
+    SSH-over-Access only completes if the guest sshd TRUSTS this CA: after Access
+    auth, Cloudflare mints a short-lived SSH cert signed by it, which authenticates
+    both the browser terminal and `cloudflared access ssh` with no user key in the
+    guest. Without it the guest is key-only and both paths fail (the live-test gap).
+
+    The CA is PER-APP (`.../access/apps/{app_id}/ca`), created once, stable after.
+    We GET it; if absent (HTTP 404) we POST to create it — idempotent per app. The
+    public key (safe to log — it is public) is printed on a greppable line so the
+    operator can paste it into the tenant's cloud-init `/etc/ssh/cf_access_ca.pub`
+    (docs/operator/vm-ssh-cloudflare-access.md). Guest delivery is out of band on
+    purpose: a VM cannot read the cluster API, and the CA does not exist until the
+    app does (after first boot), so the operator bakes it via GitOps (one lossless
+    recreate during onboarding). Per-app CA also gives per-VM crypto isolation.
+    """
+    pub = ""
+    try:
+        resp = cf("GET", f"/accounts/{ACCOUNT_ID}/access/apps/{app_id}/ca")
+        pub = (resp.get("result") or {}).get("public_key", "")
+    except RuntimeError as e:
+        if "HTTP 404" not in str(e):
+            raise
+        if DRY_RUN:
+            log(f"    DRY_RUN: would create short-lived-cert CA for {hostname}")
+            return
+        resp = cf("POST", f"/accounts/{ACCOUNT_ID}/access/apps/{app_id}/ca")
+        pub = (resp.get("result") or {}).get("public_key", "")
+    if pub:
+        # Greppable marker — the scaffolder PR body tells the operator to grep this.
+        log(f"    CA public key for {hostname} (paste into cloud-init cf_access_ca.pub):")
+        log(f"    {pub}")
+    else:
+        log(f"    WARNING: no CA public key returned for {hostname}")
+
+
 def reconcile_access(tenants):
     log("== Access application reconcile ==")
     desired = {t["hostname"]: t for t in tenants}
@@ -223,6 +266,12 @@ def reconcile_access(tenants):
             log(f"  ensure app {hostname} (emails: {', '.join(t['emails']) or 'NONE'})")
             if not DRY_RUN:
                 _ensure_policy(app["id"], t["emails"])
+            # GET-ing the CA is read-only, so we log it even in dry-run (the operator
+            # needs the pubkey to bake). CA failure must not block the reconcile.
+            try:
+                _ensure_app_ca(app["id"], hostname)
+            except Exception as e:  # noqa: BLE001
+                log(f"    CA ensure/log FAILED for {hostname}: {e}")
         else:
             log(f"  CREATE app {hostname} (emails: {', '.join(t['emails']) or 'NONE'})")
             if not DRY_RUN:
@@ -232,7 +281,14 @@ def reconcile_access(tenants):
                     "type": "self_hosted",
                     "session_duration": SESSION_DURATION,
                 })
-                _ensure_policy(created["result"]["id"], t["emails"])
+                app_id = created["result"]["id"]
+                _ensure_policy(app_id, t["emails"])
+                try:
+                    _ensure_app_ca(app_id, hostname)
+                except Exception as e:  # noqa: BLE001
+                    log(f"    CA ensure/log FAILED for {hostname}: {e}")
+            else:
+                log(f"    DRY_RUN: would create app + short-lived-cert CA for {hostname}")
 
     for hostname, app in sorted(existing.items()):
         if hostname not in desired:

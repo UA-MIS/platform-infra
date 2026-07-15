@@ -6,6 +6,7 @@
 - **Deciders:** operator (Clayton) + security track; drafted by architect
 - **Supersedes:** the per-tenant **manual** Cloudflare-dashboard steps in ADR-032a §D2 and `docs/operator/vm-ssh-cloudflare-access.md` (those remain the documented fallback until the one-time CF API token is set up).
 - **Relates to:** ADR-032a (VM SSH via Cloudflare Tunnel, Option C/D), ADR-032 (KubeVirt VM workloads), ADR-028/D-036 (Cloudflare-Tunnel edge), ADR-031 (Crossplane zero-touch onboarding), SEC-011 (Cilium netpol).
+- **⚠ Necessary but not sufficient — see [ADR-039](adr-039-vm-ssh-shortlived-certificates.md).** This ADR provisions the tunnel route + Access app, which get the Access **login** working but do **not** make SSH complete: a live test (2026-07-15) proved a key-only guest rejects both `cloudflared access ssh` (`Connection closed by UNKNOWN port 65535`) and the browser terminal (Cloudflare presents no user key). **ADR-039** adds the missing half — short-lived-certificate CA trust in the guest — and extends this same reconciler (`reconcile_access` now mints + logs the per-app CA) and this same held PR.
 
 ---
 

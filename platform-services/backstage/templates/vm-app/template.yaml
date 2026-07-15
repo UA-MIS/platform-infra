@@ -282,6 +282,16 @@ spec:
           diskGi: ${{ parameters.diskGi }}
           port: ${{ parameters.port }}
           sshPubKey: ${{ parameters.sshPubKey }}
+          # Cloudflare Access SSH CA public key (ADR-039). Rendered into cloud-init's
+          # /etc/ssh/cf_access_ca.pub so the guest trusts Cloudflare-minted short-lived
+          # SSH certs (browser terminal + `cloudflared access ssh`). EMPTY at scaffold
+          # time ON PURPOSE: the CA is per-Access-app, and that app does not exist until
+          # the cf-vm-access reconciler creates it after the VM's ssh Service appears
+          # (chicken-and-egg). The operator pastes the CA into the rendered tenant repo's
+          # cloud-init once during onboarding — see docs/operator/vm-ssh-cloudflare-access.md.
+          # Until then the sshPubKey key-only fallback is the way in; cert auth activates
+          # when this is filled in and the VM is recreated.
+          cfAccessCaPub: ""
           # Rendered onto the <app>-ssh Service annotation the cf-vm-access reconciler
           # reads to build the Cloudflare Access Allow policy (ADR-038).
           teamEmails: ${{ parameters.teamEmails }}
@@ -492,13 +502,29 @@ spec:
           `ssh-${{ parameters.appName }}.capstone.uamishub.com` → SSH →
           `${{ parameters.appName }}-ssh.${{ parameters.team }}-vm-prod.svc.cluster.local:22`
           and the matching Access application (Allow = this team's emails). DNS is already
-          covered by the platform wildcard. **Operator: nothing to do per tenant** — just
-          confirm the reconciler picked it up (`kubectl -n cloudflared logs job/...` or
-          the CronJob's latest run), assuming the one-time token setup is done
-          (`platform-services/cf-vm-access/README.md`). Teardown removes these
-          automatically when the Service is deleted. (If the one-time CF API token has NOT
-          been set up yet, fall back to the manual dashboard steps in
-          `docs/operator/vm-ssh-cloudflare-access.md`.)
+          covered by the platform wildcard. Teardown removes these automatically when the
+          Service is deleted. (If the one-time CF API token has NOT been set up yet, fall
+          back to the manual dashboard steps in `docs/operator/vm-ssh-cloudflare-access.md`.)
+
+          **4) SSH short-lived certificate CA (ADR-039) — ONE per-tenant paste, then SSH
+          actually works.** The route + Access app from step 3 are necessary but NOT
+          sufficient: the guest ships **key-only**, so the browser terminal and
+          `cloudflared access ssh` both fail (Cloudflare presents no user key). To fix,
+          the guest must trust this Access app's **short-lived-cert CA**. The reconciler
+          creates that per-app CA and **logs its public key**; paste it into this tenant's
+          cloud-init once (a public key — safe to commit), then recreate the VM:
+          ```bash
+          # read the CA public key the reconciler minted for this app
+          kubectl -n cloudflared logs -l app.kubernetes.io/name=cf-vm-access-reconciler --tail=200 \
+            | grep -A1 "CA public key for ssh-${{ parameters.appName }}"
+          # paste that key on the CA line of the RENDERED tenant repo's cloud-init:
+          #   UA-MIS/${{ parameters.appName }} → .devops/chart/base/cloud-init.yaml
+          #   (/etc/ssh/cf_access_ca.pub content — replace the empty last line), commit, then
+          #   recreate the VM so first boot bakes it (delete the VirtualMachine; GitOps recreates).
+          ```
+          Do this DURING onboarding (before the team stores data — recreate is lossless
+          then). After it, browser SSH + `cloudflared access ssh` work with no user key.
+          Full steps + rationale: `docs/operator/vm-ssh-cloudflare-access.md`.
 
           > **No CI push robot** — the VM path has no Kaniko build (ADR-032 §6 CI). The
           > only image work, if any, is an OPTIONAL future disk-bake pipeline (v2.1).
