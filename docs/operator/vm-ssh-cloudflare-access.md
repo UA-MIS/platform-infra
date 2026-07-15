@@ -1,9 +1,29 @@
 # VM tenant SSH — Cloudflare Tunnel (ADR-032a D2, resolved)
 
-**Audience:** platform operator (holds the Cloudflare account/API token). Agents
-cannot do the steps in this doc — they are Cloudflare **dashboard** writes, not git,
-and the operator directive that produced this doc explicitly withheld the CF token
-from automated work.
+> ## ⚠ NOW AUTOMATIC (ADR-038) — the per-tenant dashboard steps below are the FALLBACK
+> As of **ADR-038**, the three per-tenant Cloudflare steps (Tunnel public hostname →
+> Access application → DNS) are provisioned **automatically** by the in-cluster
+> `cf-vm-access` reconciler (`platform-services/cf-vm-access/`) — it reads each VM
+> tenant's `<app>-ssh` Service (label + emails annotation) and creates/removes the
+> Cloudflare resources on onboard/teardown. **You do NOT do the manual steps below per
+> tenant** once the **one-time** token setup is done — see
+> **`platform-services/cf-vm-access/README.md`** (create a scoped CF API token → seal it
+> → set the account/tunnel IDs → review a dry-run → flip `DRY_RUN=0`). The manual
+> per-tenant checklist in this doc remains ONLY as the fallback for before that one-time
+> setup exists.
+>
+> ## ⚠ HOSTNAME CORRECTION — use `ssh-<app>`, NOT `ssh.<app>`
+> The SSH hostname is the **single hyphenated label** `ssh-<app>.capstone.uamishub.com`,
+> **not** the dotted `ssh.<app>.capstone.uamishub.com`. The platform TLS cert is a
+> **one-level** wildcard `*.capstone.uamishub.com`, which does not cover a 2-label host —
+> the dotted form fails the HTTPS/Access handshake (`SSL_ERROR_NO_CYPHER_OVERLAP`). This
+> doc (and ADR-032a / PR #402) previously specified the wrong dotted form; it is corrected
+> throughout. The automation always emits the hyphenated form.
+
+**Audience:** platform operator (holds the Cloudflare account/API token). The **manual**
+steps in this doc are Cloudflare **dashboard** writes; the **automated** path (ADR-038)
+uses a scoped CF API **token** sealed in-cluster (agents still can't seal it — that is the
+operator's one-time keyboard step, `platform-services/cf-vm-access/README.md`).
 
 **What this unblocks:** public SSH into a KubeVirt VM tenant (`ssh <cloud-user>@...`)
 from a team's laptop — the gap ADR-032a's D2 left as an open operator decision
@@ -55,9 +75,13 @@ out of scope here — flagged as a future improvement, not done.)
 | End-user docs (two connect commands) | `skeleton-vm/docs/index.md`, `template.yaml` scaffolder output text | **This PR** |
 | Cloudflare Tunnel Public Hostname (SSH route) | Cloudflare dashboard | **You, per tenant** (below) |
 | Cloudflare Access application + policy (who may connect) | Cloudflare dashboard | **You, per tenant** (below) |
-| DNS CNAME for the `ssh.<app>...` hostname | Cloudflare dashboard (auto-created by the step above) | **You verify, per tenant** |
+| DNS CNAME for the `ssh-<app>...` hostname | Cloudflare dashboard (auto-created by the step above) | **You verify, per tenant** |
 
-## Per-tenant operator checklist
+## Per-tenant operator checklist — FALLBACK ONLY (automated by ADR-038)
+
+> Do this **only** if the one-time cf-vm-access token setup is not yet done
+> (`platform-services/cf-vm-access/README.md`). Once it is, this is fully automatic and
+> you skip this section entirely. Use `ssh-<appName>` (hyphen), never `ssh.<appName>`.
 
 Repeat this after every VM-tenant onboarding PR merges (it is also embedded as an
 "Operator steps" block in that PR's body, step 3). Needs: Cloudflare account access
@@ -68,7 +92,7 @@ with Zero Trust / Tunnels / Access permissions (the account holding the existing
    Cloudflare dashboard → **Zero Trust → Networks → Tunnels** → select the platform
    tunnel (the one `cloudflared-tunnel-token` was minted for) → **Public Hostname** →
    **Add a public hostname**:
-   - Subdomain: `ssh.<appName>`
+   - Subdomain: `ssh-<appName>`
    - Domain: `capstone.uamishub.com`
    - Path: (blank)
    - Service → Type: **SSH**
@@ -77,14 +101,14 @@ with Zero Trust / Tunnels / Access permissions (the account holding the existing
      a cluster pod).
 
    Example for a team `acme` / app `acmeapp`:
-   `ssh.acmeapp.capstone.uamishub.com` → SSH → `acmeapp-ssh.acme-vm-prod.svc.cluster.local:22`.
+   `ssh-acmeapp.capstone.uamishub.com` → SSH → `acmeapp-ssh.acme-vm-prod.svc.cluster.local:22`.
 
 2. **Add a Cloudflare Access application to gate it.** SSH has no OIDC/Dex login of
    its own (unlike every other platform hostname, which is gated by in-cluster
    Dex/oauth2-proxy) — Access is the *only* auth in front of this hostname, so do not
    skip this step.
    Zero Trust → **Access → Applications → Add an application → Self-hosted**:
-   - Application domain: `ssh.<appName>.capstone.uamishub.com`
+   - Application domain: `ssh-<appName>.capstone.uamishub.com`
    - Session duration: operator's choice (e.g. 24h)
    - Policy: **Allow** — Include: the team's UA-MIS emails (or an Access **Group** if
      you maintain one per team/cohort). Free tier covers this at the platform's
@@ -95,7 +119,7 @@ with Zero Trust / Tunnels / Access permissions (the account holding the existing
      Dex/oauth2-proxy, not Access).
 
 3. **Verify the DNS CNAME.** Adding the Public Hostname in step 1 auto-creates a
-   `ssh.<appName>.capstone.uamishub.com CNAME <tunnel-id>.cfargotunnel.com` DNS
+   `ssh-<appName>.capstone.uamishub.com CNAME <tunnel-id>.cfargotunnel.com` DNS
    record — confirm it exists (Zero Trust → Networks → Tunnels → the route, or DNS →
    Records). No manual DNS entry should be needed.
 
@@ -114,12 +138,12 @@ with Zero Trust / Tunnels / Access permissions (the account holding the existing
 brew install cloudflared        # or your OS's cloudflared package
 
 # every connection
-ssh -o ProxyCommand='cloudflared access ssh --hostname ssh.<appName>.capstone.uamishub.com' \
-    <cloud-user>@ssh.<appName>.capstone.uamishub.com
+ssh -o ProxyCommand='cloudflared access ssh --hostname ssh-<appName>.capstone.uamishub.com' \
+    <cloud-user>@ssh-<appName>.capstone.uamishub.com
 ```
 
 `cloudflared access ssh` opens a browser once for the Access login (or reuses a
-cached short-lived cert from `cloudflared access login ssh.<appName>....`), then
+cached short-lived cert from `cloudflared access login ssh-<appName>....`), then
 proxies the SSH session over the tunnel. `<cloud-user>` is the VM's default cloud-init
 user (`fedora`/`ubuntu`/`debian` depending on the base image). Teams can shorten this
 to a bare `ssh <appName>` via a `Host` block in `~/.ssh/config` with the
@@ -127,7 +151,7 @@ to a bare `ssh <appName>` via a `Host` block in `~/.ssh/config` with the
 
 **B — browser, zero install:**
 
-Open `https://ssh.<appName>.capstone.uamishub.com` directly in a browser. Cloudflare
+Open `https://ssh-<appName>.capstone.uamishub.com` directly in a browser. Cloudflare
 Access authenticates the user (email login), then renders an SSH terminal in the
 page — no client software needed on the laptop at all. This is the ADR's
 zero-infra/zero-install interim path (satisfies "no client install, no VPN" even for
@@ -145,11 +169,16 @@ changes.
 - **No image/CI/Backstage rebuild.** Everything on the git side of this change is
   template/manifest-only.
 
-## Known limitation / future automation
+## Automation status — DONE (ADR-038)
 
-Every VM tenant needs steps 1–3 above **by hand**, per tenant, until the tunnel is
-either (a) converted to a locally-managed `config.yaml` (git-served ingress rules,
-bigger change, not done here) or (b) driven via the Cloudflare API/Terraform provider
-from the onboarding PR's automation (needs a scoped Cloudflare API token handed to
-the platform — not available at the time of this change). Track as a backlog item if
-VM-tenant volume grows enough to make the manual step painful.
+The manual per-tenant burden described in earlier revisions of this doc is **resolved**
+by **ADR-038**: option (b) below (drive the Cloudflare API from in-cluster automation)
+is implemented as the `cf-vm-access` reconciler. It uses a scoped CF API token
+(Tunnel + Access + DNS edit) sealed in-cluster and enumerates desired state from the
+per-tenant SSH Services, so every future VM tenant is zero-touch and teardown cleans up
+after itself. The one remaining human action is a **one-time** setup (token + IDs +
+enable), documented in `platform-services/cf-vm-access/README.md`.
+
+Still noted as a possible future (NOT needed by ADR-038): (a) converting the tunnel to a
+locally-managed git-served `config.yaml` — a bigger change to the deliberate D-036
+token-tunnel topology, deferred.

@@ -56,21 +56,21 @@ repo, and run your stack directly on the box. cloud-init already installed the p
 key you provided at scaffold time and disabled password login.
 
 Public SSH rides the platform's existing Cloudflare Tunnel (no VPN, no LoadBalancer,
-$0) at `ssh.${{ values.appName }}.capstone.uamishub.com`, gated by a Cloudflare
+$0) at `ssh-${{ values.appName }}.capstone.uamishub.com`, gated by a Cloudflare
 Access login (your UA-MIS email). Two ways to connect:
 
 **A — native `ssh` client** (one-time: install the free `cloudflared` binary):
 
 ```bash
-ssh -o ProxyCommand='cloudflared access ssh --hostname ssh.${{ values.appName }}.capstone.uamishub.com' \
-    <cloud-user>@ssh.${{ values.appName }}.capstone.uamishub.com
+ssh -o ProxyCommand='cloudflared access ssh --hostname ssh-${{ values.appName }}.capstone.uamishub.com' \
+    <cloud-user>@ssh-${{ values.appName }}.capstone.uamishub.com
 ```
 
 (`<cloud-user>` is distro-specific — `fedora`/`ubuntu`/`debian` depending on your base
 image.) Add a `Host` block to `~/.ssh/config` to shorten this to a plain `ssh
 ${{ values.appName }}`.
 
-**B — browser, zero install:** open `https://ssh.${{ values.appName }}.capstone.uamishub.com`
+**B — browser, zero install:** open `https://ssh-${{ values.appName }}.capstone.uamishub.com`
 in a browser, sign in via Cloudflare Access, and use the rendered terminal.
 
 > This route is enabled by an operator/dashboard step **after** your onboarding PR

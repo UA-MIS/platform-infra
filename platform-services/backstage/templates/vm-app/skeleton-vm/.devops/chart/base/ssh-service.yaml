@@ -20,7 +20,7 @@
 # RESOLVED (ADR-032a D2, cheapest/easiest): the shipped public path is the
 # **Cloudflare Tunnel `ssh://` route** — reuses the existing $0 tunnel, no
 # LoadBalancer, no paid Spectrum. A Cloudflare Tunnel Public Hostname
-# (`ssh.${{ values.appName }}.capstone.uamishub.com`, Service type SSH) points
+# (`ssh-${{ values.appName }}.capstone.uamishub.com`, Service type SSH) points
 # DIRECTLY at this Service, fronted by a Cloudflare Access application (Zero Trust
 # free tier). That Public Hostname + Access app are Cloudflare-dashboard steps (the
 # tunnel is token-based/remotely-managed, so there is no in-cluster ingress config to
@@ -32,7 +32,24 @@ metadata:
   name: ${{ values.appName }}-ssh
   labels:
     app.kubernetes.io/name: ${{ values.appName }}
+    platform.capstone/team: ${{ values.team }}
+    # DESIRED-STATE MARKER for the cf-vm-access reconciler (ADR-038): this label is
+    # how the platform enumerates which VM tenants need a Cloudflare SSH route + Access
+    # app. It then reads the hostname/app from this Service's name+namespace and the
+    # allowed emails from the annotation below — so the Cloudflare Tunnel Public
+    # Hostname + Access application are provisioned AUTOMATICALLY on onboard and removed
+    # on teardown (no per-tenant dashboard steps). See ADR-038 /
+    # docs/operator/vm-ssh-cloudflare-access.md.
     platform.capstone/access: ssh
+  annotations:
+    # The team's allowed SSH emails — becomes the Cloudflare Access application's Allow
+    # policy for ssh-${{ values.appName }}.<domain> (SINGLE-label host so it stays under
+    # the one-level `*.capstone.uamishub.com` TLS wildcard — ADR-038). SSH has no OIDC
+    # of its own, so Access is the auth in front of the hostname; sshd is key-only as
+    # the backstop.
+    # NOT a secret — these are the same university emails already in the GitHub org.
+    # Comma-separated; edit + push to change who may connect.
+    platform.capstone/ssh-access-emails: "${{ values.teamEmails }}"
 spec:
   type: ClusterIP
   selector:

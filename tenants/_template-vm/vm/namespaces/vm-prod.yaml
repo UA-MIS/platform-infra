@@ -203,7 +203,7 @@ spec:
 # NetworkPolicy 3/5 — allow ingress on :22 from the `cloudflared` namespace ONLY —
 # the SSH transport (ADR-032a D2, resolved: Cloudflare Tunnel SSH, Option C/D,
 # $0/no-LoadBalancer). cloudflared proxies a per-tenant Cloudflare Tunnel Public
-# Hostname (`ssh.<app>.capstone.uamishub.com`, Service type SSH, fronted by a
+# Hostname (`ssh-<app>.capstone.uamishub.com`, Service type SSH, fronted by a
 # Cloudflare Access application) DIRECTLY to this Service (`<app>-ssh` :22) —
 # bypassing Traefik entirely, because SSH carries no Host header to route on and so
 # cannot ride the shared HTTP tunnel route every other service uses. Scoped to port
@@ -212,12 +212,13 @@ spec:
 # pod now allowed to originate traffic into this tier.
 #
 # The Cloudflare-side Public Hostname route + Access application that front this
-# hostname are dashboard/operator steps, NOT a git change — the tunnel is
-# token-based/remotely-managed (platform-services/cloudflared/deployment.yaml has no
-# mounted `ingress:` config for cloudflared to read), so there is no in-cluster
-# config to template for the route itself. See
-# docs/operator/vm-ssh-cloudflare-access.md for the exact per-tenant steps + the two
-# documented end-user connect commands.
+# hostname are provisioned AUTOMATICALLY (ADR-038) by the in-cluster cf-vm-access
+# reconciler (platform-services/cf-vm-access/): it reads the per-tenant `<app>-ssh`
+# Service (label platform.capstone/access=ssh + the ssh-access-emails annotation) and
+# GET-merge-PUTs the tunnel config (preserving the platform wildcard) + creates the
+# Access app — no per-tenant dashboard step. See ADR-038 and
+# docs/operator/vm-ssh-cloudflare-access.md (the manual dashboard steps remain there as
+# the fallback for before the one-time CF API token is set up).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

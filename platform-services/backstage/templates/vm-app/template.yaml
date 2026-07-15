@@ -144,6 +144,7 @@ spec:
       required:
         - baseImage
         - sshPubKey
+        - teamEmails
       properties:
         # BRING-YOUR-OWN / IMPORTED DISK IMAGE (ADR-032 §1, §4). The "image" is a whole
         # OS disk CDI imports into a PVC — NOT a container build. Point this at:
@@ -220,6 +221,23 @@ spec:
             key is set. This is a public key — safe to store in git.
           pattern: '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256|sk-ssh-ed25519@openssh.com|sk-ecdsa-sha2-nistp256@openssh.com) [A-Za-z0-9+/=]+( .*)?$'
           ui:help: 'Run `cat ~/.ssh/id_ed25519.pub` (or generate one with `ssh-keygen -t ed25519`) and paste the single-line output.'
+        # TEAM SSH ACCESS EMAILS (ADR-038). Who is allowed to open the SSH session.
+        # These become the Cloudflare Access application's Allow policy for
+        # ssh-<appName>.<domain> — the login gate in front of the VM's SSH hostname.
+        # Public SSH into the VM is now PROVISIONED AUTOMATICALLY at onboard (the
+        # cf-vm-access reconciler reads this list off the rendered ssh Service and
+        # creates the Cloudflare Tunnel route + Access app — no operator dashboard
+        # clicks per tenant), so this list must be right at scaffold time. Add/remove
+        # teammates later by editing the annotation on ssh-service.yaml and pushing.
+        teamEmails:
+          title: Team SSH access emails
+          type: string
+          description: >-
+            Comma-separated list of the UA-MIS emails allowed to SSH into this VM
+            (e.g. you + your teammates). These gate the Cloudflare Access login in
+            front of ssh-<appName>.capstone.uamishub.com. Not a secret.
+          pattern: '^\s*[^@\s,]+@[^@\s,]+\.[^@\s,]+(\s*,\s*[^@\s,]+@[^@\s,]+\.[^@\s,]+)*\s*$'
+          ui:help: 'e.g. `alice@crimson.ua.edu, bob@crimson.ua.edu`. Everyone on this list can open the SSH session (each still authenticates with a key inside the VM).'
 
     # NOTE (same as new-capstone-project): there is intentionally NO repoUrl input — the
     # repo is created at github.com/UA-MIS/<appName> (owner fixed; repo name = app name),
@@ -264,6 +282,9 @@ spec:
           diskGi: ${{ parameters.diskGi }}
           port: ${{ parameters.port }}
           sshPubKey: ${{ parameters.sshPubKey }}
+          # Rendered onto the <app>-ssh Service annotation the cf-vm-access reconciler
+          # reads to build the Cloudflare Access Allow policy (ADR-038).
+          teamEmails: ${{ parameters.teamEmails }}
           destination: ${{ ("github.com?owner=UA-MIS&repo=" + parameters.appName) | parseRepoUrl }}
         # ⚠ INDENTATION IS LOAD-BEARING (new-capstone-project lesson): this key MUST be
         # nested under `input:` (8-space indent, a sibling of url:/values:). Misplaced at
@@ -431,6 +452,10 @@ spec:
                 `allow-ingress-cloudflared-ssh` NetworkPolicy (port 22, from ns `cloudflared`)
                 alongside the Traefik/HTTP one — the SSH transport's in-cluster half
                 (ADR-032a D2).
+          - [ ] The `<app>-ssh` Service carries the `platform.capstone/access: ssh` label
+                and a non-empty `platform.capstone/ssh-access-emails` annotation — this is
+                what triggers AUTOMATIC Cloudflare SSH provisioning (ADR-038); a missing
+                label/annotation means the team gets no SSH route or an admit-nobody policy.
 
           ### Operator steps (run AFTER merge)
           ```bash
@@ -458,17 +483,22 @@ spec:
             && git commit -m "harbor pull robot (vm): team-${{ parameters.team }}"
           ```
 
-          **3) SSH public transport (ADR-032a D2) — Cloudflare dashboard steps, NOT
-          git** (the tunnel is token-based/remotely-managed; there is no in-cluster
-          `ingress:` config to commit for this). Full steps: `docs/operator/vm-ssh-cloudflare-access.md`. Summary:
-          - Zero Trust → Networks → Tunnels → platform tunnel → Public Hostname → Add:
-            subdomain `ssh.${{ parameters.appName }}`, domain `capstone.uamishub.com`,
-            Type `SSH`, URL
-            `${{ parameters.appName }}-ssh.${{ parameters.team }}-vm-prod.svc.cluster.local:22`.
-          - Zero Trust → Access → Applications → Add → Self-hosted, domain
-            `ssh.${{ parameters.appName }}.capstone.uamishub.com`, policy Allow =
-            team-${{ parameters.team }}'s UA-MIS emails.
-          - Confirm the CNAME Cloudflare auto-creates for that hostname in DNS.
+          **3) SSH public transport (ADR-032a D2 / ADR-038) — NOW AUTOMATIC.** As of
+          ADR-038 the per-tenant Cloudflare SSH resources are provisioned by the
+          in-cluster `cf-vm-access` reconciler (`platform-services/cf-vm-access/`), not by
+          dashboard clicks: on merge, this tenant's `${{ parameters.appName }}-ssh` Service
+          appears with its `platform.capstone/access: ssh` label + emails annotation, and
+          within ~5 min the reconciler creates the Cloudflare Tunnel Public Hostname
+          `ssh-${{ parameters.appName }}.capstone.uamishub.com` → SSH →
+          `${{ parameters.appName }}-ssh.${{ parameters.team }}-vm-prod.svc.cluster.local:22`
+          and the matching Access application (Allow = this team's emails). DNS is already
+          covered by the platform wildcard. **Operator: nothing to do per tenant** — just
+          confirm the reconciler picked it up (`kubectl -n cloudflared logs job/...` or
+          the CronJob's latest run), assuming the one-time token setup is done
+          (`platform-services/cf-vm-access/README.md`). Teardown removes these
+          automatically when the Service is deleted. (If the one-time CF API token has NOT
+          been set up yet, fall back to the manual dashboard steps in
+          `docs/operator/vm-ssh-cloudflare-access.md`.)
 
           > **No CI push robot** — the VM path has no Kaniko build (ADR-032 §6 CI). The
           > only image work, if any, is an OPTIONAL future disk-bake pipeline (v2.1).
@@ -502,14 +532,15 @@ spec:
           `git clone` your app repo and run your stack right on the box. cloud-init installs
           your public key and turns password login OFF. Public SSH rides the platform's
           existing Cloudflare Tunnel (ADR-032a D2, $0, no LoadBalancer) at
-          `ssh.${{ parameters.appName }}.capstone.uamishub.com`, gated by a Cloudflare
+          `ssh-${{ parameters.appName }}.capstone.uamishub.com`, gated by a Cloudflare
           Access login — connect with `ssh -o ProxyCommand='cloudflared access ssh
-          --hostname ssh.${{ parameters.appName }}.capstone.uamishub.com'
-          <cloud-user>@ssh.${{ parameters.appName }}.capstone.uamishub.com`, or just open
+          --hostname ssh-${{ parameters.appName }}.capstone.uamishub.com'
+          <cloud-user>@ssh-${{ parameters.appName }}.capstone.uamishub.com`, or just open
           that URL in a browser for a zero-install rendered terminal. This route is wired
-          by an **operator dashboard step after your onboarding PR merges** (see the PR
-          checklist below / `docs/operator/vm-ssh-cloudflare-access.md`) — until then your
-          VM is reachable at its HTTP URL but not over SSH.
+          **automatically** a few minutes after your onboarding PR merges (the platform's
+          cf-vm-access reconciler provisions it from your VM's SSH Service — ADR-038); the
+          people you listed in **Team SSH access emails** are who may log in. Until it
+          reconciles (~5 min) your VM is reachable at its HTTP URL but not yet over SSH.
           Your rootdisk **persists across reboots** (it is a pet, not immutable) — but note
           in-VM changes are NOT in git, so push anything you want to keep back to the repo.
 

@@ -1,0 +1,28 @@
+# cf-vm-access NON-SECRET config (ADR-038). These three IDs are NOT secrets
+# (they are account/tunnel identifiers + the public domain) — the SECRET is the
+# Cloudflare API token, sealed separately (see README.md). Until CF_ACCOUNT_ID and
+# CF_TUNNEL_ID are filled in, the reconciler no-ops (graceful).
+#
+# WHERE EACH VALUE COMES FROM (operator, one-time):
+#   PLATFORM_DOMAIN — the platform's public apex; already `capstone.uamishub.com`
+#     (same value as PLATFORM_DOMAIN elsewhere in the platform). Rarely changes.
+#   CF_ACCOUNT_ID   — Cloudflare account tag. Both this AND CF_TUNNEL_ID are encoded
+#     in the EXISTING tunnel token: the `cloudflared-tunnel-token` Secret's `token`
+#     key is base64(JSON) = {"a":"<accountTag>","t":"<tunnelID>","s":"<secret>"} —
+#     so `a` = CF_ACCOUNT_ID and `t` = CF_TUNNEL_ID. Or read them in the dashboard:
+#     account id = Cloudflare dashboard URL / "Account Home" → Account ID.
+#   CF_TUNNEL_ID    — the platform tunnel's UUID: Zero Trust → Networks → Tunnels →
+#     the platform tunnel → its ID (or `t` from the token above). This is the SAME
+#     tunnel that today carries the single `*.capstone.uamishub.com → traefik` route.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cf-vm-access-config
+  namespace: cloudflared
+  labels:
+    platform.capstone/component: platform
+data:
+  PLATFORM_DOMAIN: "capstone.uamishub.com"
+  # OPERATOR: fill these two in (see header). Empty => reconciler no-ops.
+  CF_ACCOUNT_ID: ""
+  CF_TUNNEL_ID: ""

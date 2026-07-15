@@ -69,6 +69,19 @@ Every option below points at the **same per-tenant `ClusterIP` SSH Service** (`<
 > `docs/operator/vm-ssh-cloudflare-access.md` for the operator checklist. Revisit A
 > only if native `ssh <host>:22` (no `-p`, no ProxyCommand) becomes a hard requirement
 > and the team is willing to pay for Spectrum or the fleet gets a routable public IP.
+>
+> **⚠ SUPERSEDED (2026-07-14) by ADR-038** on two points:
+> 1. **The per-tenant dashboard steps are now AUTOMATIC.** The Public Hostname route +
+>    Access application are provisioned by the in-cluster `cf-vm-access` reconciler
+>    (`platform-services/cf-vm-access/`), which reads each VM tenant's `<app>-ssh`
+>    Service and drives the Cloudflare API (token-managed tunnel config GET-merge-PUT +
+>    Access app), creating on onboard and removing on teardown. The manual checklist
+>    survives only as the pre-token-setup fallback. See ADR-038.
+> 2. **The SSH hostname is `ssh-<app>.capstone.uamishub.com` (single hyphenated label),
+>    NOT the dotted `ssh.<app>.capstone.uamishub.com` this note and the docs originally
+>    specified.** The platform TLS cert `*.capstone.uamishub.com` is a one-level wildcard
+>    that does not cover a 2-label host — the dotted form fails the HTTPS/Access TLS
+>    handshake. Corrected in ADR-038 + the operator doc.
 
 ### D3 — Clone-and-run: cloud-init bootstraps the MACHINE; the team clones + runs (true pet)
 

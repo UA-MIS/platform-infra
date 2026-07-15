@@ -1,0 +1,37 @@
+# cf-vm-access (ADR-038) — automates per-VM-tenant Cloudflare SSH provisioning
+# (Tunnel public-hostname route + Access application), replacing the 3 manual
+# Cloudflare-dashboard steps per VM tenant that ADR-032a's D2 left for the operator.
+#
+# Managed by the platform-services-appset (kustomize directory generator over
+# platform-services/*; this dir produces app `platform-svc-cf-vm-access`). Everything
+# runs in the EXISTING `cloudflared` namespace (co-located with the tunnel token; the
+# ns is created by platform-services/cloudflared/namespace.yaml — app
+# platform-svc-cloudflared).
+#
+# The CF API token itself is NOT shipped here — it is the operator's keyboard (sealed
+# at go-live, see README.md). The CronJob mounts it optionally, so this app syncs clean
+# and the reconciler NO-OPS until the token + IDs are set. DRY_RUN=1 (cronjob.yaml) is
+# the enforce switch — the operator reviews a dry-run's logs, then flips it to "0".
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - serviceaccount.yaml
+  - rbac.yaml
+  - configmap-ids.yaml
+  - cronjob.yaml
+
+# The reconciler script kept as a first-class .py file (lint/test-able) and embedded
+# as a stable-named ConfigMap the CronJob mounts at /scripts.
+configMapGenerator:
+  - name: cf-vm-access-script
+    namespace: cloudflared
+    files:
+      - reconcile.py
+    options:
+      disableNameSuffixHash: true
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false
