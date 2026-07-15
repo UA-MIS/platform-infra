@@ -34,12 +34,13 @@ data:
       priorityClassName: capstone-ci-build
       # Node placement for the KANIKO BUILD step pod (CI-fast, #237/#372; SOFT TIER).
       # Mirrors the shared platform-services/arc/hook-template.yaml. SOFT, RAM-aware tier
-      # bias fenced by a HARD candidate SET so the build PREFERS laptop-01, spills to
-      # ua-mis-db-1, then a control-plane OptiPlex, but lands on ANY candidate that can
-      # admit its request when the preferred tier is full — and NEVER on the 8GiB Mac
-      # workers (too small for a 4Gi/8Gi build; note this replaces the previous "fall
-      # back to Macs" behaviour, which risked runtime OOM on a Mac). Uses only labels
-      # that exist live → applies on the next ArgoCD sync, no `kubectl label` step.
+      # bias fenced by a HARD candidate SET so the build PREFERS laptop-01 (matched
+      # directly by ci-build=true), spills to any other build-pool node e.g. ua-mis-db-1,
+      # then a control-plane OptiPlex, but lands on ANY candidate that can admit its
+      # request when the preferred tier is full — and NEVER on the 8GiB Mac workers (too
+      # small for a 4Gi/8Gi build; note this replaces the previous "fall back to Macs"
+      # behaviour, which risked runtime OOM on a Mac). Uses only labels that exist live →
+      # applies on the next ArgoCD sync, no `kubectl label` step.
       tolerations:
         - key: capstone.io/control-plane
           operator: Equal
@@ -61,17 +62,18 @@ data:
               - matchExpressions:
                   - { key: node-role.kubernetes.io/control-plane, operator: Exists }
           preferredDuringSchedulingIgnoredDuringExecution:
-            # PRIMARY — laptop-01 (pool=build, no ci-build label).
+            # PRIMARY — laptop-01: the DEDICATED CI node, matched directly by its own
+            # label (capstone.io/ci-build=true). Highest weight = top preference.
             - weight: 100
               preference:
                 matchExpressions:
-                  - { key: capstone.io/pool, operator: In, values: ["build"] }
-                  - { key: capstone.io/ci-build, operator: DoesNotExist }
-            # SECONDARY — ua-mis-db-1 (dedicated CI box, ci-build=true).
+                  - { key: capstone.io/ci-build, operator: In, values: ["true"] }
+            # SECONDARY — any OTHER build-pool node (e.g. ua-mis-db-1, the 8GiB DB/Vault
+            # box) that is not the dedicated CI node. Fallback only.
             - weight: 50
               preference:
                 matchExpressions:
-                  - { key: capstone.io/ci-build, operator: In, values: ["true"] }
+                  - { key: capstone.io/pool, operator: In, values: ["build"] }
             # FALLBACK — control-plane OptiPlexes (last resort; tolerated above).
             - weight: 10
               preference:

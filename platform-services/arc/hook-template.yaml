@@ -63,15 +63,25 @@ data:
       # labels that exist live today → applies on the next ArgoCD sync, NO `kubectl
       # label` step required.
       #
-      # TIER BIAS (preferred, soft): laptop-01 (100) → ua-mis-db-1 (50) → OptiPlex (10).
-      # The scheduler PREFERS laptop, spills to db1, then an OptiPlex, but places the pod
-      # on ANY candidate that can admit the 4Gi request when the preferred tier is full —
-      # the fallback that was missing. (⚠ db1 is only ~7.5GiB alloc, below the 8Gi LIMIT
-      # — fine for a typical ~6Gi build; if a peak build OOMs on db1, swap the db1 and
-      # OptiPlex weights.) This PodSpecPatch is merged verbatim onto the step pod
+      # TIER BIAS (preferred, soft): laptop-01 (100, matched directly by its own
+      # capstone.io/ci-build=true label) → any other build-pool node e.g. ua-mis-db-1 (50,
+      # capstone.io/pool=build) → OptiPlex (10). The scheduler PREFERS the dedicated
+      # laptop, spills to the rest of the pool, then an OptiPlex, but places the pod on ANY
+      # candidate that can admit the 4Gi request when the preferred tier is full — the
+      # fallback that was missing. (⚠ db1 is only ~7.5GiB alloc, below the 8Gi LIMIT — fine
+      # for a typical ~6Gi build; if a peak build OOMs on db1, swap the db1 and OptiPlex
+      # weights.) This PodSpecPatch is merged verbatim onto the step pod
       # (runner-container-hooks' mergePodSpecWithOptions assigns top-level fields, no
       # deep-merge). The SAME affinity is mirrored on the runner pod in
       # arc-runner-scaleset-app.yaml and on the per-team templates.
+      #
+      # FIXED (this change): the weight-100 rule used to require `capstone.io/ci-build
+      # DoesNotExist`, which EXCLUDES laptop-01 (it carries ci-build=true) and instead
+      # matched ua-mis-db-1 (pool=build, no ci-build label) — the exact inverse of intent.
+      # Live-observed effect: the scheduler preferred the 8GiB DB/Vault node (db1, weight
+      # 100) over the dedicated 16GiB CI node (laptop-01, only weight 50), landing heavy
+      # 4Gi Backstage builds on db1 → kubelet admission OutOfMemory. laptop-01 is now
+      # matched directly by its own label so it is genuinely top-preferred.
       tolerations:
         - key: capstone.io/control-plane
           operator: Equal
@@ -98,18 +108,18 @@ data:
               - matchExpressions:
                   - { key: node-role.kubernetes.io/control-plane, operator: Exists }
           preferredDuringSchedulingIgnoredDuringExecution:
-            # PRIMARY — laptop-01: the build-pool node that is NOT the small db CI box
-            # (carries capstone.io/pool=build but no capstone.io/ci-build label).
+            # PRIMARY — laptop-01: the DEDICATED CI node, matched directly by its own
+            # label (capstone.io/ci-build=true). Highest weight = top preference.
             - weight: 100
               preference:
                 matchExpressions:
-                  - { key: capstone.io/pool, operator: In, values: ["build"] }
-                  - { key: capstone.io/ci-build, operator: DoesNotExist }
-            # SECONDARY — ua-mis-db-1: the dedicated CI box (capstone.io/ci-build=true).
+                  - { key: capstone.io/ci-build, operator: In, values: ["true"] }
+            # SECONDARY — any OTHER build-pool node (e.g. ua-mis-db-1, the 8GiB DB/Vault
+            # box) that is not the dedicated CI node. Fallback only.
             - weight: 50
               preference:
                 matchExpressions:
-                  - { key: capstone.io/ci-build, operator: In, values: ["true"] }
+                  - { key: capstone.io/pool, operator: In, values: ["build"] }
             # FALLBACK — control-plane OptiPlexes (last resort; tolerated above).
             - weight: 10
               preference:
