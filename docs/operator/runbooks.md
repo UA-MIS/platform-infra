@@ -145,7 +145,8 @@ If you rebuild the platform onto a fresh cluster, the order is:
 4. **Vault bring-up:** create `vault-server-tls`, init + unseal, enable KV v2 +
    k8s auth (`vault/README.md` §D), then the **auto-unseal** migration
    ([Vault & DR](vault-and-dr.md) / runbook §C–§D), then **(A)** above for the
-   snapshot role.
+   snapshot role. Once live, **(D)** below takes over day-to-day unsealing —
+   no more manual Shamir typing on every restart.
 5. **ESO wiring:** the ESO Vault role + `ClusterSecretStore`
    ([Secrets & ESO](secrets-eso.md) §2–§3); then `make vault-onboard` per tenant.
 6. **Netpols (security gate, manual-sync):**
@@ -154,3 +155,102 @@ If you rebuild the platform onto a fresh cluster, the order is:
 7. **Crossplane (optional, gated):** **(B)** above.
 8. **Observability:** verify the monitoring stack and rotate the Grafana password
    + wire the `platform-oncall` receiver ([Observability](observability.md)).
+
+---
+
+## (D) Vault auto-unseal via GitHub Actions (one-click + automatic)
+
+**What this is for.** `vault-unsealer` (ns `vault-unsealer`, single-node, Shamir
+3-of-5, MANUAL unseal by design — see [Vault & DR](vault-and-dr.md)) sits
+sealed after every restart until a human types 3 Shamir shares. The main
+3-node Vault auto-unseals *against* the unsealer via Transit, so a sealed
+unsealer cascades into main-Vault raft-quorum loss and an ESO
+`ClusterSecretStore` outage platform-wide — the 2026-07-13 incident (24h
+outage) this automates away. The workflow lives in the private ops repo
+`ccsmith33/capstone-ops-secrets` (NOT this repo) —
+`.github/workflows/unseal-vault.yaml`, triggered by `workflow_dispatch` (the
+button) or a `*/10 * * * *` cron. It checks
+`https://vault-unsealer.vault-unsealer.svc:8200/v1/sys/seal-status` and, if
+sealed, submits Shamir keys from `vault/unsealer-keys.txt` in that same repo
+until the threshold is met.
+
+### The button path (the normal way to unseal)
+
+1. Go to `ccsmith33/capstone-ops-secrets` → **Actions** → **unseal-vault** →
+   **Run workflow**.
+2. Watch the run. It logs whether the unsealer was already unsealed
+   (idempotent no-op) or had to submit keys, and fails LOUD (red X) if it's
+   still sealed after trying every key in the file.
+
+### Cron auto-heal (the normal way you never have to notice)
+
+The same workflow runs on its own every 10 minutes. Almost every tick is a
+fast no-op (already unsealed) — you only need the button for the rare case
+where you want to confirm recovery immediately instead of waiting up to 10
+min, or where the cron itself can't run (see the kill-switch and the
+GitHub-App/runner-coverage caveat below).
+
+### Incident kill-switch — `UNSEAL_PAUSED`
+
+If you need to stop BOTH the cron and the button (e.g. investigating *why*
+the unsealer keeps sealing, and you don't want the automation fighting your
+diagnosis): in `capstone-ops-secrets` → **Settings → Secrets and variables →
+Actions → Variables**, set `UNSEAL_PAUSED` to `true`. Every run then exits
+with a notice and does nothing. Delete the variable (or set it back to
+`false`) to resume.
+
+### One-time setup (do this once, before you rely on the cron)
+
+1. Get the unsealer's 5 Shamir shares from its ORIGINAL `vault operator init`
+   output (this is the same material [Vault & DR](vault-and-dr.md) already
+   tells you to write down offline — this is a second, git-tracked copy of it
+   for automation). If that original output is gone, `vault operator rekey`
+   the unsealer to mint a fresh set:
+   ```fish
+   kubectl -n vault-unsealer exec -it vault-unsealer-0 -- sh -c 'VAULT_SKIP_VERIFY=1 vault operator rekey -init -key-shares=5 -key-threshold=3'
+   # then -nonce=<nonce> -key=<share> for each existing share to complete it
+   ```
+2. In `capstone-ops-secrets`, edit `vault/unsealer-keys.txt` — replace each
+   `REPLACE_WITH_UNSEAL_KEY_N` placeholder line with one real key (one per
+   line). Commit + push to `main`.
+3. Set the repo Variable `UNSEAL_PAUSED` to `false` (or leave it unset —
+   unset defaults to NOT paused).
+4. Hand-run the workflow once (button path above) to confirm the keys are
+   correct before trusting the cron.
+
+**Where the plaintext keys live, and why:** see the header comment in
+`unseal-vault.yaml` and the PR that introduced it. Short version — this
+platform's ~3-person staff turns over every year, GitHub Actions Secrets are
+write-only (a successor can't read them back out), and an automated job
+holding a SOPS/age decryption key just relocates the same problem. The
+trade-off (read access to `capstone-ops-secrets` = unseal capability, NOT
+Vault-data-read capability) is accepted — keep that repo private.
+
+### Runner coverage caveat
+
+`capstone-ops-secrets` is a **personal** repo (`ccsmith33`), not under the
+**UA-MIS** org. The ARC listener's GitHub App (`ua-mis-arc-runners`) is
+installed on the UA-MIS org only — it does **not** cover personal-account
+repos. Until `capstone-ops-secrets` is moved into UA-MIS (recommended — this
+also serves the turnover goal: a personal-account repo is itself a
+continuity risk) or an equivalent runner registration is added, the
+workflow's `runs-on: ua-mis-kaniko` jobs queue with no listener to pick them
+up, and NEITHER the button nor the cron actually unseals anything. Check
+first: Actions tab on a run — if it says "Waiting for a runner" indefinitely,
+this is why.
+
+### Manual fallback — when GitHub/ARC themselves are down
+
+If GitHub Actions or the ARC runners are unavailable (whatever caused THAT
+outage), unseal by hand, 3 times (once per key, threshold 3-of-5):
+
+```fish
+kubectl exec -it -n vault-unsealer vault-unsealer-0 -- sh -c 'VAULT_SKIP_VERIFY=1 vault operator unseal'
+# paste one Shamir share, repeat 2 more times (any 3 of the 5 in
+# capstone-ops-secrets' vault/unsealer-keys.txt, or your offline copy)
+```
+
+Verify: `kubectl -n vault-unsealer exec -it vault-unsealer-0 -- vault status`
+should show `Sealed  false`. The main Vault then auto-unseals on its own next
+restart (or immediately, if it was already waiting on the unsealer) — no
+further manual steps needed on the main Vault itself.

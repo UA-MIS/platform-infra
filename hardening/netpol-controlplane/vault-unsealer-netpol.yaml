@@ -1,10 +1,14 @@
 # Control-plane NetworkPolicies — vault-unsealer namespace (ADR-030 B1, Track-2 DR).
 #
-# The unsealer Vault holds ONE Transit key and has exactly ONE client: the main
+# The unsealer Vault holds ONE Transit key and has exactly TWO clients: the main
 # Vault (vault ns), which calls it on :8200 to encrypt/decrypt its root key for
-# auto-unseal. So ingress is locked to the vault namespace + kubelet probes; egress
-# to DNS + the apiserver (service_registration "kubernetes") only. NO external
-# egress (in-cluster only). Same default-deny + scoped-allow posture as vault/.
+# auto-unseal, and the arc-runners ns (the `unseal-vault` GitHub Actions job,
+# capstone-ops-secrets repo — button + */10m cron, see docs/operator/runbooks.md
+# (D)), which calls the same :8200 to UNSEAL THIS VAULT ITSELF when a restart
+# leaves it sealed (the 2026-07-13 incident fix). So ingress is locked to those
+# two namespaces + kubelet probes; egress to DNS + the apiserver
+# (service_registration "kubernetes") only. NO external egress (in-cluster only).
+# Same default-deny + scoped-allow posture as vault/.
 #
 # Lives in hardening/netpol-controlplane/ so it inherits the MANUAL-SYNC Application
 # (platform-netpol-controlplane) — default-deny reaches this namespace only via the
@@ -29,6 +33,7 @@ spec:
     - Egress
 ---
 # --- INGRESS: from the main Vault (vault ns) -> :8200 (the seal "transit" calls),
+#     the arc-runners ns -> :8200 (the unseal-vault GH Actions job — see below),
 #     intra-namespace, and kubelet probes from the node. ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -42,12 +47,25 @@ spec:
   policyTypes:
     - Ingress
   ingress:
-    # The main Vault (vault ns) is the ONLY application client — it dials the
-    # unsealer's transit engine on :8200 for every auto-unseal.
+    # The main Vault (vault ns) is the primary application client — it dials
+    # the unsealer's transit engine on :8200 for every auto-unseal.
     - from:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: vault
+      ports:
+        - protocol: TCP
+          port: 8200
+    # The self-hosted ARC runner pods (arc-runners ns) -> :8200. Second, DELIBERATE
+    # client: the `unseal-vault` GitHub Actions job (capstone-ops-secrets repo)
+    # calls GET /v1/sys/seal-status + PUT /v1/sys/unseal here on a button-click or
+    # its */10m cron, to unseal this Vault WITHOUT a human typing Shamir shares —
+    # the fix for the 2026-07-13 incident (see docs/operator/runbooks.md (D)).
+    # Symmetric egress allow lives in hardening/netpol-runners/runner-netpol.yaml.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: arc-runners
       ports:
         - protocol: TCP
           port: 8200

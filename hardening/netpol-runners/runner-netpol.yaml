@@ -63,10 +63,11 @@ spec:
             cidr: 10.237.168.0/22   # Talos node LAN segment (kubelet probe source)
 ---
 # --- EGRESS: DNS + the in-cluster kubernetes API service (for containerMode:
-#     kubernetes job-pod creation) + Harbor (in-cluster) + external HTTPS:443
-#     (GitHub). Deliberately does NOT open the node CIDR wholesale (that would
-#     expose the apiserver on the node IP); the runner reaches the API only via
-#     the kubernetes Service ClusterIP in 10.43/16, scoped below. ---
+#     kubernetes job-pod creation) + Harbor (in-cluster) + vault-unsealer
+#     (in-cluster, the unseal-vault job's own target — see below) + external
+#     HTTPS:443 (GitHub). Deliberately does NOT open the node CIDR wholesale
+#     (that would expose the apiserver on the node IP); the runner reaches the
+#     API only via the kubernetes Service ClusterIP in 10.43/16, scoped below. ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -124,6 +125,15 @@ spec:
           port: 8443   # Traefik websecure pod port (:443 svc -> :8443 pod) — image push via Traefik
         - protocol: TCP
           port: 8080   # harbor-core pod port (:80 svc -> :8080 pod) — direct-core fallback path
+        # vault-unsealer.vault-unsealer.svc:8200 — the `unseal-vault` GitHub
+        # Actions job's own target (capstone-ops-secrets repo, button + */10m
+        # cron; docs/operator/runbooks.md (D)). No svc->pod port translation
+        # gotcha here (unlike Traefik above): the unsealer's listener binds
+        # :8200 directly, so the Service port IS the pod port. Symmetric
+        # ingress allow lives in
+        # hardening/netpol-controlplane/vault-unsealer-netpol.yaml.
+        - protocol: TCP
+          port: 8200   # vault-unsealer (seal-status GET + unseal PUT)
     # External HTTPS:443 ONLY — GitHub (clone/Actions API/job token) + base-image
     # pulls. Port-scoped (no FQDN egress until Cilium).
     #
