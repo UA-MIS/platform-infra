@@ -1,0 +1,19 @@
+# platform-services/course-demos — PLATFORM-owned prerequisites for the
+# externally-sourced `course-demos` app (public polyglot demo platform,
+# demos.uamishub.com — the live-demo targets the MIS 421/521 slides link to).
+#
+# Same split as slidedeck/harbor/backstage: this flat dir is picked up by the
+# platform-services directory generator (applicationsets/platform-services-appset.yaml)
+# as Application `platform-svc-course-demos`, shipping only the platform-side glue
+# the workload can't carry — the sealed image-pull robot secret (shared by both
+# demo images) and the ArgoCD `Application` that GitOps-manages the workload from
+# the SEPARATE app repo (github.com/UA-MIS/course-demos, path deploy). The workload
+# manifests (namespace + 2 deployments + 2 services + Traefik Middleware + 2
+# ingresses + netpol) live in that repo. No Vault/ExternalSecret here — the app has
+# no secrets, no DB, no external egress.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - sealedsecret-pull.yaml
+  - application.yaml

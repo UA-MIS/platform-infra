@@ -1,0 +1,38 @@
+# ArgoCD Application — GitOps-manages the course-demos workload from its OWN repo
+# (the second external-repo Application, after slidedeck). Source manifests live in
+# github.com/UA-MIS/course-demos/deploy: ns `demos`, the hub (Next.js) + flask-hello
+# (Flask) deployments, their services, a Traefik Middleware (StripPrefix
+# /flask-hello), two path-routed ingresses (priority 20 path + 10 catch-all on
+# demos.uamishub.com), and a netpol. The `platform` AppProject must allow the repo
+# in sourceRepos (bootstrap/platform-appproject.yaml — bootstrap-only; re-apply with
+# `make bootstrap-reapply` after merge or this app InvalidSpecErrors "repo not
+# permitted"). Namespace `demos` is inside the project's wildcard destination.
+#
+# Applied indirectly via the platform-services directory generator
+# (platform-svc-course-demos → applies this CR). CreateNamespace=true so the ns
+# exists for the workload; the sibling SealedSecret retries until it does.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: course-demos
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/UA-MIS/course-demos
+    targetRevision: main
+    path: deploy
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: demos
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff: { duration: 5s, factor: 2, maxDuration: 3m }
