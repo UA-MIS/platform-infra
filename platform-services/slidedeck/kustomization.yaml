@@ -1,0 +1,19 @@
+# platform-services/slidedeck — the PLATFORM-owned prerequisites for the
+# externally-sourced `slidedeck` app (reveal.js slide host, slides.uamishub.com).
+#
+# Same split as harbor/backstage: this flat dir is picked up by the
+# platform-services directory generator (applicationsets/platform-services-appset.yaml)
+# as Application `platform-svc-slidedeck`, and ships ONLY the platform-side glue the
+# workload can't carry itself — the sealed image-pull robot secret, the ESO
+# ExternalSecret that materializes the app's env from Vault, and the ArgoCD
+# `Application` that GitOps-manages the workload from the SEPARATE app repo
+# (github.com/UA-MIS/slidedeck, path deploy). The workload manifests
+# (namespace + deployment + service + ingress + netpol) live in that repo and are
+# synced by the nested `slidedeck` Application below — NOT here.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - sealedsecret-pull.yaml
+  - externalsecret-env.yaml
+  - application.yaml

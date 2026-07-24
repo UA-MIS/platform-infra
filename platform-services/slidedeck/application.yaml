@@ -1,0 +1,39 @@
+# ArgoCD Application — GitOps-manages the slidedeck workload from its OWN repo.
+# This is the FIRST external-repo Application on the platform: unlike every other
+# platform service (sourced from platform-infra) or tenant (sourced from a tenant
+# repo via the tenants ApplicationSet), slidedeck's deploy manifests live in the
+# standalone app repo github.com/UA-MIS/slidedeck. The `platform` AppProject must
+# allow that repo in `sourceRepos` (bootstrap/platform-appproject.yaml — a
+# bootstrap-only object; re-apply with `make bootstrap-reapply` after merge or this
+# app InvalidSpecErrors "repo not permitted"). Namespace `slides` is already inside
+# the project's wildcard destination.
+#
+# Applied indirectly: the platform-services directory generator emits
+# `platform-svc-slidedeck` over this dir, which applies THIS Application CR
+# (app-of-apps). CreateNamespace=true so the ns exists for the workload; the
+# platform-svc-slidedeck sibling ExternalSecret/SealedSecret retry until it does.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: slidedeck
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/UA-MIS/slidedeck
+    targetRevision: main
+    path: deploy
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: slides
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff: { duration: 5s, factor: 2, maxDuration: 3m }

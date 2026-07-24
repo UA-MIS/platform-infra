@@ -116,6 +116,20 @@ spec:
       ports:
         - protocol: TCP
           port: 5432
+    # ns `slides` -> CNPG (5432 only) — slidedeck (slides.uamishub.com) is a live
+    # DB client of capstone-pg (db `slides`, role `slides`). Same by-name admit as
+    # `backstage` above: ns `slides` is a platform namespace (no
+    # platform.capstone/team label), so it is NOT covered by
+    # allow-ingress-tenant-namespaces below. Scoped to 5432 only — slidedeck never
+    # talks to MariaDB/MinIO. The companion egress-allow (slides pod -> db-tier
+    # 5432) ships in the app repo's deploy/netpol.yaml.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: slides
+      ports:
+        - protocol: TCP
+          port: 5432
     # ns `crossplane-system` -> MariaDB (3306) AND CNPG Postgres (5432) — the
     # Crossplane repoint cutover (docs/operator/in-cluster-db-tier-runbook.md §4c):
     # provider-sql runs its admin session against the in-cluster DB tier instead of

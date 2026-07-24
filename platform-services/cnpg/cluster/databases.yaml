@@ -29,3 +29,19 @@ spec:
   cluster:
     name: capstone-pg
   databaseReclaimPolicy: retain
+---
+# slidedeck's database (slides.uamishub.com). Owned by the `slides` role
+# (roles.yaml); the app creates its own tables via idempotent DDL on boot.
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: capstone-pg-slides
+  namespace: db-tier
+  labels:
+    platform.capstone/component: platform
+spec:
+  name: slides
+  owner: slides
+  cluster:
+    name: capstone-pg
+  databaseReclaimPolicy: retain

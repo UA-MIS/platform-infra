@@ -23,6 +23,15 @@ spec:
   sourceRepos:
     - https://github.com/UA-MIS/platform-infra
     - https://github.com/UA-MIS/platform-infra.git
+    # slidedeck (slides.uamishub.com) is the FIRST platform app sourced from its OWN
+    # repo rather than platform-infra — the `slidedeck` Application
+    # (platform-services/slidedeck/application.yaml) points here. ⚠ INSTALL-OWNED
+    # like the Helm-chart repos below: this reaches the live `platform` AppProject
+    # ONLY via `make bootstrap`/`make bootstrap-reapply` (this file is not
+    # GitOps-reconciled) — re-apply after merge or the app InvalidSpecErrors
+    # "application repo ... is not permitted".
+    - https://github.com/UA-MIS/slidedeck
+    - https://github.com/UA-MIS/slidedeck.git
     # --- P2.2 (deploy method A, D-022): pinned external Helm chart repos for
     #     platform services that are Helm-only upstream. This widens the supply-chain
     #     allowlist by ONE named repo per chart; security audits each addition; chart
