@@ -78,3 +78,26 @@ spec:
   databaseRoleReclaimPolicy: retain
   passwordSecret:
     name: cnpg-crossplane-provisioner-credentials
+---
+# slidedeck's owner role (slides.uamishub.com — reveal.js slide host). Owns the
+# `slides` database (databases.yaml); the app runs its own idempotent DDL on boot
+# so no createdb/createrole needed. Password from the ESO-materialized basic-auth
+# Secret (platform-services/db-tier/externalsecrets.yaml → Vault
+# secret/platform/db/cnpg/slides). Same non-superuser, retain-on-delete posture as
+# backstage/harbor above.
+apiVersion: postgresql.cnpg.io/v1
+kind: DatabaseRole
+metadata:
+  name: capstone-pg-slides
+  namespace: db-tier
+  labels:
+    platform.capstone/component: platform
+spec:
+  cluster:
+    name: capstone-pg
+  name: slides
+  login: true
+  superuser: false
+  databaseRoleReclaimPolicy: retain
+  passwordSecret:
+    name: cnpg-slides-app-credentials
