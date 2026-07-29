@@ -129,6 +129,21 @@ spec:
               - name: capstone-n3       # 100.117.55.70 — WWID naa.5001b448b555979f
                 devices:
                   - name: /dev/disk/by-id/wwn-0x5001b448b555979f   # WDC WDS500G2B0A 500GB sata
+              # ── 5-node expansion (2026-07-29): the two 64GB Debian workers ──
+              # capstone-w1/w2 each carry a dedicated raw NVMe (verified wiped:
+              # wipefs + blkdiscard, zero partitions) alongside their SATA boot
+              # SSD. 5 OSD hosts + replica-3 host failure domain = a downed node
+              # now REBUILDS onto the spare hosts instead of running degraded
+              # until it returns — the maintenance-headroom prerequisite for the
+              # CP RAM-shuffle window and the mac/db1 retirement drains. NVMe
+              # by-id paths are serial-stable (consumer BC511 has no wwn- alias).
+              # mon count stays 3 (correct at this scale; mons stay on the CPs).
+              - name: capstone-w1       # 100.114.190.45 — Dell i7-10700, 64GB
+                devices:
+                  - name: /dev/disk/by-id/nvme-BC511_NVMe_SK_hynix_512GB_ND07N780710907Q5E   # 512GB NVMe, dedicated OSD
+              - name: capstone-w2       # 100.81.94.114 — Dell i7-10700, 64GB
+                devices:
+                  - name: /dev/disk/by-id/nvme-BC511_NVMe_SK_hynix_512GB_ND07N780710907Q5H   # 512GB NVMe, dedicated OSD
 
         # ── replicated block pool: replica-3, failure domain = host ──
         # 3 OSDs (one per node) → replica-3 with host failure domain = the cluster
