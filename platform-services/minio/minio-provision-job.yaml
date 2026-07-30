@@ -50,8 +50,10 @@ spec:
         platform.capstone/component: platform
     spec:
       restartPolicy: Never
-      nodeSelector:
-        kubernetes.io/hostname: mac-debian-02
+      # No nodeSelector: this Job is a network-only `mc` client to the minio
+      # Service — it does NOT need to co-locate with the minio pod. Pinning it to a
+      # single node (was mac-debian-02, now retired) only made it fragile. Let it
+      # schedule anywhere so DR provisioning can't be stranded by a node leaving.
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
