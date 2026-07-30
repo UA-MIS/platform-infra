@@ -59,4 +59,11 @@ spec:
             - key: kubernetes.io/hostname
               operator: In
               values:
-                - mac-debian-02
+                # Re-homed 2026-07-29 from the retired mac-debian-02 to a permanent
+                # Debian worker (fleet consolidation — mac-debian-02 left the cluster,
+                # stranding this local PV + failing all Velero backups). capstone-w1
+                # is a permanent 64GB worker with ~388G free on its root SSD; keeps
+                # the DR intent (backups on local disk, OFF Ceph, so a Ceph disaster
+                # can't also lose the backups). PV nodeAffinity is immutable, so the
+                # old PV/PVC were deleted and recreated to move here.
+                - capstone-w1
