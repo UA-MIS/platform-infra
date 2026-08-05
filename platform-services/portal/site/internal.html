@@ -87,6 +87,13 @@
     color: var(--ua-charcoal);
   }
   .card .desc { font-size: 0.9rem; color: var(--text-dim); }
+  .card .desc code {
+    background: var(--ua-tint);
+    color: var(--ua-crimson-dark);
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-size: 0.85em;
+  }
   .card .host {
     display: block;
     margin-top: 10px;
@@ -162,9 +169,26 @@
           <div class="desc">Dashboards &amp; logs &mdash; metrics, alerts, and log search for your app and the platform it runs on.</div>
           <span class="host">grafana.capstone.uamishub.com</span>
         </a>
+        <!--
+          UX fix: this used to be a single card linking straight to
+          db-admin.capstone.uamishub.com, the platform-wide admin console
+          (forwardAuth-gated to UA-MIS:labmx). Students clicked it looking for
+          THEIR OWN console, authenticated fine (any UA-MIS member can), then
+          got denied by the labmx gate -- confusing, and pointed at the wrong
+          console entirely. This page has no per-user logic (static site, no
+          backend), so it can't know which team's console to link a given
+          visitor to -- Backstage (which does know) is the source of truth for
+          that link. Split into two cards: an info-only explainer with the
+          <team>-db... pattern (no misleading link), and a separate,
+          clearly-labeled admin-only link for labmx.
+        -->
+        <div class="card no-link">
+          <div class="name">Your database console</div>
+          <div class="desc">Browse and query your team's database directly. Every team gets its own console at <code>&lt;team&gt;-db.capstone.uamishub.com</code> &mdash; find your team's exact link on your app's page in Backstage (Overview tab), where you're already signed in.</div>
+        </div>
         <a class="card" href="https://db-admin.capstone.uamishub.com" target="_blank" rel="noopener">
-          <div class="name">Database consoles</div>
-          <div class="desc">Browse and query databases directly. Your own team's console is linked from your app's page in Backstage; this link is the platform-wide admin console (UA-MIS platform team only &mdash; you'll get a clean access-denied if that's not you).</div>
+          <div class="name">DB Admin (platform team)</div>
+          <div class="desc">The platform-wide admin console, listing every platform database (Backstage, Harbor, Crossplane, MariaDB). UA-MIS platform team (labmx) only &mdash; if that's not you, use "Your database console" above instead.</div>
           <span class="host">db-admin.capstone.uamishub.com</span>
         </a>
       </div>
