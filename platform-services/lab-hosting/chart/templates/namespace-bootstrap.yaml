@@ -8,7 +8,7 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: {{ include "lab-app.namespace" . }}
+  name: {{ include "lab-app.namespace" . | quote }}
   labels:
     app.kubernetes.io/managed-by: argocd
     {{- include "lab-app.labels" . | nindent 4 }}
@@ -27,7 +27,7 @@ apiVersion: v1
 kind: ResourceQuota
 metadata:
   name: compute-quota
-  namespace: {{ include "lab-app.namespace" . }}
+  namespace: {{ include "lab-app.namespace" . | quote }}
   labels:
     {{- include "lab-app.labels" . | nindent 4 }}
 spec:
@@ -53,7 +53,7 @@ apiVersion: v1
 kind: LimitRange
 metadata:
   name: container-limits
-  namespace: {{ include "lab-app.namespace" . }}
+  namespace: {{ include "lab-app.namespace" . | quote }}
   labels:
     {{- include "lab-app.labels" . | nindent 4 }}
 spec:
@@ -74,21 +74,29 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: default-deny-all
-  namespace: {{ include "lab-app.namespace" . }}
+  namespace: {{ include "lab-app.namespace" . | quote }}
   labels:
     {{- include "lab-app.labels" . | nindent 4 }}
 spec:
   podSelector: {}
   policyTypes: [Ingress, Egress]
 ---
-# NetworkPolicy 2/3 — ingress from Traefik/cloudflared + intra-namespace. NO
-# oauth2-proxy selector anywhere (design decision: lab apps are public, like
+# NetworkPolicy 2/3 — ingress from Traefik/cloudflared ONLY. NO oauth2-proxy
+# selector anywhere (design decision: lab apps are public, like
 # demos.uamishub.com — see ingress.yaml for the matching "no gating" note).
+#
+# ADVERSARIAL REVIEW M-2: the original draft also allowed intra-namespace
+# pod-to-pod traffic (`- from: - podSelector: {}`), copied from the tenant
+# model where one namespace = one TRUSTED team. Here one namespace =
+# `lab-<slug>`, shared by up to 15 MUTUALLY UNTRUSTED students — nothing in
+# this chart needs intra-ns traffic (one Deployment/Service per student, no
+# sidecars, no shared cache), so allowing it would only give one student's pod
+# an unnecessary network path to another's. Removed.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-ingress-edge-and-intra-ns
-  namespace: {{ include "lab-app.namespace" . }}
+  name: allow-ingress-edge
+  namespace: {{ include "lab-app.namespace" . | quote }}
   labels:
     {{- include "lab-app.labels" . | nindent 4 }}
 spec:
@@ -100,21 +108,22 @@ spec:
             matchLabels: { kubernetes.io/metadata.name: kube-system } # traefik
         - namespaceSelector:
             matchLabels: { kubernetes.io/metadata.name: cloudflared }
-    - from:
-        - podSelector: {}
 ---
-# NetworkPolicy 3/3 — egress: DNS, intra-ns, and the shared lab-mariadb in ns
-# `slides` (the SAME instance platform-services/lab-db/mariadb.yaml provisions
-# for the browser-only Adminer console — hosted apps reach it directly with the
-# DATABASE_URL the ExternalSecret below materializes). No general internet
-# egress by default, matching the platform-wide least-privilege posture
-# (tenants/_template, slidedeck/deploy/netpol.yaml) — a lab exercise that needs
-# outbound internet is a documented follow-up, not a default-open here.
+# NetworkPolicy 3/3 — egress: DNS + the shared lab-mariadb in ns `slides` (the
+# SAME instance platform-services/lab-db/mariadb.yaml provisions for the
+# browser-only Adminer console — hosted apps reach it directly with the
+# DATABASE_URL the ExternalSecret below materializes; that file's own
+# `lab-mariadb` NetworkPolicy carries the matching INGRESS rule for this
+# namespace-label, see platform-services/lab-db/netpol.yaml). No general
+# internet egress by default, matching the platform-wide least-privilege
+# posture (tenants/_template, slidedeck/deploy/netpol.yaml) — a lab exercise
+# that needs outbound internet is a documented follow-up, not a default-open
+# here. NO intra-namespace rule — same M-2 reasoning as NetworkPolicy 2/3 above.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-egress-dns-intra-ns-and-labdb
-  namespace: {{ include "lab-app.namespace" . }}
+  name: allow-egress-dns-and-labdb
+  namespace: {{ include "lab-app.namespace" . | quote }}
   labels:
     {{- include "lab-app.labels" . | nindent 4 }}
 spec:
@@ -127,8 +136,6 @@ spec:
       ports:
         - { protocol: UDP, port: 53 }
         - { protocol: TCP, port: 53 }
-    - to:
-        - podSelector: {}
     - to:
         - namespaceSelector:
             matchLabels: { kubernetes.io/metadata.name: slides }

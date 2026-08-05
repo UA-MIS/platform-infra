@@ -26,6 +26,31 @@
 # (no green CI run) still gets an Application — see chart `lab-app.imageTag` for
 # how the ABSENT `tag` key is handled (never a `:latest` default; Kyverno
 # `disallow-latest-tag` is Enforce and lab-* is not excluded).
+#
+# ADVERSARIAL REVIEW C-2 (blast radius of one bad fleet-repo row): with
+# `goTemplateOptions: missingkey=error`, a raw `{{.username}}`-style reference
+# against a params map that is MISSING that key aborts rendering — and per the
+# review, that abort is not reliably scoped to just this one generated element
+# (behavior varies by ArgoCD version/generator; treated here as fleet-wide-risk
+# by default). EVERY field below is therefore `hasKey`-guarded, never accessed
+# raw, so a malformed row (slides bug, or a stray/misrouted tags/*.yaml) can
+# NEVER abort this ApplicationSet's render for the other labs/students — it
+# degrades to an empty string for that one field, which then either (a) fails
+# LOUDLY but ONLY for that one Application, inside the chart's own
+# `_helpers.tpl` fail-guards (see chart/templates/_helpers.tpl — labSlug/
+# username/tag are all format-validated there), or (b) in the rarer case where
+# the malformed field only affects `metadata.name`/`destination.namespace`
+# cosmetically, produces an invalid k8s object name that the API server
+# rejects for just that one Application (still a bounded, visible, single-item
+# failure — see README "Contract: required + validated fields").
+#
+# NOT fixed by this guard: a DUPLICATE (username, labSlug) key across two rows
+# (e.g. a stale/misrouted tags/*.yaml left over after a rename) still makes the
+# `merge` GENERATOR ITSELF error — that happens before any template rendering,
+# so no amount of `hasKey` guarding in the template reaches it. Documented as
+# an accepted operational risk in the README ("Known risk: duplicate merge
+# keys") — recommend alerting on the ApplicationSet controller's own error
+# conditions for `labs-students` if this needs to be caught proactively.
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
 metadata:
@@ -54,11 +79,11 @@ spec:
                 - path: "labs/*/tags/*.yaml"
   template:
     metadata:
-      name: 'lab-{{.labSlug}}-{{.username}}'
+      name: 'lab-{{ if hasKey . "labSlug" }}{{.labSlug}}{{ end }}-{{ if hasKey . "username" }}{{.username}}{{ end }}'
       labels:
         platform.capstone/component: lab
-        platform.capstone/lab-slug: '{{.labSlug}}'
-        platform.capstone/lab-username: '{{.username}}'
+        platform.capstone/lab-slug: '{{ if hasKey . "labSlug" }}{{.labSlug}}{{ end }}'
+        platform.capstone/lab-username: '{{ if hasKey . "username" }}{{.username}}{{ end }}'
     spec:
       project: platform
       source:
@@ -68,17 +93,17 @@ spec:
         helm:
           valuesObject:
             studentApp: true
-            labSlug: '{{.labSlug}}'
-            username: '{{.username}}'
-            repo: '{{.repo}}'
-            # `hasKey` (not the missing-key auto-error path) so a student with no
-            # tag file yet renders tag: "" instead of failing this Application's
-            # whole render — the chart's own default (`:unreleased`, never
-            # `:latest`) takes it from there.
+            # Every field hasKey-guarded (see the ApplicationSet-level header
+            # comment above) — a missing field renders empty string here, which
+            # the chart's own `_helpers.tpl` fail-guards then reject LOUDLY, but
+            # scoped to just this one Application's render.
+            labSlug: '{{ if hasKey . "labSlug" }}{{.labSlug}}{{ end }}'
+            username: '{{ if hasKey . "username" }}{{.username}}{{ end }}'
+            repo: '{{ if hasKey . "repo" }}{{.repo}}{{ end }}'
             tag: '{{ if hasKey . "tag" }}{{.tag}}{{ end }}'
       destination:
         server: https://kubernetes.default.svc
-        namespace: 'lab-{{.labSlug}}'
+        namespace: 'lab-{{ if hasKey . "labSlug" }}{{.labSlug}}{{ end }}'
       # Same webhook-injected-defaults drift class the platform-services
       # ApplicationSet template already documents for ExternalSecret — kept
       # identical here so every ExternalSecret in the fleet gets the same fix.

@@ -1,52 +1,110 @@
 {{/*
-Shared naming — defined ONCE here so namespace mode and studentApp mode can never
-diverge on what "the lab's namespace" or "the student's app name" means.
+Shared naming + VALIDATION — defined ONCE here so namespace mode and studentApp
+mode can never diverge on what "the lab's namespace" or "the student's app
+name" means, and so every value derived from fleet-repo data (potentially a
+slides bug, or a student's own CI writing an untrusted tag) is validated
+BEFORE it is ever interpolated into a manifest. See README "Contract: lowercase
+everywhere" and "Contract: required + validated fields" for what this enforces
+and why.
+
+DESIGN NOTE (adversarial review C-2): the ApplicationSet templates
+(applicationsets/labs-*-appset.yaml) use `hasKey`-guarded access for every
+field, so a fleet-repo row missing a field NEVER causes ArgoCD's own
+`missingkey=error` template render to abort — it always renders SOMETHING
+(an empty string when a field is absent) into `valuesObject`. This chart is
+therefore the ONE place all validation actually happens, and `fail` here
+aborts only THIS Application's `helm template` call — never the rest of the
+fleet.
 */}}
 
-{{- define "lab-app.namespace" -}}
-lab-{{ .Values.labSlug }}
+{{- define "lab-app.labSlug" -}}
+{{- $v := .Values.labSlug | default "" -}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $v) -}}
+{{ fail (printf "labSlug %q is missing, empty, or not lowercase+DNS-safe. Contract (README 'Contract: lowercase everywhere'): slides writes lab.yaml/students.yaml with labSlug already matching ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$." $v) }}
+{{- end -}}
+{{- $v -}}
 {{- end -}}
 
-{{/* GitHub usernames are already DNS-safe (alnum + single internal hyphens, no
-     leading/trailing/double hyphen — GitHub's own username policy); lowercasing
-     is the only normalization needed (see values.yaml "Username handling"). */}}
+{{/* GitHub usernames are DNS-safe by GitHub's own policy (alnum + single
+     internal hyphens, no leading/trailing/double hyphen) IF already lowercase
+     — but nothing forces slides to write students.yaml lowercased, and the
+     `labs-students` merge generator's mergeKeys are an EXACT STRING match
+     against lab-build.yaml's already-lowercased tag-file username. A case
+     mismatch there does not error — it just silently never merges, pinning
+     the student on the chart's `:unreleased` placeholder forever with no
+     visible failure ANYWHERE (adversarial review C-1). Failing loudly here
+     converts that silent, permanent breakage into a visible, per-Application
+     Degraded status the first time it would matter. */}}
 {{- define "lab-app.username" -}}
-{{ .Values.username | lower }}
+{{- $v := .Values.username | default "" -}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $v) -}}
+{{ fail (printf "username %q is missing, empty, or not already lowercase+DNS-safe. Contract (README 'Contract: lowercase everywhere'): slides writes students.yaml with username ALREADY lowercased (lab-build.yaml already lowercases before writing the tag file — the two must match byte-for-byte for the merge generator to join)." $v) }}
+{{- end -}}
+{{- $v -}}
 {{- end -}}
 
-{{/* appName doubles as: k8s object name, Harbor image repo name (within the
-     shared `labs` project), and the Ingress hostname label — ONE identifier
-     everywhere, mirroring D-026's "one slug everywhere" for tenants. Also
-     EXACTLY matches slidedeck's own `labRepoName()` (${lab.slug}-${username}),
-     so the student's GitHub repo name, Harbor image name, and hostname prefix
-     are all identical strings. */}}
+{{/* appName doubles as: k8s object name, GHCR image repo leaf, and the Ingress
+     hostname label — ONE identifier everywhere (D-026's "one slug everywhere"
+     for tenants). EXACTLY matches slidedeck's own `labRepoName()`
+     (${lab.slug}-${username}). Length-capped at 63 (adversarial review C-2):
+     it is used as BOTH a k8s label value and a DNS label, both 63-char capped;
+     an uncapped `<labSlug>-<username>` would silently produce an invalid
+     Service selector / Ingress host past that length with no clear error. */}}
 {{- define "lab-app.appName" -}}
-{{ .Values.labSlug }}-{{ include "lab-app.username" . }}
+{{- $labSlug := include "lab-app.labSlug" . -}}
+{{- $username := include "lab-app.username" . -}}
+{{- $name := printf "%s-%s" $labSlug $username -}}
+{{- if gt (len $name) 63 -}}
+{{ fail (printf "labSlug+username %q is %d chars, over the 63-char k8s label/DNS-label cap (labSlug=%q username=%q)." $name (len $name) $labSlug $username) }}
+{{- end -}}
+{{- $name -}}
+{{- end -}}
+
+{{- define "lab-app.namespace" -}}
+lab-{{ include "lab-app.labSlug" . }}
 {{- end -}}
 
 {{- define "lab-app.host" -}}
 {{ include "lab-app.appName" . }}.{{ .Values.appDomain }}
 {{- end -}}
 
-{{/* Kyverno `disallow-latest-tag` is Enforce cluster-wide and lab-* namespaces are
-     NOT in its exclude list (by design — see README), so `:latest` can never be
-     used as a fallback. A student with no green CI run yet gets `:unreleased` — a
-     deliberately non-existent tag: Kyverno admits the Pod (it's a real, non-latest
-     tag), and it sits ImagePullBackOff (not admission-rejected) until their first
-     successful push writes a real tag via labs/<labSlug>/tags/<username>.yaml. */}}
-{{- define "lab-app.imageTag" -}}
-{{- if .Values.tag -}}
-{{ .Values.tag }}
-{{- else -}}
-unreleased
-{{- end -}}
+{{/* GHCR image ref (adversarial review B-2 — replaces Harbor for lab-app
+     images; see README "Registry: GHCR, not Harbor"). DELIBERATELY DERIVED,
+     not passed as a separate `ghcrRepo` value: a GHCR package name is always
+     `ua-mis/<repo-name>`, and by the platform's own naming convention
+     (slidedeck's `labRepoName()`) `<repo-name>` is ALWAYS `<labSlug>-
+     <username>` — i.e. exactly `lab-app.appName`. Deriving it here (instead
+     of trusting a separate field lab-build.yaml would otherwise have to
+     compute and pass through the fleet repo) means there is only ONE place
+     that naming convention is encoded, and it can never drift out of sync
+     with the k8s object name / Ingress host that use the same helper. */}}
+{{- define "lab-app.image" -}}
+ghcr.io/ua-mis/{{ include "lab-app.appName" . }}:{{ include "lab-app.imageTag" . }}
 {{- end -}}
 
-{{- define "lab-app.image" -}}
-{{ .Values.harborHost }}/{{ .Values.harborProject }}/{{ include "lab-app.appName" . }}:{{ include "lab-app.imageTag" . }}
+{{/* Kyverno `disallow-latest-tag` is Enforce cluster-wide and lab-* namespaces
+     are NOT in its exclude list (by design — see README), so `:latest` can
+     never be used as a fallback. A student with no green CI run yet gets
+     `:unreleased` — a deliberately non-existent tag: Kyverno admits the Pod
+     (it's a real, non-latest tag), and it sits ImagePullBackOff (not
+     admission-rejected) until their first successful push writes a real tag.
+     STRICT allowlist (adversarial review B-4): `tag` originates from
+     student-controlled CI output written into a git file this chart reads —
+     an unvalidated value interpolated into `image:` unquoted is a YAML/pod-
+     spec injection vector (a tag containing a newline could inject sibling
+     keys). Only a short-or-long hex commit SHA, or empty (-> :unreleased), is
+     accepted; anything else fails loudly instead of being trusted verbatim. */}}
+{{- define "lab-app.imageTag" -}}
+{{- if not .Values.tag -}}
+unreleased
+{{- else if regexMatch "^[a-f0-9]{7,64}$" .Values.tag -}}
+{{ .Values.tag }}
+{{- else -}}
+{{ fail (printf "tag %q does not match ^[a-f0-9]{7,64}$ (a git commit SHA, lowercase hex) — refusing to interpolate an unvalidated, student-CI-controlled value into the pod spec. Empty/absent is fine (renders :unreleased)." .Values.tag) }}
+{{- end -}}
 {{- end -}}
 
 {{- define "lab-app.labels" -}}
 platform.capstone/component: lab
-platform.capstone/lab-slug: {{ .Values.labSlug }}
+platform.capstone/lab-slug: {{ include "lab-app.labSlug" . | quote }}
 {{- end -}}

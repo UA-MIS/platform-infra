@@ -3,25 +3,28 @@
 # the sibling namespaceBootstrap Application — see labs-namespace-appset.yaml).
 #
 # CONTAINER PORT CONVENTION: every hosted lab app MUST listen on 0.0.0.0:8080 —
-# this is a platform-wide fixed convention (like slidedeck's own 8080), chosen
-# specifically to avoid needing a `port` field propagated through
-# students.yaml/tags (see README "Container port convention" for the judgment
-# call and what it means for the Next.js stack template, whose STACK_RUN_DEFAULTS
-# default port is 3000 today).
+# a platform-wide fixed convention (like slidedeck's own 8080), chosen so
+# students.yaml/tags never need a `port` field. `PORT=8080` is also injected
+# into the container env below (L-3) — most frameworks (Next.js `next start`
+# included) honor `$PORT`, which mostly dissolves the Next.js-stack-template
+# concern the README previously flagged as a judgment call.
 #
-# IMAGE TAG: see templates/_helpers.tpl `lab-app.imageTag` — never `:latest`
-# (Kyverno `disallow-latest-tag` is Enforce and lab-* is not excluded). A fresh
-# student (no green CI run yet) renders `:unreleased` and sits ImagePullBackOff
-# until their first successful push.
+# IMAGE: GHCR, not Harbor (adversarial review B-2 — see README "Registry:
+# GHCR, not Harbor"). IMAGE TAG: see templates/_helpers.tpl `lab-app.imageTag`
+# — never `:latest` (Kyverno `disallow-latest-tag` is Enforce and lab-* is not
+# excluded) and STRICTLY VALIDATED (adversarial review B-4 — a student-CI-
+# controlled value, rejected outright if it isn't a plain hex commit SHA). A
+# fresh student (no green CI run yet) renders `:unreleased` and sits
+# ImagePullBackOff until their first successful push.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "lab-app.appName" . }}
-  namespace: {{ include "lab-app.namespace" . }}
+  name: {{ include "lab-app.appName" . | quote }}
+  namespace: {{ include "lab-app.namespace" . | quote }}
   labels:
     {{- include "lab-app.labels" . | nindent 4 }}
-    platform.capstone/lab-username: {{ include "lab-app.username" . }}
-    app.kubernetes.io/name: {{ include "lab-app.appName" . }}
+    platform.capstone/lab-username: {{ include "lab-app.username" . | quote }}
+    app.kubernetes.io/name: {{ include "lab-app.appName" . | quote }}
   annotations:
     # Traceability back to the source repo (informational only — nothing reads
     # this back programmatically).
@@ -31,16 +34,25 @@ spec:
   revisionHistoryLimit: 2
   selector:
     matchLabels:
-      app.kubernetes.io/name: {{ include "lab-app.appName" . }}
+      app.kubernetes.io/name: {{ include "lab-app.appName" . | quote }}
   template:
     metadata:
       labels:
         {{- include "lab-app.labels" . | nindent 8 }}
-        app.kubernetes.io/name: {{ include "lab-app.appName" . }}
+        app.kubernetes.io/name: {{ include "lab-app.appName" . | quote }}
     spec:
-      # Shared pull credential for the `labs` Harbor project, sealed ONCE per lab
-      # namespace by the operator (README "Harbor" — `labs-pull-robot-job.yaml`,
-      # NAME=labs level, one robot per lab namespace: `labs-pull-<labSlug>`).
+      # Dedicated SA, no projected API-server token (adversarial review M-3 —
+      # every other app template in this platform does this; the lab chart was
+      # the odd one out on exactly the LEAST-trusted workload here: arbitrary
+      # student-authored code, publicly reachable, no reason it should ever be
+      # able to talk to the k8s API even by default-SA accident).
+      serviceAccountName: {{ include "lab-app.appName" . | quote }}
+      automountServiceAccountToken: false
+      # GHCR pull credential, sealed ONCE per lab namespace by the operator
+      # (README "Registry: GHCR, not Harbor" — a static read-scoped PAT, NOT a
+      # per-lab Harbor robot mint; the same secret content can be resealed into
+      # every `lab-<slug>` namespace since it isn't project-scoped the way a
+      # Harbor robot was).
       imagePullSecrets:
         - name: labs-pull
       securityContext:
@@ -51,7 +63,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: app
-          image: {{ include "lab-app.image" . }}
+          image: {{ include "lab-app.image" . | quote }}
           # SHA tags are minted once per push and never reused (see
           # .github/workflows/lab-build.yaml) — IfNotPresent is correct and
           # avoids an unnecessary re-pull on every reconcile, unlike a floating
@@ -61,12 +73,15 @@ spec:
           ports:
             - name: http
               containerPort: {{ .Values.containerPort }}
+          env:
+            - name: PORT
+              value: {{ .Values.containerPort | quote }}
           envFrom:
             - secretRef:
                 # Materialized by templates/externalsecret.yaml below. `optional`
                 # is deliberately NOT set — Deployment stays Pending (not silently
                 # running without a DB) if the ExternalSecret hasn't synced yet.
-                name: {{ include "lab-app.appName" . }}-db
+                name: {{ printf "%s-db" (include "lab-app.appName" .) | quote }}
           # Generic TCP probes (not an HTTP path): the platform doesn't know
           # whether a given lab template exposes a /healthz — a template MAY add
           # its own HTTP probe by forking this chart's values later, but the

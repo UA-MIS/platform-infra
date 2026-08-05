@@ -1,9 +1,12 @@
-# Defaults for the lab-app chart. Every real value below is INTENTIONALLY invalid/
-# absent — every real render comes from an ApplicationSet's `source.helm.valuesObject`
-# (see applicationsets/labs-namespace-appset.yaml and labs-students-appset.yaml). This
+# Defaults for the lab-app chart. Every real value below is a PLACEHOLDER — every
+# real render comes from an ApplicationSet's `source.helm.valuesObject` (see
+# applicationsets/labs-namespace-appset.yaml and labs-students-appset.yaml). This
 # file exists so `helm template`/`helm lint` can render SOMETHING for local
 # verification (see platform-services/lab-hosting/README.md "Local verification"),
-# never so the chart is meant to be installed with these defaults.
+# never so the chart is meant to be installed with these defaults. Placeholders are
+# deliberately VALID (pass the `_helpers.tpl` fail-guards) so a bare `helm lint`
+# still renders — see README "Contract: lowercase everywhere" for why the
+# fail-guards exist and reject anything that ISN'T already lowercase+DNS-safe.
 
 # --- mode switch --------------------------------------------------------------
 # Exactly one must be true per Application. Neither true = chart renders nothing
@@ -13,14 +16,21 @@ studentApp: false
 
 # --- shared -----------------------------------------------------------------
 # The lab slug (labs.<slug> in slidedeck's `labs` table). Namespace = lab-<labSlug>.
-labSlug: PLACEHOLDER-lab-slug
+# CONTRACT: already lowercase + DNS-safe (^[a-z0-9]([-a-z0-9]*[a-z0-9])?$) — the
+# chart FAILS the render (not silently corrects) if this doesn't hold; see
+# _helpers.tpl `lab-app.labSlug` and README "Contract: lowercase everywhere".
+labSlug: unset-lab-slug
 
 # --- namespaceBootstrap mode ---------------------------------------------------
+# ADVERSARIAL REVIEW M-1: 15 students x the Deployment's hard-coded 500m/512Mi
+# container limits = 7.5 CPU / 7.5Gi. The previous 6/6Gi ceiling would silently
+# quota-exceeded-block student #13+ (buried in ReplicaSet events, invisible on
+# the Application) — raised with headroom above the 15-student worst case.
 quota:
-  requestsCpu: "3"
-  requestsMemory: 3Gi
-  limitsCpu: "6"
-  limitsMemory: 6Gi
+  requestsCpu: "5"
+  requestsMemory: 5Gi
+  limitsCpu: "10"
+  limitsMemory: 10Gi
   pods: "30"
   services: "20"
 limitRange:
@@ -32,23 +42,32 @@ limitRange:
   maxMemory: 512Mi
 
 # --- studentApp mode -----------------------------------------------------------
-# username: the GitHub username, LOWERCASED by the chart (`| lower`) wherever it
-#   composes a k8s name / hostname / Vault path — GitHub usernames are already
-#   DNS-safe (alnum + single hyphens, no leading/trailing/double hyphen), so
-#   lowercasing alone is sufficient sanitization (see README "Username handling").
-username: PLACEHOLDER-username
+# username: the GitHub username. CONTRACT: already lowercase + DNS-safe (same
+#   pattern as labSlug) — see README "Contract: lowercase everywhere" for WHY
+#   this is a hard requirement (not a `| lower` normalization like the first
+#   draft of this chart did): the labs-students ApplicationSet's merge
+#   generator joins on an EXACT STRING match against lab-build.yaml's
+#   already-lowercased tag file, so silently lowercasing only on the Helm side
+#   would NOT fix a case-mismatched merge — it would hide the symptom while
+#   the underlying join still silently never happens.
+username: unset-username
 # repo: informational only (org/name of the student's repo) — carried through as a
 #   label/annotation for traceability; NOT used to derive the image name (see below).
-repo: UA-MIS/PLACEHOLDER-repo
-# tag: the short commit SHA the student's own CI last pushed successfully, written
+repo: UA-MIS/unset-repo
+# tag: the git commit SHA the student's own CI last pushed successfully, written
 #   by the reusable lab-build.yaml workflow into labs/<labSlug>/tags/<username>.yaml
 #   (see README "Image tag propagation"). ABSENT until the student's first green
 #   build — the ApplicationSet template handles that with `hasKey`, not a `latest`
 #   default (Kyverno `disallow-latest-tag` is Enforce cluster-wide and lab-* isn't
-#   excluded — see README).
+#   excluded — see README). VALIDATED (adversarial review B-4): must match
+#   ^[a-f0-9]{7,64}$ or be empty — see _helpers.tpl `lab-app.imageTag`.
 tag: ""
 
-harborHost: harbor.capstone.uamishub.com
-harborProject: labs
+# Registry: GHCR, not Harbor (adversarial review B-2 — see README "Registry:
+# GHCR, not Harbor" for why: Harbor sits behind the Cloudflare-proxied tunnel,
+# which caps request bodies at 100MB, and a GitHub-hosted runner has no path
+# around it the way ARC/Kaniko builders do via a Traefik ClusterIP hostAlias).
+# No `ghcrRepo` value here — DERIVED from labSlug+username, see _helpers.tpl
+# `lab-app.image`.
 appDomain: uamishub.com
 containerPort: 8080

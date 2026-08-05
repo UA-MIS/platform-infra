@@ -36,10 +36,10 @@ spec:
           - path: "labs/*/lab.yaml"
   template:
     metadata:
-      name: 'lab-ns-{{.labSlug}}'
+      name: 'lab-ns-{{ if hasKey . "labSlug" }}{{.labSlug}}{{ end }}'
       labels:
         platform.capstone/component: lab
-        platform.capstone/lab-slug: '{{.labSlug}}'
+        platform.capstone/lab-slug: '{{ if hasKey . "labSlug" }}{{.labSlug}}{{ end }}'
     spec:
       # Runs in `platform` (like the tenants-appset team-bootstrap apps) because
       # it creates a Namespace — a cluster-scoped-adjacent object a per-lab
@@ -55,10 +55,10 @@ spec:
         helm:
           valuesObject:
             namespaceBootstrap: true
-            labSlug: '{{.labSlug}}'
+            labSlug: '{{ if hasKey . "labSlug" }}{{.labSlug}}{{ end }}'
       destination:
         server: https://kubernetes.default.svc
-        namespace: 'lab-{{.labSlug}}'
+        namespace: 'lab-{{ if hasKey . "labSlug" }}{{.labSlug}}{{ end }}'
       syncPolicy:
         automated:
           prune: true
