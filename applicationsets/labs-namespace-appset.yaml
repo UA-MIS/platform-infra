@@ -1,0 +1,71 @@
+# Lab-hosting NAMESPACE BOOTSTRAP ApplicationSet (lab-hosting layer, see
+# platform-services/lab-hosting/README.md for the full design).
+#
+# A git FILES generator over the small, dedicated `UA-MIS/capstone-labs-fleet`
+# repo, matching `labs/*/lab.yaml` — ONE tiny marker file per hosted lab
+# (`{labSlug: <slug>}`, NOT a list — so this generator emits exactly ONE
+# Application per LAB, never per student). Slides writes this file once, at the
+# same time it writes labs/<slug>/students.yaml, when a lab is flagged `hosted`.
+#
+# WHY A SEPARATE ApplicationSet from labs-students-appset.yaml: the objects
+# rendered here (Namespace, ResourceQuota, LimitRange, baseline NetworkPolicies)
+# are SHARED by every student of a lab. If they were instead rendered by each
+# student's OWN Application (labs-students-appset.yaml explodes the roster list
+# into one Application per student), N Applications would all declare the SAME
+# Namespace object — ArgoCD's per-resource ownership tracking only lets one
+# Application "own" a shared object at a time, so the others would chronically
+# flip OutOfSync fighting over it (the same anti-pattern the platform-services
+# ApplicationSet's own comments call out and the tenants-appset avoids by giving
+# each tenant its own single bootstrap Application). One Application per LAB
+# sidesteps this entirely.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: labs-namespace
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - git:
+        repoURL: https://github.com/UA-MIS/capstone-labs-fleet
+        revision: HEAD
+        files:
+          - path: "labs/*/lab.yaml"
+  template:
+    metadata:
+      name: 'lab-ns-{{.labSlug}}'
+      labels:
+        platform.capstone/component: lab
+        platform.capstone/lab-slug: '{{.labSlug}}'
+    spec:
+      # Runs in `platform` (like the tenants-appset team-bootstrap apps) because
+      # it creates a Namespace — a cluster-scoped-adjacent object a per-lab
+      # project could not create for itself. The STUDENT apps (labs-students-
+      # appset.yaml), by contrast, could in principle run under a narrower
+      # project once one exists — see README "AppProject: reused platform
+      # project, not a new one" for why v1 does not add one.
+      project: platform
+      source:
+        repoURL: https://github.com/UA-MIS/platform-infra
+        targetRevision: HEAD
+        path: platform-services/lab-hosting/chart
+        helm:
+          valuesObject:
+            namespaceBootstrap: true
+            labSlug: '{{.labSlug}}'
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: 'lab-{{.labSlug}}'
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=false   # this Application's own manifest set IS the Namespace
+          - ServerSideApply=true
+        retry:
+          limit: 5
+          backoff: { duration: 5s, factor: 2, maxDuration: 3m }

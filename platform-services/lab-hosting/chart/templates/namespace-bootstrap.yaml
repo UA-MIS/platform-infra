@@ -1,0 +1,137 @@
+{{- if .Values.namespaceBootstrap }}
+# One Namespace + ResourceQuota + LimitRange + baseline NetworkPolicies per lab
+# (shared by every student of that lab — see README "Two ApplicationSets, not
+# one" for why this is a SEPARATE Application from the per-student apps: sharing
+# these objects across N per-student Applications would make ArgoCD fight itself
+# over ownership of one shared object, the exact anti-pattern the tenants-appset
+# avoids by giving each tenant its own bootstrap Application).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "lab-app.namespace" . }}
+  labels:
+    app.kubernetes.io/managed-by: argocd
+    {{- include "lab-app.labels" . | nindent 4 }}
+    # Goldilocks recommend-only sizing (never evicts) — same posture as tenant
+    # namespaces (tenants/_template/namespaces/dev.yaml).
+    goldilocks.fairwinds.com/enabled: "true"
+    # Pod Security Admission enforced cluster-side, same as every tenant namespace.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.31
+---
+# ResourceQuota — starting values for a WHOLE LAB (all ~15 students share this
+# namespace), sized well below the tenant-dev quota (tenants/_template) since a
+# lab app is a single small student workload, not a multi-component tenant stack.
+# Tunable per lab later (values.yaml).
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: compute-quota
+  namespace: {{ include "lab-app.namespace" . }}
+  labels:
+    {{- include "lab-app.labels" . | nindent 4 }}
+spec:
+  hard:
+    requests.cpu: {{ .Values.quota.requestsCpu | quote }}
+    requests.memory: {{ .Values.quota.requestsMemory | quote }}
+    limits.cpu: {{ .Values.quota.limitsCpu | quote }}
+    limits.memory: {{ .Values.quota.limitsMemory | quote }}
+    pods: {{ .Values.quota.pods | quote }}
+    services: {{ .Values.quota.services | quote }}
+    # persistentvolumeclaims pinned to 0 ON PURPOSE: lab apps are deliberately
+    # STATELESS (their database lives in the dedicated lab-mariadb instance in ns
+    # `slides`, not a per-app PVC). Omitting this line from `hard` would NOT mean
+    # "zero PVCs" — an absent ResourceQuota key is unlimited, not zero — so a
+    # future lab that genuinely needs a PVC must raise this explicitly, not rely
+    # on a silently-open default.
+    persistentvolumeclaims: "0"
+---
+# LimitRange — per-container defaults + ceiling, same purpose as
+# tenants/_template (makes the quota enforceable even if a student's Deployment
+# omits requests/limits — required anyway by Kyverno `require-limits`, Audit mode).
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: container-limits
+  namespace: {{ include "lab-app.namespace" . }}
+  labels:
+    {{- include "lab-app.labels" . | nindent 4 }}
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: {{ .Values.limitRange.defaultCpu }}
+        memory: {{ .Values.limitRange.defaultMemory }}
+      defaultRequest:
+        cpu: {{ .Values.limitRange.defaultRequestCpu }}
+        memory: {{ .Values.limitRange.defaultRequestMemory }}
+      max:
+        cpu: {{ .Values.limitRange.maxCpu }}
+        memory: {{ .Values.limitRange.maxMemory }}
+---
+# NetworkPolicy 1/3 — default-deny ingress+egress (mirrors tenants/_template).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: {{ include "lab-app.namespace" . }}
+  labels:
+    {{- include "lab-app.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+# NetworkPolicy 2/3 — ingress from Traefik/cloudflared + intra-namespace. NO
+# oauth2-proxy selector anywhere (design decision: lab apps are public, like
+# demos.uamishub.com — see ingress.yaml for the matching "no gating" note).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-edge-and-intra-ns
+  namespace: {{ include "lab-app.namespace" . }}
+  labels:
+    {{- include "lab-app.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system } # traefik
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: cloudflared }
+    - from:
+        - podSelector: {}
+---
+# NetworkPolicy 3/3 — egress: DNS, intra-ns, and the shared lab-mariadb in ns
+# `slides` (the SAME instance platform-services/lab-db/mariadb.yaml provisions
+# for the browser-only Adminer console — hosted apps reach it directly with the
+# DATABASE_URL the ExternalSecret below materializes). No general internet
+# egress by default, matching the platform-wide least-privilege posture
+# (tenants/_template, slidedeck/deploy/netpol.yaml) — a lab exercise that needs
+# outbound internet is a documented follow-up, not a default-open here.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-dns-intra-ns-and-labdb
+  namespace: {{ include "lab-app.namespace" . }}
+  labels:
+    {{- include "lab-app.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    - to:
+        - podSelector: {}
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: slides }
+      ports:
+        - { protocol: TCP, port: 3306 }
+{{- end }}

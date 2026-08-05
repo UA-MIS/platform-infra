@@ -1,0 +1,42 @@
+{{- if .Values.studentApp }}
+# Public ingress, NO oauth2-proxy middleware and no other auth gate — the
+# professor grades by visiting the URL, and students have no org/Dex identity to
+# gate on anyway (mirrors slidedeck's own "no oauth2-proxy, app does its own
+# auth" note, except here there IS no app-side auth either — deliberately public,
+# same posture as demos.uamishub.com/course-demos).
+#
+# No `ingressClassName` and no `router.priority` annotation: mirrors
+# slidedeck/deploy/ingress.yaml (Traefik is the cluster default IngressClass),
+# and unlike course-demos there is no path-based multi-priority need here — every
+# lab app owns its own distinct host, so there's never ambiguity between two
+# Ingresses claiming the same host.
+#
+# Reachability: a ONE-TIME wildcard DNS record (operator action, see README) —
+# `*.uamishub.com CNAME <tunnelID>.cfargotunnel.com` (proxied) — routes any
+# undefined single-label uamishub.com host to the SAME cloudflared tunnel, which
+# has exactly one catch-all ingress rule to Traefik (verified live,
+# `ingressRule=0` only, both replicas). Traefik then routes purely on THIS
+# Ingress's `host:` — no DNS change is needed per student, only this object.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "lab-app.appName" . }}
+  namespace: {{ include "lab-app.namespace" . }}
+  labels:
+    {{- include "lab-app.labels" . | nindent 4 }}
+    app.kubernetes.io/name: {{ include "lab-app.appName" . }}
+spec:
+  rules:
+    - host: {{ include "lab-app.host" . }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "lab-app.appName" . }}
+                port:
+                  number: 80
+  tls:
+    - hosts: [{{ include "lab-app.host" . }}]
+{{- end }}

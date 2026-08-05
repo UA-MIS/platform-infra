@@ -1,0 +1,136 @@
+# ============================================================================
+# lab-build.yaml — the CENTRAL, reusable lab-hosting CI pipeline. `on:
+# workflow_call`. Deliberately THIN compared to tenant-build.yaml (D-032): no
+# component matrix, no scan/checks gates, no staged promotion (single env, no
+# overlay ladder — see platform-services/lab-hosting/README.md "Image tag
+# propagation" for why). Every hosted-lab student repo ships a ~6-line CALLER:
+#
+#   jobs:
+#     build:
+#       uses: UA-MIS/platform-infra/.github/workflows/lab-build.yaml@main
+#       with:
+#         lab_slug: lab1        # baked into the repo at scaffold time (slides)
+#         username: jsmith      # baked into the repo at scaffold time (slides)
+#       secrets: inherit        # org secrets: HARBOR_ROBOT_USER/TOKEN, LAB_FLEET_TOKEN
+#
+# GITHUB-HOSTED runners (not the tenant ARC/Kaniko scale set) — student repos are
+# NOT part of the tenant CI system, and 15 students is well inside GitHub's free
+# Actions minutes for a private-org repo.
+#
+# WHAT THIS DOES, staged the same shape as bump-dev (build -> push -> record the
+# tag in git so ArgoCD picks it up) but with the "overlay" being one small
+# per-student file instead of a kustomize image patch:
+#   1. build the student's Dockerfile, tag `<labSlug>-<username>:<short-sha>`
+#      (12-char, matching the platform's short-sha convention elsewhere) —
+#      NEVER `:latest` (Kyverno `disallow-latest-tag` is Enforce on lab-*).
+#   2. push to the shared Harbor project `labs` using the ORG-LEVEL push robot
+#      (HARBOR_ROBOT_USER/HARBOR_ROBOT_TOKEN — one robot, scoped to project
+#      `labs` only, shared by every lab repo; see README "Harbor").
+#   3. write labs/<lab_slug>/tags/<username>.yaml in the capstone-labs-fleet repo
+#      (ONLY this student's own file — never students.yaml, which slides owns)
+#      so the labs-students ApplicationSet's merge generator picks up the new
+#      tag and ArgoCD deploys it.
+on:
+  workflow_call:
+    inputs:
+      lab_slug:
+        description: "The lab's slug (labs.slug in slidedeck). Baked into the caller at repo-scaffold time."
+        type: string
+        required: true
+      username:
+        description: "The student's GitHub username, as scaffolded. Baked into the caller at repo-scaffold time."
+        type: string
+        required: true
+    secrets:
+      HARBOR_ROBOT_USER:
+        description: "Org-level: the shared `labs` project's push robot username (robot$labs+<name>)."
+        required: true
+      HARBOR_ROBOT_TOKEN:
+        description: "Org-level: the shared `labs` project's push robot token."
+        required: true
+      LAB_FLEET_TOKEN:
+        description: "Org-level: fine-grained PAT, Contents:read/write on UA-MIS/capstone-labs-fleet ONLY."
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lab-build-${{ github.repository }}
+  cancel-in-progress: true
+
+jobs:
+  build-push-record:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout student repo
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Resolve identity (lowercased app name + 12-char short sha)
+        id: resolve
+        run: |
+          set -eu
+          LAB_SLUG="$(printf '%s' "${{ inputs.lab_slug }}" | tr '[:upper:]' '[:lower:]')"
+          USERNAME="$(printf '%s' "${{ inputs.username }}" | tr '[:upper:]' '[:lower:]')"
+          APP_NAME="${LAB_SLUG}-${USERNAME}"
+          TAG="$(printf '%s' "${GITHUB_SHA}" | cut -c1-12)"
+          {
+            echo "lab_slug=${LAB_SLUG}"
+            echo "username=${USERNAME}"
+            echo "app_name=${APP_NAME}"
+            echo "tag=${TAG}"
+            echo "image=harbor.capstone.uamishub.com/labs/${APP_NAME}:${TAG}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Log in to Harbor (labs project push robot)
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: harbor.capstone.uamishub.com
+          username: ${{ secrets.HARBOR_ROBOT_USER }}
+          password: ${{ secrets.HARBOR_ROBOT_TOKEN }}
+
+      - name: Build + push (never :latest — see header)
+        uses: docker/build-push-action@0adf9959216b96bec444f325f1e493d4aa344497 # v6.14.0
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.resolve.outputs.image }}
+
+      - name: Record the new tag in capstone-labs-fleet (this student's file ONLY)
+        env:
+          GH_TOKEN: ${{ secrets.LAB_FLEET_TOKEN }}
+          LAB_SLUG: ${{ steps.resolve.outputs.lab_slug }}
+          USERNAME: ${{ steps.resolve.outputs.username }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          set -eu
+          REPO="UA-MIS/capstone-labs-fleet"
+          FILE="labs/${LAB_SLUG}/tags/${USERNAME}.yaml"
+          WORKDIR="$(mktemp -d)"
+          git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "$WORKDIR"
+          cd "$WORKDIR"
+          mkdir -p "labs/${LAB_SLUG}/tags"
+          cat > "$FILE" <<EOF
+          username: ${USERNAME}
+          labSlug: ${LAB_SLUG}
+          tag: ${TAG}
+          EOF
+          git config user.name "lab-build-ci"
+          git config user.email "lab-build-ci@users.noreply.github.com"
+          git add "$FILE"
+          if git diff --cached --quiet; then
+            echo "==> ${FILE} already at tag ${TAG}, nothing to commit"
+            exit 0
+          fi
+          git commit -m "lab-build: ${LAB_SLUG}/${USERNAME} -> ${TAG}"
+          # ONE own-file conflict is possible (a double/racing run for the SAME
+          # student); a few pull-rebase-push retries are enough — this workflow
+          # never touches another student's file or students.yaml, so it never
+          # races with slides or with any other student's CI.
+          for i in 1 2 3 4 5; do
+            if git push origin HEAD:main; then exit 0; fi
+            echo "==> push rejected (attempt $i), rebasing and retrying..."
+            git pull --rebase origin main
+          done
+          echo "FAIL: could not push ${FILE} after 5 attempts"
+          exit 1

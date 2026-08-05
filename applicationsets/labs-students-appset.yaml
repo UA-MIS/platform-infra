@@ -1,0 +1,104 @@
+# Lab-hosting PER-STUDENT ApplicationSet (lab-hosting layer, see
+# platform-services/lab-hosting/README.md for the full design + the exact
+# students.yaml / tags/<username>.yaml schemas).
+#
+# A `merge` generator over TWO git files generators against the SAME fleet repo
+# (`UA-MIS/capstone-labs-fleet`):
+#   - BASE (roster):  labs/*/students.yaml — a YAML LIST per lab; ArgoCD's git
+#     files generator explodes a matched list file into one generator element
+#     PER LIST ITEM, so this alone already yields one element per student:
+#     {username, repo, labSlug}. Owned/written ONLY by the slides app.
+#   - OVERRIDE (tag):  labs/*/tags/*.yaml — one SINGLE-OBJECT file per student
+#     ({username, labSlug, tag}, NOT a list — so this yields one element per
+#     FILE, matching the roster 1:1 by mergeKeys). Owned/written ONLY by that
+#     one student's own CI (.github/workflows/lab-build.yaml @ platform-infra).
+#
+# WHY TWO FILES INSTEAD OF ONE: an early draft put `tag` directly on each row of
+# students.yaml. Rejected — that would make BOTH slides (adding/removing
+# students) and up to 15 independent student CI runs (bumping their own tag)
+# writers of the SAME git file, a real race: slides rewriting the roster wholesale
+# exactly when a student's CI is mid-commit would silently clobber one or the
+# other. Splitting the ever-changing per-student tag into its OWN small file
+# means the only possible conflict is a student racing THEMSELVES (double CI
+# runs), and slides's roster writes never touch a path any CI job also writes.
+#
+# The merge is a LEFT JOIN on [username, labSlug]: a student with no tag file yet
+# (no green CI run) still gets an Application — see chart `lab-app.imageTag` for
+# how the ABSENT `tag` key is handled (never a `:latest` default; Kyverno
+# `disallow-latest-tag` is Enforce and lab-* is not excluded).
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: labs-students
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - merge:
+        mergeKeys:
+          - username
+          - labSlug
+        generators:
+          - git:
+              repoURL: https://github.com/UA-MIS/capstone-labs-fleet
+              revision: HEAD
+              files:
+                - path: "labs/*/students.yaml"
+          - git:
+              repoURL: https://github.com/UA-MIS/capstone-labs-fleet
+              revision: HEAD
+              files:
+                - path: "labs/*/tags/*.yaml"
+  template:
+    metadata:
+      name: 'lab-{{.labSlug}}-{{.username}}'
+      labels:
+        platform.capstone/component: lab
+        platform.capstone/lab-slug: '{{.labSlug}}'
+        platform.capstone/lab-username: '{{.username}}'
+    spec:
+      project: platform
+      source:
+        repoURL: https://github.com/UA-MIS/platform-infra
+        targetRevision: HEAD
+        path: platform-services/lab-hosting/chart
+        helm:
+          valuesObject:
+            studentApp: true
+            labSlug: '{{.labSlug}}'
+            username: '{{.username}}'
+            repo: '{{.repo}}'
+            # `hasKey` (not the missing-key auto-error path) so a student with no
+            # tag file yet renders tag: "" instead of failing this Application's
+            # whole render — the chart's own default (`:unreleased`, never
+            # `:latest`) takes it from there.
+            tag: '{{ if hasKey . "tag" }}{{.tag}}{{ end }}'
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: 'lab-{{.labSlug}}'
+      # Same webhook-injected-defaults drift class the platform-services
+      # ApplicationSet template already documents for ExternalSecret — kept
+      # identical here so every ExternalSecret in the fleet gets the same fix.
+      ignoreDifferences:
+        - group: external-secrets.io
+          kind: ExternalSecret
+          jqPathExpressions:
+            - '.spec.data[].remoteRef.conversionStrategy'
+            - '.spec.data[].remoteRef.decodingStrategy'
+            - '.spec.data[].remoteRef.metadataPolicy'
+            - '.spec.data[].remoteRef.nullBytePolicy'
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          # The lab's Namespace is owned by the sibling labs-namespace
+          # ApplicationSet's Application — never created here.
+          - CreateNamespace=false
+          - ServerSideApply=true
+        retry:
+          limit: 5
+          backoff: { duration: 5s, factor: 2, maxDuration: 3m }

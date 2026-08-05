@@ -1,0 +1,18 @@
+{{- if .Values.studentApp }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "lab-app.appName" . }}
+  namespace: {{ include "lab-app.namespace" . }}
+  labels:
+    {{- include "lab-app.labels" . | nindent 4 }}
+    app.kubernetes.io/name: {{ include "lab-app.appName" . }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: {{ include "lab-app.appName" . }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: {{ .Values.containerPort }}
+{{- end }}

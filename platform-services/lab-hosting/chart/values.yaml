@@ -1,0 +1,54 @@
+# Defaults for the lab-app chart. Every real value below is INTENTIONALLY invalid/
+# absent — every real render comes from an ApplicationSet's `source.helm.valuesObject`
+# (see applicationsets/labs-namespace-appset.yaml and labs-students-appset.yaml). This
+# file exists so `helm template`/`helm lint` can render SOMETHING for local
+# verification (see platform-services/lab-hosting/README.md "Local verification"),
+# never so the chart is meant to be installed with these defaults.
+
+# --- mode switch --------------------------------------------------------------
+# Exactly one must be true per Application. Neither true = chart renders nothing
+# (both template groups are gated), which is a safe default, not silent breakage.
+namespaceBootstrap: false
+studentApp: false
+
+# --- shared -----------------------------------------------------------------
+# The lab slug (labs.<slug> in slidedeck's `labs` table). Namespace = lab-<labSlug>.
+labSlug: PLACEHOLDER-lab-slug
+
+# --- namespaceBootstrap mode ---------------------------------------------------
+quota:
+  requestsCpu: "3"
+  requestsMemory: 3Gi
+  limitsCpu: "6"
+  limitsMemory: 6Gi
+  pods: "30"
+  services: "20"
+limitRange:
+  defaultCpu: 200m
+  defaultMemory: 256Mi
+  defaultRequestCpu: 50m
+  defaultRequestMemory: 64Mi
+  maxCpu: 500m
+  maxMemory: 512Mi
+
+# --- studentApp mode -----------------------------------------------------------
+# username: the GitHub username, LOWERCASED by the chart (`| lower`) wherever it
+#   composes a k8s name / hostname / Vault path — GitHub usernames are already
+#   DNS-safe (alnum + single hyphens, no leading/trailing/double hyphen), so
+#   lowercasing alone is sufficient sanitization (see README "Username handling").
+username: PLACEHOLDER-username
+# repo: informational only (org/name of the student's repo) — carried through as a
+#   label/annotation for traceability; NOT used to derive the image name (see below).
+repo: UA-MIS/PLACEHOLDER-repo
+# tag: the short commit SHA the student's own CI last pushed successfully, written
+#   by the reusable lab-build.yaml workflow into labs/<labSlug>/tags/<username>.yaml
+#   (see README "Image tag propagation"). ABSENT until the student's first green
+#   build — the ApplicationSet template handles that with `hasKey`, not a `latest`
+#   default (Kyverno `disallow-latest-tag` is Enforce cluster-wide and lab-* isn't
+#   excluded — see README).
+tag: ""
+
+harborHost: harbor.capstone.uamishub.com
+harborProject: labs
+appDomain: uamishub.com
+containerPort: 8080
