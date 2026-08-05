@@ -21,11 +21,32 @@ studentApp: false
 # _helpers.tpl `lab-app.labSlug` and README "Contract: lowercase everywhere".
 labSlug: unset-lab-slug
 
+# withDatabase: lab-level (NOT per-student), whether this lab provisions a
+# per-student database — INDEPENDENT of `hosted` in slidedeck (server/db.js:
+# labs.hosted / labs.with_database are separate columns; scaffold.js: "Stack
+# and database are ORTHOGONAL"). ADVERSARIAL REVIEW H-1: the first draft of
+# this chart rendered the ExternalSecret + envFrom unconditionally, so a
+# `hosted: true, with_database: false` lab (slides never writes a Vault path
+# for it) sat every pod in CreateContainerConfigError forever. Gates
+# externalsecret.yaml, deployment.yaml's `envFrom`, and the `slides:3306`
+# egress NetworkPolicy rule — see README "Contract: withDatabase (H-1)" for
+# the full contract, including WHY this is duplicated onto every
+# students.yaml row (chart/README rationale: the labs-students
+# ApplicationSet's merge generator has no path back to lab.yaml's data with
+# the current [username, labSlug] mergeKeys).
+withDatabase: false
+
 # --- namespaceBootstrap mode ---------------------------------------------------
 # ADVERSARIAL REVIEW M-1: 15 students x the Deployment's hard-coded 500m/512Mi
 # container limits = 7.5 CPU / 7.5Gi. The previous 6/6Gi ceiling would silently
 # quota-exceeded-block student #13+ (buried in ReplicaSet events, invisible on
 # the Application) — raised with headroom above the 15-student worst case.
+#
+# FULL QUOTA (spelled out for a README-only reader, adversarial review LOW):
+# requests.cpu=5, requests.memory=5Gi, limits.cpu=10, limits.memory=10Gi,
+# pods=30, services=20, persistentvolumeclaims=0 (HARD — lab apps are
+# stateless by design, see namespace-bootstrap.yaml's own comment; this is a
+# real constraint, not an oversight, if a future lab genuinely needs a PVC).
 quota:
   requestsCpu: "5"
   requestsMemory: 5Gi
@@ -54,13 +75,17 @@ username: unset-username
 # repo: informational only (org/name of the student's repo) — carried through as a
 #   label/annotation for traceability; NOT used to derive the image name (see below).
 repo: UA-MIS/unset-repo
-# tag: the git commit SHA the student's own CI last pushed successfully, written
-#   by the reusable lab-build.yaml workflow into labs/<labSlug>/tags/<username>.yaml
-#   (see README "Image tag propagation"). ABSENT until the student's first green
-#   build — the ApplicationSet template handles that with `hasKey`, not a `latest`
-#   default (Kyverno `disallow-latest-tag` is Enforce cluster-wide and lab-* isn't
-#   excluded — see README). VALIDATED (adversarial review B-4): must match
-#   ^[a-f0-9]{7,64}$ or be empty — see _helpers.tpl `lab-app.imageTag`.
+# tag: the git commit SHA of the student's default-branch HEAD at last poll,
+#   written into labs/<labSlug>/tags/<username>.yaml by the SCHEDULED
+#   `.github/workflows/lab-tag-sync.yaml` (ADVERSARIAL REVIEW H-2 — NOT by
+#   student CI itself, see README "Security hardening: H-2" for why the
+#   original per-student-CI-writes-its-own-tag design was a real
+#   privilege-escalation bug). ABSENT until the first poll after the
+#   student's first push — the ApplicationSet template handles that with
+#   `hasKey`, not a `latest` default (Kyverno `disallow-latest-tag` is
+#   Enforce cluster-wide and lab-* isn't excluded — see README). VALIDATED
+#   (adversarial review B-4): must match ^[a-f0-9]{7,64}$ or be empty — see
+#   _helpers.tpl `lab-app.imageTag`.
 tag: ""
 
 # Registry: GHCR, not Harbor (adversarial review B-2 — see README "Registry:
@@ -68,6 +93,9 @@ tag: ""
 # which caps request bodies at 100MB, and a GitHub-hosted runner has no path
 # around it the way ARC/Kaniko builders do via a Traefik ClusterIP hostAlias).
 # No `ghcrRepo` value here — DERIVED from labSlug+username, see _helpers.tpl
-# `lab-app.image`.
+# `lab-app.image`. PACKAGES ARE PUBLIC (adversarial review H-3 — see README
+# "Registry: GHCR, not Harbor" / "H-3"): the app is already public via its
+# Ingress with no SSO gate, so there is no `imagePullSecrets` on the
+# Deployment and no pull-credential plumbing anywhere in this chart.
 appDomain: uamishub.com
 containerPort: 8080

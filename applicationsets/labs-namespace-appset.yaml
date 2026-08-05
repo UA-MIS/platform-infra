@@ -56,6 +56,20 @@ spec:
           valuesObject:
             namespaceBootstrap: true
             labSlug: '{{ if hasKey . "labSlug" }}{{.labSlug}}{{ end }}'
+            # Adversarial review H-1. QUOTED like every other field here — a
+            # bare (unquoted) `{{...}}` is not valid YAML on its own (the
+            # leading `{` reads as a flow-mapping open, confirmed live:
+            # `kubectl apply --dry-run=server` rejected the unquoted form
+            # with a parse error before this fix). This ApplicationSet's own
+            # YAML is parsed BEFORE any Go-template substitution happens, so
+            # the field's type is fixed as STRING at that first parse — the
+            # rendered Application's `valuesObject.withDatabase` is therefore
+            # ALWAYS the Helm string "true"/"false"/"", never a real YAML
+            # boolean, regardless of quoting. This is exactly why
+            # chart/templates/_helpers.tpl's gates use
+            # `eq (toString .Values.withDatabase) "true"` rather than a bare
+            # `{{- if .Values.withDatabase }}` — see that file's comment.
+            withDatabase: '{{ if hasKey . "withDatabase" }}{{.withDatabase}}{{ end }}'
       destination:
         server: https://kubernetes.default.svc
         namespace: 'lab-{{ if hasKey . "labSlug" }}{{.labSlug}}{{ end }}'

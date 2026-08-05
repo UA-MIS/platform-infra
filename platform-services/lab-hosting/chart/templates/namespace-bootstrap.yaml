@@ -109,16 +109,21 @@ spec:
         - namespaceSelector:
             matchLabels: { kubernetes.io/metadata.name: cloudflared }
 ---
-# NetworkPolicy 3/3 — egress: DNS + the shared lab-mariadb in ns `slides` (the
-# SAME instance platform-services/lab-db/mariadb.yaml provisions for the
-# browser-only Adminer console — hosted apps reach it directly with the
-# DATABASE_URL the ExternalSecret below materializes; that file's own
-# `lab-mariadb` NetworkPolicy carries the matching INGRESS rule for this
-# namespace-label, see platform-services/lab-db/netpol.yaml). No general
-# internet egress by default, matching the platform-wide least-privilege
-# posture (tenants/_template, slidedeck/deploy/netpol.yaml) — a lab exercise
-# that needs outbound internet is a documented follow-up, not a default-open
-# here. NO intra-namespace rule — same M-2 reasoning as NetworkPolicy 2/3 above.
+# NetworkPolicy 3/3 — egress: DNS always, PLUS the shared lab-mariadb in ns
+# `slides` ONLY IF this lab has withDatabase (adversarial review H-1 — see
+# README "Contract: withDatabase"; `lab.yaml`'s canonical value, read
+# directly here since namespaceBootstrap mode has a real path back to it,
+# unlike studentApp mode — see the duplication note in chart/values.yaml).
+# The lab-mariadb instance is the SAME one platform-services/lab-db/
+# mariadb.yaml provisions for the browser-only Adminer console — hosted apps
+# reach it directly with the DATABASE_URL the ExternalSecret materializes;
+# that file's own `lab-mariadb` NetworkPolicy carries the matching INGRESS
+# rule for this namespace-label, see platform-services/lab-db/netpol.yaml.
+# No general internet egress by default, matching the platform-wide
+# least-privilege posture (tenants/_template, slidedeck/deploy/netpol.yaml)
+# — a lab exercise that needs outbound internet is a documented follow-up,
+# not a default-open here. NO intra-namespace rule — same M-2 reasoning as
+# NetworkPolicy 2/3 above.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -136,9 +141,11 @@ spec:
       ports:
         - { protocol: UDP, port: 53 }
         - { protocol: TCP, port: 53 }
+    {{- if eq (toString .Values.withDatabase) "true" }}
     - to:
         - namespaceSelector:
             matchLabels: { kubernetes.io/metadata.name: slides }
       ports:
         - { protocol: TCP, port: 3306 }
+    {{- end }}
 {{- end }}

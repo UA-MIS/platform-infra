@@ -10,12 +10,30 @@
 # concern the README previously flagged as a judgment call.
 #
 # IMAGE: GHCR, not Harbor (adversarial review B-2 — see README "Registry:
-# GHCR, not Harbor"). IMAGE TAG: see templates/_helpers.tpl `lab-app.imageTag`
-# — never `:latest` (Kyverno `disallow-latest-tag` is Enforce and lab-* is not
-# excluded) and STRICTLY VALIDATED (adversarial review B-4 — a student-CI-
-# controlled value, rejected outright if it isn't a plain hex commit SHA). A
-# fresh student (no green CI run yet) renders `:unreleased` and sits
-# ImagePullBackOff until their first successful push.
+# GHCR, not Harbor"), PUBLIC packages (adversarial review H-3 — no
+# `imagePullSecrets` anywhere in this file; see README for why). IMAGE TAG:
+# see templates/_helpers.tpl `lab-app.imageTag` — never `:latest` (Kyverno
+# `disallow-latest-tag` is Enforce and lab-* is not excluded) and STRICTLY
+# VALIDATED (adversarial review B-4). A fresh student (no tag written yet)
+# renders `:unreleased` and sits ImagePullBackOff until
+# `.github/workflows/lab-tag-sync.yaml`'s next poll picks up their first
+# successful push.
+#
+# ⚠ runAsUser: 65532 (adversarial review M-5, KNOWN LIMITATION — see README
+# "Container security context vs. lab template images"): a lab template's OWN
+# Dockerfile `USER` directive can conflict with this. Verified concretely
+# against slidedeck's generated Next.js starter, whose Dockerfile sets
+# `USER node` (uid 1000) with `/app` owned by that uid — forcing uid 65532 at
+# the pod level overrides the image USER, so `next start` writing its
+# `.next/cache` directory hits EACCES (the directory is owned by uid 1000,
+# not 65532). The Spring Boot starter is unaffected (its image runs as root
+# by default, uid 65532 then owns nothing conflicting the JVM needs to
+# write). NOT fixed in this chart — a per-template `runAsUser` override would
+# require a `port`-style value threaded through the fleet contract for every
+# stack, which this PR deliberately avoids (see "Container port convention").
+# Documented prominently instead: the Next.js hosted-lab template's
+# Dockerfile MUST either `chown` its working directory to 65532 or drop a
+# writable `.next/cache` volume the image can use regardless of uid.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -48,13 +66,6 @@ spec:
       # able to talk to the k8s API even by default-SA accident).
       serviceAccountName: {{ include "lab-app.appName" . | quote }}
       automountServiceAccountToken: false
-      # GHCR pull credential, sealed ONCE per lab namespace by the operator
-      # (README "Registry: GHCR, not Harbor" — a static read-scoped PAT, NOT a
-      # per-lab Harbor robot mint; the same secret content can be resealed into
-      # every `lab-<slug>` namespace since it isn't project-scoped the way a
-      # Harbor robot was).
-      imagePullSecrets:
-        - name: labs-pull
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -64,11 +75,10 @@ spec:
       containers:
         - name: app
           image: {{ include "lab-app.image" . | quote }}
-          # SHA tags are minted once per push and never reused (see
-          # .github/workflows/lab-build.yaml) — IfNotPresent is correct and
-          # avoids an unnecessary re-pull on every reconcile, unlike a floating
-          # tag (the Adminer/#419 class of bug this platform hard-learned to
-          # avoid — see platform-services/lab-db/mariadb.yaml).
+          # SHA tags are minted once per commit and never reused — IfNotPresent
+          # is correct and avoids an unnecessary re-pull on every reconcile,
+          # unlike a floating tag (the Adminer/#419 class of bug this platform
+          # hard-learned to avoid — see platform-services/lab-db/mariadb.yaml).
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -76,12 +86,15 @@ spec:
           env:
             - name: PORT
               value: {{ .Values.containerPort | quote }}
+          {{- if eq (toString .Values.withDatabase) "true" }}
           envFrom:
             - secretRef:
-                # Materialized by templates/externalsecret.yaml below. `optional`
+                # Materialized by templates/externalsecret.yaml below (only
+                # rendered when withDatabase — adversarial review H-1). `optional`
                 # is deliberately NOT set — Deployment stays Pending (not silently
                 # running without a DB) if the ExternalSecret hasn't synced yet.
                 name: {{ printf "%s-db" (include "lab-app.appName" .) | quote }}
+          {{- end }}
           # Generic TCP probes (not an HTTP path): the platform doesn't know
           # whether a given lab template exposes a /healthz — a template MAY add
           # its own HTTP probe by forking this chart's values later, but the

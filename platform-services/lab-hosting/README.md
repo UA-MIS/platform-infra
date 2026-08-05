@@ -8,13 +8,15 @@ no promotion model. See `RUNBOOK-DEPLOY.md` in `UA-MIS/slidedeck` for the full
 lab-feature context this builds on (`hosted` flag, `labAppUrl()`,
 `labRepoName()`, the existing per-student lab-mariadb + Adminer console).
 
-> **This README was revised after an adversarial review of the original PR
-> #426 diff found several blocking bugs** (case-sensitivity in the merge
-> generator, a missing NetworkPolicy rule, a Cloudflare body-size cap on
-> Harbor pushes, an identity-spoofing gap in the CI workflow, and unvalidated/
-> unquoted template interpolation). Every section below reflects the FIXED
-> design; where something changed materially from the first pass, it says so
-> inline (tagged with the review finding ID, e.g. "B-1", "C-2").
+> **This README has been revised twice after adversarial review of PR #426.**
+> Round 1 found case-sensitivity in the merge generator, a missing NetworkPolicy
+> rule, a Cloudflare body-size cap on Harbor pushes, an identity-spoofing gap,
+> and unvalidated/unquoted template interpolation (tagged `B-*`/`C-*`/`M-*`
+> below). Round 2 found a `hosted`-without-`with_database` breakage, a genuine
+> privilege-escalation hole in the round-1 CI-writes-its-own-tag fix, and a
+> pull-secret that landed nowhere anything would sync it (tagged `H-*`/`M-*`
+> below). Every section reflects the FIXED design as of round 2; where
+> something changed materially, it says so inline with the finding ID.
 
 This directory is EXCLUDED from the generic `platform-services` directory
 ApplicationSet (see the exclude entry + comment in
@@ -26,33 +28,50 @@ standalone Application. It is consumed two ways instead:
   `applicationsets/labs-students-appset.yaml`).
 - `../external-secrets/vault-policies/labs-*.sh` — operator-run scripts, never
   auto-applied (same shape as `platform-services/harbor-onboarding/`).
+- `.github/workflows/lab-build.yaml` (student-repo reusable CI) and
+  `.github/workflows/lab-tag-sync.yaml` (platform-infra-only scheduled sync —
+  see "Image tag propagation" / H-2) — both live in this repo's `.github/`,
+  not under this directory, but are part of the same design.
 
 ---
 
 ## Design at a glance
 
 ```
-UA-MIS/capstone-labs-fleet (NEW, private, small — slides + student CI write here)
-  labs/<lab-slug>/lab.yaml            {labSlug}                — slides writes once, lab opens hosted
-  labs/<lab-slug>/students.yaml       [{username, repo, labSlug}, ...] — slides writes (roster)
-  labs/<lab-slug>/tags/<username>.yaml  {username, labSlug, tag} — that student's OWN CI writes
+UA-MIS/capstone-labs-fleet (NEW, private, small)
+  labs/<lab-slug>/lab.yaml              {labSlug, withDatabase}          — slides writes once, lab opens hosted
+  labs/<lab-slug>/students.yaml         [{username, repo, labSlug,
+                                           withDatabase}, ...]           — slides writes (roster)
+  labs/<lab-slug>/tags/<username>.yaml  {username, labSlug, tag}        — lab-tag-sync.yaml writes (H-2)
 
         │ git files generator (lab.yaml)      │ merge generator (students.yaml ⋈ tags/*.yaml)
         ▼                                     ▼
 applicationsets/labs-namespace-appset.yaml   applicationsets/labs-students-appset.yaml
   1 Application per LAB                        1 Application per STUDENT
   → chart/ (namespaceBootstrap: true)          → chart/ (studentApp: true)
-  → Namespace lab-<slug>, ResourceQuota,        → Deployment, Service, Ingress,
-    LimitRange, baseline NetworkPolicies          ExternalSecret — all in ns lab-<slug>
+  → Namespace lab-<slug>, ResourceQuota,        → ServiceAccount, Deployment, Service,
+    LimitRange, baseline NetworkPolicies          Ingress, ExternalSecret (only if
+    (+ slides:3306 egress only if                  withDatabase) — all in ns lab-<slug>
+    withDatabase, H-1)
+
+student's own repo:
+  .github/workflows/*.yml (thin caller) --uses--> platform-infra's
+    .github/workflows/lab-build.yaml (build + push to GHCR, own GITHUB_TOKEN,
+    NO fleet-repo write, NO shared secret — H-2)
+
+platform-infra (students CANNOT modify):
+  .github/workflows/lab-tag-sync.yaml (scheduled, every 5min) — polls each
+    roster row's repo HEAD via API, writes labs/<slug>/tags/<user>.yaml —
+    the ONLY writer to tags/*, closing H-2
 ```
 
 A student's app becomes reachable the moment THREE independent things are all
-true: (1) slides has registered them in `students.yaml`, (2) their own CI has
-pushed at least once (`tags/<username>.yaml` exists), (3) the lab's namespace
-bootstrap has synced. Missing (2) alone is not a failure state — the Application
-still exists and Syncs, the Pod just sits `ImagePullBackOff` on the `:unreleased`
-placeholder tag until their first green build (see `chart/templates/
-_helpers.tpl` `lab-app.imageTag`).
+true: (1) slides has registered them in `students.yaml`, (2) `lab-tag-sync.yaml`
+has polled at least once since their first push (`tags/<username>.yaml`
+exists), (3) the lab's namespace bootstrap has synced. Missing (2) alone is not
+a failure state — the Application still exists and Syncs, the Pod just sits
+`ImagePullBackOff` on the `:unreleased` placeholder tag until the next
+successful poll (see `chart/templates/_helpers.tpl` `lab-app.imageTag`).
 
 ## Two ApplicationSets, not one
 
@@ -77,8 +96,8 @@ Every other ApplicationSet in this platform is a git DIRECTORY generator
 matched DIRECTORY, source = that directory, rendered by plain kustomize. That
 works because "onboard a tenant" is already a platform-infra PR (a real
 directory with real files). Lab onboarding deliberately is NOT a platform-infra
-PR — the whole point of the fleet-repo split is that slides (and student CI)
-commit registration data to a small, separate repo with zero platform-infra
+PR — the whole point of the fleet-repo split is that slides commits
+registration data to a small, separate repo with zero platform-infra
 involvement. ArgoCD's git FILES/MERGE generators turn that data into per-element
 PARAMETER MAPS, not directory trees, and kustomize has no way to interpolate an
 arbitrary scalar (an Ingress host, an image tag, a Vault path) from a parameter
@@ -93,7 +112,7 @@ a name collision first):
 
 ```bash
 gh repo create UA-MIS/capstone-labs-fleet --private \
-  --description "Lab-hosting fleet data: per-lab roster + per-student build tags. Written by slidedeck + student CI; read by platform-infra's labs-*-appset ApplicationSets."
+  --description "Lab-hosting fleet data: per-lab roster + per-student build tags. Written by slidedeck + lab-tag-sync.yaml; read by platform-infra's labs-*-appset ApplicationSets."
 ```
 
 Three file shapes, all under `labs/<lab-slug>/`:
@@ -104,7 +123,13 @@ lab tears down.
 
 ```yaml
 labSlug: lab1
+withDatabase: false
 ```
+
+| field | required | meaning |
+| --- | --- | --- |
+| `labSlug` | yes, **already lowercase** | See "Contract: lowercase everywhere". |
+| `withDatabase` | yes | The lab's `with_database` flag (adversarial review H-1 — see "Contract: withDatabase" below). NOT the same as `hosted` — slidedeck's `labs.hosted` and `labs.with_database` are independent columns. |
 
 **`labs/<lab-slug>/students.yaml`** — a LIST. Written/maintained by slides ONLY
 (add a row on registration+repo-provision, remove a row on teardown/unregister).
@@ -115,67 +140,68 @@ output PER ELEMENT — this is what makes ONE Application per student happen.
 - username: jsmith
   repo: UA-MIS/lab1-jsmith
   labSlug: lab1
+  withDatabase: false
 ```
 
 | field | required | meaning |
 | --- | --- | --- |
-| `username` | yes, **already lowercase** | GitHub username, as scaffolded, LOWERCASED by slides before writing (see "Contract: lowercase everywhere" below — this is not optional). |
-| `repo` | yes | `org/name` of the student's repo (== `labRepoName()` == `<labSlug>-<username>`). Carried through as an annotation only — NOT parsed to derive the image name (the chart derives that from `labSlug`+`username` directly, which is guaranteed identical to the repo name by convention). |
+| `username` | yes, **already lowercase** | GitHub username, as scaffolded, LOWERCASED by slides before writing (see "Contract: lowercase everywhere" — this is not optional). |
+| `repo` | yes | `org/name` of the student's repo (== `labRepoName()` == `<labSlug>-<username>`). Carried through as an annotation only — NOT parsed to derive the image name (the chart derives that from `labSlug`+`username` directly, which is guaranteed identical to the repo name by convention). **MUST be `≤ 63` total chars combined with username — see "Contract: the 63-char cap must be enforced by slides BEFORE repo creation" (M-3).** |
 | `labSlug` | yes, **already lowercase** | Must exactly equal the `lab.yaml` in the same directory. Present on every row (not inferred from the file path) so the merge generator's `mergeKeys` always has it, regardless of how a given ArgoCD version injects file-path metadata. |
+| `withDatabase` | yes | **Duplicated** from `lab.yaml` — see "Contract: withDatabase" for why this can't just be read from `lab.yaml` by this ApplicationSet, and why the duplication is low-risk. |
 
-**`labs/<lab-slug>/tags/<username>.yaml`** — single OBJECT. Written ONLY by that
-one student's own CI (`.github/workflows/lab-build.yaml`), never by slides.
-Absent until the student's first successful push.
+**`labs/<lab-slug>/tags/<username>.yaml`** — single OBJECT. Written ONLY by
+`.github/workflows/lab-tag-sync.yaml` (platform-infra, scheduled — adversarial
+review H-2). Slides never writes this file. Absent until the first poll after
+the student's first successful push.
 
 ```yaml
-username: jsmith
-labSlug: lab1
-tag: a1b2c3d4e5f6
+username: "jsmith"
+labSlug: "lab1"
+tag: "a1b2c3d4e5f6"
 ```
 
-`tag` is the 12-char short commit SHA `lab-build.yaml` pushed. Kept in a file
-separate from `students.yaml` specifically to avoid a slides-vs-CI write race
-— see `applicationsets/labs-students-appset.yaml`'s header for the full
-rationale (an earlier draft had `tag` as a column on `students.yaml`;
-rejected for that reason).
+`tag` is the 12-char short commit SHA of the student's default-branch HEAD at
+last poll. Kept in a file separate from `students.yaml` specifically to keep
+slides (roster) and the sync workflow (tag) as the only two writers to the
+fleet repo, each to disjoint paths — see `applicationsets/labs-students-
+appset.yaml`'s header for the full rationale.
 
-## Contract: lowercase everywhere (found in adversarial review, C-1)
+## Contract: lowercase everywhere (adversarial review C-1)
 
 **`username` and `labSlug` MUST already be lowercase + DNS-safe
-(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`) wherever slides or student CI writes
-them.** This is not a normalization the chart performs for you — it is a hard
-requirement, enforced by `fail`-guards in `chart/templates/_helpers.tpl`
+(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`) wherever slides or `lab-tag-sync.yaml`
+writes them.** This is not a normalization the chart performs for you — it is
+a hard requirement, enforced by `fail`-guards in `chart/templates/_helpers.tpl`
 (`lab-app.username`, `lab-app.labSlug`) that ABORT the render if either isn't
 already in that exact form.
 
 **Why this matters more than it looks**: `applicationsets/labs-students-
 appset.yaml`'s `merge` generator joins `students.yaml` (slides-written) against
-`tags/<username>.yaml` (student-CI-written, via `lab-build.yaml`, which already
-lowercases before writing) on `mergeKeys: [username, labSlug]` — an EXACT
-STRING match, case-sensitive. The first draft of this chart "fixed" this by
-silently lowercasing `username` with Helm's `| lower` filter — which does
-nothing for the actual bug: the merge generator compares the RAW fleet-repo
-values BEFORE Helm ever runs, so a `students.yaml` row written as `JSmith`
-would simply never join with a tag file written as `jsmith`, permanently
-pinning that student on the `:unreleased` placeholder with **no error
-anywhere** — ArgoCD shows a normal, Synced, Healthy Application; only the
-image tag is silently wrong forever. The fail-guards fix this by rejecting a
-not-already-lowercase value outright: if slides ever writes mixed-case data,
-the Application for that ONE student goes visibly Degraded (a clear `fail`
-message naming the exact field and value) instead of silently never updating.
+`tags/<username>.yaml` (`lab-tag-sync.yaml`-written, already lowercased) on
+`mergeKeys: [username, labSlug]` — an EXACT STRING match, case-sensitive. An
+early draft "fixed" this by silently lowercasing `username` with Helm's
+`| lower` filter — which does nothing for the actual bug: the merge generator
+compares the RAW fleet-repo values BEFORE Helm ever runs, so a `students.yaml`
+row written as `JSmith` would simply never join with a tag file written as
+`jsmith`, permanently pinning that student on the `:unreleased` placeholder
+with **no error anywhere** — ArgoCD shows a normal, Synced, Healthy
+Application; only the image tag is silently wrong forever. The fail-guards fix
+this by rejecting a not-already-lowercase value outright: if slides ever writes
+mixed-case data, the Application for that ONE student goes visibly Degraded (a
+clear `fail` message naming the exact field and value) instead of silently
+never updating.
 
 **This also affects the Vault path.** `chart/templates/externalsecret.yaml`
 builds the read path from the SAME validated (lowercased) `labSlug`/`username`
-— so the path slides writes credentials to must ALSO be the lowercased form:
-`secret/labs/<lowercase labSlug>/<lowercase username>`, never the
-as-scaffolded-case GitHub username. See "Vault" below.
+— so the path slides writes credentials to must ALSO be the lowercased form,
+never the as-scaffolded-case GitHub username. See "Vault" below.
 
-## Contract: required + validated fields (found in adversarial review, C-2)
+## Contract: required + validated fields (adversarial review C-2)
 
-Every field in every fleet-repo row is REQUIRED (`username`, `repo`, `labSlug`
-in `students.yaml`; `labSlug` in `lab.yaml`; `username`, `labSlug`, `tag` in a
-tag file) — a missing field is not tolerated silently. Two layers enforce this
-without letting one bad row take down the whole fleet:
+Every field in every fleet-repo row is REQUIRED — a missing field is not
+tolerated silently. Two layers enforce this without letting one bad row take
+down the whole fleet:
 
 1. **`applicationsets/labs-*-appset.yaml`** never reference a field raw
    (`{{.username}}`) — every reference is `hasKey`-guarded
@@ -200,29 +226,76 @@ across two rows (e.g. a stale `tags/<username>.yaml` left over after a
 lab-slug rename, now colliding with a re-registered student) makes the
 `merge` GENERATOR itself error — that happens before any template renders, so
 no `hasKey` guard reaches it. This is a fleet-repo data-hygiene concern, not
-something a platform-infra manifest change can close. Recommend the operator
-alert on the `labs-students` ApplicationSet's own error/degraded conditions
+something a platform-infra manifest change can close. **After the H-2 fix,
+this risk is now bounded to slides' own bugs and `lab-tag-sync.yaml`'s own
+bugs only** (no student-controlled writer can create a duplicate anymore).
+Recommend the operator alert on the `labs-students` ApplicationSet's own
+error/degraded conditions
 (`kubectl -n argocd get applicationset labs-students -o jsonpath='{.status.conditions}'`)
 if catching this proactively matters.
 
-## Contract: Vault write semantics (found in adversarial review, C-3)
+## Contract: the 63-char cap must be enforced by slides BEFORE repo creation (adversarial review M-3)
 
-The `slides-labs-writer` Vault policy
-(`../external-secrets/vault-policies/slides-labs-writer-role.sh`) grants
-**create + update + patch ONLY — no `read`, no `delete`.** This is already
-correctly scoped in the script; stated explicitly here so the slides
-implementation doesn't assume either capability:
+`chart/templates/_helpers.tpl`'s `lab-app.appName` fail-guard catches an
+over-length `<labSlug>-<username>` combination — but only AFTER the repo
+already exists: slidedeck's `labRepoName()` truncates at 90 characters when
+naming the GitHub repo
+(`` `${lab.slug}-${githubUsername}`.slice(0, 90) ``), which is well past this
+chart's 63-char cap. A `(labSlug, username)` pair between 64 and 90 characters
+combined therefore yields a WORKING, successfully-created student repo whose
+lab-hosting Application is then PERMANENTLY Degraded (the fail-guard fires on
+every single render forever — there is no shorter name to fall back to once
+the repo is named). **Slides must check `labSlug.length + 1 + username.length
+<= 63` BEFORE calling the repo-generate API**, not rely on this chart to catch
+it after the fact — this chart's guard is a correctness backstop, not a
+substitute for validating at the point where the mistake is still cheap to
+refuse.
 
-- **Setting/updating credentials**: KV-v2 `PATCH` (merge-patch), same as
-  Backstage's secrets-UX.
-- **Removing a single key**: a merge-patch with that key set to `null`
-  (`{"DATABASE_URL": null}`), NOT a `vault kv delete` / KV-v2 `DELETE` — the
-  policy grants no `delete` capability, so an actual delete call 403s.
-- **No read-back**: the slides backend cannot fetch a previously-written
-  value from this path with this token. If slides ever needs to display
-  "current" values back to a TA/admin, it must retain them itself (e.g. in
-  its own Postgres, as it already does for the browser-only lab-mariadb
-  creds) — Vault is write-only from this identity.
+## Contract: withDatabase (adversarial review H-1 — NEW)
+
+**`hosted` and `with_database` are INDEPENDENT columns in slidedeck**
+(`server/db.js:56-57`; `server/scaffold.js`'s own comment: "Stack and database
+are ORTHOGONAL"; `deriveLabFlags()` returns them as two separate booleans). An
+earlier draft of this chart rendered `chart/templates/externalsecret.yaml` and
+`deployment.yaml`'s `envFrom` unconditionally — so a `hosted: true,
+with_database: false` lab (slides never writes a Vault path for it, by design)
+would have every student pod sit in `CreateContainerConfigError` forever,
+waiting on a k8s Secret an ExternalSecret can never materialize because
+nothing will ever populate the Vault path it's pointed at.
+
+**Fixed**: `withDatabase` gates THREE things, all via the identical inline
+check `{{- if eq (toString .Values.withDatabase) "true" }}` (see
+`chart/templates/_helpers.tpl`'s "withDatabase gating" comment for why this is
+NOT a reusable `{{- define }}` helper — a Helm/Go-template footgun where any
+non-empty string, including the literal text "false", is truthy):
+
+1. `chart/templates/externalsecret.yaml` — the whole file, gated alongside
+   `.Values.studentApp`.
+2. `chart/templates/deployment.yaml` — the `envFrom` block only (the rest of
+   the Deployment always renders).
+3. `chart/templates/namespace-bootstrap.yaml` — the `slides:3306` egress
+   `NetworkPolicy` rule only (DNS egress always renders).
+
+**Why `withDatabase` is DUPLICATED onto every `students.yaml` row** instead of
+living only in `lab.yaml`: `namespaceBootstrap` mode (gate #3) has a direct
+path to `lab.yaml`'s data (its OWN ApplicationSet's generator reads that file
+directly), but `studentApp` mode (gates #1 and #2) does not — the
+`labs-students` ApplicationSet's `merge` generator is keyed on
+`[username, labSlug]`, and `lab.yaml` carries neither of those keys, so there
+is no way for that generator to join in `lab.yaml`'s data without changing the
+merge key shape (which would break the EXISTING roster⋈tag merge — see
+`applicationsets/labs-students-appset.yaml`'s header). A nested `matrix`
+generator combining a per-lab source with the existing per-student `merge`
+could in principle thread this through without duplication, but that shape
+could not be verified against a live ArgoCD controller from this environment
+(schema-valid via `--dry-run=server` says nothing about generator RUNTIME
+behavior, unlike the `merge` generator's left-join semantics, which round 1's
+review independently verified as correct) — duplication was chosen as the
+lower-risk, provably-correct option. Both copies are written by slides at the
+SAME time (lab creation), from the SAME source fact, and neither ever changes
+after that — low drift risk in practice, unlike the tag/roster split, which
+genuinely needed separation because those two values change on different,
+overlapping schedules from different writers.
 
 ## Container port convention (judgment call)
 
@@ -237,22 +310,90 @@ Next.js stack template (whose `STACK_RUN_DEFAULTS` in slidedeck's
 framework does NOT honor `$PORT` still needs its Dockerfile/start command
 adjusted to bind 8080 explicitly.
 
-## Image tag propagation ("bump-dev, simpler")
+## Container security context vs. lab template images (adversarial review M-5 — KNOWN LIMITATION)
 
-Mirrors the tenant `tenant-build.yaml` → `bump-dev` pattern (CI resolves + pushes
-an image, then writes the new tag into a git-tracked file ArgoCD watches) with
-the promotion ladder removed: single env, and the "overlay" is
-`tags/<username>.yaml` instead of a kustomize image patch. See
-`.github/workflows/lab-build.yaml`'s header for the full pipeline and
-`applicationsets/labs-students-appset.yaml`'s `merge` generator for how the tag
-reaches the rendered Deployment. **Never falls back to `:latest`** — Kyverno's
-`disallow-latest-tag` ClusterPolicy is `Enforce` cluster-wide and `lab-*`
-namespaces are not in its exclude list (correctly — they shouldn't be); a
-student with no tag yet gets `:unreleased` (a real, non-`latest`, guaranteed-
-nonexistent tag — Kyverno admits the Pod, it just sits `ImagePullBackOff`).
-`tag` is also STRICTLY VALIDATED against `^[a-f0-9]{7,64}$` before it is ever
-interpolated into a manifest (adversarial review B-4 — see "Security hardening"
-below).
+The Deployment forces `runAsUser: 65532` at the pod level (`chart/templates/
+deployment.yaml`), which OVERRIDES whatever `USER` a lab template's own
+Dockerfile sets. **Verified concretely against slidedeck's generated Next.js
+starter**: its Dockerfile sets `USER node` (uid 1000) with `/app` owned by
+that uid; forcing uid 65532 means `next start` writing its `.next/cache`
+directory hits `EACCES` (the directory is owned by uid 1000, not 65532) — the
+Next.js hosted-lab template is broken out of the box against this chart as
+shipped. The Spring Boot starter is unaffected (its image runs as root by
+default, so uid 65532 doesn't collide with anything the JVM needs to write).
+**Not fixed in this PR** — a per-template `runAsUser` override would need a
+value threaded through the fleet contract for every stack, which this PR
+deliberately avoids (see "Container port convention" for the same tradeoff
+made the same way). The Next.js hosted-lab template's Dockerfile MUST either
+`chown` its working directory to `65532` or provide a writable `.next/cache`
+location the image can use regardless of uid — flagged prominently here so
+this is caught before a professor's first Next.js hosted lab, not during it.
+
+## Image tag propagation (adversarial review H-2 — CHANGED from round 1)
+
+**Round 1 had each student's own CI (`lab-build.yaml`) write its own tag file
+directly into `capstone-labs-fleet`, using an org-shared `LAB_FLEET_TOKEN`
+secret present in every student repo's job environment.** Round-1 review
+caught that this token was shared and gated the write with an identity check
+(B-3); round-2 review found that gate insufficient: a student has push access
+to their OWN repo (`scaffold.js:81-84`), so they could author ANY workflow in
+`.github/workflows/` in their own repo that reads `secrets.LAB_FLEET_TOKEN`
+directly and does whatever it wants with the raw token — B-3's identity check
+only constrained what `lab-build.yaml`'s OWN git commands did with the token;
+it did nothing to stop a student from bypassing `lab-build.yaml` entirely.
+With the raw token, a student could pin any peer to an old/nonexistent tag
+(DoS), read the private roster, corrupt `students.yaml`, or — worst —
+`git rm labs/<slug>/`, which with `prune: true` on both `labs-*-appset.yaml`
+ApplicationSets would DESTROY that lab's entire Namespace and every student's
+app.
+
+**Fixed by removing the shared secret from student repos entirely, not by
+tightening the check further** (tightening cannot close a "student can write
+their own script" hole — any check lives in code the student can route
+around). `.github/workflows/lab-build.yaml` now does ONLY the one thing that
+is safe to let student-authored CI do: build + push ITS OWN repo's image to
+ITS OWN GHCR package, using the workflow run's automatic, repo-scoped
+`GITHUB_TOKEN` (which cannot reach any other repo's package or any other
+resource). It takes no inputs and needs no secrets at all — see that file's
+header. Tag-writing moved to `.github/workflows/lab-tag-sync.yaml`, a
+SCHEDULED workflow (every 5 minutes, `on: schedule` + `workflow_dispatch`)
+that lives ONLY in `platform-infra`, which students have no access to at all.
+It reads the (slides-owned, trusted) roster, asks the GitHub API for each
+student repo's default-branch HEAD commit, and writes/updates
+`labs/<slug>/tags/<username>.yaml` itself, batching every change from one poll
+into a single commit. **Latency is fine**: the `labs-students` ApplicationSet's
+git generators already requeue on ArgoCD's own ~3 minute default polling
+interval, so a 5-minute sync cadence is not the bottleneck.
+
+**This closes the round-2 findings completely, not partially**: with no
+credential of any kind in a student repo's environment that can reach
+`capstone-labs-fleet`, a student cannot write another student's tag file,
+cannot corrupt `students.yaml` (read-only to them — they have no token that
+can write it at all), and cannot `git rm` a lab directory. The two credentials
+`lab-tag-sync.yaml` uses (`LAB_ROSTER_READ_TOKEN`, `LAB_FLEET_WRITE_TOKEN` —
+see "OPERATOR ACTIONS") live ONLY as platform-infra repository/organization
+secrets, which GitHub Actions never exposes to a DIFFERENT repository's
+workflow runs (including student repos) under any circumstance — there is no
+`secrets: inherit` or equivalent that could leak them there, because
+`lab-tag-sync.yaml` is not a reusable workflow a student repo calls; it is a
+scheduled workflow that only ever runs in the context of `platform-infra`
+itself.
+
+**Never falls back to `:latest`** — Kyverno's `disallow-latest-tag`
+ClusterPolicy is `Enforce` cluster-wide and `lab-*` namespaces are not in its
+exclude list (correctly — they shouldn't be); a student with no tag yet gets
+`:unreleased` (a real, non-`latest`, guaranteed-nonexistent tag — Kyverno
+admits the Pod, it just sits `ImagePullBackOff`). `tag` is also STRICTLY
+VALIDATED against `^[a-f0-9]{7,64}$` before it is ever interpolated into a
+manifest (adversarial review B-4 — see "Security hardening" below), AND every
+field `lab-tag-sync.yaml` writes into a tag file is explicitly quoted
+(adversarial review M-4 — see that workflow's own comment: an unquoted
+all-digit 12-char short SHA, ~1.4% of builds by birthday-paradox arithmetic on
+hex digits, parses as a YAML/JSON NUMBER once ArgoCD's git generator converts
+it, which the chart's own hex-format fail-guard then correctly — but
+confusingly — rejects; quoting removes the whole class of coercion bug,
+including the same risk for a username/labSlug that happens to be a YAML 1.1
+boolean word like `on`/`no`/`yes`/`off`).
 
 ## Registry: GHCR, not Harbor (adversarial review B-2 — CHANGED from the first draft)
 
@@ -269,62 +410,64 @@ image with a layer over 100MB (routine for `node_modules` on a Next.js
 template, a Spring Boot fat jar, or any ML dependency set) would 413 and look
 like an unexplained platform failure.
 
-**Fix: push to GHCR instead.** `.github/workflows/lab-build.yaml` now pushes
-to `ghcr.io/ua-mis/<repo-name>:<tag>` using the workflow run's own automatic
-`GITHUB_TOKEN` (scoped to that one repo, `packages: write`) — **no shared
-secret needed for the push side at all**, and no Cloudflare/Harbor in the path
-whatsoever. `chart/templates/_helpers.tpl`'s `lab-app.image` derives the same
-`ghcr.io/ua-mis/<labSlug>-<username>` ref the chart-side, so there is exactly
-one place the naming convention lives.
+**Fix: push to GHCR instead.** `.github/workflows/lab-build.yaml` pushes to
+`ghcr.io/<lowercased github.repository>:<tag>` using the workflow run's own
+automatic `GITHUB_TOKEN` (scoped to that one repo, `packages: write`) — no
+shared secret needed for the push side at all, and no Cloudflare/Harbor in the
+path whatsoever. `chart/templates/_helpers.tpl`'s `lab-app.image` derives the
+identical `ghcr.io/ua-mis/<labSlug>-<username>` ref chart-side, so there is
+exactly one place the naming convention lives.
 
-**Pull still needs a credential** (GHCR packages tied to a private repo
-default to private visibility) — ONE static, read-scoped credential, sealed
-into each `lab-<slug>` namespace as a `docker-registry` Secret named
-`labs-pull` (same name the Deployment's `imagePullSecrets` already expects).
-Unlike a Harbor robot (API-minted, uniquely named per project, one mint call
-required per lab because robot names can't repeat), this is just a static PAT
-the operator generates once in GitHub's UI/CLI — resealing the SAME value into
-every lab namespace is fine (no server-side uniqueness constraint), which
-removes an entire class of operator tooling (no per-lab Job to mint anything).
-See "OPERATOR ACTIONS" below for the exact commands.
+## Pull: GHCR packages are PUBLIC — no pull secret at all (adversarial review H-3/M-2 — CHANGED from round 1)
 
-**Harbor is not used anywhere in the lab-hosting layer as of this revision** —
-the earlier `make harbor-onboard NAME=labs` / shared push-robot / per-lab
-pull-robot Job steps from the first draft of this PR are REMOVED, not just
-deprioritized.
+**Round 1 planned to reseal ONE static PAT as a `docker-registry` Secret
+(`labs-pull`) into every `lab-<slug>` namespace**, and round-1's own README
+even said so — but round-2 review found the plan never actually landed
+anywhere GitOps would apply it (the SealedSecret's proposed path,
+`platform-services/lab-hosting/`, is EXCLUDED from the `platform-services`
+directory generator by this SAME PR, and the two `labs-*-appset.yaml`
+ApplicationSets only ever render `chart/` — nothing in the design applied it).
+Separately, round-2 review also confirmed a factual gap in the round-1 plan
+(M-2): GitHub Packages authentication requires a **classic** PAT, not the
+fine-grained PAT round 1 offered as the primary option, and a private package
+inherits its linked repo's access — meaning a single pull identity would need
+explicit read access GRANTED on every current AND future student repo, an
+ever-growing list the operator would have to maintain by hand.
 
-## Security hardening (adversarial review B-3, B-4)
+**Decision: make GHCR packages PUBLIC, and delete the pull-secret mechanism
+entirely** rather than solve either problem. Reasoning: every hosted-lab app
+is ALREADY fully public (no SSO gate, that's the whole design point of this
+layer) — the running application, its behavior, and everything a professor or
+anyone else can observe by visiting the URL are already unauthenticated and
+world-reachable. Making the CONTAINER IMAGE that produces that same running
+app also publicly pullable adds no meaningful new exposure: the image doesn't
+(and must not, by ordinary Docker hygiene any public open-source project
+already has to observe) contain secrets baked in — database credentials arrive
+at runtime via the ExternalSecret/`envFrom`, never the image. Public GHCR
+visibility does NOT affect the PUSH side at all (still gated by the
+repo-scoped `GITHUB_TOKEN`, still only that repo's own CI can push to it) —
+only pull/read visibility changes. This deletes `imagePullSecrets` from
+`chart/templates/deployment.yaml` entirely (confirmed: `grep -i pullsecret`
+against the rendered chart output returns nothing — see "Local verification"),
+deletes the classic-vs-fine-grained-PAT problem (M-2, moot — there is no PAT),
+and deletes the "where does the SealedSecret land" problem (H-3, moot — there
+is no SealedSecret).
 
-**B-3 — identity spoofing.** The reusable workflow's `with: {lab_slug,
-username}` inputs are set by the CALLER (the thin ~7-line workflow baked into
-each student's OWN repo at scaffold time) — and a student has push access to
-their own repo, so they can edit that caller. Without a check, a malicious
-student could set `username: <victim>` to have their OWN CI write
-`labs/<lab>/tags/<victim>.yaml`, redeploying the VICTIM's public URL with the
-attacker's image. **Fix**: `lab-build.yaml`'s first real step reconstructs the
-expected repo name (`ua-mis/<lab_slug>-<username>`, lowercased) from the
-caller's claimed inputs and asserts it EXACTLY equals `github.repository` —
-the one thing a student cannot forge (renaming a repo they don't admin is not
-possible). This is deliberately NOT a parse of `github.repository` back into
-`(lab_slug, username)` — that split is genuinely ambiguous, since `labSlug`
-itself may contain hyphens (e.g. `f26-lab0`) — reconstruct-and-compare sidesteps
-the ambiguity entirely: there is no `(lab_slug, username)` pair other than the
-student's own real one that reconstructs their own immutable repo name.
+**Operator action required**: each student's GHCR package defaults to private
+on first push and must be flipped to Public once — see "OPERATOR ACTIONS"
+below for the exact API call and a bulk script covering the whole current
+roster. This is the one piece of this decision that costs operator effort; it
+was chosen anyway because the alternative (classic PAT, ever-growing read
+grants, actually finding a real place to land a SealedSecret) was assessed as
+more total ongoing effort, not less.
 
-**Residual trust**: `LAB_FLEET_TOKEN` (Contents:read/write, scoped to
-`capstone-labs-fleet` ONLY) is present in the job environment for every
-student's CI run. After the B-3 fix, a student cannot repurpose it to write
-anyone else's file (the workflow's own git commands are hardcoded to
-`labs/${LAB_SLUG}/tags/${USERNAME}.yaml`, using the now-validated values) — but
-the token itself is still shared across all ~15 students' CI runs, since it
-lives in the reusable workflow, not per-student. Do not grant students direct
-access to mint or view this token; it should be minted and set once by the
-operator (see "OPERATOR ACTIONS"), scoped to nothing beyond the fleet repo.
+## Security hardening (adversarial review B-4)
 
-**B-4 — template injection.** `tag` originates from a git file a student's own
-CI writes — an earlier draft interpolated it unquoted into `image:` in the
-Deployment manifest. A tag value containing a YAML-significant character
-(e.g. a newline) could inject sibling keys into the pod spec. Fixed two ways,
+**B-4 — template injection.** `tag` originates from a value `lab-tag-sync.yaml`
+resolves from the GitHub API and writes into a git file this chart reads — an
+earlier draft interpolated it unquoted into `image:` in the Deployment
+manifest. A tag value containing a YAML-significant character (e.g. a newline)
+could inject sibling keys into the pod spec. Fixed two ways,
 belt-and-suspenders: (1) `_helpers.tpl`'s `lab-app.imageTag` now rejects
 anything that isn't `^[a-f0-9]{7,64}$` (or empty) BEFORE it is ever
 interpolated anywhere — this alone closes the injection vector, since a valid
@@ -337,12 +480,33 @@ structure.
 ## Vault: read side vs write side
 
 **Read side (this PR provides the manifest, NOT the Vault write)**:
-`chart/templates/externalsecret.yaml` reads `secret/labs/<labSlug>/<username>`
-(both ALREADY lowercase — see "Contract: lowercase everywhere") via the
-EXISTING platform-wide `vault-backend` ClusterSecretStore (same store every
-other platform service uses) — property names `DATABASE_URL`, `DB_HOST`,
-`DB_NAME`, `DB_USER`, `DB_PASSWORD`, mapped 1:1 into a k8s Secret
-`<appName>-db` that the Deployment consumes via `envFrom`.
+`chart/templates/externalsecret.yaml` reads a student's DB credentials (only
+when `withDatabase` — see "Contract: withDatabase") via the EXISTING
+platform-wide `vault-backend` ClusterSecretStore (same store every other
+platform service uses) — property names `DATABASE_URL`, `DB_HOST`, `DB_NAME`,
+`DB_USER`, `DB_PASSWORD`, mapped 1:1 into a k8s Secret `<appName>-db` that the
+Deployment consumes via `envFrom`.
+
+**Vault path notation — three correct forms, one value (adversarial review
+M-6, disambiguating an earlier inconsistency where this README stated the path
+three different ways without saying they were different things)**:
+- **ESO `remoteRef.key`** (what `externalsecret.yaml` actually contains): the
+  BARE KV-v2 logical path, `labs/<slug>/<user>` — no `secret/` or
+  `secret/data/` prefix. Correct because the ClusterSecretStore already
+  carries `spec.provider.vault.path: "secret"` as the mount point, and ESO
+  appends `/data` itself for KV-v2 reads.
+  - Both `labSlug`/`username` are the ALREADY-VALIDATED, lowercased values —
+    slides must write to this SAME lowercased path or ESO 404s even though the
+    roster data looked fine (see "Contract: lowercase everywhere").
+- **Raw Vault HTTP KV-v2 API path**: `secret/data/labs/<slug>/<user>` — what
+  `labs-read-role.sh`'s policy grants `read` on, and what a curl call or the
+  Vault Go/JS client would address directly. This is the form slides' backend
+  will actually use if it calls Vault's HTTP API.
+- **Vault CLI `kv` subcommand form**: `vault kv patch secret/labs/<slug>/<user>
+  ...` — the CLI's own `kv` helper inserts `data` itself, so this form LOOKS
+  almost identical to the ESO bare form above; that visual similarity is the
+  actual source of the confusion this section exists to resolve. They are not
+  interchangeable outside their own tool's context.
 
 **What's missing today**: `external-secrets-ro` (the policy the ESO controller's
 k8s-auth role carries) does not cover `secret/data/labs/*` — see
@@ -352,13 +516,23 @@ k8s-auth role carries) does not cover `secret/data/labs/*` — see
 **Write side (slides writes the values; NOT built here)**:
 `platform-services/external-secrets/vault-policies/slides-labs-writer-role.sh`
 drafts the WRITE-only policy + k8s-auth role slides' backend will authenticate
-as (mirrors `backstage-role.sh` exactly — see "Contract: Vault write
-semantics" above for the exact capability set: create/update/patch only, no
-read-back, no delete). Wiring the slides Deployment to actually present that
-identity (a projected serviceAccountToken volume, same as
-`backstage-process-app.yaml`) is a slidedeck-repo change — out of scope for
-this PR; the script only stands up the Vault-side identity ahead of that
-wiring landing.
+as (mirrors `backstage-role.sh` exactly): **create + update + patch ONLY — no
+`read`, no `delete`.**
+- **Setting/updating credentials**: KV-v2 `PATCH` (merge-patch), same as
+  Backstage's secrets-UX.
+- **Removing a single key**: a merge-patch with that key set to `null`
+  (`{"DATABASE_URL": null}`), NOT a `vault kv delete` / KV-v2 `DELETE` — the
+  policy grants no `delete` capability, so an actual delete call 403s.
+- **No read-back**: the slides backend cannot fetch a previously-written value
+  from this path with this token. If slides ever needs to display "current"
+  values back to a TA/admin, it must retain them itself (e.g. in its own
+  Postgres, as it already does for the browser-only lab-mariadb creds) — Vault
+  is write-only from this identity.
+
+Wiring the slides Deployment to actually present that identity (a projected
+serviceAccountToken volume, same as `backstage-process-app.yaml`) is a
+slidedeck-repo change — out of scope for this PR; the script only stands up
+the Vault-side identity ahead of that wiring landing.
 
 ## Netpol: lab pods reaching lab-mariadb (adversarial review B-1 — CRITICAL fix)
 
@@ -368,14 +542,15 @@ netpol.yaml` (already live on `main`, from PR #425) governs ingress to the
 (`podSelector`s for `app: slidedeck` and `app.kubernetes.io/name: lab-adminer`
 — no `namespaceSelector`, so only same-namespace `slides` pods matching those
 labels could reach it). This chart's own `namespace-bootstrap.yaml` adds the
-EGRESS side from every `lab-<slug>` namespace to `slides:3306` — but per that
-netpol file's OWN header comment ("a peer's egress allowance alone does not
-admit traffic once the receiver is policy-covered"), egress-only is not
-enough: `lab-mariadb` already declares `policyTypes: [Ingress, ...]`, so it is
-policy-covered, and without a matching INGRESS rule naming lab pods as an
-allowed peer, every hosted lab app's DB connection would be dropped — the
-platform would ship an ExternalSecret with valid credentials pointed at a
-database the app's own pod is network-denied from ever reaching.
+EGRESS side from every `withDatabase` `lab-<slug>` namespace to `slides:3306`
+— but per that netpol file's OWN header comment ("a peer's egress allowance
+alone does not admit traffic once the receiver is policy-covered"),
+egress-only is not enough: `lab-mariadb` already declares
+`policyTypes: [Ingress, ...]`, so it is policy-covered, and without a matching
+INGRESS rule naming lab pods as an allowed peer, every hosted lab app's DB
+connection would be dropped — the platform would ship an ExternalSecret with
+valid credentials pointed at a database the app's own pod is network-denied
+from ever reaching.
 
 **Fix** (included in this PR, `platform-services/lab-db/netpol.yaml`): added a
 `namespaceSelector: {matchLabels: {platform.capstone/component: lab}}` peer to
@@ -385,8 +560,7 @@ chart's `namespace-bootstrap.yaml` creates carries that exact label
 traffic from every current AND future lab namespace on 3306 — no per-lab netpol
 edit needed as labs come and go.
 
-**Verification** (server-side dry-run + live label-match evidence, see the PR
-thread for the raw command output — summarized here):
+**Verification** (server-side dry-run + live label-match evidence):
 - `kubectl --dry-run=server -f platform-services/lab-db/netpol.yaml` → all
   three NetworkPolicy objects in that file apply cleanly as `configured`
   (modifications to the live, already-applied objects), zero schema errors.
@@ -411,28 +585,47 @@ thread for the raw command output — summarized here):
   `limits.cpu: "6"` / `limits.memory: 6Gi` ResourceQuota would have silently
   quota-blocked student #13+ (visible only in ReplicaSet events, not on the
   Application). Raised to `10`/`10Gi` (`chart/values.yaml`).
-- **M-2 — no intra-namespace traffic**: the original NetworkPolicies allowed
-  unrestricted pod-to-pod traffic within a `lab-<slug>` namespace
+
+  **Full quota, spelled out for a README-only reader** (`chart/values.yaml`):
+  `requests.cpu: 5`, `requests.memory: 5Gi`, `limits.cpu: 10`,
+  `limits.memory: 10Gi`, `pods: 30`, `services: 20`, and
+  **`persistentvolumeclaims: 0`** — a HARD, deliberate constraint, not an
+  oversight: lab apps are stateless by design (their database, when
+  `withDatabase`, lives in the dedicated `lab-mariadb` instance in ns
+  `slides`, never a per-app PVC). A future lab that genuinely needs a PVC must
+  raise this quota explicitly.
+- **M-2 (this section's M-2 is the resource-governance one — see "Pull: GHCR
+  packages are PUBLIC" above for the OTHER M-2, about PAT scoping, which this
+  numbering collision is left as-is from the original review rather than
+  renumbered) — no intra-namespace traffic**: the original NetworkPolicies
+  allowed unrestricted pod-to-pod traffic within a `lab-<slug>` namespace
   (`podSelector: {}` both directions), copied from the tenant model where one
   namespace = one TRUSTED team. Here one namespace = up to 15 MUTUALLY
   UNTRUSTED students sharing nothing (one Deployment/Service each, no
   sidecars). Removed both intra-namespace allow rules —
   `chart/templates/namespace-bootstrap.yaml` now permits only Traefik/
-  cloudflared ingress and DNS+lab-mariadb egress.
+  cloudflared ingress and DNS(+lab-mariadb, if withDatabase) egress.
 - **M-3 — no default-SA sharing**: every other app template in this platform
   gives its workload a dedicated ServiceAccount with
   `automountServiceAccountToken: false`; the lab chart was the odd one out on
   exactly the LEAST-trusted workload here (arbitrary student-authored code,
   publicly reachable). Fixed — `chart/templates/serviceaccount.yaml` +
   `deployment.yaml`'s `serviceAccountName`/`automountServiceAccountToken: false`.
+  (This is a DIFFERENT M-3 than the "63-char cap" M-3 elsewhere in this
+  README — again, left as originally numbered by the two separate review
+  passes rather than renumbered, to keep finding IDs traceable back to the
+  actual review comments.)
 
 ## Teardown
 
 - **A student leaves / lab closes to new students**: slides removes their row
-  from `students.yaml` (and may delete their `tags/<username>.yaml`) → the
-  merge generator drops that element → ArgoCD prunes that ONE Application
-  (Deployment/Service/Ingress/ExternalSecret gone; the shared namespace and its
-  siblings are untouched).
+  from `students.yaml` → the merge generator drops that element → ArgoCD
+  prunes that ONE Application (Deployment/Service/Ingress/ExternalSecret gone;
+  the shared namespace and its siblings are untouched). `lab-tag-sync.yaml`'s
+  NEXT poll simply stops finding that row and stops touching its tag file (it
+  neither deletes nor needs to — the pruned Application means nothing reads it
+  anymore); an operator MAY delete the stale `tags/<username>.yaml` for
+  tidiness, not required for correctness.
 - **End of term**: delete the WHOLE lab —
   ```bash
   git rm labs/<lab-slug>/lab.yaml labs/<lab-slug>/students.yaml \
@@ -446,6 +639,20 @@ thread for the raw command output — summarized here):
   Crossplane `CapstoneTenant` claim lifecycle — labs are a single flat
   `lab-<slug>` namespace with no semester/env axis. Forcing it in would be more
   code than the two `git rm`s above; not done.
+- **What teardown does NOT clean up (adversarial review LOW — stated plainly,
+  not assumed obvious)**: the Vault entries at `secret/labs/<slug>/<user>`
+  are NOT deleted — the `slides-labs-writer` policy has no `delete`
+  capability by design (see "Vault: read side vs write side"), and neither
+  ArgoCD nor this chart has any Vault-write identity at all. Orphaned Vault
+  data after teardown is an accepted, low-cost byproduct (it's inert once
+  nothing reads it) — cleaning it up, if ever wanted, is a slides-side or
+  manual Vault-admin action, not something this PR's teardown path performs.
+  Similarly, each torn-down student's GHCR package (and its now-Public
+  visibility, see "Pull: GHCR packages are PUBLIC") is NOT deleted or
+  re-privatized by teardown — an intentionally-scoped decision to keep
+  teardown to "stop serving traffic + free cluster resources," not "erase
+  every trace," matching how student repos themselves are only ever ARCHIVED
+  (never deleted) elsewhere in slidedeck's own teardown flow.
 
 ## Known gap found during verification: `verify-image-signature` (cosign)
 
@@ -474,15 +681,27 @@ two, which correctly stay unexcluded).
 
 - Harbor immutable-tag rule: moot now that Harbor isn't used for lab images at all (B-2).
 - An ADR for this design was not written (v1 lab-hosting predates this repo's ADR-numbered decisions; could be retrofitted).
-- Further expression-injection hardening review of `lab-build.yaml` beyond the `env:`-passthrough fix already applied (L-1/L-2) — the pattern is now consistent throughout the file, but a dedicated actionlint/zizmor pass was not run.
+- Further expression-injection hardening review of `lab-build.yaml`/`lab-tag-sync.yaml` beyond the `env:`-passthrough fix already applied (L-1/L-2) — the pattern is consistent throughout both files, but a dedicated actionlint/zizmor pass was not run.
 - Doc cross-links from `docs/operator/harbor.md` etc. noting labs no longer touch Harbor — not added; this README + the PR description are the source of truth for now.
+- `lab-tag-sync.yaml` does not verify a GHCR image actually exists before writing its tag (trusts that a push already happened) — see that workflow's header for the tradeoff accepted.
 
 ## Local verification
 
 ```bash
 helm lint platform-services/lab-hosting/chart
+
+# namespaceBootstrap mode, both withDatabase states:
 helm template t platform-services/lab-hosting/chart --set namespaceBootstrap=true --set labSlug=lab1
+helm template t platform-services/lab-hosting/chart --set namespaceBootstrap=true --set labSlug=lab1 --set withDatabase=true
+
+# studentApp mode, both withDatabase states (H-1 — prove the false case has NO
+# ExternalSecret / envFrom / 3306 egress, and the true case has all three):
 helm template t platform-services/lab-hosting/chart --set studentApp=true --set labSlug=lab1 --set username=jsmith --set tag=abc123d
+helm template t platform-services/lab-hosting/chart --set studentApp=true --set labSlug=lab1 --set username=jsmith --set tag=abc123d --set withDatabase=true
+
+# confirm no pull secret anywhere (H-3):
+helm template t platform-services/lab-hosting/chart --set studentApp=true --set labSlug=lab1 --set username=jsmith | grep -i pullsecret   # expect: no output
+
 # fail-guards (should each error loudly, scoped to this one render):
 helm template t platform-services/lab-hosting/chart --set studentApp=true --set labSlug=lab1 --set username=JSmith        # C-1: not lowercase
 helm template t platform-services/lab-hosting/chart --set studentApp=true --set labSlug=lab1 --set username=jsmith --set tag=not-hex  # B-4: bad tag
@@ -515,87 +734,119 @@ are classifier-gated for agents; read-only verification only
    generator reads are a repo-server read operation, gated by repo credentials,
    not by an Application's `spec.source.repoURL` (which stays `platform-infra`
    for every generated Application here; `sourceRepos` governs THAT field only).
-3. **Merging this PR to `main` IS the deploy — no manual `kubectl apply`
-   needed or possible** (correction — an earlier draft of this README said to
-   `kubectl apply` the two new ApplicationSets manually; that was wrong).
-   `bootstrap/root-app.yaml` recurses `applicationsets/` with
-   `automated: {prune: true, selfHeal: true}`, so ArgoCD picks up
-   `labs-namespace-appset.yaml`/`labs-students-appset.yaml` automatically on
-   merge, per this platform's own golden rule ("you do not `kubectl apply` to
-   change the platform" — `docs/operator/README.md`). **Sequencing matters**:
-   do step 1 (create the fleet repo) BEFORE or immediately after merging —
-   until it exists and is readable, both new ApplicationSets' git generators
-   show `ErrorOccurred` (harmless — they just generate zero Applications — but
-   noisy in the ArgoCD UI until the repo exists).
-4. **GHCR — mint the shared pull credential** (adversarial review B-2 —
-   replaces the old Harbor pull-robot-per-lab flow entirely): generate ONE
-   fine-grained PAT (or a machine-user classic PAT), `read:packages` scope,
-   able to read the `ua-mis/*` package namespace. Reseal the SAME value into
-   every `lab-<slug>` namespace as it's created:
+3. **Merging this PR to `main` IS the deploy for the two ApplicationSets — no
+   manual `kubectl apply` needed or possible.** `bootstrap/root-app.yaml`
+   recurses `applicationsets/` with `automated: {prune: true, selfHeal: true}`,
+   so ArgoCD picks up `labs-namespace-appset.yaml`/`labs-students-appset.yaml`
+   automatically on merge, per this platform's own golden rule ("you do not
+   `kubectl apply` to change the platform" — `docs/operator/README.md`).
+   **Sequencing matters**: do step 1 (create the fleet repo) BEFORE or
+   immediately after merging — until it exists and is readable, both new
+   ApplicationSets' git generators show `ErrorOccurred` (harmless — they just
+   generate zero Applications — but noisy in the ArgoCD UI until the repo
+   exists). The `lab-tag-sync.yaml` SCHEDULED WORKFLOW, by contrast, does NOT
+   auto-enable on merge — GitHub disables `schedule` triggers on workflows in
+   a repo with no activity for 60 days, and more relevantly here, it simply
+   won't fire usefully until secrets exist (step 5) and the fleet repo has
+   real data (step 1) — no action needed beyond merging for it to start
+   working once those are in place.
+4. **GHCR — make each student's package Public** (adversarial review H-3/M-2
+   — replaces the round-1 Harbor-robot / round-1-revision static-PAT-pull
+   plans entirely; see README "Pull: GHCR packages are PUBLIC" for why this
+   was chosen over maintaining a pull credential):
    ```bash
-   kubectl create secret docker-registry labs-pull \
-     --docker-server=ghcr.io \
-     --docker-username=<a GitHub username/bot with read:packages> \
-     --docker-password=<the PAT> \
-     -n lab-lab1 --dry-run=client -o yaml \
-     | kubeseal --controller-namespace kube-system \
-         --controller-name sealed-secrets-controller \
-         --namespace lab-lab1 --format yaml \
-     > platform-services/lab-hosting/sealedsecret-pull-lab1.yaml
-   # commit that file; repeat --namespace lab-<slug> per new lab, same PAT value.
+   # one-time, per student, after their FIRST successful push creates the
+   # package (idempotent — safe to re-run):
+   gh api -X PATCH "/orgs/UA-MIS/packages/container/<labSlug>-<username>" -f visibility=public
+
+   # bulk, covering the whole CURRENT roster (run periodically, or after
+   # onboarding a batch of students) — requires a token with admin:org or the
+   # package-admin equivalent, which a plain repo-scoped GITHUB_TOKEN does NOT
+   # have (verified by this PR's own review as a real constraint, not
+   # assumed) — use an operator PAT, not the CI token:
+   for repo in $(yq -r '.[] | .labSlug + "-" + .username' labs/*/students.yaml); do
+     gh api -X PATCH "/orgs/UA-MIS/packages/container/${repo}" -f visibility=public || echo "WARN: ${repo} (package may not exist yet — no push since last run)"
+   done
    ```
-   (No in-cluster Job/API mint step needed — unlike a Harbor robot, GHCR PAT
-   creation has no per-project uniqueness constraint, so the same secret value
-   reseals cleanly into every lab namespace.)
+   No `imagePullSecrets`, no SealedSecret, no per-namespace anything — the
+   Deployment has none of that (confirmed — see "Local verification").
 5. **GHCR — no push-side secret needed.** Each student repo's CI uses its own
    automatic `GITHUB_TOKEN` (with `permissions: packages: write` — declared in
    both the reusable workflow and the caller, see `.github/workflows/
    lab-build.yaml`'s header). Nothing to mint or store for this side at all.
-6. **Vault — read side**: run
+6. **`lab-tag-sync.yaml` — mint TWO platform-infra-only secrets** (adversarial
+   review H-2 — neither of these is ever granted to any student repo):
+   - `LAB_ROSTER_READ_TOKEN` — a token that can READ commit metadata across
+     every current and future student repo (fine-grained PAT, organization
+     resource owner, "all repositories", Contents:read ONLY — deliberately
+     broad but read-only, low risk by construction: it can never write or
+     destroy anything). Set as a `platform-infra` repository (or org, scoped
+     to `platform-infra` only) secret:
+     `gh secret set LAB_ROSTER_READ_TOKEN --repo UA-MIS/platform-infra`.
+   - `LAB_FLEET_WRITE_TOKEN` — a fine-grained PAT scoped to
+     `UA-MIS/capstone-labs-fleet` ONLY, Contents:read/write (the same shape
+     the round-1 `LAB_FLEET_TOKEN` had — the fix here is WHERE it lives, not
+     its own scope, which was already minimal):
+     `gh secret set LAB_FLEET_WRITE_TOKEN --repo UA-MIS/platform-infra`.
+7. **Vault — read side**: run
    `platform-services/external-secrets/vault-policies/labs-read-role.sh` inside
    `vault-0` (see its header for the exact `kubectl exec` invocation).
-7. **Vault — write side**: run
+8. **Vault — write side**: run
    `platform-services/external-secrets/vault-policies/slides-labs-writer-role.sh`
    inside `vault-0`. This alone does NOT let slides write yet — the slidedeck
    Deployment also needs the projected `serviceAccountToken` (audience `vault`)
    + SA `slides-vault-writer` wiring; that's a slidedeck-repo change, tracked
    there, not in this PR.
-8. **Set `LAB_FLEET_TOKEN`** as an org secret (`gh secret set LAB_FLEET_TOKEN
-   --org UA-MIS --visibility selected --repos <fleet repo + each lab template
-   repo>`) — a fine-grained PAT, Contents:read/write on
-   `UA-MIS/capstone-labs-fleet` ONLY. See "Security hardening" above for the
-   residual-trust note on this token's scope.
-9. **DNS — the one-time wildcard route.** ~~Pending~~ **DONE** (per the
-   coordinator's live confirmation): the operator already added ONE Cloudflare
-   Tunnel Public Hostname route for `*.uamishub.com` (HTTP, empty path, origin
+9. **DNS — the one-time wildcard route.** Marked here as
+   **operator-confirmed, not independently re-verified by this PR** (an
+   earlier draft of this README said "DONE" on the strength of the
+   coordinator's own statement alone — restated more precisely): the operator
+   reported already adding ONE Cloudflare Tunnel Public Hostname route for
+   `*.uamishub.com` (HTTP, empty path, origin
    `traefik.kube-system.svc.cluster.local:80`). This IS a tunnel *routing
-   config* change (the dashboard-managed Public Hostname list) — corrected
-   wording from an earlier draft of this README/`ingress.yaml`, which
-   inaccurately implied "no tunnel config change at all"; what's still true is
-   that cloudflared's own process-level ingress config stays a single
-   catch-all (`ingressRule=0`, verified live on both replicas) — a wildcard
-   Public Hostname still resolves to that one rule, so no PER-LAB or
-   PER-STUDENT Cloudflare change is ever needed going forward. `*.uamishub.com`
-   was chosen over `*.labs.uamishub.com` for zero incremental TLS cost (free
-   Universal SSL already covers a single-label wildcard on the zone apex) —
-   see "Judgment calls" below.
+   config* change (the dashboard-managed Public Hostname list) — what's
+   independently verified by THIS PR (live, read-only) is only that
+   cloudflared's own process-level ingress config stays a single catch-all
+   (`ingressRule=0` on both replicas) — a wildcard Public Hostname still
+   resolves to that one rule regardless of who added it or when, so no
+   PER-LAB or PER-STUDENT Cloudflare change is ever needed going forward
+   REGARDLESS of the current status of the one-time route itself. If the
+   route is not actually live yet, no lab-hosting URL will resolve until it
+   is — worth a operator double-check, not just taking this line's word for
+   it. `*.uamishub.com` was chosen over `*.labs.uamishub.com` for zero
+   incremental TLS cost (free Universal SSL already covers a single-label
+   wildcard on the zone apex) — see "Judgment calls" below.
 
 ### Judgment calls made without being able to verify live (flagged, not hidden)
 
 - **`*.uamishub.com` vs `*.labs.uamishub.com`** for the one-time wildcard —
   the former was used (zero incremental TLS cost); a reasonable alternative
   for tighter zone-scoping, not taken.
-- **Pull-credential landing spot** (step 4) — a committed SealedSecret per lab
-  namespace under `platform-services/lab-hosting/`, applied via a small
-  platform-infra PR per new lab. Simpler than the Harbor-robot-Job approach
-  the first draft used (no per-project uniqueness constraint to work around),
-  but still means "onboard a new hosted lab" costs one small platform-infra PR
-  for this ONE piece (namespace bootstrap + student apps need zero
-  platform-infra involvement per lab; only this pull-credential step does).
+- **Public GHCR packages vs. a maintained pull credential** (H-3/M-2) — chosen
+  after concluding the private-package path required either a classic PAT
+  with an ever-growing per-repo grant list, or a nontrivial GitOps landing
+  spot for a per-namespace SealedSecret that the round-1 design never
+  actually resolved. A reasonable operator could still prefer private
+  packages for other reasons (e.g. hiding student source/Dockerfile
+  structure, not just the running app); that tradeoff is now explicit rather
+  than defaulted-into.
+- **`withDatabase` duplicated across `lab.yaml` and every `students.yaml` row**
+  rather than joined via a nested `matrix` generator — chosen because the
+  `matrix` approach could not be verified against a live ArgoCD controller
+  from this environment, while the `merge` generator's behavior already had
+  independent verification from round 1's review. See "Contract:
+  withDatabase" for the full reasoning.
+- **`LAB_ROSTER_READ_TOKEN` scoped "all repositories"** rather than an
+  explicit, maintained list — deliberately broad-but-read-only, accepting
+  that scope as lower operational burden than keeping a repo list in sync,
+  since a read-only token cannot itself cause the H-2 class of damage.
 - **Container port = 8080, fixed** rather than adding a `port` field to the
-  roster schema — mitigated by injecting `PORT=8080` (L-3), which covers most
+  roster schema — mitigated by injecting `PORT=8080`, which covers most
   frameworks; a template whose framework ignores `$PORT` still needs its own
   adjustment.
+- **`runAsUser: 65532` forced at the pod level** (M-5) — known to break the
+  Next.js starter template as shipped; not fixed, prominently flagged instead
+  (see "Container security context vs. lab template images").
 - **ArgoCD repo-credential coverage for the new fleet repo** (operator step 2)
   — inferred from `argocd-repo-creds-uamis`'s existing org-wide usage
   (cohort-gc), not independently verified (its `url` field is SealedSecret-

@@ -1,0 +1,171 @@
+# ============================================================================
+# lab-tag-sync.yaml — SCHEDULED workflow, lives ONLY in platform-infra (students
+# cannot modify it — this is the whole point, see below). Replaces the earlier
+# design where each student's own CI wrote its own tag file directly
+# (adversarial review H-2 — see `.github/workflows/lab-build.yaml`'s header and
+# README "Security hardening: H-2" for the full incident this fixes).
+#
+# WHAT IT DOES, every 5 minutes: reads the (slides-owned, trusted) roster —
+# every `labs/*/students.yaml` in `UA-MIS/capstone-labs-fleet` — and for each
+# row, asks the GitHub API for that student's repo's default-branch HEAD
+# commit SHA, then writes/updates `labs/<labSlug>/tags/<username>.yaml` with
+# the 12-char short form, committing every change from this ONE poll in a
+# SINGLE commit. This is now the ONLY writer to `labs/*/tags/*.yaml` — no
+# student-controlled code touches the fleet repo at all, closing the H-2
+# attack surface completely (a student cannot corrupt another student's tag
+# file, corrupt `students.yaml`, or `git rm` a lab's directory, because they
+# have no credential that can do any of those things).
+#
+# LATENCY IS FINE (per adversarial review): the labs-students ApplicationSet's
+# git generators already requeue on ArgoCD's own ~3min default polling
+# interval, so a 5-minute sync cadence here is not the bottleneck.
+#
+# NOT VERIFIED: whether the build for a given HEAD sha actually SUCCEEDED
+# (i.e. whether `ghcr.io/<repo>:<sha12>` really exists) before writing the
+# tag — this workflow trusts that lab-build.yaml (triggered on push, same
+# repo) will have already run by the time this polls. A failed/slow build
+# means the pod sits ImagePullBackOff (self-healing: kubelet retries on its
+# own backoff, and the NEXT successful push/poll cycle recovers it) — the
+# same tolerance this design already accepts for a fresh student with no tag
+# yet (`:unreleased`). Deliberately not hardened further, to keep this thin —
+# see README "Backlog" if verifying GHCR package existence before writing
+# becomes worth the added complexity.
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: lab-tag-sync
+  cancel-in-progress: false # queue, don't cancel a mid-commit run
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install yq (pinned + checksum-verified — same pin as tenant-build.yaml)
+        env:
+          YQ_VERSION: v4.44.3
+          YQ_SHA256: a2c097180dd884a8d50c956ee16a9cec070f30a7947cf4ebf87d5f36213e9ed7
+        run: |
+          set -eu
+          curl -fsSL -o /usr/local/bin/yq \
+            "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+          echo "${YQ_SHA256}  /usr/local/bin/yq" | sha256sum -c -
+          chmod +x /usr/local/bin/yq
+          yq --version
+
+      # ADVERSARIAL REVIEW: TWO separate credentials, deliberately — a broad
+      # READ-ONLY token (safe to be broad: it can only ever READ commit
+      # metadata, never write/destroy anything) for scanning every student
+      # repo's HEAD, and a NARROW token limited to Contents:read/write on
+      # ONLY `capstone-labs-fleet` for the actual write. Neither is ever
+      # exposed to a student repo — both are platform-infra-only secrets.
+      - name: Clone capstone-labs-fleet (roster read + the write target)
+        env:
+          GH_TOKEN: ${{ secrets.LAB_FLEET_WRITE_TOKEN }}
+        run: |
+          set -eu
+          git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/UA-MIS/capstone-labs-fleet.git" fleet
+
+      - name: Poll each student's default-branch HEAD, update tag files
+        id: sync
+        env:
+          READ_TOKEN: ${{ secrets.LAB_ROSTER_READ_TOKEN }}
+        run: |
+          set -eu
+          cd fleet
+          CHANGED=0
+          API="https://api.github.com"
+          for students_file in labs/*/students.yaml; do
+            [ -f "$students_file" ] || continue
+            LAB_SLUG="$(basename "$(dirname "$students_file")")"
+            COUNT="$(yq '. | length' "$students_file")"
+            i=0
+            while [ "$i" -lt "$COUNT" ]; do
+              USERNAME="$(yq -r ".[$i].username" "$students_file")"
+              REPO="$(yq -r ".[$i].repo" "$students_file")"
+              i=$((i + 1))
+              if [ -z "$USERNAME" ] || [ "$USERNAME" = "null" ] || [ -z "$REPO" ] || [ "$REPO" = "null" ]; then
+                echo "WARN: ${students_file} row $i missing username/repo, skipping"
+                continue
+              fi
+              DEFAULT_BRANCH="$(curl -sS -H "Authorization: Bearer ${READ_TOKEN}" \
+                -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' \
+                "${API}/repos/${REPO}" | jq -r '.default_branch // empty')"
+              if [ -z "$DEFAULT_BRANCH" ]; then
+                echo "WARN: cannot resolve default branch for ${REPO} (repo missing / token lacks access?), skipping"
+                continue
+              fi
+              SHA="$(curl -sS -H "Authorization: Bearer ${READ_TOKEN}" \
+                -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' \
+                "${API}/repos/${REPO}/commits/${DEFAULT_BRANCH}" | jq -r '.sha // empty')"
+              if [ -z "$SHA" ]; then
+                echo "WARN: cannot resolve HEAD sha for ${REPO}, skipping"
+                continue
+              fi
+              TAG="$(printf '%s' "$SHA" | cut -c1-12)"
+              TAG_FILE="labs/${LAB_SLUG}/tags/${USERNAME}.yaml"
+              CUR_TAG=""
+              if [ -f "$TAG_FILE" ]; then
+                CUR_TAG="$(yq -r '.tag // ""' "$TAG_FILE")"
+              fi
+              if [ "$CUR_TAG" = "$TAG" ]; then
+                continue
+              fi
+              mkdir -p "labs/${LAB_SLUG}/tags"
+              # ADVERSARIAL REVIEW M-4: every field QUOTED. ArgoCD's git files
+              # generator parses via sigs.k8s.io/yaml -> JSON — an UNQUOTED
+              # all-digit 12-char short sha (~1.4% of builds, (10/16)^12) would
+              # parse as a JSON NUMBER (`1.23456789012e+11`), which the
+              # chart's own `^[a-f0-9]{7,64}$` fail-guard then correctly
+              # rejects as invalid — a one-character-looking bug that breaks
+              # ~1 in 70 students. An unquoted username/labSlug that happens
+              # to be a YAML 1.1 boolean word (`on`, `no`, `yes`, `off`, …)
+              # hits the same class of coercion. Quoting every field removes
+              # the whole class.
+              cat > "$TAG_FILE" <<EOF
+              username: "${USERNAME}"
+              labSlug: "${LAB_SLUG}"
+              tag: "${TAG}"
+              EOF
+              echo "==> ${TAG_FILE} -> ${TAG}"
+              CHANGED=1
+            done
+          done
+          echo "changed=${CHANGED}" >> "$GITHUB_OUTPUT"
+
+      - name: Commit + push (single batched commit for this poll)
+        if: steps.sync.outputs.changed == '1'
+        env:
+          GH_TOKEN: ${{ secrets.LAB_FLEET_WRITE_TOKEN }}
+        run: |
+          set -eu
+          cd fleet
+          git config user.name "lab-tag-sync"
+          git config user.email "lab-tag-sync@users.noreply.github.com"
+          # `-A -- labs` (not a `labs/*/tags` glob pathspec, whose cross-`/`
+          # matching semantics are easy to get subtly wrong): this workflow
+          # only ever writes under labs/<slug>/tags/, so staging everything
+          # under labs/ is unambiguous and safe — students.yaml/lab.yaml are
+          # never touched by this job.
+          git add -A -- labs
+          if git diff --cached --quiet; then
+            echo "==> nothing actually changed (all resolved tags matched an existing file byte-for-byte), skipping commit"
+            exit 0
+          fi
+          git commit -m "lab-tag-sync: update student build tags"
+          # origin already carries the write-token-embedded URL from the
+          # clone step above; concurrency: cancel-in-progress:false means this
+          # is the only writer at a time, but retry anyway in case of an
+          # out-of-band manual commit to the same file between poll and push.
+          for i in 1 2 3 4 5; do
+            if git push origin HEAD:main; then exit 0; fi
+            echo "==> push rejected (attempt $i), rebasing and retrying..."
+            git pull --rebase origin main
+          done
+          echo "FAIL: could not push after 5 attempts"
+          exit 1

@@ -27,17 +27,19 @@ spec:
           # reason. Applied imperatively per team, not reconciled.
           - path: platform-services/harbor-onboarding
             exclude: true
-          # EXCLUDE lab-hosting/ (lab-hosting layer): this directory holds the
-          # shared Helm CHART (chart/) rendered per-element by the two dedicated
-          # labs-*-appset.yaml ApplicationSets (git files/merge generators over
-          # the external capstone-labs-fleet repo, NOT this directory generator),
-          # plus operator-only Job TEMPLATES (harbor/, literal __LAB_SLUG__
-          # placeholders — same non-synced shape as harbor-onboarding/ above).
-          # Without this exclude the glob would ALSO try to render
-          # platform-svc-lab-hosting from the bare chart (no real values -> the
-          # PLACEHOLDER-* defaults in chart/values.yaml) and from the templated
-          # Job YAML (invalid RFC-1123 names) — the exact double-management /
-          # invalid-name failure modes documented on every other exclude here.
+          # EXCLUDE lab-hosting/ (lab-hosting layer): this directory holds
+          # ONLY the shared Helm CHART (chart/), rendered per-element by the
+          # two dedicated labs-*-appset.yaml ApplicationSets (git files/merge
+          # generators over the external capstone-labs-fleet repo, NOT this
+          # directory generator). (M-8 fix: an earlier draft of this comment
+          # also mentioned a `harbor/` subdirectory of operator-only Job
+          # templates with literal `__LAB_SLUG__` placeholders — removed when
+          # the design switched from Harbor to GHCR, adversarial review B-2;
+          # that subdirectory no longer exists.) Without this exclude the
+          # glob would ALSO try to render platform-svc-lab-hosting from the
+          # bare chart (no real values -> the PLACEHOLDER-* defaults in
+          # chart/values.yaml) — the exact double-management failure mode
+          # documented on every other exclude here.
           - path: platform-services/lab-hosting
             exclude: true
           # EXCLUDE traefik/ (D-042/ADR-028): Traefik is no longer a kustomize-dir

@@ -7,25 +7,40 @@
 #   - BASE (roster):  labs/*/students.yaml — a YAML LIST per lab; ArgoCD's git
 #     files generator explodes a matched list file into one generator element
 #     PER LIST ITEM, so this alone already yields one element per student:
-#     {username, repo, labSlug}. Owned/written ONLY by the slides app.
+#     {username, repo, labSlug, withDatabase}. Owned/written ONLY by the
+#     slides app.
 #   - OVERRIDE (tag):  labs/*/tags/*.yaml — one SINGLE-OBJECT file per student
 #     ({username, labSlug, tag}, NOT a list — so this yields one element per
-#     FILE, matching the roster 1:1 by mergeKeys). Owned/written ONLY by that
-#     one student's own CI (.github/workflows/lab-build.yaml @ platform-infra).
+#     FILE, matching the roster 1:1 by mergeKeys). Owned/written ONLY by the
+#     SCHEDULED `.github/workflows/lab-tag-sync.yaml` (platform-infra) — NOT
+#     by student CI (adversarial review H-2, see that workflow's header and
+#     README "Security hardening: H-2" for why student-CI-writes-its-own-tag
+#     was a real privilege-escalation bug, not just a race-condition risk).
 #
 # WHY TWO FILES INSTEAD OF ONE: an early draft put `tag` directly on each row of
 # students.yaml. Rejected — that would make BOTH slides (adding/removing
-# students) and up to 15 independent student CI runs (bumping their own tag)
-# writers of the SAME git file, a real race: slides rewriting the roster wholesale
-# exactly when a student's CI is mid-commit would silently clobber one or the
-# other. Splitting the ever-changing per-student tag into its OWN small file
-# means the only possible conflict is a student racing THEMSELVES (double CI
-# runs), and slides's roster writes never touch a path any CI job also writes.
+# students) and the tag-sync workflow (bumping every student's tag on every
+# poll) writers of the SAME git file, a real race: slides rewriting the roster
+# wholesale exactly when a sync run is mid-commit would silently clobber one or
+# the other. Splitting the ever-changing per-student tag into its OWN small
+# file means slides's roster writes never touch a path the sync workflow also
+# writes (and the sync workflow, now the SOLE writer to tags/*, needs no
+# retry-loop for cross-writer races — only its own consecutive runs could ever
+# collide, guarded by that workflow's own `concurrency` group).
 #
 # The merge is a LEFT JOIN on [username, labSlug]: a student with no tag file yet
-# (no green CI run) still gets an Application — see chart `lab-app.imageTag` for
-# how the ABSENT `tag` key is handled (never a `:latest` default; Kyverno
-# `disallow-latest-tag` is Enforce and lab-* is not excluded).
+# (no successful poll since their first push) still gets an Application — see
+# chart `lab-app.imageTag` for how the ABSENT `tag` key is handled (never a
+# `:latest` default; Kyverno `disallow-latest-tag` is Enforce and lab-* is not
+# excluded).
+#
+# withDatabase (adversarial review H-1) is DUPLICATED onto every students.yaml
+# row rather than read from lab.yaml — see README "Contract: withDatabase" for
+# why: this ApplicationSet's merge generator has no path back to lab.yaml's
+# data (its mergeKeys are [username, labSlug], and lab.yaml carries neither).
+# Slides writes the SAME withDatabase value on every row for a given lab, at
+# the same time it writes lab.yaml's canonical copy — both are static per-lab
+# facts set once at creation, so the redundancy carries low drift risk.
 #
 # ADVERSARIAL REVIEW C-2 (blast radius of one bad fleet-repo row): with
 # `goTemplateOptions: missingkey=error`, a raw `{{.username}}`-style reference
@@ -101,6 +116,13 @@ spec:
             username: '{{ if hasKey . "username" }}{{.username}}{{ end }}'
             repo: '{{ if hasKey . "repo" }}{{.repo}}{{ end }}'
             tag: '{{ if hasKey . "tag" }}{{.tag}}{{ end }}'
+            # Adversarial review H-1 — QUOTED (same fix + reasoning as
+            # labs-namespace-appset.yaml's withDatabase field: unquoted
+            # `{{...}}` is not valid YAML on its own, confirmed live via
+            # dry-run=server; the value is always a Helm STRING post-render
+            # regardless, which is why the chart gates on
+            # `eq (toString .Values.withDatabase) "true"`, not a bare `if`).
+            withDatabase: '{{ if hasKey . "withDatabase" }}{{.withDatabase}}{{ end }}'
       destination:
         server: https://kubernetes.default.svc
         namespace: 'lab-{{ if hasKey . "labSlug" }}{{.labSlug}}{{ end }}'

@@ -29,12 +29,14 @@ fleet.
      internal hyphens, no leading/trailing/double hyphen) IF already lowercase
      — but nothing forces slides to write students.yaml lowercased, and the
      `labs-students` merge generator's mergeKeys are an EXACT STRING match
-     against lab-build.yaml's already-lowercased tag-file username. A case
-     mismatch there does not error — it just silently never merges, pinning
-     the student on the chart's `:unreleased` placeholder forever with no
-     visible failure ANYWHERE (adversarial review C-1). Failing loudly here
-     converts that silent, permanent breakage into a visible, per-Application
-     Degraded status the first time it would matter. */}}
+     against the tag file's already-lowercased username (written by the
+     SCHEDULED `.github/workflows/lab-tag-sync.yaml`, not student CI — see
+     README "Security hardening: H-2"). A case mismatch there does not error
+     — it just silently never merges, pinning the student on the chart's
+     `:unreleased` placeholder forever with no visible failure ANYWHERE
+     (adversarial review C-1). Failing loudly here converts that silent,
+     permanent breakage into a visible, per-Application Degraded status the
+     first time it would matter. */}}
 {{- define "lab-app.username" -}}
 {{- $v := .Values.username | default "" -}}
 {{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $v) -}}
@@ -108,3 +110,22 @@ unreleased
 platform.capstone/component: lab
 platform.capstone/lab-slug: {{ include "lab-app.labSlug" . | quote }}
 {{- end -}}
+
+{{/* withDatabase gating (adversarial review H-1 — see README "Contract:
+     withDatabase"). NOT a `{{- define }}` helper used as `{{- if include ...
+     }}` — a `define` block always returns non-empty STRING TEXT (even the
+     text "false"), and Go templates treat any non-empty string as truthy, so
+     `{{- if include "lab-app.withDatabase" . }}` would be ALWAYS true
+     regardless of the actual value — a real Helm footgun. Every gate on this
+     value therefore uses this EXACT inline expression directly:
+
+       {{- if eq (toString .Values.withDatabase) "true" }}
+
+     `toString` (sprig) normalizes whatever the ApplicationSet's goTemplate
+     layer produced — a real YAML bool (`true`) OR (defensively, in case a
+     given ArgoCD version's git-files generator stringifies scalars) the
+     string "true" — to one canonical string, so the comparison is correct
+     either way. Never write `{{- if .Values.withDatabase }}` directly: an
+     ApplicationSet-supplied STRING "false" would be non-empty and therefore
+     Go-template-truthy, silently inverting the gate for exactly the
+     `with_database: false` labs this whole mechanism exists to protect. */}}

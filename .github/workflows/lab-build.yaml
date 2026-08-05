@@ -3,7 +3,7 @@
 # workflow_call`. Deliberately THIN compared to tenant-build.yaml (D-032): no
 # component matrix, no scan/checks gates, no staged promotion (single env, no
 # overlay ladder — see platform-services/lab-hosting/README.md "Image tag
-# propagation" for why). Every hosted-lab student repo ships a ~7-line CALLER:
+# propagation" for why). Every hosted-lab student repo ships a ~5-line CALLER:
 #
 #   jobs:
 #     build:
@@ -11,69 +11,35 @@
 #         contents: read
 #         packages: write   # GHCR push (adversarial review B-2) — required, see below
 #       uses: UA-MIS/platform-infra/.github/workflows/lab-build.yaml@main
-#       with:
-#         lab_slug: lab1        # baked into the repo at scaffold time (slides)
-#         username: jsmith      # baked into the repo at scaffold time (slides)
-#       secrets:
-#         LAB_FLEET_TOKEN: ${{ secrets.LAB_FLEET_TOKEN }}   # org secret; NOT `secrets: inherit`
+#
+# NO `with:` inputs, NO `secrets:` block (adversarial review H-2 — CHANGED
+# from earlier drafts, which had this workflow write
+# `labs/<lab_slug>/tags/<username>.yaml` itself, using an org-shared
+# `LAB_FLEET_TOKEN` present in every student repo's job environment. That was
+# a real privilege-escalation bug, not just a race-condition risk: a student
+# has push access to their OWN repo (`scaffold.js:81-84`), so they could
+# author ANY workflow reading that secret and use the raw token directly —
+# the B-3 identity check gated what THIS workflow's own git commands did with
+# the token, but did nothing to stop a student from writing their own script
+# that used the same token to write ANY OTHER student's tag file, corrupt
+# `students.yaml`, or `git rm` the whole lab (which — `prune: true` on both
+# labs-*-appset.yaml ApplicationSets — would DESTROY that lab's Namespace and
+# every student's app). See README "Security hardening: H-2" for the full
+# writeup and the decision to fix this rather than merely flag it.
+#
+# FIX: student CI now does ONLY the one thing that is safe to let it do —
+# build + push ITS OWN repo's image to ITS OWN GHCR package, authenticated
+# with the workflow run's own automatic, repo-scoped `GITHUB_TOKEN`. There is
+# no shared secret in a student repo's environment AT ALL anymore, and no
+# fleet-repo write happens from student CI at all — see
+# `.github/workflows/lab-tag-sync.yaml` for what replaced it (a SCHEDULED
+# workflow that lives only in platform-infra, which students cannot modify).
 #
 # GITHUB-HOSTED runners (not the tenant ARC/Kaniko scale set) — student repos are
 # NOT part of the tenant CI system, and 15 students is well inside GitHub's free
 # Actions minutes for a private-org repo.
-#
-# WHAT THIS DOES, staged the same shape as bump-dev (build -> push -> record the
-# tag in git so ArgoCD picks it up) but with the "overlay" being one small
-# per-student file instead of a kustomize image patch:
-#   1. VALIDATE the caller's claimed identity against the one thing a student
-#      cannot forge — see "IDENTITY" below (adversarial review B-3).
-#   2. build the student's Dockerfile, tag `<short-sha>` (12-char, matching the
-#      platform's short-sha convention elsewhere) — NEVER `:latest` (Kyverno
-#      `disallow-latest-tag` is Enforce on lab-*).
-#   3. push to **GHCR**, not Harbor (adversarial review B-2 — see README
-#      "Registry: GHCR, not Harbor"). Uses the workflow run's own automatic
-#      `GITHUB_TOKEN` (repo-scoped, zero shared secret for the PUSH side at
-#      all) — `ghcr.io/ua-mis/<repo-name>:<tag>`.
-#   4. write labs/<lab_slug>/tags/<username>.yaml in the capstone-labs-fleet repo
-#      (ONLY this student's own file — never students.yaml, which slides owns)
-#      so the labs-students ApplicationSet's merge generator picks up the new
-#      tag and ArgoCD deploys it. This is the ONE step that needs a shared
-#      secret (LAB_FLEET_TOKEN, Contents:read/write on capstone-labs-fleet
-#      ONLY — see README "Residual trust" for what that secret's presence in
-#      the job environment does and doesn't let a malicious caller do, now
-#      that step 1 closes the impersonation path).
-#
-# IDENTITY (adversarial review B-3): earlier drafts trusted the caller's
-# `with: {lab_slug, username}` directly to decide WHICH tag file to write —
-# but those are attacker-controlled if a student edits their OWN repo's
-# caller workflow, and there is no way to write `labs/<lab>/tags/<X>.yaml`
-# without exposing exactly which file, per-student, gets overwritten. Splitting
-# `<labSlug>-<username>` back out of the repo name is genuinely AMBIGUOUS
-# (labSlug itself may contain hyphens, e.g. "f26-lab0" per the labs table
-# comment in slidedeck's server/db.js) — so this workflow does NOT parse
-# `github.repository` to derive identity. Instead it RECONSTRUCTS the expected
-# repo name from the caller's claimed (lab_slug, username) and asserts it
-# equals the ACTUAL repository this workflow is running in
-# (`github.repository`, which a student cannot change — repo rename is
-# admin-only). A student can only ever satisfy that equality with their OWN
-# real (lab_slug, username) — there is no username they could substitute that
-# would still reconstruct their own immutable repo name. This achieves the
-# same goal as "derive from github.repository" without the hyphen-boundary
-# parsing ambiguity a literal split would hit.
 on:
-  workflow_call:
-    inputs:
-      lab_slug:
-        description: "The lab's slug (labs.slug in slidedeck). Baked into the caller at repo-scaffold time. VALIDATED, not trusted blindly — see IDENTITY above."
-        type: string
-        required: true
-      username:
-        description: "The student's GitHub username, as scaffolded. Baked into the caller at repo-scaffold time. VALIDATED, not trusted blindly — see IDENTITY above."
-        type: string
-        required: true
-    secrets:
-      LAB_FLEET_TOKEN:
-        description: "Org-level: fine-grained PAT, Contents:read/write on UA-MIS/capstone-labs-fleet ONLY. Do NOT grant students write access to this token's scope directly — see README 'Residual trust'."
-        required: true
+  workflow_call: {}
 
 # packages: write is what GHCR push needs; a reusable workflow can only
 # DOWNGRADE the caller's grant (same rule tenant-build.yaml documents), so the
@@ -88,46 +54,27 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-push-record:
+  build-push:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout student repo
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
-      # ADVERSARIAL REVIEW L-1/L-2: every `${{ ... }}` expression that touches
-      # potentially-untrusted content (the caller's OWN `with:` inputs — a
-      # student can set these to anything, including shell metacharacters) is
-      # passed through `env:` and referenced as a quoted shell variable, NEVER
-      # interpolated directly into the `run:` script body. Direct interpolation
-      # (`"${{ inputs.foo }}"` inline in a script) is GitHub's own documented
-      # script-injection anti-pattern — an attacker-controlled value can close
-      # the quote and inject arbitrary shell. `github.repository`/`github.sha`
-      # are GitHub-controlled (not student-controlled) but are routed through
-      # `env:` too here for consistency and because it costs nothing.
-      - name: Validate identity + resolve build tag
+      # ADVERSARIAL REVIEW L-1/L-2: `github.repository`/`github.sha` are
+      # GitHub-controlled (a student cannot forge them), but are still routed
+      # through `env:` rather than interpolated directly into the `run:`
+      # script body, for consistency with the rest of this repo's workflows
+      # and because it costs nothing.
+      - name: Resolve GHCR image ref (lowercased repo + 12-char short sha)
         id: resolve
         env:
-          INPUT_LAB_SLUG: ${{ inputs.lab_slug }}
-          INPUT_USERNAME: ${{ inputs.username }}
-          ACTUAL_REPO: ${{ github.repository }}
+          REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
         run: |
           set -eu
-          LAB_SLUG="$(printf '%s' "$INPUT_LAB_SLUG" | tr '[:upper:]' '[:lower:]')"
-          USERNAME="$(printf '%s' "$INPUT_USERNAME" | tr '[:upper:]' '[:lower:]')"
-          ACTUAL_REPO_LC="$(printf '%s' "$ACTUAL_REPO" | tr '[:upper:]' '[:lower:]')"
-          EXPECTED_REPO="ua-mis/${LAB_SLUG}-${USERNAME}"
-          if [ "$EXPECTED_REPO" != "$ACTUAL_REPO_LC" ]; then
-            echo "::error::identity mismatch — caller claims lab_slug='${LAB_SLUG}' username='${USERNAME}' (expects repo '${EXPECTED_REPO}') but this workflow is running in repo '${ACTUAL_REPO_LC}'. Refusing: with: inputs are NOT trusted for identity (adversarial review B-3) — a student cannot rename their own repo, so this check only ever passes for the repo's real (lab_slug, username)."
-            exit 1
-          fi
+          REPO_LC="$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')"
           TAG="$(printf '%s' "$SHA" | cut -c1-12)"
-          {
-            echo "lab_slug=${LAB_SLUG}"
-            echo "username=${USERNAME}"
-            echo "tag=${TAG}"
-            echo "image=ghcr.io/${ACTUAL_REPO_LC}:${TAG}"
-          } >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${REPO_LC}:${TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
@@ -136,49 +83,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build + push (never :latest — see header)
+      - name: Build + push (never :latest — see chart/templates/_helpers.tpl `lab-app.imageTag`)
         uses: docker/build-push-action@0adf9959216b96bec444f325f1e493d4aa344497 # v6.14.0
         with:
           context: .
           push: true
           tags: ${{ steps.resolve.outputs.image }}
-
-      - name: Record the new tag in capstone-labs-fleet (this student's file ONLY)
-        env:
-          GH_TOKEN: ${{ secrets.LAB_FLEET_TOKEN }}
-          LAB_SLUG: ${{ steps.resolve.outputs.lab_slug }}
-          USERNAME: ${{ steps.resolve.outputs.username }}
-          TAG: ${{ steps.resolve.outputs.tag }}
-        run: |
-          set -eu
-          REPO="UA-MIS/capstone-labs-fleet"
-          FILE="labs/${LAB_SLUG}/tags/${USERNAME}.yaml"
-          WORKDIR="$(mktemp -d)"
-          git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "$WORKDIR"
-          cd "$WORKDIR"
-          mkdir -p "labs/${LAB_SLUG}/tags"
-          cat > "$FILE" <<EOF
-          username: ${USERNAME}
-          labSlug: ${LAB_SLUG}
-          tag: ${TAG}
-          EOF
-          git config user.name "lab-build-ci"
-          git config user.email "lab-build-ci@users.noreply.github.com"
-          git add "$FILE"
-          if git diff --cached --quiet; then
-            echo "==> ${FILE} already at tag ${TAG}, nothing to commit"
-            exit 0
-          fi
-          git commit -m "lab-build: ${LAB_SLUG}/${USERNAME} -> ${TAG}"
-          # ONE own-file conflict is possible (a double/racing run for the SAME
-          # student, now that identity is validated above); a few
-          # pull-rebase-push retries are enough — this workflow never touches
-          # another student's file or students.yaml, so it never races with
-          # slides or with any other student's CI.
-          for i in 1 2 3 4 5; do
-            if git push origin HEAD:main; then exit 0; fi
-            echo "==> push rejected (attempt $i), rebasing and retrying..."
-            git pull --rebase origin main
-          done
-          echo "FAIL: could not push ${FILE} after 5 attempts"
-          exit 1
