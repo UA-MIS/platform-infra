@@ -33,9 +33,12 @@ if (!string.IsNullOrWhiteSpace(port))
 }
 
 // ---- MySQL connection string (env-first, never hardcoded) -----------------
-var connectionString =
+// DATABASE_URL arrives as a `mysql://` URI; ADO.NET/MySqlConnector needs
+// "Server=...;Database=...;User ID=...;Password=...;" instead — see
+// ConnectionStringHelper for why a raw pass-through crashes the pod on boot.
+var connectionString = ConnectionStringHelper.NormalizeMySql(
     Environment.GetEnvironmentVariable("DATABASE_URL")
-    ?? builder.Configuration.GetConnectionString("Default");
+    ?? builder.Configuration.GetConnectionString("Default"));
 
 // Register EF Core with a FIXED ServerVersion so AddDbContext does NOT open a
 // connection at startup (ServerVersion.AutoDetect would connect immediately and a
