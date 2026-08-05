@@ -1,0 +1,68 @@
+# First-boot init for the lab MariaDB: creates the ADMIN account the slidedeck app
+# connects as (LAB_DB_ADMIN_URL). Mounted at /docker-entrypoint-initdb.d/.
+#
+# The mariadb image entrypoint's docker_process_init_files() SOURCES non-executable
+# *.sh files (`. "$f"`) and only EXECUTES them if they are +x. A ConfigMap
+# projection is mode 0644, so this always takes the SOURCE path — which is what we
+# want: the script then runs inside the entrypoint's own bash and can call its
+# docker_process_sql / docker_sql_escape_string_literal / mysql_note helpers.
+#
+# ORDER (verified against the image's docker-entrypoint.sh, mariadb 11.8.8):
+# docker_mariadb_init() -> docker_init_database_dir -> temp server start ->
+# docker_setup_db (sets root@localhost's password) -> docker_process_init_files.
+# So by the time this runs, root@localhost ALREADY has $MARIADB_ROOT_PASSWORD and
+# the plain docker_process_sql form (which passes it) is the correct one — NOT
+# --dont-use-mysql-root-password.
+#
+# ⚠ FIRST-BOOT ONLY. The mariadb entrypoint runs initdb files only against an EMPTY
+# datadir. Rotating ADMIN_PASSWORD in Vault therefore does NOT re-key `labadmin` on
+# an existing volume — see README.md "Rotating the admin password" for the two-step
+# procedure.
+#
+# Not a configMapGenerator: a content hash would roll the StatefulSet pod on every
+# edit for a script that, by construction, only ever runs on an empty datadir.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lab-mariadb-initdb
+  namespace: slides
+  labels:
+    platform.capstone/component: platform
+data:
+  10-lab-admin.sh: |
+    #!/bin/bash
+    # Deliberately does NOT `set -e`/`set -u`: this file is SOURCED, so shell
+    # options would leak into the rest of the entrypoint's init. Errors are
+    # checked explicitly instead; a hard failure `exit 1`s the entrypoint so the
+    # pod CrashLoops loudly rather than coming up with no admin account.
+
+    if [ -z "${LAB_ADMIN_USER:-}" ] || [ -z "${LAB_ADMIN_PASSWORD:-}" ]; then
+    	echo >&2 "lab-db init: LAB_ADMIN_USER / LAB_ADMIN_PASSWORD are required"
+    	exit 1
+    fi
+
+    # The username is interpolated into SQL (identifiers cannot be parameterized),
+    # so it is WHITELISTED rather than escaped. The password IS escaped, using the
+    # entrypoint's own helper.
+    case "$LAB_ADMIN_USER" in
+    	*[!a-z0-9_]* | '' )
+    		echo >&2 "lab-db init: refusing unsafe LAB_ADMIN_USER (want [a-z0-9_]+)"
+    		exit 1
+    		;;
+    esac
+
+    lab_admin_pw="$(docker_sql_escape_string_literal "$LAB_ADMIN_PASSWORD")"
+
+    mysql_note "lab-db init: creating admin user ${LAB_ADMIN_USER}@'%'"
+    docker_process_sql --database=mysql --binary-mode <<-EOSQL
+    	SET @@SESSION.SQL_LOG_BIN=0;
+    	-- NO_BACKSLASH_ESCAPES must be clear for the escaped literal to apply
+    	SET @@SESSION.SQL_MODE=REPLACE(@@SESSION.SQL_MODE, 'NO_BACKSLASH_ESCAPES', '');
+    	CREATE USER IF NOT EXISTS '${LAB_ADMIN_USER}'@'%' IDENTIFIED BY '${lab_admin_pw}';
+    	ALTER USER '${LAB_ADMIN_USER}'@'%' IDENTIFIED BY '${lab_admin_pw}';
+    	-- CREATE DATABASE / CREATE USER / GRANT on every schema: exactly what the
+    	-- app's provisioning SQL needs (slidedeck server/labdb.js).
+    	GRANT ALL PRIVILEGES ON *.* TO '${LAB_ADMIN_USER}'@'%' WITH GRANT OPTION;
+    	FLUSH PRIVILEGES;
+    EOSQL
+    unset lab_admin_pw

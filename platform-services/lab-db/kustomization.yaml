@@ -1,0 +1,36 @@
+# platform-services/lab-db — the per-student LAB DATABASE tier for the slides app
+# (UA-MIS/slidedeck, ns `slides`). Picked up by the platform-services directory
+# generator (applicationsets/platform-services-appset.yaml) as Application
+# `platform-svc-lab-db`.
+#
+# NAMESPACE OWNERSHIP: ns `slides` is created and owned by the SEPARATE `slidedeck`
+# Application (source repo UA-MIS/slidedeck, path deploy/ — nested under
+# platform-services/slidedeck/application.yaml). This dir deliberately ships NO
+# Namespace object; every manifest here pins `namespace: slides` explicitly, which
+# overrides the appset template's neutral `kube-system` destination for namespaced
+# objects. Every object name here is `lab-*`-prefixed and disjoint from the
+# slidedeck app's objects (slidedeck Deployment/Service/Ingress/NetworkPolicy
+# `slidedeck`, Namespace `slides`), so the two Applications never contend for a
+# resource: ArgoCD prune/self-heal only ever touches objects carrying its OWN
+# tracking id.
+#
+# See README.md for the design (browser-only access, no public 3306).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - externalsecret.yaml
+  - initdb-configmap.yaml
+  - mariadb.yaml
+  - adminer.yaml
+  - netpol.yaml
+
+# Platform component label on metadata only. includeSelectors: false is REQUIRED
+# here: with selectors included, kustomize would rewrite the NetworkPolicy
+# podSelectors below — including the one that targets the slidedeck pod
+# (`app: slidedeck`), which does NOT carry this label and is owned by another
+# repo. Same convention as platform-services/db-admin/kustomization.yaml.
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false
