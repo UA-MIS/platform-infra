@@ -1,0 +1,189 @@
+# The DEDICATED lab MariaDB for the slides app's per-student lab databases.
+#
+# ⚠ DELIBERATELY NOT the db-tier Galera cluster (platform-services/db-tier,
+# applicationsets/mariadb-cluster-app.yaml). Lab databases are high-churn,
+# student-writable, and disposable — a `DROP DATABASE`-happy classroom must not be
+# able to touch the same instance that backs Backstage/Harbor/Crossplane. This is a
+# single-replica, single-purpose instance whose worst-case blast radius is "the lab
+# sandboxes are gone", and whose durability comes from Ceph RBD replica-3 under the
+# PVC, not from Galera.
+#
+# STATEFULSET (not Deployment+PVC): gives the volume a stable per-ordinal identity
+# and — critically for a RWO Ceph RBD volume — the default OrderedReady/Recreate
+# rollout, which never runs two pods against one datadir. A Deployment's default
+# RollingUpdate would try exactly that on every image bump.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: lab-mariadb
+  namespace: slides
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: lab-mariadb
+spec:
+  serviceName: lab-mariadb
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: lab-mariadb
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: lab-mariadb
+        platform.capstone/component: platform
+    spec:
+      # PodSecurity `restricted`-compliant. The mariadb entrypoint re-execs itself
+      # under `gosu mysql` ONLY when it starts as uid 0; started as 999 (the image's
+      # own `mysql` user) it skips that branch and runs directly — verified against
+      # the image's docker-entrypoint.sh and by running this exact image as
+      # --user 999:999 locally. fsGroup 999 makes the freshly-provisioned RBD volume
+      # group-writable for it; OnRootMismatch keeps the recursive chown off the
+      # restart path once the volume is already correctly owned.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mariadb
+          # Pinned by DIGEST, not just tag — the exact class of failure that broke
+          # every platform Adminer console (see adminer.yaml's header and #419):
+          # a floating tag + imagePullPolicy IfNotPresent silently ships a different
+          # build to whichever node the pod lands on next. The tag is kept alongside
+          # the digest because Kyverno `disallow-latest-tag` (Enforce, and ns
+          # `slides` is NOT in its exclude list) requires an explicit `*:*` tag.
+          # mariadb:11.8.8 == mariadb:11 as of 2026-08-05; same minor as the db-tier
+          # Galera cluster, so there is one MariaDB version story on this fleet.
+          image: mariadb:11.8.8@sha256:d9f7eb2637296652f24b484afd5d246f759f49f5babcadc6a9e344c9acb75fbf
+          imagePullPolicy: IfNotPresent
+          # `args` replaces the image CMD (`mariadbd`) while keeping its ENTRYPOINT
+          # (docker-entrypoint.sh), which dispatches on $1 == mariadbd.
+          # --skip-name-resolve: never reverse-DNS an incoming connection. Both
+          # consumers (the app, Adminer) authenticate as accounts defined on host
+          # '%', so nothing depends on name resolution, and skipping it removes a
+          # per-connection stall whenever DNS is slow.
+          args:
+            - mariadbd
+            - --skip-name-resolve
+          env:
+            # root exists ONLY as root@'localhost' (loopback/unix socket inside this
+            # pod). Setting MARIADB_ROOT_HOST=localhost makes the entrypoint SKIP its
+            # `CREATE USER 'root'@'%'` branch, so there is no network-reachable root
+            # account on this instance at all — verified live in the local run
+            # (mysql.user held exactly root@localhost + labadmin@%).
+            - name: MARIADB_ROOT_HOST
+              value: localhost
+            - name: MARIADB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: lab-db-admin
+                  key: MARIADB_ROOT_PASSWORD
+            # Consumed by the initdb script, NOT by the image itself.
+            - name: LAB_ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: lab-db-admin
+                  key: LAB_ADMIN_USER
+            - name: LAB_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: lab-db-admin
+                  key: LAB_ADMIN_PASSWORD
+          ports:
+            - name: mysql
+              containerPort: 3306
+          # healthcheck.sh ships in the image and authenticates through the
+          # entrypoint-provisioned $DATADIR/.my-healthcheck.cnf, so the probes need
+          # no credentials of their own.
+          # startupProbe covers first boot: mariadb-install-db + the initdb script
+          # run before the socket answers, and .my-healthcheck.cnf does not exist
+          # until then. 30 x 10s = 5 minutes of grace, after which liveness takes
+          # over on a tight loop.
+          startupProbe:
+            exec:
+              command: ["healthcheck.sh", "--connect", "--innodb_initialized"]
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            exec:
+              command: ["healthcheck.sh", "--connect", "--innodb_initialized"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["healthcheck.sh", "--connect"]
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 5
+          # Modest, and BOTH cpu+memory on requests AND limits: Kyverno
+          # `require-limits` covers ns `slides` (not in its exclude list). Sized for
+          # a classroom of small sandbox schemas — InnoDB's default 128M buffer pool
+          # plus per-connection buffers sits well inside the 1Gi ceiling.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 320Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+            # readOnlyRootFilesystem is NOT set: mariadbd writes /run/mysqld and
+            # /tmp, and PodSecurity `restricted` does not require it. Left as an
+            # explicit non-decision rather than an oversight.
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+            - name: initdb
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+      volumes:
+        - name: initdb
+          configMap:
+            name: lab-mariadb-initdb
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        # ceph-block == the fleet's Rook Ceph RBD replica-3 class (the cluster
+        # default), the same class used by vault/monitoring/tempo/thanos PVCs.
+        storageClassName: ceph-block
+        resources:
+          requests:
+            storage: 5Gi
+---
+# Headless-free ClusterIP: the app and Adminer only ever need "one address that
+# reaches the primary", and a stable VIP survives pod restarts without the client
+# re-resolving a per-ordinal DNS name.
+#
+# ⚠ NAME IS LOAD-BEARING. Its FQDN is what students see and what Adminer validates:
+#   lab-mariadb.slides.svc.cluster.local:3306
+# Adminer >= 5.4.3 (GHSA-r4x9-5m63-3vxw) rejects any server string whose host part
+# falls outside a narrow character class — see adminer.yaml. Lowercase letters,
+# digits, dots, hyphens and the port colon only: NO underscores anywhere in this
+# Service name or in the namespace.
+apiVersion: v1
+kind: Service
+metadata:
+  name: lab-mariadb
+  namespace: slides
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: lab-mariadb
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: lab-mariadb
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: 3306
+      protocol: TCP

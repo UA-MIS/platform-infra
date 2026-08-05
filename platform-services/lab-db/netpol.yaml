@@ -1,0 +1,152 @@
+# NetworkPolicies for the lab-database tier, all in ns `slides`.
+#
+# THE MATRIX (nothing else is permitted in or out of the two new pods):
+#
+#   slidedeck  -> lab-adminer :8080   (the /db-console reverse proxy)
+#   slidedeck  -> lab-mariadb :3306   (the app runs the provisioning SQL itself)
+#   lab-adminer-> lab-mariadb :3306   (students' own queries)
+#   lab-adminer-> kube-dns    :53     lab-mariadb -> kube-dns :53
+#   everything else                    DENIED
+#
+# ⚠ EXTEND, NEVER REPLACE. The `slidedeck` NetworkPolicy that already governs the
+# app pod is owned by a DIFFERENT repo (UA-MIS/slidedeck, deploy/netpol.yaml) and a
+# DIFFERENT ArgoCD Application, and it carries the app's existing egress: DNS,
+# 5432 to db-tier (CNPG), and 443 (the Entra token exchange). NetworkPolicies are
+# purely additive — a pod's allowed traffic is the UNION over every policy that
+# selects it — so the first policy below ADDS two destinations to the slidedeck pod
+# without touching, and without needing to know, that object. Editing the
+# slidedeck-owned policy from here would have the two Applications fight over one
+# resource; a separate, differently-named policy cannot.
+#
+# ⚠ NETPOLS ARE PER-POD, and ns `slides` is NOT blanket default-deny: today the
+# only policy in it selects `app: slidedeck`, so an unselected pod is wide open.
+# That is why policies 2 and 3 declare `policyTypes: [Ingress, Egress]` for their
+# own pods — declaring the type is what flips that pod to deny-by-default in that
+# direction, and it is why each needs an explicit INGRESS rule (a peer's egress
+# allowance alone does not admit traffic once the receiver is policy-covered) plus
+# its own DNS egress. No namespace-wide `podSelector: {}` default-deny is added
+# here on purpose: that would silently govern the slidedeck app pod and any future
+# pod owned by the other Application.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: lab-db-slidedeck-egress
+  namespace: slides
+  labels:
+    platform.capstone/component: platform
+spec:
+  # The slidedeck app pod — selector copied from the app repo's Deployment
+  # (deploy/deployment.yaml: `matchLabels: { app: slidedeck }`), verified against
+  # the live pod's labels.
+  podSelector:
+    matchLabels:
+      app: slidedeck
+  # Egress ONLY. Naming just this one type leaves the app's INGRESS entirely to the
+  # slidedeck-owned policy (Traefik/cloudflared -> :8080); an accidental
+  # `policyTypes: [Ingress, Egress]` here with no ingress rules would be a no-op
+  # under union semantics, but it would also misdescribe the intent.
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: lab-adminer
+      ports:
+        - protocol: TCP
+          port: 8080
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: lab-mariadb
+      ports:
+        - protocol: TCP
+          port: 3306
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: lab-adminer
+  namespace: slides
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: lab-adminer
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # ONLY the app pod. Not Traefik, not cloudflared, not the other pods in this
+    # namespace — the whole point of the design is that the only route to this
+    # console is through the app's Entra-gated /db-console proxy.
+    - from:
+        - podSelector:
+            matchLabels:
+              app: slidedeck
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: lab-mariadb
+      ports:
+        - protocol: TCP
+          port: 3306
+    # DNS. Scoped to kube-system (where this fleet's CoreDNS runs), same shape as
+    # platform-services/db-admin/netpol.yaml. Without this the console cannot even
+    # resolve ADMINER_DEFAULT_SERVER's FQDN.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: lab-mariadb
+  namespace: slides
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: lab-mariadb
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        # The app, for provisioning SQL (CREATE DATABASE/USER/GRANT as `labadmin`).
+        - podSelector:
+            matchLabels:
+              app: slidedeck
+        # The console, for students' own queries as their own account.
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: lab-adminer
+      ports:
+        - protocol: TCP
+          port: 3306
+  egress:
+    # DNS only. This instance initiates nothing else — no replication, no backup
+    # push, and --skip-name-resolve (mariadb.yaml) means it never reverse-looks-up
+    # an inbound connection either. There is deliberately NO egress rule that would
+    # let it reach db-tier or anything outside the namespace.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

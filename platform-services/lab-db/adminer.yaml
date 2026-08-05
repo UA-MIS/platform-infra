@@ -1,0 +1,154 @@
+# The lab Adminer console. NO Ingress, NO oauth2-proxy/Dex middleware, NO
+# public route — by design. The slidedeck app reverse-proxies this Service at
+# https://slides.uamishub.com/db-console behind its OWN Entra session
+# (server/index.js: http-proxy-middleware onto $LAB_DB_CONSOLE_URL), so the app IS
+# the gate. Reaching it any other way requires already being inside ns `slides`,
+# which the NetworkPolicies in netpol.yaml then deny anyway.
+#
+# IMAGE CHOICE: the OFFICIAL docker-library `adminer`, not the `dockette/adminer`
+# used by db-admin and the per-tenant consoles. Those two run plugin-driven flows
+# (server-list dropdown / autologin) where the platform holds the credentials.
+# Here students log in AS THEMSELVES with their own per-lab database account, so
+# what is needed is the plain login form with the Server field PRE-FILLED — which
+# is exactly what the official image's ADMINER_DEFAULT_SERVER does (its index.php
+# wraps Adminer's loginFormField hook and substitutes the env var into the empty
+# `auth[server]` value). Verified by extracting index.php from the pinned image and
+# by rendering the login page from a locally-run container.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lab-adminer
+  namespace: slides
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: lab-adminer
+spec:
+  # Single replica ON PURPOSE: PHP sessions live on the pod's own /tmp (the
+  # emptyDir below), so a second replica would sign users out at random. This is a
+  # classroom console proxied by a single app pod; it does not need HA.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: lab-adminer
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: lab-adminer
+        platform.capstone/component: platform
+    spec:
+      securityContext:
+        # The image's own `adminer` account, uid 100 / gid 101 (read out of the
+        # pinned image's /etc/passwd). It MUST be given numerically: the image sets
+        # `User: adminer` by NAME, and with runAsNonRoot the kubelet cannot prove a
+        # named user is non-root and refuses to start the container.
+        runAsNonRoot: true
+        runAsUser: 100
+        runAsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: adminer
+          # Pinned by DIGEST — this is the tier that already burned us: the floating
+          # `dockette/adminer:full` tag silently pulled Adminer 5.4.4 onto the new
+          # workers and 403'd every platform console login (#419). Tag kept next to
+          # the digest for Kyverno `disallow-latest-tag` (Enforce here).
+          # adminer:5.5.1 == adminer:5 as of 2026-08-05.
+          image: adminer:5.5.1@sha256:890cffec7caa20159fb6f68c1a521b2e5879f7314f4845d4ebca7cc1cf145971
+          imagePullPolicy: IfNotPresent
+          env:
+            # ⚠ THE REGEX CAVEAT. Adminer 5.4.3 added GHSA-r4x9-5m63-3vxw
+            # ("Validate server"), which rejects the submitted server string with
+            # "Invalid server." unless its host component matches a narrow class
+            # (`^[-a-z0-9.:]*$` in 5.4.3/5.4.4; relaxed to a `[^-\w.:/]` negative
+            # class in the 5.5.1 pinned here — read out of this image's own
+            # adminer.php). The value below satisfies BOTH forms: lowercase letters,
+            # digits, dots, hyphens, and the port colon, with NO underscores. Its
+            # port also has to sit in 1024..65535 (a second check in the same block)
+            # — 3306 does.
+            # This is a prefill of the form field, not a lock: it is submitted back
+            # as auth[server] and revalidated on every login, so keeping the Service
+            # name regex-clean is a hard requirement, not cosmetic.
+            # END-TO-END VERIFIED locally against this exact digest: the rendered
+            # login form carries value="lab-mariadb.slides.svc.cluster.local:3306",
+            # and POSTing it with a per-lab student account reached the database
+            # (page title "Database: lab1_student - lab-mariadb.slides.svc.cluster.local:3306 - Adminer")
+            # with no "Invalid server."
+            - name: ADMINER_DEFAULT_SERVER
+              value: lab-mariadb.slides.svc.cluster.local:3306
+            # ⚠ Do NOT add ADMINER_DESIGN or ADMINER_PLUGINS here. The image's
+            # entrypoint runs under `set -e` and implements both by WRITING into
+            # /var/www/html (`ln -sf designs/...`, `php plugin-loader.php >
+            # plugins-enabled/...`), which fails hard against the read-only root
+            # filesystem below and would CrashLoop the pod. (The one write it does
+            # unconditionally, `touch .adminer-init`, is `|| true`-guarded and just
+            # logs a harmless "Read-only file system" line — confirmed in the local
+            # run.) Theming this console means dropping readOnlyRootFilesystem or
+            # mounting a ConfigMap at /var/www/html/adminer.css, not setting these.
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          # Same envelope as platform-services/db-admin's console, which was sized
+          # after an operator-reported OOM: Adminer buffers whole result sets in PHP
+          # memory, so a 64Mi ceiling is an easy OOMKill on a bulk SELECT/export.
+          # Both cpu+memory on requests AND limits (Kyverno require-limits covers
+          # ns `slides`).
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 100
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+            # Safe here BECAUSE no ADMINER_DESIGN/ADMINER_PLUGINS (see above) —
+            # verified by running this digest with --read-only locally.
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            # PHP's session store. Without a writable /tmp the login round-trip
+            # cannot keep a session and every click bounces back to the form.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+# ClusterIP only — no Ingress object exists for this Service anywhere in this repo,
+# and none should. The app dials it in-cluster as
+#   http://lab-adminer.slides.svc.cluster.local:8080
+# which is the value of LAB_DB_CONSOLE_URL on secret/platform/slidedeck.
+apiVersion: v1
+kind: Service
+metadata:
+  name: lab-adminer
+  namespace: slides
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: lab-adminer
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: lab-adminer
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
