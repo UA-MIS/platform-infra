@@ -28,6 +28,15 @@ function withServer(run) {
   })
 }
 
+test('GET / -> 200 running', async () => {
+  await withServer(async (base) => {
+    const res = await fetch(`${base}/`)
+    assert.strictEqual(res.status, 200)
+    const body = await res.json()
+    assert.strictEqual(body.status, 'running')
+  })
+})
+
 test('GET /healthz -> 200 ok (DB-independent)', async () => {
   await withServer(async (base) => {
     const res = await fetch(`${base}/healthz`)

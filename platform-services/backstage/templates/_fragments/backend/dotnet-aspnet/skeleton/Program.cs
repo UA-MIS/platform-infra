@@ -62,6 +62,15 @@ builder.Services.AddSwaggerGen();
 
 var app = builder.Build();
 
+// Root — so a student's first visit to the app's own URL isn't a 404. API-only backend:
+// no UI lives here (a fullstack layout's frontend owns "/" instead).
+app.MapGet("/", () => Results.Json(new
+{
+    service = "${{ values.appName }}",
+    status = "running",
+    hints = new[] { "/healthz", "/api/health", "/api/widgets" },
+}));
+
 // Probe endpoint — DB-independent, matches the .devops chart's readiness/liveness path.
 app.MapGet("/healthz", () => Results.Text("ok"));
 

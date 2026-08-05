@@ -11,6 +11,17 @@ import (
 	"testing"
 )
 
+func TestRootReturnsOk(t *testing.T) {
+	router := buildRouter(nil)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("root status = %d, want 200", w.Code)
+	}
+}
+
 func TestHealthzIsOkAndDbIndependent(t *testing.T) {
 	router := buildRouter(nil)
 	w := httptest.NewRecorder()

@@ -60,6 +60,17 @@ async function handle(req, res) {
   const path = url.pathname
   const method = req.method
 
+  // Root — so a student's first visit to the app's own URL isn't a 404. API-only backend:
+  // no UI lives here (a fullstack layout's frontend owns "/" instead).
+  if (method === 'GET' && path === '/') {
+    sendJson(res, 200, {
+      service: '${{ values.appName }}',
+      status: 'running',
+      hints: ['/healthz', '/api/health', '/api/items'],
+    })
+    return
+  }
+
   // Liveness/readiness probe — kept INDEPENDENT of the database so the pod stays Ready
   // even when DATABASE_URL is unset/unreachable.
   if (method === 'GET' && path === '/healthz') {

@@ -8,6 +8,7 @@ const app = express()
 app.use(express.json())
 
 const PORT = Number(process.env.PORT) || 8080
+const APP_NAME = '${{ values.appName }}'
 
 // Wrap async route handlers so a rejected promise is forwarded to the error handler
 // (Express 4 does not catch async errors automatically).
@@ -15,6 +16,16 @@ type AsyncHandler = (req: Request, res: Response) => Promise<unknown>
 const wrap =
   (fn: AsyncHandler) => (req: Request, res: Response, next: NextFunction) =>
     fn(req, res).catch(next)
+
+// Root — so a student's first visit to the app's own URL isn't a 404. API-only backend:
+// no UI lives here (a fullstack layout's frontend owns "/" instead).
+app.get('/', (_req: Request, res: Response) => {
+  res.json({
+    service: APP_NAME,
+    status: 'running',
+    hints: ['/healthz', '/api/health', '/api/items'],
+  })
+})
 
 // Liveness/readiness probe — the chart hits /healthz on the pod DIRECTLY. Kept INDEPENDENT
 // of the database so the pod stays Ready even when DATABASE_URL is unset/unreachable.
