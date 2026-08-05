@@ -9,9 +9,19 @@
 #   - portal (2 replicas)                → apex landing page.
 #
 #  SINGLE-REPLICA (one-time eviction on first reconcile — a brief self-healing blip):
-#   - db-admin-console (Adminer), oauth2-proxy (db-console auth front), arc-gha-rs-controller
-#     (the ARC runner-scale-set controller — an eviction briefly pauses runner scaling,
-#      in-flight CI jobs are unaffected).
+#   - arc-gha-rs-controller (the ARC runner-scale-set controller — an eviction briefly
+#     pauses runner scaling, in-flight CI jobs are unaffected).
+#
+#  SINGLE-REPLICA, updateMode "Initial" (recommendations applied ONLY at pod creation
+#  — never a live eviction, per https://github.com/kubernetes/autoscaler/blob/master/
+#  vertical-pod-autoscaler/docs/api.md#update-policy):
+#   - db-admin-console (Adminer), oauth2-proxy (db-console auth front) — both are
+#     singleton, stateful-session UIs (an in-progress DB console login/query, or an
+#     in-progress OAuth2 redirect through oauth2-proxy) with no PDB/replica to absorb
+#     an eviction; live incident 2026-08 (db-admin-console evicted mid-login on
+#     updateMode "Auto") — see git history for the full report. "Initial" still
+#     right-sizes on every rollout (image bump, resource-limit change, etc.), just
+#     never mid-session.
 ---
 # ── traefik (kube-system) ─────────────────────────────────────────────────────
 apiVersion: autoscaling.k8s.io/v1
@@ -80,6 +90,9 @@ spec:
         maxAllowed: { cpu: 250m, memory: 256Mi }
 ---
 # ── db-admin-console (Adminer) ────────────────────────────────────────────────
+# updateMode "Initial", NOT "Auto" -- singleton UI, no PDB/replica to absorb an
+# eviction; live incident 2026-08, db-admin-console evicted mid-login. See the
+# file-header comment block above.
 apiVersion: autoscaling.k8s.io/v1
 kind: VerticalPodAutoscaler
 metadata:
@@ -93,7 +106,7 @@ spec:
     kind: Deployment
     name: db-admin-console
   updatePolicy:
-    updateMode: "Auto"
+    updateMode: "Initial"
   resourcePolicy:
     containerPolicies:
       - containerName: "*"
@@ -102,6 +115,8 @@ spec:
         maxAllowed: { cpu: 250m, memory: 256Mi }
 ---
 # ── oauth2-proxy (db-console auth) ────────────────────────────────────────────
+# updateMode "Initial", NOT "Auto" -- same rationale as db-admin-console above:
+# singleton UI/auth-front, no PDB/replica to absorb an eviction mid-OAuth2-redirect.
 apiVersion: autoscaling.k8s.io/v1
 kind: VerticalPodAutoscaler
 metadata:
@@ -115,7 +130,7 @@ spec:
     kind: Deployment
     name: oauth2-proxy
   updatePolicy:
-    updateMode: "Auto"
+    updateMode: "Initial"
   resourcePolicy:
     containerPolicies:
       - containerName: "*"
