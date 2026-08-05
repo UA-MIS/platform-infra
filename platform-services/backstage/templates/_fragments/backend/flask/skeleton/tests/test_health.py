@@ -1,6 +1,14 @@
 """Health endpoint tests — the chart probes hit /healthz, so it must be 200 and DB-free."""
 
 
+def test_root_ok(client):
+    resp = client.get("/")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["status"] == "running"
+    assert "/healthz" in body["hints"]
+
+
 def test_healthz_ok(client):
     resp = client.get("/healthz")
     assert resp.status_code == 200

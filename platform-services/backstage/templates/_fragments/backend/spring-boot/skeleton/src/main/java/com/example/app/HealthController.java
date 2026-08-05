@@ -26,6 +26,17 @@ public class HealthController {
         return ResponseEntity.ok("ok");
     }
 
+    // Root — so a student's first visit to the app's own URL isn't a 404. API-only
+    // backend: no UI lives here (a fullstack layout's frontend owns "/" instead).
+    @GetMapping(value = "/", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> root() {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("service", "${{ values.appName }}");
+        body.put("status", "running");
+        body.put("hints", new String[] {"/healthz", "/api/health", "/api/items"});
+        return body;
+    }
+
     @GetMapping(value = "/api/health", produces = MediaType.APPLICATION_JSON_VALUE)
     public Map<String, Object> apiHealth() {
         String dbStatus = "unconfigured";

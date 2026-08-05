@@ -21,6 +21,16 @@ __version__ = "0.0.0"
 def create_app() -> Flask:
     app = Flask(__name__)
 
+    @app.get("/")
+    def root():
+        # So a student's first visit to the app's own URL isn't a 404. API-only
+        # backend: no UI lives here (a fullstack layout's frontend owns "/" instead).
+        return jsonify(
+            service="${{ values.appName }}",
+            status="running",
+            hints=["/healthz", "/api/health", "/api/items"],
+        )
+
     @app.get("/healthz")
     def healthz():
         # Liveness/readiness probe — always 200 while the process is up, and INDEPENDENT

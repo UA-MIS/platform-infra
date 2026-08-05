@@ -24,6 +24,13 @@ class AppTests {
     private MockMvc mvc;
 
     @Test
+    void rootReturnsOk() throws Exception {
+        mvc.perform(get("/"))
+            .andExpect(status().isOk())
+            .andExpect(content().string(org.hamcrest.Matchers.containsString("\"status\":\"running\"")));
+    }
+
+    @Test
     void healthzIsOkAndDbIndependent() throws Exception {
         mvc.perform(get("/healthz"))
             .andExpect(status().isOk())

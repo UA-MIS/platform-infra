@@ -55,10 +55,21 @@ async fn main() {
 /// None (or fake) pool.
 pub fn build_router(state: AppState) -> Router {
     Router::new()
+        .route("/", get(root))
         .route("/healthz", get(healthz))
         .route("/api/health", get(api_health))
         .merge(items::routes())
         .with_state(state)
+}
+
+/// Root — so a student's first visit to the app's own URL isn't a 404. API-only backend:
+/// no UI lives here (a fullstack layout's frontend owns "/" instead).
+async fn root() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "service": APP_NAME,
+        "status": "running",
+        "hints": ["/healthz", "/api/health", "/api/items"],
+    }))
 }
 
 /// Liveness/readiness probe — DB-INDEPENDENT (the chart hits this directly).
@@ -91,6 +102,15 @@ mod tests {
 
     fn router_no_db() -> Router {
         build_router(AppState { pool: None })
+    }
+
+    #[tokio::test]
+    async fn root_is_ok() {
+        let resp = router_no_db()
+            .oneshot(Request::get("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]

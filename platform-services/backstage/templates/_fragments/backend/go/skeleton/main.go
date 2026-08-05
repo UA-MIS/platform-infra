@@ -52,6 +52,16 @@ func buildRouter(db *sql.DB) *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Recovery())
 
+	// Root — so a student's first visit to the app's own URL isn't a 404. API-only
+	// backend: no UI lives here (a fullstack layout's frontend owns "/" instead).
+	r.GET("/", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"service": appName,
+			"status":  "running",
+			"hints":   []string{"/healthz", "/api/health", "/api/items"},
+		})
+	})
+
 	// Liveness/readiness probe — DB-INDEPENDENT (the chart hits this directly).
 	r.GET("/healthz", func(c *gin.Context) {
 		c.String(http.StatusOK, "ok")

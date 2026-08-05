@@ -16,12 +16,18 @@ describe('backend contract (no DATABASE_URL)', () => {
       imports: [AppModule],
     }).compile()
     app = moduleRef.createNestApplication()
-    app.setGlobalPrefix('api', { exclude: ['healthz'] })
+    app.setGlobalPrefix('api', { exclude: ['healthz', '/'] })
     await app.init()
   })
 
   afterAll(async () => {
     await app.close()
+  })
+
+  it('GET / -> 200 running (not under /api)', async () => {
+    const res = await request(app.getHttpServer()).get('/')
+    expect(res.status).toBe(200)
+    expect(res.body.status).toBe('running')
   })
 
   it('GET /healthz -> 200 ok (DB-independent)', async () => {
