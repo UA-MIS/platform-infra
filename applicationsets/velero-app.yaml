@@ -97,6 +97,30 @@ spec:
           defaultVolumesToFsBackup: true
           defaultBackupTTL: 720h0m0s   # 30 days retention (matches the schedule's own ttl)
 
+          # Per-repo kopia maintenance jobs (one per protected namespace, hourly by
+          # default) previously ran with NO resource requests/limits (chart default:
+          # unset) and kept the chart-default 3 failed/completed pods per repo. Found
+          # 2026-08-05: after the MinIO re-home (#415/#416) wiped the backup bucket,
+          # every pre-existing repo's maintenance job errored continuously
+          # ("repository not initialized in the provided storage") and — at 3 kept
+          # pods × ~29 affected repos — left ~90 dead Error pods sitting in the
+          # velero namespace. Pinning small requests/limits (fleet is
+          # resource-constrained OptiPlex/Mac-mini nodes) and dropping keepLatest to 1
+          # bounds that debris to ~1 per repo on any future repeat, without losing the
+          # most-recent-failure breadcrumb. Does NOT fix the underlying repo-init
+          # issue — that's a one-time operator action (recreate the affected
+          # BackupRepository CRs so Velero re-initializes them against the now-empty
+          # bucket), tracked separately.
+          repositoryMaintenanceJob:
+            repositoryConfigData:
+              global:
+                podResources:
+                  cpuRequest: "100m"
+                  cpuLimit: "200m"
+                  memoryRequest: "100Mi"
+                  memoryLimit: "200Mi"
+                keepLatestMaintenanceJobs: 1
+
         # No cloud/CSI snapshotter is configured (see header) — Velero backs up PV
         # DATA via the node-agent's file-system backup (Kopia) instead.
         snapshotsEnabled: false
