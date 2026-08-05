@@ -18,3 +18,12 @@ def test_api_health_reports_unconfigured_without_db(client):
     resp = client.get("/api/health")
     assert resp.status_code == 200
     assert resp.get_json()["db"] == "unconfigured"
+
+
+def test_root_ok_without_leaking_secret(client, monkeypatch):
+    monkeypatch.setenv("APP_SECRET", "shh-super-secret")
+    resp = client.get("/")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["secret_loaded"] is True
+    assert "shh-super-secret" not in resp.get_data(as_text=True)

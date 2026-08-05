@@ -8,8 +8,12 @@
 #   GET /healthz : 200 "ok" — liveness/readiness; the platform chart's probes hit THIS
 #                  path, so it is cheap and DB-independent (stays green with no DATABASE_URL).
 #   GET /health  : JSON alias of /healthz (convenience).
+#   GET /        : 200 — proves APP_SECRET was read WITHOUT echoing it.
 #   GET /api/health : DB-aware — reports whether DATABASE_URL is configured/reachable.
 #   /api/items   : sample CRUD (see app/items.py); returns 503 until DATABASE_URL is set.
+import hashlib
+import os
+
 from flask import Flask, jsonify
 
 from .db import db_status, ensure_schema
@@ -35,6 +39,18 @@ def create_app() -> Flask:
     def api_health():
         # DB-aware health — reports configured/reachable without leaking the connection.
         return jsonify(status="ok", db=db_status())
+
+    @app.get("/")
+    def root():
+        # Proves APP_SECRET was read WITHOUT leaking it: bool + length + sha256 prefix.
+        secret = os.environ.get("APP_SECRET", "")
+        digest = hashlib.sha256(secret.encode()).hexdigest()[:8]
+        return jsonify(
+            app="${{ values.appName }}",
+            secret_loaded=bool(secret),
+            secret_length=len(secret),
+            secret_sha256_prefix=digest,
+        )
 
     app.register_blueprint(items_bp)
 

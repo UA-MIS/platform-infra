@@ -1,3 +1,4 @@
+import { createHash } from 'crypto'
 import express from 'express'
 import type { Request, Response, NextFunction } from 'express'
 import type { RowDataPacket, ResultSetHeader } from 'mysql2'
@@ -38,6 +39,18 @@ app.get(
     res.json({ status: 'ok', db, time: new Date().toISOString() })
   }),
 )
+
+// Root — gives a single-component backend (no frontend) something other than a 404 at
+// "/", and proves APP_SECRET was read WITHOUT echoing it.
+app.get('/', (_req: Request, res: Response) => {
+  const secret = process.env.APP_SECRET ?? ''
+  res.json({
+    app: '${{ values.appName }}',
+    secret_loaded: secret.length > 0,
+    secret_length: secret.length,
+    secret_sha256_prefix: createHash('sha256').update(secret).digest('hex').slice(0, 8),
+  })
+})
 
 // Return the pool, or send a 503 (and return undefined) when DATABASE_URL is not set yet.
 function requireDb(res: Response): Pool | undefined {

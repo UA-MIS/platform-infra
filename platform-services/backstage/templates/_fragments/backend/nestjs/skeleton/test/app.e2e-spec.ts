@@ -1,5 +1,6 @@
 import { Test } from '@nestjs/testing'
 import type { INestApplication } from '@nestjs/common'
+import { RequestMethod } from '@nestjs/common'
 import request from 'supertest'
 import { AppModule } from '../src/app.module'
 
@@ -16,7 +17,9 @@ describe('backend contract (no DATABASE_URL)', () => {
       imports: [AppModule],
     }).compile()
     app = moduleRef.createNestApplication()
-    app.setGlobalPrefix('api', { exclude: ['healthz'] })
+    app.setGlobalPrefix('api', {
+      exclude: ['healthz', { path: '/', method: RequestMethod.GET }],
+    })
     await app.init()
   })
 
@@ -28,6 +31,15 @@ describe('backend contract (no DATABASE_URL)', () => {
     const res = await request(app.getHttpServer()).get('/healthz')
     expect(res.status).toBe(200)
     expect(res.text).toBe('ok')
+  })
+
+  it('GET / -> 200 ok without leaking APP_SECRET (excluded from /api prefix)', async () => {
+    process.env.APP_SECRET = 'shh-super-secret'
+    const res = await request(app.getHttpServer()).get('/')
+    expect(res.status).toBe(200)
+    expect(res.body.secret_loaded).toBe(true)
+    expect(JSON.stringify(res.body)).not.toContain('shh-super-secret')
+    delete process.env.APP_SECRET
   })
 
   it('GET /api/health -> 200 unconfigured (DB-aware, under /api)', async () => {

@@ -8,6 +8,7 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -22,6 +23,24 @@ func TestHealthzIsOkAndDbIndependent(t *testing.T) {
 	}
 	if w.Body.String() != "ok" {
 		t.Fatalf("healthz body = %q, want \"ok\"", w.Body.String())
+	}
+}
+
+func TestRootReturnsOkWithoutLeakingSecret(t *testing.T) {
+	t.Setenv("APP_SECRET", "shh-super-secret")
+	router := buildRouter(nil)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("/ status = %d, want 200", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Fatalf("/ content-type = %q, want application/json", ct)
+	}
+	if strings.Contains(w.Body.String(), "shh-super-secret") {
+		t.Fatalf("/ body leaked the secret: %s", w.Body.String())
 	}
 }
 

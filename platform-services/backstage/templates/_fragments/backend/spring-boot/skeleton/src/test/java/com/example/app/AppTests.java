@@ -43,6 +43,15 @@ class AppTests {
     }
 
     @Test
+    void rootReturnsOkAndReportsSecretLoadState() throws Exception {
+        // The test env has no APP_SECRET, so this proves the route stays 200 and reports
+        // secret_loaded honestly rather than leaking anything.
+        mvc.perform(get("/"))
+            .andExpect(status().isOk())
+            .andExpect(content().string(org.hamcrest.Matchers.containsString("\"secret_loaded\":false")));
+    }
+
+    @Test
     void convertsMysqlUriToJdbcUrl() {
         assertThat(Db.toJdbcUrl("mysql://u:p@dbhost:3306/mydb"))
             .isEqualTo("jdbc:mysql://dbhost:3306/mydb");

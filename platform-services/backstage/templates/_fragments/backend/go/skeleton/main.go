@@ -16,7 +16,9 @@
 package main
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"log"
 	"net/http"
 	"os"
@@ -68,6 +70,19 @@ func buildRouter(db *sql.DB) *gin.Engine {
 			}
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "app": appName, "db": dbStatus})
+	})
+
+	// Root — gives a single-component backend (no frontend) something other than a 404
+	// at "/", and proves APP_SECRET was read WITHOUT echoing it.
+	r.GET("/", func(c *gin.Context) {
+		secret := os.Getenv("APP_SECRET")
+		sum := sha256.Sum256([]byte(secret))
+		c.JSON(http.StatusOK, gin.H{
+			"app":                  appName,
+			"secret_loaded":        secret != "",
+			"secret_length":        len(secret),
+			"secret_sha256_prefix": hex.EncodeToString(sum[:])[:8],
+		})
 	})
 
 	registerItemRoutes(r, db)

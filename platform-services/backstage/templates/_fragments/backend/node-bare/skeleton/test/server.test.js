@@ -36,6 +36,18 @@ test('GET /healthz -> 200 ok (DB-independent)', async () => {
   })
 })
 
+test('GET / -> 200 ok without leaking APP_SECRET', async () => {
+  process.env.APP_SECRET = 'shh-super-secret'
+  await withServer(async (base) => {
+    const res = await fetch(`${base}/`)
+    assert.strictEqual(res.status, 200)
+    const body = await res.json()
+    assert.strictEqual(body.secret_loaded, true)
+    assert.doesNotMatch(JSON.stringify(body), /shh-super-secret/)
+  })
+  delete process.env.APP_SECRET
+})
+
 test('GET /api/health -> 200 unconfigured without DATABASE_URL', async () => {
   await withServer(async (base) => {
     const res = await fetch(`${base}/api/health`)

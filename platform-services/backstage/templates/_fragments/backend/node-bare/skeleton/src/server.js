@@ -14,6 +14,7 @@
 'use strict'
 
 const http = require('http')
+const { createHash } = require('crypto')
 const { getPool, isConfigured, ensureSchema } = require('./db')
 
 const PORT = Number(process.env.PORT) || 8080
@@ -65,6 +66,19 @@ async function handle(req, res) {
   if (method === 'GET' && path === '/healthz') {
     res.writeHead(200, { 'Content-Type': 'text/plain' })
     res.end('ok')
+    return
+  }
+
+  // Root — gives a single-component backend (no frontend) something other than a 404 at
+  // "/", and proves APP_SECRET was read WITHOUT echoing it.
+  if (method === 'GET' && path === '/') {
+    const secret = process.env.APP_SECRET || ''
+    sendJson(res, 200, {
+      app: '${{ values.appName }}',
+      secret_loaded: secret.length > 0,
+      secret_length: secret.length,
+      secret_sha256_prefix: createHash('sha256').update(secret).digest('hex').slice(0, 8),
+    })
     return
   }
 
