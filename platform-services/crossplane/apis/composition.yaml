@@ -2475,6 +2475,15 @@ spec:
             # Deployment: dockette/adminer:mysql -- identical pod spec to the retired per-env consoles
             # (see git history for the non-root-UID / adminer-plugins emptyDir
             # rationale), plus the adminer.css mount.
+            #
+            # Image pinned by digest (Adminer 5.4.4, same build family as db-admin's
+            # dockette/adminer:full -- see platform-services/db-admin/deployment.yaml's
+            # "Invalid server." comment block for the full 5.4.4 root cause). Was the
+            # floating `dockette/adminer:mysql` tag; live-tested against a running
+            # tenant console (ADMINER_AUTOLOGIN_SERVER uses the real host:port as
+            # SERVER, which -- unlike db-admin's server-list plugin -- already satisfies
+            # Adminer 5.4.3+'s `^[-a-z0-9.:]*$` validation, so auto-login itself was
+            # NOT broken here; this is a stability/parity pin only, not a functional fix.
             apiVersion: kubernetes.crossplane.io/v1alpha1
             kind: Object
             metadata:
@@ -2525,7 +2534,7 @@ spec:
                       spec:
                         containers:
                           - name: adminer
-                            image: dockette/adminer:mysql
+                            image: dockette/adminer:mysql@sha256:e35d484253c91131080bacfcf99df1bd62fb22e13e61314cd0202f0bbfee7c6a
                             imagePullPolicy: IfNotPresent
                             env:
                               - name: ADMINER_PLUGIN_AUTOLOGIN
@@ -3675,6 +3684,15 @@ spec:
             # Deployment: dockette/adminer:postgres -- identical pod spec to the retired per-env consoles
             # (see git history for the non-root-UID / adminer-plugins emptyDir
             # rationale), plus the adminer.css mount.
+            #
+            # Image pinned by digest -- same rationale and parity-only scope as the
+            # dockette/adminer:mysql pin above (see that comment block). Digest is the
+            # tag's current manifest-list digest (registry-verified); could NOT verify
+            # ADMINER_VERSION on a live Postgres tenant console (none currently
+            # deployed) the way the MySQL one was live-tested, so treat this pin as
+            # unverified-in-cluster -- re-check ADMINER_AUTOLOGIN_SERVER's host format
+            # against Adminer 5.4.4's `^[-a-z0-9.:]*$` rule the first time a Postgres
+            # tenant console actually runs post-merge.
             apiVersion: kubernetes.crossplane.io/v1alpha1
             kind: Object
             metadata:
@@ -3725,7 +3743,7 @@ spec:
                       spec:
                         containers:
                           - name: adminer
-                            image: dockette/adminer:postgres
+                            image: dockette/adminer:postgres@sha256:9e8ae62bfd8b1b5b3a18cf9bfa9f80c93d918b45bdd6c532153bd0ce26f9ded2
                             imagePullPolicy: IfNotPresent
                             env:
                               - name: ADMINER_PLUGIN_AUTOLOGIN

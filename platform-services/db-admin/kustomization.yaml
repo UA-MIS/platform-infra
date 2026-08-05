@@ -25,6 +25,13 @@ configMapGenerator:
     namespace: db-admin
     files:
       - adminer.css
+  # Patched copy of dockette/adminer's bundled server-list plugin (Adminer 5.4.4
+  # "Invalid server." fix — see the file's own header and deployment.yaml for the
+  # full root cause and why this bypasses ADMINER_PLUGIN_SERVER_LIST=1 entirely).
+  - name: db-admin-adminer-server-list-plugin
+    namespace: db-admin
+    files:
+      - adminer-server-list.php
 generatorOptions:
   disableNameSuffixHash: true
 

@@ -100,8 +100,13 @@ spec:
               value: "http://harbor-core.harbor.svc:80"
             # Space-separated project names to apply the "keep last N pushed tags"
             # retention rule to. Adding a project = adding it here (no code change).
+            # `swami` was removed 2026-08 -- its Harbor project was deleted (tenant
+            # teardown, ~22d before this fix) and, with the Job's `-f`-on-404 curl
+            # previously aborting the whole script (see the project-resolution loop
+            # below for the tolerance fix that now also covers this case for any
+            # FUTURE torn-down project left in this list).
             - name: RETENTION_PROJECTS
-              value: "backstage swami"
+              value: "backstage"
             - name: RETENTION_KEEP_LAST_N
               value: "10"
           command: ["/bin/sh", "-eu", "-c"]
@@ -123,7 +128,15 @@ spec:
               #        matches all repos, including backstage/cache). -------------
               for P in $RETENTION_PROJECTS; do
                 echo "==> retention: resolving project '$P' ..."
-                proj=$(curl -fsS -u "$AUTH" "$CORE/api/v2.0/projects/$P")
+                proj_code=$(curl -sS -o "/tmp/proj_${P}.json" -w '%{http_code}' -u "$AUTH" "$CORE/api/v2.0/projects/$P")
+                if [ "$proj_code" = "404" ]; then
+                  echo "==> retention: skip: project '$P' gone (404 from GET /projects/$P), continuing."
+                  continue
+                fi
+                if [ "$proj_code" != "200" ]; then
+                  echo "FAIL: GET /projects/$P returned HTTP $proj_code"; cat "/tmp/proj_${P}.json"; exit 1
+                fi
+                proj=$(cat "/tmp/proj_${P}.json")
                 PID=$(printf '%s' "$proj" | grep -o '"project_id":[0-9]*' | head -1 | grep -o '[0-9]*')
                 if [ -z "$PID" ]; then
                   echo "FAIL: could not resolve project_id for '$P'"; echo "$proj"; exit 1

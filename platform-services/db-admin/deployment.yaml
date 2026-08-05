@@ -1,8 +1,11 @@
 # Platform-admin Adminer (tenant-db-access design §5). Same tool as the tenant
 # consoles, dockette/adminer:full (needs BOTH MySQL and Postgres drivers under ONE
 # instance — the per-engine-only images used per-tenant don't fit here since this
-# console lists presets from both engines at once). ADMINER_PLUGIN_SERVER_LIST (not
-# autologin) — a dropdown of every platform DB with an Auto Sign-In button.
+# console lists presets from both engines at once). Server-list plugin (not
+# autologin) — a dropdown of every platform DB with an Auto Sign-In button. NOTE:
+# ADMINER_PLUGIN_SERVER_LIST=1 is intentionally NOT set below — the plugin is
+# activated by directly ConfigMap-mounting a patched copy of it instead (see the
+# "Adminer 5.4.4" comment block below for why).
 #
 # Same non-root-UID + PORT-off-80 posture as the per-tenant consoles
 # (platform-services/crossplane/apis/composition.yaml's ADMINER CONSOLE blocks) — see
@@ -26,6 +29,40 @@
 # them). ADMINER_THEME (image-bundled /srv/designs/<name>/) was considered and
 # rejected — none of the bundled themes are UA-MIS branded, and using it would still
 # hit the same in-container-cp permission wall.
+#
+# ⚠ ADMINER 5.4.4 "Invalid server." FIX (incident: every login/Auto-Sign-In POST
+# 403'd on this console starting ~when w1/w2 joined and pulled the then-current
+# dockette/adminer:full digest, which resolves to Adminer 5.4.4). Root cause
+# (verified against vrana/adminer's auth.inc.php, diffed v5.4.2 -> v5.4.4): Adminer
+# 5.4.3 added a security fix (GHSA-r4x9-5m63-3vxw, "Validate server") that requires
+# `host_port(SERVER)`'s host component to match `^[-a-z0-9.:]*$`, erroring
+# lang('Invalid server.') otherwise. dockette's bundled adminer-server-list.php
+# plugin (activated below via ADMINER_SERVERS_* env vars, one per platform DB)
+# submits the env var's suffix itself (e.g. "MariaDB_Root", "CNPG_Backstage") as
+# `auth[server]` / SERVER — and those suffixes contain underscores, which the new
+# regex rejects. Reproduced live (Auto Sign-In -> HTTP 403 "Invalid server.")
+# before this fix.
+#
+# Fix: adminer-server-list.php below is a patched, ConfigMap-mounted copy of that
+# plugin (see its own header for the full diff rationale) — same underscore-bearing
+# names are still shown as the dropdown's display label, but a separate
+# regex-safe slug is what's actually submitted/validated as SERVER. It's mounted
+# directly at /srv/adminer-plugins/adminer-server-list.php (subPath, alongside the
+# adminer-plugins emptyDir fix above) INSTEAD of relying on
+# ADMINER_PLUGIN_SERVER_LIST=1's entrypoint.sh copy step — that env var is
+# deliberately NOT set below, because entrypoint.sh runs under `set -Eeo pipefail`
+# and its `cp .../adminer-server-list.php /srv/adminer-plugins/` would try to
+# overwrite this already-mounted read-only file, fail Permission Denied, and crash
+# the container on every start. Adminer's own plugin loader glob()s every *.php in
+# that directory regardless of the env var, so no further wiring is needed — this
+# is the same pattern already used for the per-tenant adminer-hide-login-fields.php
+# plugin (platform-services/crossplane/apis/composition.yaml).
+#
+# Image is now pinned by digest (was the floating `dockette/adminer:full` tag,
+# imagePullPolicy IfNotPresent — the exact mechanism that silently pulled 5.4.4 onto
+# the new workers and triggered this incident). Digest below = the Adminer 5.4.4
+# build this fix targets and was verified against; bump deliberately (re-diff
+# auth.inc.php against the new tag first) rather than floating again.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -47,11 +84,9 @@ spec:
     spec:
       containers:
         - name: adminer
-          image: dockette/adminer:full
+          image: dockette/adminer:full@sha256:206994d32c8c4e692ef0d05be679cc5e468f1894615f1d7bc2ee8c97137dab09
           imagePullPolicy: IfNotPresent
           env:
-            - name: ADMINER_PLUGIN_SERVER_LIST
-              value: "1"
             - name: PORT
               value: "8080"
             - name: ADMINER_BANNER
@@ -122,6 +157,10 @@ spec:
           volumeMounts:
             - name: adminer-plugins
               mountPath: /srv/adminer-plugins
+            - name: adminer-server-list-plugin
+              mountPath: /srv/adminer-plugins/adminer-server-list.php
+              subPath: adminer-server-list.php
+              readOnly: true
             - name: adminer-css
               mountPath: /srv/adminer.css
               subPath: adminer.css
@@ -129,6 +168,9 @@ spec:
       volumes:
         - name: adminer-plugins
           emptyDir: {}
+        - name: adminer-server-list-plugin
+          configMap:
+            name: db-admin-adminer-server-list-plugin
         - name: adminer-css
           configMap:
             name: db-admin-adminer-css
