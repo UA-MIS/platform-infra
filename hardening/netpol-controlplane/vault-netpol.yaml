@@ -4,12 +4,27 @@
 # external-secrets namespace) + provider-vault (the crossplane-system namespace,
 # for tenant Vault Policy/AuthBackendRole MRs during onboarding, Track-5/ADR-031)
 # + Backstage (the backstage namespace, backstage-vault-writer SA — the portal's
-# Secrets tab, so teams can set tenant secrets via k8s-auth login) + the node
+# Secrets tab, so teams can set tenant secrets via k8s-auth login)
+# + the slides app (the slides namespace, slides-vault-writer SA — lab hosting;
+# see the DIRECT-CALLER note below) + the node
 # (kubelet probes) + itself (raft peers — Vault now runs 3-node Raft HA,
 # vault-app.yaml ha.replicas: 3, so intra-namespace :8200/:8201 traffic is
 # LIVE raft peering, not merely provisioned-for-later). Everything else is
 # denied. This brings Vault under the same default-deny + scoped-allow posture
 # as argocd/dex/harbor.
+#
+# DIRECT CALLERS vs ESO. Most Vault consumers on this cluster never appear in this
+# list, because they read secrets through an ExternalSecret — and ESO always dials
+# Vault from its OWN controller pod in ns external-secrets, so the packet's source
+# namespace is `external-secrets` no matter which namespace the ExternalSecret and
+# its target Secret live in. Only components that hold a projected
+# serviceAccountToken (audience: vault) and call Vault's HTTP API themselves need a
+# rule here. Today that is exactly two: `backstage` (portal Secrets tab) and
+# `slides` (the lab-hosting backend, which WRITES each student's per-lab DB
+# credentials to secret/labs/<labSlug>/<username> via slides-labs-writer; ESO then
+# reads that path back into the student's lab namespace). If you add a namespace
+# here, it is because that namespace's pods speak to Vault directly — an
+# ExternalSecret alone is never a reason to add one.
 #
 # Lives in hardening/netpol-controlplane/ so it inherits the MANUAL-SYNC Application
 # (platform-netpol-controlplane) — default-deny is applied to the vault namespace
@@ -39,9 +54,9 @@ spec:
     - Ingress
     - Egress
 ---
-# --- INGRESS: from ESO + provider-vault + Backstage (the three application
-#     clients), intra-namespace (raft peers — LIVE, 3-node HA), and kubelet
-#     probes from the node. ---
+# --- INGRESS: from ESO + provider-vault + Backstage + slides (the four
+#     application clients), intra-namespace (raft peers — LIVE, 3-node HA), and
+#     kubelet probes from the node. ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -81,6 +96,20 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: backstage
+      ports:
+        - protocol: TCP
+          port: 8200
+    # slides (slides ns) -> vault API :8200. The slides-vault-writer SA logs in via
+    # k8s-auth (role slides-labs-writer) and WRITES each student's per-lab DB
+    # credentials to secret/labs/<labSlug>/<username>; ESO then reads that path back
+    # into the student's lab namespace. This is a DIRECT call from the slides pod —
+    # unlike every other consumer, it is not proxied by ESO, so it needs its own
+    # rule (see the DIRECT CALLERS note in the header). Scoped to :8200 only — no
+    # other port, no other namespace.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: slides
       ports:
         - protocol: TCP
           port: 8200
