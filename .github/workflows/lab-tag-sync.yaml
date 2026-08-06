@@ -91,6 +91,20 @@ jobs:
           for students_file in labs/*/students.yaml; do
             [ -f "$students_file" ] || continue
             LAB_SLUG="$(basename "$(dirname "$students_file")")"
+            # ADVERSARIAL REVIEW round-4 (path traversal — see the fuller
+            # comment on the per-row USERNAME check below): LAB_SLUG is
+            # interpolated into the SAME `labs/${LAB_SLUG}/tags/...` path as
+            # USERNAME, once per FILE (not per row), so it is validated once
+            # here — a `continue` at this point in the `for` body skips the
+            # rest of this iteration, i.e. this whole students.yaml file,
+            # which is correct: an unsafe directory name should never be
+            # trusted for any row inside it.
+            case "$LAB_SLUG" in
+              ''|*[!a-z0-9-]*|-*|*-)
+                echo "WARN: ${students_file} labSlug '${LAB_SLUG}' (from directory name) is not lowercase DNS-safe, skipping whole file"
+                continue
+                ;;
+            esac
             COUNT="$(yq '. | length' "$students_file")"
             i=0
             while [ "$i" -lt "$COUNT" ]; do
@@ -105,6 +119,33 @@ jobs:
                 echo "WARN: ${students_file} row ${ROW} missing username/repo, skipping"
                 continue
               fi
+              # ADVERSARIAL REVIEW round-4 (path traversal, pre-existing —
+              # not a regression from the H-1 heredoc fix): USERNAME is
+              # interpolated straight into TAG_FILE below with zero
+              # validation. A roster row with e.g. `username: "../students"`
+              # would resolve to `labs/<slug>/tags/../students.yaml` ==
+              # `labs/<slug>/students.yaml` — OVERWRITING the roster itself
+              # with a 3-line tag file, which `git add -A -- labs` then
+              # stages and pushes; with `prune: true` on labs-students-
+              # appset.yaml, the next ArgoCD sync would delete every student
+              # Application in that lab. Post-H-2 a student holds no
+              # fleet-write credential, so this needs a SLIDES-side bug to
+              # trigger rather than an attacker — but this workflow is
+              # specifically the hardened sole writer and should not be one
+              # malformed roster row away from wiping a lab. Reject anything
+              # that isn't already lowercase-DNS-safe (the SAME contract
+              # `_helpers.tpl`'s `lab-app.username` fail-guard already
+              # requires downstream) BEFORE it ever touches a path — a `../`
+              # sequence, a leading/trailing hyphen, uppercase, or any other
+              # non-`[a-z0-9-]` character all fail this case pattern and are
+              # skipped, never interpolated into TAG_FILE. (LAB_SLUG got the
+              # same treatment above, once per file, not per row.)
+              case "$USERNAME" in
+                ''|*[!a-z0-9-]*|-*|*-)
+                  echo "WARN: ${students_file} row ${ROW} username '${USERNAME}' is not lowercase DNS-safe (^[a-z0-9-]+$, no leading/trailing hyphen), skipping"
+                  continue
+                  ;;
+              esac
               DEFAULT_BRANCH="$(curl -sS -H "Authorization: Bearer ${READ_TOKEN}" \
                 -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' \
                 "${API}/repos/${REPO}" | jq -r '.default_branch // empty')"

@@ -135,7 +135,7 @@ slides when a lab is flagged `hosted`, deleted (or left — see Teardown) when t
 lab tears down.
 
 ```yaml
-labSlug: lab1
+labSlug: "lab1"
 withDatabase: false
 ```
 
@@ -150,16 +150,16 @@ ArgoCD's git files generator explodes a matched list file into one generator
 output PER ELEMENT — this is what makes ONE Application per student happen.
 
 ```yaml
-- username: jsmith
-  repo: UA-MIS/lab1-jsmith
-  labSlug: lab1
+- username: "jsmith"
+  repo: "UA-MIS/lab1-jsmith"
+  labSlug: "lab1"
   withDatabase: false
 ```
 
 | field | required | meaning |
 | --- | --- | --- |
 | `username` | yes, **already lowercase** | GitHub username, as scaffolded, LOWERCASED by slides before writing (see "Contract: lowercase everywhere" — this is not optional). |
-| `repo` | yes | `org/name` of the student's repo (== `labRepoName()` == `<labSlug>-<username>`). Carried through as an annotation only — NOT parsed to derive the image name (the chart derives that from `labSlug`+`username` directly, which is guaranteed identical to the repo name by convention). **MUST be `≤ 63` total chars combined with username — see "Contract: the 63-char cap must be enforced by slides BEFORE repo creation" (M-3).** |
+| `repo` | yes | `org/name` of the student's repo, exactly as `github.repository` reads inside the student's CI run (== `labRepoName()` == `<labSlug>-<username>`, by convention — but no longer relied on: see below). **LOAD-BEARING (adversarial review round-3 M-1)**: the chart derives the GHCR pull ref FROM THIS FIELD (`ghcr.io/<lowercased repo>:<tag>`), not by reconstructing `labSlug`+`username`. Must match `^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$` or that student's Application fails its Helm render (a loud, per-Application failure). If it's well-formed but doesn't match the repo the student's CI actually pushed from, there is no render-time signal at all — the pod just sits `ImagePullBackOff` forever, silently pointed at a ref nothing ever pushed. **If a student's repo is ever renamed, slides must update this field** — nothing else will catch a stale value. **MUST also be `≤ 63` total chars combined with username — see "Contract: the 63-char cap must be enforced by slides BEFORE repo creation" (M-3).** |
 | `labSlug` | yes, **already lowercase** | Must exactly equal the `lab.yaml` in the same directory. Present on every row (not inferred from the file path) so the merge generator's `mergeKeys` always has it, regardless of how a given ArgoCD version injects file-path metadata. |
 | `withDatabase` | yes | **Duplicated** from `lab.yaml` — see "Contract: withDatabase" for why this can't just be read from `lab.yaml` by this ApplicationSet, and why the duplication is low-risk. |
 
@@ -210,6 +210,45 @@ builds the read path from the SAME validated (lowercased) `labSlug`/`username`
 — so the path slides writes credentials to must ALSO be the lowercased form,
 never the as-scaffolded-case GitHub username. See "Vault" below.
 
+### Contract: quote every string scalar in `lab.yaml`/`students.yaml` (adversarial review round-4 — MEASURED, not theoretical)
+
+There are TWO different YAML parsers in this pipeline, and they resolve an
+UNQUOTED YAML-1.1 boolean/octal-looking word differently. `lab-tag-sync.yaml`
+uses `yq` (go-yaml v3 under the hood); ArgoCD's git-files generator uses
+`sigs.k8s.io/yaml`, which is strict YAML 1.1. Measured side by side on the
+same unquoted input:
+
+```
+input:            yq resolves it to:      sigs.k8s.io/yaml resolves it to:
+username: no      "no" (string)           false (bool)
+username: 0755    "0755" (string)         493 (int, octal)
+```
+
+If slides writes an UNQUOTED `username: no` in `students.yaml`, ArgoCD's
+generator hands the ApplicationSet template the boolean `false`, which
+stringifies to `"false"` in `valuesObject.username` — a value that IS itself
+a valid lowercase DNS label, so `lab-app.username`'s fail-guard (previous
+section) does **not** catch it; the render succeeds, but as
+`lab-lab1-false` / `lab1-false.uamishub.com`. Meanwhile `lab-tag-sync.yaml`
+resolves the SAME unquoted `no` via `yq` as the literal string `"no"`, and
+writes `username: "no"` (quoted, correctly) into that student's tag file. The
+merge generator then joins on `[username, labSlug]` comparing `"false"`
+against `"no"` — they never match, and that student is silently pinned on
+`:unreleased` forever, same failure shape as the case-sensitivity bug earlier
+in this section, just triggered by an unquoted boolean-looking word instead
+of mixed case. The same class of bug applies to `on`/`off`/`yes`/`y`/`n` and
+to any all-digit username YAML would read as a number.
+
+**Contract requirement: every STRING scalar in `lab.yaml` and
+`students.yaml` MUST be quoted** — `labSlug`, `username`, `repo`, and any
+future string field. The `withDatabase` field is the one exception: it is a
+REAL boolean and must stay unquoted (see `chart/templates/_helpers.tpl`'s
+"withDatabase gating" comment for why the chart itself normalizes it via
+`toString` rather than trusting either parser's native type). This repo's own
+`labs/<lab-slug>/tags/<username>.yaml` examples already show this correctly
+quoted — the `lab.yaml`/`students.yaml` examples above have been updated to
+match.
+
 ## Contract: required + validated fields (adversarial review C-2)
 
 Every field in every fleet-repo row is REQUIRED — a missing field is not
@@ -224,10 +263,12 @@ down the whole fleet:
    original bug: a single malformed row could have stopped every OTHER lab's
    Applications from generating/updating too).
 2. **`chart/templates/_helpers.tpl`** then validates format (lowercase+DNS-safe
-   for `labSlug`/`username`, `^[a-f0-9]{7,64}$` for `tag`) and REQUIREDNESS
-   (empty fails the same regex check) — `fail`-ing there aborts only that ONE
-   Application's Helm render, which surfaces as that one Application going
-   Degraded, not a fleet-wide outage.
+   for `labSlug`/`username`, `^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$`
+   for `repo` — see `lab-app.repo`, adversarial review round-3 M-1 — and
+   `^[a-f0-9]{7,64}$` for `tag`) and REQUIREDNESS (empty fails the same regex
+   check) — `fail`-ing there aborts only that ONE Application's Helm render,
+   which surfaces as that one Application going Degraded, not a fleet-wide
+   outage.
 3. **Length cap**: `<labSlug>-<username>` is used as both a k8s label value
    and a DNS label (both 63-char capped). `_helpers.tpl`'s `lab-app.appName`
    explicitly checks `len(labSlug)+1+len(username) <= 63` and fails loudly if
