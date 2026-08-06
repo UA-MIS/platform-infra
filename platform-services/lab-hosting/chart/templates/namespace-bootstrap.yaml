@@ -148,4 +148,98 @@ spec:
       ports:
         - { protocol: TCP, port: 3306 }
     {{- end }}
+---
+# ExternalSecret — the GHCR image-pull credential, ONE per lab namespace, shared
+# by every student app in it (referenced from templates/serviceaccount.yaml's
+# `imagePullSecrets`).
+#
+# WHY THIS EXISTS AT ALL — it REPLACES the "packages are PUBLIC" decision that
+# PR #426 shipped (its H-3/M-2). That decision was built on an operator step
+# that CANNOT WORK: `gh api -X PATCH /orgs/<org>/packages/container/<name> -f
+# visibility=public`. GitHub's REST API for organization packages exposes only
+# GET, DELETE and POST .../restore — there is no PATCH verb and no WRITABLE
+# `visibility` field on that resource (the GET response does carry a READ-ONLY
+# `visibility` enum, so you can observe it but not change it); package
+# visibility is a per-package UI setting with no scripted equivalent. Student CI
+# pushes from PRIVATE repos, so each package is created PRIVATE and it inherits
+# its repo's visibility, and nothing in
+# #426's design could ever have flipped it. Every lab pod would have sat in
+# ImagePullBackOff forever. Hence: a real pull secret, which is what round 1
+# originally wanted before H-3 talked itself out of it.
+#
+# WHY THIS LANDS HERE (namespaceBootstrap), NOT IN THE STUDENT APPLICATION: the
+# credential is IDENTICAL for every student of every lab — one platform-owned
+# read-only identity, not per-student data. Rendering it per-student would make
+# N Applications all declare the same Secret in the same namespace, which is
+# exactly the shared-resource ownership fight "Two ApplicationSets, not one"
+# exists to avoid. It is deliberately NOT gated on `withDatabase` (unlike
+# templates/externalsecret.yaml) — every lab pulls an image, database or not.
+#
+# CREDENTIAL: a classic PAT with `read:packages` ONLY, staged by the operator at
+# Vault `secret/platform/labs-ghcr-pull` (keys GHCR_USERNAME, GHCR_TOKEN). GHCR
+# REQUIRES a classic PAT — GitHub's own docs state Packages "only supports
+# authentication using a personal access token (classic)"; fine-grained PATs and
+# GitHub App installation tokens are NOT accepted for package auth, so the
+# platform's existing fine-grained tokens cannot be reused here.
+#
+# NO NEW VAULT POLICY IS NEEDED for this path: `external-secrets-ro` (eso-role.sh)
+# already grants read on `secret/data/platform/*`, which is why sibling services
+# on the same `platform/<name>` convention (platform-services/lab-db/
+# externalsecret.yaml -> `platform/lab-db`, slidedeck -> `platform/slidedeck`)
+# resolve today with no per-service grant. This is UNLIKE `secret/data/labs/*`
+# (the per-student DB creds), which genuinely does need labs-read-role.sh.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: {{ .Values.ghcr.pullSecretName | quote }}
+  namespace: {{ include "lab-app.namespace" . | quote }}
+  labels:
+    {{- include "lab-app.labels" . | nindent 4 }}
+spec:
+  refreshInterval: "1h"
+  secretStoreRef:
+    name: vault-backend
+    kind: ClusterSecretStore
+  target:
+    name: {{ .Values.ghcr.pullSecretName | quote }}
+    creationPolicy: Owner
+    template:
+      engineVersion: v2
+      type: kubernetes.io/dockerconfigjson
+      data:
+        # The backtick literals below pass the INNER Go-template tokens through
+        # Helm untouched so ESO's own template engine evaluates them against the
+        # two fetched keys — the same two-engine escaping technique the tenant
+        # harbor-pull ExternalSecret uses (platform-services/crossplane/apis/
+        # composition.yaml). `auth` MUST be base64("<username>:<token>"); a
+        # malformed dockerconfigjson fails at PULL time with an opaque kubelet
+        # error, never at apply time, so this exact rendering is verified by
+        # execution (README "Local verification"), not by inspection.
+        #
+        # `toString | toJson` rather than bare interpolation inside hand-written
+        # quotes: toJson EMITS its own surrounding quotes and escapes any `"` or
+        # `\` in the value, so a credential containing either cannot silently
+        # produce invalid JSON. Not reachable with today's credential (classic
+        # PATs are [A-Za-z0-9_], GitHub usernames alphanumeric+hyphen) — this is
+        # hardening against a future rotation into a different token format,
+        # whose only symptom would otherwise be an opaque ImagePullBackOff. The
+        # leading `toString` pins string semantics so the value can never be
+        # marshalled as a []byte (which Go would render as base64). `auth` needs
+        # no escaping: b64enc output is base64-alphabet only, JSON-safe by
+        # construction. Verified available: `toJson`/`toString` are both
+        # registered in ESO v2.6.0's VENDORED sprig subset
+        # (runtime/template/v2/sprig/functions.go) — ESO does not expose sprig
+        # wholesale, so this was checked against the exact running version
+        # rather than assumed.
+        .dockerconfigjson: |
+          {{ `{"auths":{"` }}{{ .Values.ghcr.registry }}{{ `":{"username":{{ .username | toString | toJson }},"password":{{ .token | toString | toJson }},"auth":"{{ printf "%s:%s" .username .token | b64enc }}"}}}` }}
+  data:
+    - secretKey: username
+      remoteRef:
+        key: {{ .Values.ghcr.vaultPath | quote }}
+        property: GHCR_USERNAME
+    - secretKey: token
+      remoteRef:
+        key: {{ .Values.ghcr.vaultPath | quote }}
+        property: GHCR_TOKEN
 {{- end }}

@@ -99,9 +99,33 @@ tag: ""
 # which caps request bodies at 100MB, and a GitHub-hosted runner has no path
 # around it the way ARC/Kaniko builders do via a Traefik ClusterIP hostAlias).
 # No `ghcrRepo` value here — DERIVED from `repo` (adversarial review M-1),
-# see _helpers.tpl `lab-app.image`. PACKAGES ARE PUBLIC (adversarial review H-3 — see README
-# "Registry: GHCR, not Harbor" / "H-3"): the app is already public via its
-# Ingress with no SSO gate, so there is no `imagePullSecrets` on the
-# Deployment and no pull-credential plumbing anywhere in this chart.
+# see _helpers.tpl `lab-app.image`.
+#
+# PACKAGES ARE PRIVATE, AND THE CHART SHIPS A PULL SECRET. This REVERSES PR
+# #426's H-3 "packages are PUBLIC, no pull secret" decision, which rested on an
+# operator step that does not exist: there is no PATCH verb and no WRITABLE
+# `visibility` field on GitHub's `/orgs/{org}/packages/container/{name}` REST
+# resource (only GET, DELETE, POST .../restore; GET returns a READ-ONLY
+# `visibility` enum you can observe but not set). Student CI pushes from PRIVATE repos, so the
+# package is created private and there is no scripted way to flip it. See
+# templates/namespace-bootstrap.yaml's ExternalSecret header and README "Pull:
+# private GHCR packages + an image pull secret".
 appDomain: uamishub.com
 containerPort: 8080
+
+# --- GHCR pull credential -----------------------------------------------------
+# Consumed by templates/namespace-bootstrap.yaml (the ExternalSecret, one per lab
+# namespace) and templates/serviceaccount.yaml (the `imagePullSecrets` reference,
+# one per student). Both modes read these, so they are NOT under a mode gate.
+#
+# `vaultPath` holds a CLASSIC PAT with `read:packages` ONLY, under keys
+# GHCR_USERNAME / GHCR_TOKEN. GHCR accepts ONLY classic PATs for package auth —
+# not fine-grained PATs, not GitHub App installation tokens — so this credential
+# cannot be folded into the platform's existing fine-grained tokens.
+# `secret/data/platform/*` is already covered by the `external-secrets-ro` policy
+# (external-secrets/vault-policies/eso-role.sh), so no Vault policy change is
+# needed for this path.
+ghcr:
+  registry: ghcr.io
+  pullSecretName: ghcr-pull
+  vaultPath: platform/labs-ghcr-pull
