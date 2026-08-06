@@ -103,9 +103,10 @@ tag: ""
 #
 # PACKAGES ARE PRIVATE, AND THE CHART SHIPS A PULL SECRET. This REVERSES PR
 # #426's H-3 "packages are PUBLIC, no pull secret" decision, which rested on an
-# operator step that does not exist: there is no PATCH verb and no `visibility`
-# field on GitHub's `/orgs/{org}/packages/container/{name}` REST resource (only
-# GET, DELETE, POST .../restore). Student CI pushes from PRIVATE repos, so the
+# operator step that does not exist: there is no PATCH verb and no WRITABLE
+# `visibility` field on GitHub's `/orgs/{org}/packages/container/{name}` REST
+# resource (only GET, DELETE, POST .../restore; GET returns a READ-ONLY
+# `visibility` enum you can observe but not set). Student CI pushes from PRIVATE repos, so the
 # package is created private and there is no scripted way to flip it. See
 # templates/namespace-bootstrap.yaml's ExternalSecret header and README "Pull:
 # private GHCR packages + an image pull secret".

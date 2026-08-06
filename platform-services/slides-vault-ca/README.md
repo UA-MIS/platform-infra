@@ -41,13 +41,33 @@ Two ESO-native alternatives were evaluated and rejected:
 | ESO **Kubernetes-provider** `SecretStore` in ns `slides` reading `vault-server-tls` from ns `vault` | ESO requires the store's identity to hold `get`+`list`+`watch` on `secrets` in the SOURCE namespace, and RBAC cannot scope `list`/`watch` to a single `resourceName`. That would grant a slides-namespace ServiceAccount the ability to enumerate and read **every** Secret in ns `vault` — which today holds `vault-transit-unseal-token` (the auto-unseal transit token) and `vault-unsealer-ca`. Trading a public certificate for read access to the unseal credential is a bad trade. It would also be the first use of ESO's Kubernetes provider anywhere in this repo (every existing store is `provider.vault`). |
 | Stage the CA into Vault at `secret/platform/vault-ca`, read it back via the existing `vault-backend` ClusterSecretStore | Workable, and it reuses machinery that already exists — but it is **strictly worse than this file**: the copy in Vault would also be a manual snapshot that does not track CA rotation, so it buys no freshness while adding an operator write and a second copy to keep straight. |
 
-A reflector/replicator (emberstack, kubernetes-replicator) or a Kyverno
-`generate`+`clone` rule would give genuine auto-distribution, but **none is
-installed in this cluster** (verified live) — adopting a new controller to copy
-one public file is not proportionate. The right long-term fix is cert-manager
-**trust-manager** `Bundle`, already recorded as the post-demo TODO in
-`vault-ca-configmap.yaml`; when that lands it should replace all four committed
-copies at once, including this one.
+Two auto-distribution mechanisms were also considered, and they fail for
+**different** reasons — worth separating, because only one is about availability:
+
+- **A reflector/replicator** (emberstack, kubernetes-replicator): **not
+  installed** here — verified live; no such workload, CRD, or reflector-style
+  annotation anywhere. Adopting a new controller to copy one public file is not
+  proportionate.
+- **A Kyverno `generate`+`clone` rule**: **Kyverno IS installed and healthy**
+  (v1.18.1, four controllers Ready in ns `kyverno`, *including* the
+  `background-controller` that executes `generate` rules), and this platform
+  already depends on it — `disallow-latest-tag` runs `Enforce` cluster-wide and
+  the lab chart references that enforcement in several places. So this option is
+  genuinely available, and unlike the ESO option it has **no RBAC downside at
+  all**: Kyverno's background controller does the copying and the slides
+  namespace gains no permission. It is rejected purely on **proportionality** —
+  there are currently **zero `generate` rules anywhere in this cluster**
+  (verified live across all ClusterPolicies and Policies; every existing policy
+  is validate-only), and introducing the first one, along with the
+  background-reconciliation and policy-ownership semantics it brings, to copy a
+  single static public file is more machinery than the problem warrants. If the
+  platform later adopts `generate` rules for other reasons, this file is a
+  reasonable thing to fold into them.
+
+The right long-term fix is cert-manager **trust-manager** `Bundle` (also not
+installed — `bundles.trust.cert-manager.io` does not exist here), already
+recorded as the post-demo TODO in `vault-ca-configmap.yaml`; when that lands it
+should replace all four committed copies at once, including this one.
 
 A **Secret** rather than a ConfigMap (unlike the crossplane/arc copies) because
 the consumer mounts it as a `secret:` volume — a ConfigMap volume source would

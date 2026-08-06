@@ -62,8 +62,9 @@ lab-feature context this builds on (`hosted` flag, `labAppUrl()`,
 > rounds of adversarial review did not catch that the ONE operator step the
 > whole pull path depended on was fabricated: `gh api -X PATCH
 > "/orgs/UA-MIS/packages/container/<name>" -f visibility=public`. GitHub's
-> organization-package REST resource has no `PATCH` verb and no `visibility`
-> field — only `GET`, `DELETE`, and `POST .../restore`. Because student CI
+> organization-package REST resource has no `PATCH` verb and no WRITABLE
+> `visibility` field — only `GET`, `DELETE`, and `POST .../restore` (GET
+> returns a read-only `visibility` enum: observable, not settable). Because student CI
 > pushes from PRIVATE repos, every package is created private and #426 had no
 > working way to change that, so with no `imagePullSecrets` in the chart every
 > lab pod would have sat in `ImagePullBackOff` forever. The feature could not
@@ -647,7 +648,10 @@ gh api -X PATCH "/orgs/UA-MIS/packages/container/<name>" -f visibility=public
 **That endpoint does not exist.** GitHub's REST API for organization packages
 exposes only `GET /orgs/{org}/packages/container/{name}`, `DELETE` on the same
 path, and `POST .../restore`. There is no `PATCH` verb on the resource and no
-`visibility` field anywhere in its schema — package visibility is a per-package
+**writable** `visibility` field — the GET response *does* carry a read-only
+`visibility` (enum `private`/`public`), so you can OBSERVE a package's
+visibility over REST; there is simply no supported way to CHANGE it there.
+Package visibility is a per-package
 setting changeable only through the web UI, with no scripted equivalent and no
 bulk form. The command above was fabricated, not verified; it would have failed
 with a 404 the first time an operator ran it, and the "bulk script covering the
@@ -738,6 +742,17 @@ exists yet, so once ESO materializes it the very next retry succeeds with no
 human action and no pod restart required. The observable symptom during that
 window is a pod in `ImagePullBackOff` — the same symptom, and the same recovery,
 as a student who has not pushed yet.
+
+**What "self-healing" actually costs, concretely** — so this is a bounded claim
+rather than a reassuring adjective. The kubelet's image-pull backoff starts at
+~10s and doubles to a **cap of ~5 minutes**, where it stays. So the worst case
+is not unbounded: once `ghcr-pull` exists, a stuck pod recovers **within about
+five minutes**, with no human action. Both Applications are also driven by
+ArgoCD's own ~3-minute git polling interval, so in practice the two land within
+one or two reconcile cycles of each other anyway. The exposure window is
+minutes, once, at lab-creation time — not a persistent failure mode, and not
+something that degrades as more students join (the Secret is per-namespace and
+already present by the time student #2 exists).
 
 ### `ignoreDifferences` — required, not cosmetic
 
@@ -1227,14 +1242,22 @@ are classifier-gated for agents; read-only verification only
 4. **GHCR — stage the pull credential in Vault.** (This REPLACES #426's
    "make each student's package Public" step, which has been DELETED: the
    `gh api -X PATCH ... -f visibility=public` command it told you to run does
-   not exist — there is no PATCH verb and no `visibility` field on GitHub's
+   not exist — there is no PATCH verb and no WRITABLE `visibility` field on GitHub's
    organization-package resource. See "Pull: private GHCR packages + an image
    pull secret". **Packages stay private; nothing per-student is ever
    flipped, and there is no bulk script to run as students are onboarded.**)
 
    ONE-TIME, not per student. Mint a **classic** PAT (GHCR accepts nothing
    else — not fine-grained PATs, not App tokens) with `read:packages` as its
-   ONLY scope, on an account with visibility of `UA-MIS`'s packages, then:
+   ONLY scope, on an account with visibility of `UA-MIS`'s packages.
+
+   ⚠ **Mint it on a dedicated MACHINE ACCOUNT whose only org membership is
+   `UA-MIS`, not on a human administrator account.** A classic PAT's
+   `read:packages` is not org-scoped — it grants read of every package its
+   owning account can see, across every org that account belongs to. The
+   credential staged today uses `ccsmith33`, a human admin, which makes the
+   blast radius of a leak far wider than the lab images this is for. See the
+   tradeoff bullet under "Judgment calls" for the full framing.
    ```sh
    kubectl -n vault exec -i vault-0 -- env VAULT_CACERT=/vault/userconfig/vault-server-tls/ca.crt sh -c \
      'vault kv put secret/platform/labs-ghcr-pull GHCR_USERNAME="<user>" GHCR_TOKEN="<classic-pat>"'
@@ -1312,14 +1335,31 @@ are classifier-gated for agents; read-only verification only
   with `visibility=public`), so "public packages" was not actually available
   at any price. Packages are now private and pulled with a credential — see
   "Pull: private GHCR packages + an image pull secret". The genuinely
-  judgment-shaped part that remains: the pull identity is ONE org-level
-  classic PAT shared by every lab, rather than a per-lab or per-student
-  credential. Chosen because a lab image is not sensitive relative to the app
-  it produces (which is already world-reachable with no SSO gate), and
-  because per-student pull identities would reintroduce exactly the
-  ever-growing manual grant list #426's M-2 correctly objected to. The cost is
-  a single credential whose compromise would allow reading every lab image in
-  the org; it is `read:packages`-only and rotatable in one Vault write.
+  judgment-shaped part that remains: the pull identity is ONE classic PAT
+  shared by every lab, rather than a per-lab or per-student credential. Chosen
+  because a lab image is not sensitive relative to the app it produces (which
+  is already world-reachable with no SSO gate), and because per-student pull
+  identities would reintroduce exactly the ever-growing manual grant list
+  #426's M-2 correctly objected to.
+
+  **State the blast radius accurately: `read:packages` on a classic PAT is NOT
+  org-scoped.** A classic PAT is not scoped to an organization at all — it
+  grants read of **every package its OWNING ACCOUNT can see, across every org
+  that account belongs to**, plus that account's own personal packages. So the
+  cost of compromise is not "every lab image in UA-MIS" (the narrower claim an
+  earlier draft of this section made); it is every container package visible to
+  whoever owns the token. The credential currently staged uses
+  `GHCR_USERNAME=ccsmith33` — a **human administrator account**, which is the
+  widest possible version of that blast radius.
+
+  **Recommendation: mint this on a dedicated machine account whose only org
+  membership is `UA-MIS`**, granted read on nothing beyond what lab pulls
+  require, and use that account's classic PAT here instead of an
+  administrator's. That bounds compromise to exactly the images this platform
+  already serves publicly. The token remains `read:packages`-only (it can never
+  push, delete, or reach any non-package resource) and is rotatable in a single
+  Vault write with no git change — but least-privilege on the ACCOUNT is the
+  part that actually bounds the damage, and it is not achieved today.
 - **Vault CA into ns `slides` as a committed manifest, not an ExternalSecret**
   — see `platform-services/slides-vault-ca/secret.yaml`'s header for the full
   reasoning and the two rejected ESO alternatives. Short form: a CA
