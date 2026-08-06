@@ -8,7 +8,7 @@ no promotion model. See `RUNBOOK-DEPLOY.md` in `UA-MIS/slidedeck` for the full
 lab-feature context this builds on (`hosted` flag, `labAppUrl()`,
 `labRepoName()`, the existing per-student lab-mariadb + Adminer console).
 
-> **This README has been revised five times after adversarial review of PR
+> **This README has been revised six times after adversarial review of PR
 > #426.** Round 1 found case-sensitivity in the merge generator, a missing
 > NetworkPolicy rule, a Cloudflare body-size cap on Harbor pushes, an
 > identity-spoofing gap, and unvalidated/unquoted template interpolation
@@ -28,17 +28,31 @@ lab-feature context this builds on (`hosted` flag, `labAppUrl()`,
 > delete a whole lab's Applications on the next sync) plus documentation
 > drift (this README had gone stale against its own code twice: once
 > describing `repo` as decorative after it had become load-bearing, once
-> never mentioning the traversal fix at all). **Round 5 — the final round
-> before merge — found two remaining SILENT failure modes one layer down
-> from round 4's theme ("one bad row must not stop the rest"): a malformed
-> `students.yaml`/tag file could abort the ENTIRE sync run under `set -eu`
-> (now tolerated, self-healing), and a row whose OWN `labSlug` field
-> disagreed with its directory produced no loud failure anywhere (now
-> rejected with a WARN)** — plus the same class of PR-body/README staleness
-> as round 4. Every section reflects the FIXED design as of round 5; where
-> something changed materially, it says so inline with the finding ID.
-> Finding IDs (`B-`/`C-`/`H-`/`M-`/`L-` + a number) are **not globally
-> unique across rounds** — each review pass numbered its own findings from
+> never mentioning the traversal fix at all). Round 5 found two remaining
+> SILENT failure modes one layer down from round 4's theme ("one bad row
+> must not stop the rest"): a malformed `students.yaml`/tag file could
+> abort the ENTIRE sync run under `set -eu` (now tolerated, self-healing),
+> and a row whose OWN `labSlug` field disagreed with its directory produced
+> no loud failure anywhere (now rejected with a WARN) — plus the same class
+> of PR-body/README staleness as round 4. **Round 6 found the round-5
+> contract table still described `labSlug` matching against `lab.yaml` when
+> the round-5 code actually compares against the DIRECTORY NAME** (a lab
+> whose `lab.yaml` and every row agreed with EACH OTHER but not with their
+> own directory would have satisfied the documented contract while every
+> row silently failed to sync — fixed in the contract table itself, not
+> just the changelog), **a genuine bug in the round-5 fix where the
+> "malformed students.yaml" WARN could never actually fire** (the
+> `|| echo 0` fallback converted a `yq` failure into a clean value BEFORE
+> the format check ever ran — caught by tracing the script with `bash -x`,
+> fixed by checking `yq`'s own exit status directly), plus doc corrections
+> (an incorrect attribution of an octal-preservation behavior to `-r`, and
+> two pre-existing inaccuracies: the "every field is required" sentence
+> overstated `tag`'s and `withDatabase`'s actual by-design non-required
+> behavior, and the 63-char cap note was attached to the wrong table row).
+> Every section reflects the FIXED design as of round 6; where something
+> changed materially, it says so inline with the finding ID. Finding IDs
+> (`B-`/`C-`/`H-`/`M-`/`L-`/`R5-` + a number) are **not globally unique
+> across rounds** — each review pass numbered its own findings from
 > scratch, so e.g. "M-1" means a different thing in several different
 > sections of this document. Kept as originally numbered (not renumbered) so
 > every ID stays traceable back to the actual review comment it came from;
@@ -172,8 +186,8 @@ output PER ELEMENT — this is what makes ONE Application per student happen.
 | field | required | meaning |
 | --- | --- | --- |
 | `username` | yes, **already lowercase** | GitHub username, as scaffolded, LOWERCASED by slides before writing (see "Contract: lowercase everywhere" — this is not optional). |
-| `repo` | yes | `org/name` of the student's repo, exactly as `github.repository` reads inside the student's CI run (== `labRepoName()` == `<labSlug>-<username>`, by convention — but no longer relied on: see below). **LOAD-BEARING (adversarial review round-3 M-1)**: the chart derives the GHCR pull ref FROM THIS FIELD (`ghcr.io/<lowercased repo>:<tag>`), not by reconstructing `labSlug`+`username`. Must match `^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$` or that student's Application fails its Helm render (a loud, per-Application failure). If it's well-formed but doesn't match the repo the student's CI actually pushed from, there is no render-time signal at all — the pod just sits `ImagePullBackOff` forever, silently pointed at a ref nothing ever pushed. **If a student's repo is ever renamed, slides must update this field** — nothing else will catch a stale value. **MUST also be `≤ 63` total chars combined with username — see "Contract: the 63-char cap must be enforced by slides BEFORE repo creation" (M-3).** |
-| `labSlug` | yes, **already lowercase** | Must exactly equal the `lab.yaml` in the same directory. Present on every row (not inferred from the file path) so the merge generator's `mergeKeys` always has it, regardless of how a given ArgoCD version injects file-path metadata. |
+| `repo` | yes | `org/name` of the student's repo, exactly as `github.repository` reads inside the student's CI run (== `labRepoName()` == `<labSlug>-<username>`, by convention — but no longer relied on: see below). **LOAD-BEARING (adversarial review round-3 M-1)**: the chart derives the GHCR pull ref FROM THIS FIELD (`ghcr.io/<lowercased repo>:<tag>`), not by reconstructing `labSlug`+`username`. Must match `^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$` or that student's Application fails its Helm render (a loud, per-Application failure). If it's well-formed but doesn't match the repo the student's CI actually pushed from, there is no render-time signal at all — the pod just sits `ImagePullBackOff` forever, silently pointed at a ref nothing ever pushed. **If a student's repo is ever renamed, slides must update this field** — nothing else will catch a stale value. |
+| `labSlug` | yes, **already lowercase** | **Must exactly equal the DIRECTORY NAME** (`labs/<labSlug>/...` — not merely "the `lab.yaml` in the same directory": `.github/workflows/lab-tag-sync.yaml` derives its own comparison value from the directory itself, `basename $(dirname students.yaml)`, and never reads `lab.yaml` at all — see "Security hardening" round-5 L-2). A row whose `labSlug` disagrees with its directory is skipped with a `WARN`, never written. Since `lab.yaml`'s own `labSlug` must ALSO equal its directory name (same convention), this transitively means every row's `labSlug` equals `lab.yaml`'s too — but the DIRECTORY is the actual thing enforced, not `lab.yaml` directly. Present on every row (not inferred from the file path) so the merge generator's `mergeKeys` always has it, regardless of how a given ArgoCD version injects file-path metadata. **`labSlug`+`username` combined MUST be `≤ 63` total chars — see "Contract: the 63-char cap must be enforced by slides BEFORE repo creation" (M-3).** |
 | `withDatabase` | yes | **Duplicated** from `lab.yaml` — see "Contract: withDatabase" for why this can't just be read from `lab.yaml` by this ApplicationSet, and why the duplication is low-risk. |
 
 **`labs/<lab-slug>/tags/<username>.yaml`** — single OBJECT. Written ONLY by
@@ -237,15 +251,18 @@ username: no      no  (the literal text "no")                    false (bool)
 username: 0755    0755 (the literal text "0755")                 493 (int, octal)
 ```
 
-(Precise nit on the second row: `yq`'s own RESOLVED type for `0755` is
-actually an int too — `yq -o=json` on the same input prints `755`, not a
-string. It is specifically the `-r`/raw-output mode this workflow's
-`yq -r ".[$i].username" ...` calls use that stringifies whatever it resolved
-to, which is why the text `"0755"` survives that path even though `yq`'s
-internal type for it, like `sigs.k8s.io/yaml`'s, is numeric. The
+(Precise nit on the second row, corrected round-6 — the earlier version of
+this note incorrectly credited `-r` for preserving `0755`: on the pinned
+`yq v4.44.3`, `yq '.b'` and `yq -r '.b'` both emit the literal text `0755`
+for that input — `-r` is a no-op here in the workflow's default YAML output
+mode. `yq`'s own RESOLVED type for `0755` is an int (755) either way, same
+as `sigs.k8s.io/yaml`'s; **yq's default YAML output round-trips the original
+scalar TOKEN**, so the literal text `0755` survives regardless of `-r` —
+only `-o=json` re-encodes it to `755`, discarding the original token. The
 `username: no` row is the one where the two parsers disagree at the TYPE
-level, not just the output-formatting level — that's the actually dangerous
-case.)
+level (string vs. bool), not just the output-formatting level — that's the
+actually dangerous case; the `0755` row is here to show the octal-looking
+case exists too, not because it behaves identically.)
 
 If slides writes an UNQUOTED `username: no` in `students.yaml`, ArgoCD's
 generator hands the ApplicationSet template the boolean `false`, which
@@ -274,9 +291,23 @@ match.
 
 ## Contract: required + validated fields (adversarial review C-2)
 
-Every field in every fleet-repo row is REQUIRED — a missing field is not
-tolerated silently. Two layers enforce this without letting one bad row take
-down the whole fleet:
+**Corrected (round-6 review — this section previously overstated the actual
+behavior, verified by render):** `username`, `labSlug`, and `repo` are
+REQUIRED and format-validated exactly as described below — a missing or
+malformed value fails that ONE Application's render loudly. **`tag` is the
+one deliberate exception**: an absent/empty `tag` is BY DESIGN, not an error
+— it renders `:unreleased` (see `_helpers.tpl`'s `lab-app.imageTag`,
+`"Image tag propagation"` above), which is exactly the expected state for a
+student who hasn't pushed yet. **`withDatabase` has NO fail-guard at all** —
+absent, empty, or garbage (e.g. `withDatabase: "yesplease"`) all render
+successfully with zero `ExternalSecret`, zero `envFrom`, and no error of any
+kind, because `_helpers.tpl`'s `eq (toString .Values.withDatabase) "true"`
+check treats anything other than the exact string `"true"` as `false` (see
+"Contract: withDatabase" above) — this is a silent-but-safe default (a
+missing DB flag never accidentally grants DB access), not a validated field.
+The two layers below apply to `username`/`labSlug`/`repo`, NOT to `tag`/
+`withDatabase`, which have their own, different handling documented in their
+own sections:
 
 1. **`applicationsets/labs-*-appset.yaml`** never reference a field raw
    (`{{.username}}`) — every reference is `hasKey`-guarded
@@ -894,16 +925,16 @@ comments):
 different L-1/L-2 than either set above — same collision, kept as originally
 numbered):
 - **L-1** — `yq` failures on a malformed `students.yaml` or a malformed
-  `tags/*.yaml` no longer abort the whole run under `set -eu`. Both reads are
-  now `... 2>/dev/null || <safe default>`: an unparseable `students.yaml`
-  is treated as zero rows for that file (skip it, other labs still sync); an
-  unparseable existing tag file is treated as "no current tag" (the row
-  falls through to rewriting it with a fresh, valid one — self-healing on
-  the very next poll, no different from a brand-new student's first
-  successful poll). Verified by executing against a mock two-lab fleet with
-  a deliberately malformed `tags/adoe.yaml`: `lab1`'s other student AND all
-  of `lab2` still synced in the same run, and `adoe.yaml` came out
-  self-healed to a valid mapping.
+  `tags/*.yaml` no longer abort the whole run under `set -eu`. An unparseable
+  `students.yaml` is treated as zero rows for that file (skip it, other labs
+  still sync — see round-6 R5-2 immediately below for the WARN this
+  originally lacked); an unparseable existing tag file is treated as "no
+  current tag" (the row falls through to rewriting it with a fresh, valid
+  one — self-healing on the very next poll, no different from a brand-new
+  student's first successful poll). Verified by executing against a mock
+  two-lab fleet with a deliberately malformed `tags/adoe.yaml`: `lab1`'s
+  other student AND all of `lab2` still synced in the same run, and
+  `adoe.yaml` came out self-healed to a valid mapping.
 - **L-2** — the workflow derives `LAB_SLUG` from the DIRECTORY
   (`labs/<slug>/students.yaml`), never from a row's own `labSlug` field, so a
   row whose `labSlug` disagreed with its directory (e.g. `labSlug: "lab-1"`
@@ -918,6 +949,48 @@ numbered):
   the directory. Verified: a mismatched row is rejected and no tag file is
   ever written for it, while the well-formed row in the same file still
   syncs normally.
+
+**Fixed round-6** (a mix of a real bug in round 5's own fix, a genuine
+contract-table/code disagreement, and doc corrections):
+- **R5-1** — the "Repo-list contract" table's `labSlug` row still said "must
+  exactly equal the `lab.yaml` in the same directory" after round 5's L-2 fix
+  had made the ACTUAL comparison the directory name, never `lab.yaml` itself
+  (`lab-tag-sync.yaml` doesn't read `lab.yaml` at all). A lab whose `lab.yaml`
+  and every `students.yaml` row all agreed with EACH OTHER but not with their
+  own directory name would have fully satisfied the OLD documented contract
+  while every single row silently failed the L-2 guard. Fixed the contract
+  table itself (see "Repo-list contract" above) — this is the ONE table
+  slides implements against, so the round-5 changelog entry above documenting
+  the real behavior wasn't sufficient on its own.
+- **R5-2** — the round-5 L-1 fix's `COUNT="$(yq ... 2>/dev/null || echo 0)"`
+  had a real bug: the `|| echo 0` fallback converted a `yq` FAILURE into a
+  clean numeric value BEFORE any format check ever ran, so a case guard
+  placed after it (the original round-5 shape) could never actually detect
+  "yq failed" — only a value that was numeric-but-somehow-still-wrong could
+  trigger it, which a bare failure never produces. Caught by tracing the
+  script live with `bash -x`: `COUNT=0` was assigned straight from the
+  fallback branch with the WARN unreachable. A whole lab's roster could drop
+  out of every sync with zero signal beyond the absence of `==>` lines — the
+  one silent exception left in the round dedicated to eliminating exactly
+  that. Fixed by checking `yq`'s own exit status directly
+  (`if COUNT="$(yq ... 2>/dev/null)"; then ... else echo WARN; fi`), which
+  correctly separates "yq failed" (now WARNs) from "yq succeeded with a
+  legitimately empty roster, `[]` -> `0`" (silently fine, not an error).
+  Verified both directions by execution: a genuinely unparseable
+  `students.yaml` now WARNs and is skipped; an empty-list `students.yaml`
+  produces no WARN.
+- Doc-only: corrected an incorrect attribution (an earlier note credited
+  `-r`/raw-output for preserving the literal text `0755` — false on the
+  pinned `yq v4.44.3`, where `-r` is a no-op in the workflow's default YAML
+  output mode; it's `yq`'s default YAML output round-tripping the original
+  scalar token that does it, `-o=json` is the only mode that re-encodes it).
+  Corrected the "required + validated fields" section, which overstated
+  actual behavior: `tag` absent/empty is BY DESIGN (renders `:unreleased`,
+  not an error), and `withDatabase` has NO fail-guard at all (absent or
+  garbage both render successfully with the DB path simply not included —
+  silent-but-safe, not validated). Moved a misplaced 63-char-cap note off the
+  `repo` table row (the cap applies to `labSlug`+`username`, not `repo`) onto
+  the `labSlug` row, where it's now stated once, correctly.
 
 ## Local verification
 

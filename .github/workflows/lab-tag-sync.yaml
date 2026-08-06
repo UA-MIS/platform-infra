@@ -112,8 +112,36 @@ jobs:
             # this workflow already applies to individual rows, one layer
             # up). `|| echo 0` treats an unparseable file as zero rows
             # (skip it) rather than aborting.
-            COUNT="$(yq '. | length' "$students_file" 2>/dev/null || echo 0)"
-            case "$COUNT" in ''|*[!0-9]*) COUNT=0 ;; esac
+            #
+            # ADVERSARIAL REVIEW round-6 R5-2: the tolerance above originally
+            # had NO output on either failure path (a `yq` error was
+            # redirected to /dev/null and immediately folded into a clean
+            # "0" by `|| echo 0` BEFORE any format check could ever see the
+            # failure — so a case guard placed AFTER that fallback, like the
+            # first version of this fix, could never actually fire for the
+            # exact "yq errored" scenario it was written for; verified live
+            # via `bash -x`, which showed `COUNT=0` assigned straight from
+            # the `|| echo 0` branch with no WARN reachable). A whole lab's
+            # roster could drop out of every sync with zero signal anywhere
+            # except the ABSENCE of `==>` lines for its students, on an
+            # otherwise-green job — the one silent exception in the round
+            # themed on eliminating silent failures. Fixed by checking `yq`'s
+            # OWN exit status directly (not folding it into the value first),
+            # so the WARN fires on genuine failure while a legitimately EMPTY
+            # roster (`students.yaml` containing just `[]`, which `yq`
+            # resolves cleanly to `0`) still passes through silently — an
+            # empty roster is a normal state, not an error.
+            if COUNT="$(yq '. | length' "$students_file" 2>/dev/null)"; then
+              case "$COUNT" in
+                ''|*[!0-9]*)
+                  echo "WARN: ${students_file} resolved to a non-numeric row count ('${COUNT}'), skipping whole file"
+                  COUNT=0
+                  ;;
+              esac
+            else
+              echo "WARN: ${students_file} is not parseable as a list of rows, skipping whole file"
+              COUNT=0
+            fi
             i=0
             while [ "$i" -lt "$COUNT" ]; do
               ROW="$i"
