@@ -1,0 +1,91 @@
+# ============================================================================
+# lab-build.yaml — the CENTRAL, reusable lab-hosting CI pipeline. `on:
+# workflow_call`. Deliberately THIN compared to tenant-build.yaml (D-032): no
+# component matrix, no scan/checks gates, no staged promotion (single env, no
+# overlay ladder — see platform-services/lab-hosting/README.md "Image tag
+# propagation" for why). Every hosted-lab student repo ships a ~5-line CALLER:
+#
+#   jobs:
+#     build:
+#       permissions:
+#         contents: read
+#         packages: write   # GHCR push (adversarial review B-2) — required, see below
+#       uses: UA-MIS/platform-infra/.github/workflows/lab-build.yaml@main
+#
+# NO `with:` inputs, NO `secrets:` block (adversarial review H-2 — CHANGED
+# from earlier drafts, which had this workflow write
+# `labs/<lab_slug>/tags/<username>.yaml` itself, using an org-shared
+# `LAB_FLEET_TOKEN` present in every student repo's job environment. That was
+# a real privilege-escalation bug, not just a race-condition risk: a student
+# has push access to their OWN repo (`scaffold.js:81-84`), so they could
+# author ANY workflow reading that secret and use the raw token directly —
+# the B-3 identity check gated what THIS workflow's own git commands did with
+# the token, but did nothing to stop a student from writing their own script
+# that used the same token to write ANY OTHER student's tag file, corrupt
+# `students.yaml`, or `git rm` the whole lab (which — `prune: true` on both
+# labs-*-appset.yaml ApplicationSets — would DESTROY that lab's Namespace and
+# every student's app). See README "Security hardening: H-2" for the full
+# writeup and the decision to fix this rather than merely flag it.
+#
+# FIX: student CI now does ONLY the one thing that is safe to let it do —
+# build + push ITS OWN repo's image to ITS OWN GHCR package, authenticated
+# with the workflow run's own automatic, repo-scoped `GITHUB_TOKEN`. There is
+# no shared secret in a student repo's environment AT ALL anymore, and no
+# fleet-repo write happens from student CI at all — see
+# `.github/workflows/lab-tag-sync.yaml` for what replaced it (a SCHEDULED
+# workflow that lives only in platform-infra, which students cannot modify).
+#
+# GITHUB-HOSTED runners (not the tenant ARC/Kaniko scale set) — student repos are
+# NOT part of the tenant CI system, and 15 students is well inside GitHub's free
+# Actions minutes for a private-org repo.
+on:
+  workflow_call: {}
+
+# packages: write is what GHCR push needs; a reusable workflow can only
+# DOWNGRADE the caller's grant (same rule tenant-build.yaml documents), so the
+# CALLER's job must also declare `permissions: { contents: read, packages:
+# write }` or the build-push step silently loses the scope it asks for.
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: lab-build-${{ github.repository }}
+  cancel-in-progress: true
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout student repo
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      # ADVERSARIAL REVIEW L-1/L-2: `github.repository`/`github.sha` are
+      # GitHub-controlled (a student cannot forge them), but are still routed
+      # through `env:` rather than interpolated directly into the `run:`
+      # script body, for consistency with the rest of this repo's workflows
+      # and because it costs nothing.
+      - name: Resolve GHCR image ref (lowercased repo + 12-char short sha)
+        id: resolve
+        env:
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          REPO_LC="$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')"
+          TAG="$(printf '%s' "$SHA" | cut -c1-12)"
+          echo "image=ghcr.io/${REPO_LC}:${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build + push (never :latest — see chart/templates/_helpers.tpl `lab-app.imageTag`)
+        uses: docker/build-push-action@0adf9959216b96bec444f325f1e493d4aa344497 # v6.14.0
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.resolve.outputs.image }}

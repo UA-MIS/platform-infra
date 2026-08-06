@@ -216,4 +216,5 @@ These are **live-verified** weak spots a successor should close:
 | [vm-path-harbor-provisioner.md](vm-path-harbor-provisioner.md) | KubeVirt VM scaffolder wiring |
 | [vm-ssh-cloudflare-access.md](vm-ssh-cloudflare-access.md) | VM tenant SSH via Cloudflare Tunnel — per-tenant dashboard checklist + connect commands |
 | [multi-cluster.md](multi-cluster.md) | Multi-cluster scaffolding (ApplicationSet cluster generator, inert until a 2nd cluster is registered) |
+| [../../platform-services/lab-hosting/README.md](../../platform-services/lab-hosting/README.md) | Lab-hosting layer (slidedeck's `hosted` labs) — public per-student apps at `<lab-slug>-<username>.uamishub.com`, separate/lighter than the tenant model |
 | [gotchas-and-lessons.md](gotchas-and-lessons.md) | Process-layer war stories |

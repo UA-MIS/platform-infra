@@ -1,0 +1,46 @@
+{{- if .Values.studentApp }}
+# Public ingress, NO oauth2-proxy middleware and no other auth gate — the
+# professor grades by visiting the URL, and students have no org/Dex identity to
+# gate on anyway (mirrors slidedeck's own "no oauth2-proxy, app does its own
+# auth" note, except here there IS no app-side auth either — deliberately public,
+# same posture as demos.uamishub.com/course-demos).
+#
+# No `ingressClassName` and no `router.priority` annotation: mirrors
+# slidedeck/deploy/ingress.yaml (Traefik is the cluster default IngressClass),
+# and unlike course-demos there is no path-based multi-priority need here — every
+# lab app owns its own distinct host, so there's never ambiguity between two
+# Ingresses claiming the same host.
+#
+# Reachability (ADVERSARIAL REVIEW M-7 — corrected wording): the operator added
+# ONE Cloudflare Tunnel Public Hostname route for `*.uamishub.com` (HTTP, empty
+# path, origin `traefik.kube-system.svc.cluster.local:80`) — that IS a tunnel
+# *routing config* change (the remotely/dashboard-managed Public Hostname list),
+# even though it does NOT add a new *ingress rule* inside cloudflared's own
+# process config, which stays the single catch-all (`ingressRule=0`, verified
+# live on both replicas) it already was — a wildcard Public Hostname still
+# resolves to that one rule. Once that ONE route exists, every current and
+# future lab host under `*.uamishub.com` needs ZERO further Cloudflare-side
+# changes; Traefik routes purely on THIS Ingress's `host:`.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "lab-app.appName" . | quote }}
+  namespace: {{ include "lab-app.namespace" . | quote }}
+  labels:
+    {{- include "lab-app.labels" . | nindent 4 }}
+    app.kubernetes.io/name: {{ include "lab-app.appName" . | quote }}
+spec:
+  rules:
+    - host: {{ include "lab-app.host" . | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "lab-app.appName" . | quote }}
+                port:
+                  number: 80
+  tls:
+    - hosts: [{{ include "lab-app.host" . | quote }}]
+{{- end }}

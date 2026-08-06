@@ -1,0 +1,107 @@
+# Defaults for the lab-app chart. Every real value below is a PLACEHOLDER — every
+# real render comes from an ApplicationSet's `source.helm.valuesObject` (see
+# applicationsets/labs-namespace-appset.yaml and labs-students-appset.yaml). This
+# file exists so `helm template`/`helm lint` can render SOMETHING for local
+# verification (see platform-services/lab-hosting/README.md "Local verification"),
+# never so the chart is meant to be installed with these defaults. Placeholders are
+# deliberately VALID (pass the `_helpers.tpl` fail-guards) so a bare `helm lint`
+# still renders — see README "Contract: lowercase everywhere" for why the
+# fail-guards exist and reject anything that ISN'T already lowercase+DNS-safe.
+
+# --- mode switch --------------------------------------------------------------
+# Exactly one must be true per Application. Neither true = chart renders nothing
+# (both template groups are gated), which is a safe default, not silent breakage.
+namespaceBootstrap: false
+studentApp: false
+
+# --- shared -----------------------------------------------------------------
+# The lab slug (labs.<slug> in slidedeck's `labs` table). Namespace = lab-<labSlug>.
+# CONTRACT: already lowercase + DNS-safe (^[a-z0-9]([-a-z0-9]*[a-z0-9])?$) — the
+# chart FAILS the render (not silently corrects) if this doesn't hold; see
+# _helpers.tpl `lab-app.labSlug` and README "Contract: lowercase everywhere".
+labSlug: unset-lab-slug
+
+# withDatabase: lab-level (NOT per-student), whether this lab provisions a
+# per-student database — INDEPENDENT of `hosted` in slidedeck (server/db.js:
+# labs.hosted / labs.with_database are separate columns; scaffold.js: "Stack
+# and database are ORTHOGONAL"). ADVERSARIAL REVIEW H-1: the first draft of
+# this chart rendered the ExternalSecret + envFrom unconditionally, so a
+# `hosted: true, with_database: false` lab (slides never writes a Vault path
+# for it) sat every pod in CreateContainerConfigError forever. Gates
+# externalsecret.yaml, deployment.yaml's `envFrom`, and the `slides:3306`
+# egress NetworkPolicy rule — see README "Contract: withDatabase (H-1)" for
+# the full contract, including WHY this is duplicated onto every
+# students.yaml row (chart/README rationale: the labs-students
+# ApplicationSet's merge generator has no path back to lab.yaml's data with
+# the current [username, labSlug] mergeKeys).
+withDatabase: false
+
+# --- namespaceBootstrap mode ---------------------------------------------------
+# ADVERSARIAL REVIEW M-1: 15 students x the Deployment's hard-coded 500m/512Mi
+# container limits = 7.5 CPU / 7.5Gi. The previous 6/6Gi ceiling would silently
+# quota-exceeded-block student #13+ (buried in ReplicaSet events, invisible on
+# the Application) — raised with headroom above the 15-student worst case.
+#
+# FULL QUOTA (spelled out for a README-only reader, adversarial review LOW):
+# requests.cpu=5, requests.memory=5Gi, limits.cpu=10, limits.memory=10Gi,
+# pods=30, services=20, persistentvolumeclaims=0 (HARD — lab apps are
+# stateless by design, see namespace-bootstrap.yaml's own comment; this is a
+# real constraint, not an oversight, if a future lab genuinely needs a PVC).
+quota:
+  requestsCpu: "5"
+  requestsMemory: 5Gi
+  limitsCpu: "10"
+  limitsMemory: 10Gi
+  pods: "30"
+  services: "20"
+limitRange:
+  defaultCpu: 200m
+  defaultMemory: 256Mi
+  defaultRequestCpu: 50m
+  defaultRequestMemory: 64Mi
+  maxCpu: 500m
+  maxMemory: 512Mi
+
+# --- studentApp mode -----------------------------------------------------------
+# username: the GitHub username. CONTRACT: already lowercase + DNS-safe (same
+#   pattern as labSlug) — see README "Contract: lowercase everywhere" for WHY
+#   this is a hard requirement (not a `| lower` normalization like the first
+#   draft of this chart did): the labs-students ApplicationSet's merge
+#   generator joins on an EXACT STRING match against lab-build.yaml's
+#   already-lowercased tag file, so silently lowercasing only on the Helm side
+#   would NOT fix a case-mismatched merge — it would hide the symptom while
+#   the underlying join still silently never happens.
+username: unset-username
+# repo: org/name of the student's repo. REQUIRED + format-validated, and
+#   LOAD-BEARING for the GHCR image ref (adversarial review M-1, round 3 —
+#   CHANGED from rounds 1-2, which derived the ref by reconstructing
+#   `ua-mis/<labSlug>-<username>` and only stayed correct because a since-
+#   removed identity check in lab-build.yaml enforced that convention as a
+#   side effect; see _helpers.tpl `lab-app.image`/`lab-app.repo` for the full
+#   reasoning). `appName` (labSlug-username) is still authoritative for k8s
+#   object names / the Ingress host — only the pull ref now comes from here.
+repo: UA-MIS/unset-repo
+# tag: the git commit SHA of the student's default-branch HEAD at last poll,
+#   written into labs/<labSlug>/tags/<username>.yaml by the SCHEDULED
+#   `.github/workflows/lab-tag-sync.yaml` (ADVERSARIAL REVIEW H-2 — NOT by
+#   student CI itself, see README "Security hardening: H-2" for why the
+#   original per-student-CI-writes-its-own-tag design was a real
+#   privilege-escalation bug). ABSENT until the first poll after the
+#   student's first push — the ApplicationSet template handles that with
+#   `hasKey`, not a `latest` default (Kyverno `disallow-latest-tag` is
+#   Enforce cluster-wide and lab-* isn't excluded — see README). VALIDATED
+#   (adversarial review B-4): must match ^[a-f0-9]{7,64}$ or be empty — see
+#   _helpers.tpl `lab-app.imageTag`.
+tag: ""
+
+# Registry: GHCR, not Harbor (adversarial review B-2 — see README "Registry:
+# GHCR, not Harbor" for why: Harbor sits behind the Cloudflare-proxied tunnel,
+# which caps request bodies at 100MB, and a GitHub-hosted runner has no path
+# around it the way ARC/Kaniko builders do via a Traefik ClusterIP hostAlias).
+# No `ghcrRepo` value here — DERIVED from `repo` (adversarial review M-1),
+# see _helpers.tpl `lab-app.image`. PACKAGES ARE PUBLIC (adversarial review H-3 — see README
+# "Registry: GHCR, not Harbor" / "H-3"): the app is already public via its
+# Ingress with no SSO gate, so there is no `imagePullSecrets` on the
+# Deployment and no pull-credential plumbing anywhere in this chart.
+appDomain: uamishub.com
+containerPort: 8080

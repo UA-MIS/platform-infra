@@ -133,6 +133,22 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: lab-adminer
+        # Hosted lab APP pods (lab-hosting layer, platform-services/lab-hosting/,
+        # PR #426) — every `lab-<slug>` namespace the labs chart creates carries
+        # `platform.capstone/component: lab` (chart/templates/_helpers.tpl
+        # `lab-app.labels`), so this namespaceSelector admits any pod in any of
+        # those namespaces, cluster-wide, on 3306 — no per-lab edit needed as
+        # labs come and go. A namespaceSelector-only peer matches on namespace
+        # label alone (no podSelector), so it is NOT scoped to `app: slidedeck`
+        # like the two peers above. REQUIRED alongside lab-hosting's own
+        # namespace-bootstrap EGRESS rule (chart/templates/
+        # namespace-bootstrap.yaml) — per this file's own header, a peer's
+        # egress allowance alone does not admit traffic once the receiver (this
+        # NetworkPolicy, which already declares `policyTypes: [Ingress, ...]`)
+        # is policy-covered; both sides are required.
+        - namespaceSelector:
+            matchLabels:
+              platform.capstone/component: lab
       ports:
         - protocol: TCP
           port: 3306

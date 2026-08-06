@@ -1,0 +1,135 @@
+{{- if .Values.studentApp }}
+# One Deployment per student, in the SHARED `lab-<labSlug>` namespace (created by
+# the sibling namespaceBootstrap Application — see labs-namespace-appset.yaml).
+#
+# CONTAINER PORT CONVENTION: every hosted lab app MUST listen on 0.0.0.0:8080 —
+# a platform-wide fixed convention (like slidedeck's own 8080), chosen so
+# students.yaml/tags never need a `port` field. `PORT=8080` is also injected
+# into the container env below (L-3) — most frameworks (Next.js `next start`
+# included) honor `$PORT`, which mostly dissolves the Next.js-stack-template
+# concern the README previously flagged as a judgment call.
+#
+# IMAGE: GHCR, not Harbor (adversarial review B-2 — see README "Registry:
+# GHCR, not Harbor"), PUBLIC packages (adversarial review H-3 — no
+# `imagePullSecrets` anywhere in this file; see README for why). IMAGE TAG:
+# see templates/_helpers.tpl `lab-app.imageTag` — never `:latest` (Kyverno
+# `disallow-latest-tag` is Enforce and lab-* is not excluded) and STRICTLY
+# VALIDATED (adversarial review B-4). A fresh student (no tag written yet)
+# renders `:unreleased` and sits ImagePullBackOff until
+# `.github/workflows/lab-tag-sync.yaml`'s next poll picks up their first
+# successful push.
+#
+# ⚠ runAsUser: 65532 (adversarial review M-5, KNOWN LIMITATION — see README
+# "Container security context vs. lab template images"): a lab template's OWN
+# Dockerfile `USER` directive can conflict with this. Verified concretely
+# against slidedeck's generated Next.js starter, whose Dockerfile sets
+# `USER node` (uid 1000) with `/app` owned by that uid — forcing uid 65532 at
+# the pod level overrides the image USER, so `next start` writing its
+# `.next/cache` directory hits EACCES (the directory is owned by uid 1000,
+# not 65532). The Spring Boot starter is unaffected (its image runs as root
+# by default, uid 65532 then owns nothing conflicting the JVM needs to
+# write). NOT fixed in this chart — a per-template `runAsUser` override would
+# require a `port`-style value threaded through the fleet contract for every
+# stack, which this PR deliberately avoids (see "Container port convention").
+# Documented prominently instead: the Next.js hosted-lab template's
+# Dockerfile MUST either `chown` its working directory to 65532 or drop a
+# writable `.next/cache` volume the image can use regardless of uid.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "lab-app.appName" . | quote }}
+  namespace: {{ include "lab-app.namespace" . | quote }}
+  labels:
+    {{- include "lab-app.labels" . | nindent 4 }}
+    platform.capstone/lab-username: {{ include "lab-app.username" . | quote }}
+    app.kubernetes.io/name: {{ include "lab-app.appName" . | quote }}
+  annotations:
+    # Traceability back to the source repo (informational only — nothing reads
+    # this back programmatically).
+    # `include "lab-app.repo"` (not raw `.Values.repo`), so a malformed repo
+    # field fails loudly here too, not just when `lab-app.image` happens to
+    # be rendered later in the same template execution (adversarial review
+    # M-1 — this field became load-bearing for the image ref this round).
+    platform.capstone/lab-repo: {{ include "lab-app.repo" . | quote }}
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "lab-app.appName" . | quote }}
+  template:
+    metadata:
+      labels:
+        {{- include "lab-app.labels" . | nindent 8 }}
+        app.kubernetes.io/name: {{ include "lab-app.appName" . | quote }}
+    spec:
+      # Dedicated SA, no projected API-server token (adversarial review M-3 —
+      # every other app template in this platform does this; the lab chart was
+      # the odd one out on exactly the LEAST-trusted workload here: arbitrary
+      # student-authored code, publicly reachable, no reason it should ever be
+      # able to talk to the k8s API even by default-SA accident).
+      serviceAccountName: {{ include "lab-app.appName" . | quote }}
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          image: {{ include "lab-app.image" . | quote }}
+          # SHA tags are minted once per commit and never reused — IfNotPresent
+          # is correct and avoids an unnecessary re-pull on every reconcile,
+          # unlike a floating tag (the Adminer/#419 class of bug this platform
+          # hard-learned to avoid — see platform-services/lab-db/mariadb.yaml).
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: {{ .Values.containerPort }}
+          env:
+            - name: PORT
+              value: {{ .Values.containerPort | quote }}
+          {{- if eq (toString .Values.withDatabase) "true" }}
+          envFrom:
+            - secretRef:
+                # Materialized by templates/externalsecret.yaml below (only
+                # rendered when withDatabase — adversarial review H-1). `optional`
+                # is deliberately NOT set — Deployment stays Pending (not silently
+                # running without a DB) if the ExternalSecret hasn't synced yet.
+                name: {{ printf "%s-db" (include "lab-app.appName" .) | quote }}
+          {{- end }}
+          # Generic TCP probes (not an HTTP path): the platform doesn't know
+          # whether a given lab template exposes a /healthz — a template MAY add
+          # its own HTTP probe by forking this chart's values later, but the
+          # cluster-wide default has to work for an unknown, arbitrary student
+          # app listening on 8080.
+          readinessProbe:
+            tcpSocket:
+              port: {{ .Values.containerPort }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: {{ .Values.containerPort }}
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+            # readOnlyRootFilesystem NOT set: arbitrary student app frameworks
+            # (Next.js dev server, Spring Boot, etc.) commonly need to write to
+            # their own working directory / tmp; an explicit non-decision, same
+            # as lab-mariadb.yaml's rationale for the same field.
+{{- end }}

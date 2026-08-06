@@ -1,0 +1,30 @@
+# lab-app — the SHARED rendering chart for the lab-hosting layer.
+#
+# ONE chart, TWO modes, selected by the caller's values (see values.yaml for the
+# full contract):
+#   - namespaceBootstrap: true  -> Namespace + ResourceQuota + LimitRange + baseline
+#     NetworkPolicies for one lab (`lab-<labSlug>`). Rendered ONCE per lab by
+#     applicationsets/labs-namespace-appset.yaml.
+#   - studentApp: true          -> Deployment + Service + Ingress + ExternalSecret
+#     for one student's hosted app. Rendered ONCE per (student, lab) by
+#     applicationsets/labs-students-appset.yaml.
+#
+# WHY one chart instead of two: both modes share the SAME `labSlug` shape and the
+# SAME namespace-naming convention (`lab-<labSlug>`) — keeping them in one chart
+# means that convention is defined exactly once (templates/_helpers.tpl), and the
+# split is a `.Values` gate, not a second place a naming bug could diverge.
+#
+# WHY Helm at all (this repo is kustomize-first everywhere else, see
+# platform-services/lab-hosting/README.md "Why Helm here and nowhere else"):
+# ArgoCD ApplicationSet generators (git files / merge) produce per-element PARAMETER
+# maps, not directory trees — the only native ArgoCD mechanism to turn a parameter
+# map into templated manifest FIELDS (an Ingress host, an image tag, a Vault path)
+# is `source.helm.valuesObject` on the generated Application. Kustomize has no
+# equivalent (its patches address paths, not interpolate arbitrary scalar values),
+# so this is the one place in the platform that needs a real chart.
+apiVersion: v2
+name: lab-app
+description: Lab-hosting rendering chart (namespace bootstrap + per-student app), UA-MIS capstone labs.
+type: application
+version: 0.1.0
+appVersion: "1.0"
