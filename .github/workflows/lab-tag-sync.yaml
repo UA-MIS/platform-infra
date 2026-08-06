@@ -105,18 +105,46 @@ jobs:
                 continue
                 ;;
             esac
-            COUNT="$(yq '. | length' "$students_file")"
+            # ADVERSARIAL REVIEW round-5 L-1: tolerate a malformed
+            # students.yaml (`yq` erroring under `set -eu` would otherwise
+            # kill the ENTIRE run — every other lab, not just this one file
+            # — the same "one bad row must not stop the other N" principle
+            # this workflow already applies to individual rows, one layer
+            # up). `|| echo 0` treats an unparseable file as zero rows
+            # (skip it) rather than aborting.
+            COUNT="$(yq '. | length' "$students_file" 2>/dev/null || echo 0)"
+            case "$COUNT" in ''|*[!0-9]*) COUNT=0 ;; esac
             i=0
             while [ "$i" -lt "$COUNT" ]; do
               ROW="$i"
               USERNAME="$(yq -r ".[$i].username" "$students_file")"
               REPO="$(yq -r ".[$i].repo" "$students_file")"
+              ROW_LAB_SLUG="$(yq -r ".[$i].labSlug" "$students_file")"
               i=$((i + 1))
               # L-3: report $ROW (the row just read), not $i (already
               # incremented past it) — otherwise the WARN always names the
               # NEXT row instead of the one that actually failed.
               if [ -z "$USERNAME" ] || [ "$USERNAME" = "null" ] || [ -z "$REPO" ] || [ "$REPO" = "null" ]; then
                 echo "WARN: ${students_file} row ${ROW} missing username/repo, skipping"
+                continue
+              fi
+              # ADVERSARIAL REVIEW round-5 L-2: the workflow derives
+              # LAB_SLUG from the DIRECTORY name (labs/<slug>/students.yaml),
+              # never from the row's own `labSlug` field — so a row whose
+              # `labSlug` disagrees with its directory (e.g. `labSlug:
+              # "lab-1"` sitting inside `labs/lab1/`) would silently write
+              # its tag file under the DIRECTORY's slug while the row itself
+              # claims a different one. The merge generator's
+              # `[username, labSlug]` join then compares the STUDENTS.YAML
+              # row's `labSlug` (mismatched) against the TAG FILE's `labSlug`
+              # (correct, directory-derived) and never matches — that
+              # student is pinned on `:unreleased` with NO loud failure
+              # anywhere: both values are individually well-formed, so
+              # neither this workflow's guards nor the chart's fail-guards
+              # ever see anything invalid. This is the last silent-failure
+              # gap in an otherwise fail-loud contract; catch it here.
+              if [ "$ROW_LAB_SLUG" != "$LAB_SLUG" ]; then
+                echo "WARN: ${students_file} row ${ROW} labSlug '${ROW_LAB_SLUG}' does not match its directory '${LAB_SLUG}', skipping"
                 continue
               fi
               # ADVERSARIAL REVIEW round-4 (path traversal, pre-existing —
@@ -164,7 +192,20 @@ jobs:
               TAG_FILE="labs/${LAB_SLUG}/tags/${USERNAME}.yaml"
               CUR_TAG=""
               if [ -f "$TAG_FILE" ]; then
-                CUR_TAG="$(yq -r '.tag // ""' "$TAG_FILE")"
+                # ADVERSARIAL REVIEW round-5 L-1: tolerate a malformed/
+                # partially-written tags/*.yaml (e.g. a hand-edit that isn't
+                # a mapping) — demonstrated to otherwise kill the ENTIRE run
+                # under `set -eu` (yq exits non-zero -> script aborts ->
+                # `changed=` never emitted -> the commit step is skipped ->
+                # every OTHER lab's already-resolved tag updates in this same
+                # run are discarded too, and that lab's directory is never
+                # even reached). `|| echo ""` treats an unreadable tag as
+                # "no current tag" instead — CUR_TAG stays empty, so this row
+                # falls through to rewriting TAG_FILE with a fresh, valid
+                # one, which is exactly the self-healing behavior wanted: the
+                # NEXT poll fixes the file the same way a fresh student's
+                # first successful poll creates it.
+                CUR_TAG="$(yq -r '.tag // ""' "$TAG_FILE" 2>/dev/null || echo "")"
               fi
               if [ "$CUR_TAG" = "$TAG" ]; then
                 continue

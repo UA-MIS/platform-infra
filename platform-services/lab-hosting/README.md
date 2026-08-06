@@ -8,28 +8,41 @@ no promotion model. See `RUNBOOK-DEPLOY.md` in `UA-MIS/slidedeck` for the full
 lab-feature context this builds on (`hosted` flag, `labAppUrl()`,
 `labRepoName()`, the existing per-student lab-mariadb + Adminer console).
 
-> **This README has been revised three times after adversarial review of PR
+> **This README has been revised five times after adversarial review of PR
 > #426.** Round 1 found case-sensitivity in the merge generator, a missing
 > NetworkPolicy rule, a Cloudflare body-size cap on Harbor pushes, an
 > identity-spoofing gap, and unvalidated/unquoted template interpolation
 > (tagged `B-*`/`C-*`/`M-*` below). Round 2 found a `hosted`-without-
 > `with_database` breakage, a genuine privilege-escalation hole in the
 > round-1 CI-writes-its-own-tag fix, and a pull-secret that landed nowhere
-> anything would sync it (tagged `H-*`/`M-*` below). **Round 3 found the
+> anything would sync it (tagged `H-*`/`M-*` below). Round 3 found the
 > round-2 tag-sync workflow had a real bash syntax error — an indented
 > heredoc delimiter — that made it silently a no-op since the moment it was
-> introduced** (caught by executing it, not by reading it; see "Image tag
+> introduced (caught by executing it, not by reading it; see "Image tag
 > propagation" and "Local verification"), plus a second-order breakage where
 > removing round-2's now-unnecessary identity check also silently removed
 > the thing keeping the chart's image-ref DERIVATION in sync with what CI
-> actually pushed. Every section reflects the FIXED design as of round 3;
-> where something changed materially, it says so inline with the finding ID.
+> actually pushed. Round 4 found a pre-existing path-traversal gap in the
+> tag-sync workflow (an unvalidated `username` could, via a malformed roster
+> row, overwrite `students.yaml` itself and — via ArgoCD's `prune: true` —
+> delete a whole lab's Applications on the next sync) plus documentation
+> drift (this README had gone stale against its own code twice: once
+> describing `repo` as decorative after it had become load-bearing, once
+> never mentioning the traversal fix at all). **Round 5 — the final round
+> before merge — found two remaining SILENT failure modes one layer down
+> from round 4's theme ("one bad row must not stop the rest"): a malformed
+> `students.yaml`/tag file could abort the ENTIRE sync run under `set -eu`
+> (now tolerated, self-healing), and a row whose OWN `labSlug` field
+> disagreed with its directory produced no loud failure anywhere (now
+> rejected with a WARN)** — plus the same class of PR-body/README staleness
+> as round 4. Every section reflects the FIXED design as of round 5; where
+> something changed materially, it says so inline with the finding ID.
 > Finding IDs (`B-`/`C-`/`H-`/`M-`/`L-` + a number) are **not globally
 > unique across rounds** — each review pass numbered its own findings from
-> scratch, so e.g. "M-1" means a different thing in three different sections
-> of this document. Kept as originally numbered (not renumbered) so every ID
-> stays traceable back to the actual review comment it came from; each
-> occurrence below says which fix it is in the surrounding prose.
+> scratch, so e.g. "M-1" means a different thing in several different
+> sections of this document. Kept as originally numbered (not renumbered) so
+> every ID stays traceable back to the actual review comment it came from;
+> each occurrence below says which fix it is in the surrounding prose.
 
 This directory is EXCLUDED from the generic `platform-services` directory
 ApplicationSet (see the exclude entry + comment in
@@ -219,10 +232,20 @@ uses `yq` (go-yaml v3 under the hood); ArgoCD's git-files generator uses
 same unquoted input:
 
 ```
-input:            yq resolves it to:      sigs.k8s.io/yaml resolves it to:
-username: no      "no" (string)           false (bool)
-username: 0755    "0755" (string)         493 (int, octal)
+input:            yq -r (raw output, what this workflow uses):   sigs.k8s.io/yaml resolves it to:
+username: no      no  (the literal text "no")                    false (bool)
+username: 0755    0755 (the literal text "0755")                 493 (int, octal)
 ```
+
+(Precise nit on the second row: `yq`'s own RESOLVED type for `0755` is
+actually an int too — `yq -o=json` on the same input prints `755`, not a
+string. It is specifically the `-r`/raw-output mode this workflow's
+`yq -r ".[$i].username" ...` calls use that stringifies whatever it resolved
+to, which is why the text `"0755"` survives that path even though `yq`'s
+internal type for it, like `sigs.k8s.io/yaml`'s, is numeric. The
+`username: no` row is the one where the two parsers disagree at the TYPE
+level, not just the output-formatting level — that's the actually dangerous
+case.)
 
 If slides writes an UNQUOTED `username: no` in `students.yaml`, ArgoCD's
 generator hands the ApplicationSet template the boolean `false`, which
@@ -596,7 +619,7 @@ was chosen anyway because the alternative (classic PAT, ever-growing read
 grants, actually finding a real place to land a SealedSecret) was assessed as
 more total ongoing effort, not less.
 
-## Security hardening (adversarial review B-4)
+## Security hardening (adversarial review B-4, round-4 path traversal)
 
 **B-4 — template injection.** `tag` originates from a value `lab-tag-sync.yaml`
 resolves from the GitHub API and writes into a git file this chart reads — an
@@ -611,6 +634,35 @@ across the whole chart (`image`, `host`, all k8s names, the `repo` annotation)
 is also explicitly `| quote`d as defense-in-depth, so even a value that
 somehow bypassed validation would be YAML-string-safe, not parsed as
 structure.
+
+**Round-4 — path traversal in `lab-tag-sync.yaml`'s tag-file path.**
+`.github/workflows/lab-tag-sync.yaml` builds
+`TAG_FILE="labs/${LAB_SLUG}/tags/${USERNAME}.yaml"` from two roster-sourced
+values. A roster row with `username: "../students"` resolves that path to
+`labs/<slug>/tags/../students.yaml` — i.e. `labs/<slug>/students.yaml`,
+OVERWRITING THE ROSTER ITSELF with a 3-line tag file, which the commit step's
+`git add -A -- labs` then stages and pushes; with `automated: {prune: true}`
+on `labs-students-appset.yaml`, the next ArgoCD sync would delete every
+student Application in that lab. Post-H-2 a student holds no fleet-write
+credential at all, so triggering this needs a slides-side bug rather than an
+attacker — but this workflow is specifically the hardened SOLE writer to the
+fleet repo and should not be one malformed roster row away from wiping a
+lab's worth of students. **Fixed** with a shell `case` guard, applied to both
+values BEFORE either is ever interpolated into a path:
+```sh
+case "$USERNAME" in ''|*[!a-z0-9-]*|-*|*-) echo "WARN: ...skipping"; continue;; esac
+```
+— exactly `lab-app.username`'s (and `lab-app.labSlug`'s) `^[a-z0-9]
+([-a-z0-9]*[a-z0-9])?$` contract, re-expressed as a POSIX shell `case`
+pattern rather than a regex (`sh`/`dash` don't have `[[ =~ ]]`). `USERNAME`
+is checked per row; `LAB_SLUG` (derived once per file from the directory
+name, shared by every row in that file) is checked once, right after it's
+computed, with the file skipped entirely if it fails. Verified by executing
+the actual exploit against a mock fleet repo: a `username: "../students"` row
+is rejected with a `WARN` and `students.yaml` comes out of the run
+byte-identical, with no trace of the attempted overwrite in git history
+beyond the row that was rejected — see "Local verification" for the exact
+recipe.
 
 ## Vault: read side vs write side
 
@@ -838,6 +890,35 @@ comments):
 - The malformed-row `WARN` message now reports the row index BEFORE it was
   incremented, so it names the actual bad row instead of the next one.
 
+**Fixed round-5, closing the last two silent-failure gaps** (again a
+different L-1/L-2 than either set above — same collision, kept as originally
+numbered):
+- **L-1** — `yq` failures on a malformed `students.yaml` or a malformed
+  `tags/*.yaml` no longer abort the whole run under `set -eu`. Both reads are
+  now `... 2>/dev/null || <safe default>`: an unparseable `students.yaml`
+  is treated as zero rows for that file (skip it, other labs still sync); an
+  unparseable existing tag file is treated as "no current tag" (the row
+  falls through to rewriting it with a fresh, valid one — self-healing on
+  the very next poll, no different from a brand-new student's first
+  successful poll). Verified by executing against a mock two-lab fleet with
+  a deliberately malformed `tags/adoe.yaml`: `lab1`'s other student AND all
+  of `lab2` still synced in the same run, and `adoe.yaml` came out
+  self-healed to a valid mapping.
+- **L-2** — the workflow derives `LAB_SLUG` from the DIRECTORY
+  (`labs/<slug>/students.yaml`), never from a row's own `labSlug` field, so a
+  row whose `labSlug` disagreed with its directory (e.g. `labSlug: "lab-1"`
+  sitting inside `labs/lab1/`) would silently write its tag file under the
+  directory's slug while the row claimed a different one — the merge
+  generator's `[username, labSlug]` join then compares two DIFFERENT
+  `labSlug` values and never matches, pinning that student on `:unreleased`
+  with **no loud failure anywhere** (both values are individually
+  well-formed, so no existing guard sees anything invalid). This was the
+  last remaining silent-failure gap in an otherwise fail-loud contract. Now
+  reads the row's own `labSlug` and skips with a `WARN` if it disagrees with
+  the directory. Verified: a mismatched row is rejected and no tag file is
+  ever written for it, while the well-formed row in the same file still
+  syncs normally.
+
 ## Local verification
 
 ```bash
@@ -888,11 +969,16 @@ for f in /tmp/step_*.sh; do bash -n "$f" || echo "SYNTAX ERROR in $f"; done
 #    real local git repo standing in for capstone-labs-fleet, with a fake
 #    `curl` on PATH stubbing the GitHub API responses (default_branch + HEAD
 #    sha), covering: a normal username, an all-digit-first-12-chars sha
-#    (proves M-4's quoting prevents numeric coercion), and a username of
-#    literally `no` (proves it prevents YAML 1.1 boolean coercion). Confirm
-#    the written files are valid YAML with all THREE values still strings,
-#    then run the whole thing a second time unchanged and confirm zero new
-#    commits (idempotence) — see the PR thread for the full transcript.
+#    (proves M-4's quoting prevents numeric coercion), a username of
+#    literally `no` (proves it prevents YAML 1.1 boolean coercion), AND a
+#    username of `"../students"` committed into a roster row (proves the
+#    round-4 path-traversal guard rejects it with a WARN and that
+#    students.yaml comes out of the run byte-identical — `git log --oneline
+#    -- labs/<slug>/students.yaml` should show no commit from this workflow
+#    at all). Confirm the written files are valid YAML with all THREE values
+#    still strings, then run the whole thing a second time unchanged and
+#    confirm zero new commits (idempotence) — see the PR thread for the full
+#    transcript.
 ```
 
 ---
