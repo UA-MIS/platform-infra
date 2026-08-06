@@ -70,18 +70,54 @@ lab-{{ include "lab-app.labSlug" . }}
 {{ include "lab-app.appName" . }}.{{ .Values.appDomain }}
 {{- end -}}
 
+{{/* `repo` — the roster's authoritative `org/name` field, required + format-
+     validated (same fail-loud pattern as labSlug/username/tag). Existed in
+     the contract from round 1 onward as an "informational only" annotation
+     — now load-bearing (adversarial review M-1, round 3): see
+     `lab-app.image` below for why. */}}
+{{- define "lab-app.repo" -}}
+{{- $v := .Values.repo | default "" -}}
+{{- if not (regexMatch "^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$" $v) -}}
+{{ fail (printf "repo %q is missing, empty, or not a valid \"org/name\". Required: chart/templates/_helpers.tpl `lab-app.image` derives the GHCR pull ref from THIS field (adversarial review M-1), not from labSlug+username." $v) }}
+{{- end -}}
+{{- $v -}}
+{{- end -}}
+
 {{/* GHCR image ref (adversarial review B-2 — replaces Harbor for lab-app
-     images; see README "Registry: GHCR, not Harbor"). DELIBERATELY DERIVED,
-     not passed as a separate `ghcrRepo` value: a GHCR package name is always
-     `ua-mis/<repo-name>`, and by the platform's own naming convention
-     (slidedeck's `labRepoName()`) `<repo-name>` is ALWAYS `<labSlug>-
-     <username>` — i.e. exactly `lab-app.appName`. Deriving it here (instead
-     of trusting a separate field lab-build.yaml would otherwise have to
-     compute and pass through the fleet repo) means there is only ONE place
-     that naming convention is encoded, and it can never drift out of sync
-     with the k8s object name / Ingress host that use the same helper. */}}
+     images; see README "Registry: GHCR, not Harbor").
+
+     ADVERSARIAL REVIEW M-1 (round 3, CHANGED from rounds 1-2): this used to
+     RECONSTRUCT the ref as `ua-mis/<labSlug>-<username>` (i.e.
+     `lab-app.appName`), on the assumption that `lab-build.yaml`'s push
+     target always equals that same string by convention. Round 3 removed
+     the identity-assertion check that USED to enforce that convention in
+     `lab-build.yaml` (correctly — B-3's check gated nothing an attacker
+     couldn't already bypass with the H-2 fix in place, so keeping it added
+     complexity without real security value). But that check was doing
+     double duty: it was ALSO the only thing keeping the chart's
+     RECONSTRUCTED ref in sync with what `lab-build.yaml` ACTUALLY pushed to
+     (`ghcr.io/<lowercased github.repository>`). Once removed, a
+     `students.yaml` row whose `repo` field didn't exactly match
+     `<labSlug>-<username>` (a slides bug, a renamed repo, anything) would
+     silently push a GREEN build to a package this chart would never derive
+     the same ref for — a real image sitting in GHCR, an
+     ImagePullBackOff pod pointed at a DIFFERENT (correctly-named but
+     nonexistent) ref, with no error anywhere pointing at the mismatch. The
+     failure mode degraded from "fail loud" (round 2's identity check) to
+     "fail silent" (round 3 with no compensating fix).
+
+     FIXED by deriving from `.Values.repo` (`lab-app.repo` above) — the
+     roster's OWN authoritative `org/name` field, which is exactly what
+     `github.repository` equals inside the student's CI run, lowercased the
+     same way `lab-build.yaml` lowercases it before pushing. This can no
+     longer drift: the chart now points at whatever slides ACTUALLY put in
+     the roster, not a reconstruction that assumes it matches. `appName`
+     (labSlug-username) remains authoritative for k8s OBJECT NAMES / the
+     Ingress host — those still need the platform's own naming convention,
+     independent of what the student's repo happens to be called — but is no
+     longer used for the pull ref. */}}
 {{- define "lab-app.image" -}}
-ghcr.io/ua-mis/{{ include "lab-app.appName" . }}:{{ include "lab-app.imageTag" . }}
+ghcr.io/{{ include "lab-app.repo" . | lower }}:{{ include "lab-app.imageTag" . }}
 {{- end -}}
 
 {{/* Kyverno `disallow-latest-tag` is Enforce cluster-wide and lab-* namespaces

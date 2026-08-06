@@ -8,15 +8,28 @@ no promotion model. See `RUNBOOK-DEPLOY.md` in `UA-MIS/slidedeck` for the full
 lab-feature context this builds on (`hosted` flag, `labAppUrl()`,
 `labRepoName()`, the existing per-student lab-mariadb + Adminer console).
 
-> **This README has been revised twice after adversarial review of PR #426.**
-> Round 1 found case-sensitivity in the merge generator, a missing NetworkPolicy
-> rule, a Cloudflare body-size cap on Harbor pushes, an identity-spoofing gap,
-> and unvalidated/unquoted template interpolation (tagged `B-*`/`C-*`/`M-*`
-> below). Round 2 found a `hosted`-without-`with_database` breakage, a genuine
-> privilege-escalation hole in the round-1 CI-writes-its-own-tag fix, and a
-> pull-secret that landed nowhere anything would sync it (tagged `H-*`/`M-*`
-> below). Every section reflects the FIXED design as of round 2; where
-> something changed materially, it says so inline with the finding ID.
+> **This README has been revised three times after adversarial review of PR
+> #426.** Round 1 found case-sensitivity in the merge generator, a missing
+> NetworkPolicy rule, a Cloudflare body-size cap on Harbor pushes, an
+> identity-spoofing gap, and unvalidated/unquoted template interpolation
+> (tagged `B-*`/`C-*`/`M-*` below). Round 2 found a `hosted`-without-
+> `with_database` breakage, a genuine privilege-escalation hole in the
+> round-1 CI-writes-its-own-tag fix, and a pull-secret that landed nowhere
+> anything would sync it (tagged `H-*`/`M-*` below). **Round 3 found the
+> round-2 tag-sync workflow had a real bash syntax error — an indented
+> heredoc delimiter — that made it silently a no-op since the moment it was
+> introduced** (caught by executing it, not by reading it; see "Image tag
+> propagation" and "Local verification"), plus a second-order breakage where
+> removing round-2's now-unnecessary identity check also silently removed
+> the thing keeping the chart's image-ref DERIVATION in sync with what CI
+> actually pushed. Every section reflects the FIXED design as of round 3;
+> where something changed materially, it says so inline with the finding ID.
+> Finding IDs (`B-`/`C-`/`H-`/`M-`/`L-` + a number) are **not globally
+> unique across rounds** — each review pass numbered its own findings from
+> scratch, so e.g. "M-1" means a different thing in three different sections
+> of this document. Kept as originally numbered (not renumbered) so every ID
+> stays traceable back to the actual review comment it came from; each
+> occurrence below says which fix it is in the surrounding prose.
 
 This directory is EXCLUDED from the generic `platform-services` directory
 ApplicationSet (see the exclude entry + comment in
@@ -297,6 +310,29 @@ after that — low drift risk in practice, unlike the tag/roster split, which
 genuinely needed separation because those two values change on different,
 overlapping schedules from different writers.
 
+**Advisory — the residual drift risk this duplication leaves open
+(adversarial review round-3 M-2, logged rather than fixed):** nothing
+enforces that `lab.yaml`'s `withDatabase` and every `students.yaml` row's
+copy actually agree. If slides' own write logic ever lets them drift (e.g.
+`lab.yaml: withDatabase: false` but a row still carries `withDatabase: true`,
+or vice versa), the two gates land INDEPENDENTLY and can disagree at runtime:
+a row saying `true` gets the ExternalSecret + `envFrom` (DB creds injected
+into the pod env) while `lab.yaml` saying `false` means the SHARED
+`lab-<slug>` namespace never got the `slides:3306` egress rule — the student
+sees `DATABASE_URL` etc. set in their env, but every connection attempt times
+out with no NetworkPolicy-level error visible anywhere (a silent, confusing
+runtime failure, not a Kyverno/Helm-fail-guard-catchable one, since both
+values are individually well-formed booleans). **This is a slides-side
+contract requirement, not something this chart can guard**: slides MUST
+write `lab.yaml`'s `withDatabase` and every row's copy in the SAME
+transaction/code path, from the SAME source value, every time a lab is
+created or a student is added. Not fixed with a chart-side `fail` guard in
+this PR — closing it chart-side would require exactly the same
+merge-generator reach-into-`lab.yaml`-from-`studentApp`-mode problem this
+section's duplication already exists to avoid (see above), so a real fix
+would have to happen on the slides side, or via the `matrix`-generator
+alternative already flagged as unverified from this environment.
+
 ## Container port convention (judgment call)
 
 Every hosted lab app MUST listen on `0.0.0.0:8080` — a fixed, platform-wide
@@ -395,6 +431,29 @@ confusingly — rejects; quoting removes the whole class of coercion bug,
 including the same risk for a username/labSlug that happens to be a YAML 1.1
 boolean word like `on`/`no`/`yes`/`off`).
 
+**Round-3 review found the mechanism that writes those quoted fields had
+never actually worked, at all, since it was introduced (adversarial review
+round-3 H-1, CRITICAL).** The tag-file write used a `cat > "$TAG_FILE" <<EOF
+... EOF` heredoc, indented to match the surrounding nested `for`/`while` loop
+for readability — but a heredoc delimiter must sit at column 0; GitHub
+Actions' YAML `run: |` block-scalar processing only strips the block's COMMON
+leading indent, so the `EOF` delimiter still carried the loop's indentation
+and was never recognized as the terminator. Verified live by extracting the
+exact step via `yaml.safe_load` (the same parse Actions performs) and running
+`bash -n` on it: a real syntax error, not a lint nitpick — the broken heredoc
+silently swallowed the rest of the script, including both loop `done`s and
+the `changed=` `GITHUB_OUTPUT` write. Because round 3 made this workflow the
+SOLE writer of `tags/*.yaml` (closing H-2), this meant NO tag file was ever
+written by anything, ever: every student, on every lab, would have been
+permanently pinned on the chart's `:unreleased` placeholder — the H-2 fix was
+only half-landed (the insecure writer was removed; the replacement could not
+run). Fixed by replacing the heredoc with `printf '%s\n' ...` (sidesteps the
+whole indentation-sensitive class rather than just re-indenting it correctly,
+so a future edit inside this loop can't reintroduce the same bug), with the
+quoting on all three fields preserved exactly. See "Local verification" below
+for the execution evidence this fix was actually tested against, not just
+read.
+
 ## Registry: GHCR, not Harbor (adversarial review B-2 — CHANGED from the first draft)
 
 **The original design pushed student images to the platform's Harbor
@@ -414,9 +473,44 @@ like an unexplained platform failure.
 `ghcr.io/<lowercased github.repository>:<tag>` using the workflow run's own
 automatic `GITHUB_TOKEN` (scoped to that one repo, `packages: write`) — no
 shared secret needed for the push side at all, and no Cloudflare/Harbor in the
-path whatsoever. `chart/templates/_helpers.tpl`'s `lab-app.image` derives the
-identical `ghcr.io/ua-mis/<labSlug>-<username>` ref chart-side, so there is
-exactly one place the naming convention lives.
+path whatsoever.
+
+## Image ref derivation: from `repo`, not `labSlug`+`username` (adversarial review round-3 M-1 — CHANGED from rounds 1-2)
+
+`chart/templates/_helpers.tpl`'s `lab-app.image` used to RECONSTRUCT the pull
+ref as `ghcr.io/ua-mis/<labSlug>-<username>`, on the assumption that
+`lab-build.yaml` always pushes to that exact same string. That assumption was
+only actually TRUE because round 2's B-3 identity-assertion check in
+`lab-build.yaml` enforced it as a side effect (it refused to run at all
+unless the caller's claimed `labSlug`/`username` reconstructed the repo's own
+real name). Round 3 correctly removed that check — it gated nothing an
+attacker couldn't already bypass once H-2 removed the shared fleet-write
+secret from student repos, so keeping it added complexity with no remaining
+security value. But removing it silently broke the OTHER thing it was
+enforcing: with no check left, a `students.yaml` row whose `repo` field
+doesn't exactly equal `<labSlug>-<username>` (a slides bug, a repo that was
+renamed after creation, anything) would push a perfectly successful build to
+`ghcr.io/<real repo name>`, while this chart kept deriving
+`ghcr.io/ua-mis/<labSlug>-<username>` — a real image sitting in GHCR, an
+`ImagePullBackOff` pod pointed at a different, non-existent ref, and nothing
+anywhere surfacing the mismatch. **The failure mode had degraded from fail
+loud (round 2's check) to fail silent (round 3 with no compensating fix.)**
+
+**Fixed by deriving from `.Values.repo` instead** — the roster's own
+authoritative `org/name` field (now required + format-validated by a new
+`lab-app.repo` helper, same fail-loud pattern as `labSlug`/`username`/`tag`),
+lowercased. `repo` is exactly what `github.repository` equals inside the
+student's CI run, so this can no longer drift: the chart now points at
+whatever slides ACTUALLY put in the roster, not a reconstruction that assumes
+it matches. `lab-app.appName` (`labSlug`-`username`) remains authoritative
+for k8s object names and the Ingress host — those still need the platform's
+own naming convention regardless of what the student's repo happens to be
+named — only the pull ref changed. Verified (`helm template`): a
+`repo=UA-MIS/lab1-jsmith` row renders `ghcr.io/ua-mis/lab1-jsmith:<tag>`; a
+deliberately NONCONFORMING `repo=UA-MIS/totally-different-repo-name` row
+(mismatched with its `labSlug`/`username`) now correctly renders
+`ghcr.io/ua-mis/totally-different-repo-name:<tag>` — reflecting the real
+field instead of silently reconstructing the wrong one.
 
 ## Pull: GHCR packages are PUBLIC — no pull secret at all (adversarial review H-3/M-2 — CHANGED from round 1)
 
@@ -685,6 +779,24 @@ two, which correctly stay unexcluded).
 - Doc cross-links from `docs/operator/harbor.md` etc. noting labs no longer touch Harbor — not added; this README + the PR description are the source of truth for now.
 - `lab-tag-sync.yaml` does not verify a GHCR image actually exists before writing its tag (trusts that a push already happened) — see that workflow's header for the tradeoff accepted.
 
+**Fixed this round, trivial** (round-3 review's L-1/L-2/L-3 — NOTE: these are
+DIFFERENT findings than the round-2 L-1/L-2 mentioned above, which were about
+`lab-build.yaml`'s expression-injection pattern; the review's own finding IDs
+reset per round rather than being globally unique, so — same as the M-1/M-2/
+M-3 collisions elsewhere in this README — they're kept as originally
+numbered rather than renumbered, to stay traceable back to the actual review
+comments):
+- `lab-tag-sync.yaml`'s `yq` install now uses `sudo install` rather than
+  assuming an unprivileged write to `/usr/local/bin` on `ubuntu-latest`
+  (every OTHER pinned-install in this repo targets a root ARC runner, where
+  that assumption already held; this one doesn't).
+- The `capstone-labs-fleet` clone is now a full clone, not `--depth 1` — a
+  shallow clone's `git pull --rebase` retry path (in the commit+push step)
+  can fail against history it doesn't have; the fleet repo is small enough
+  that a full clone costs nothing meaningful.
+- The malformed-row `WARN` message now reports the row index BEFORE it was
+  incremented, so it names the actual bad row instead of the next one.
+
 ## Local verification
 
 ```bash
@@ -705,6 +817,41 @@ helm template t platform-services/lab-hosting/chart --set studentApp=true --set 
 # fail-guards (should each error loudly, scoped to this one render):
 helm template t platform-services/lab-hosting/chart --set studentApp=true --set labSlug=lab1 --set username=JSmith        # C-1: not lowercase
 helm template t platform-services/lab-hosting/chart --set studentApp=true --set labSlug=lab1 --set username=jsmith --set tag=not-hex  # B-4: bad tag
+helm template t platform-services/lab-hosting/chart --set studentApp=true --set labSlug=lab1 --set username=jsmith --set tag=abc123d --set repo=""  # round-3 M-1: repo now required
+
+# M-1 image-ref derivation (round 3) — conforming vs. a deliberately
+# nonconforming repo field, proving the ref now tracks `repo` exactly rather
+# than silently reconstructing labSlug-username:
+helm template t platform-services/lab-hosting/chart --set studentApp=true --set labSlug=lab1 --set username=jsmith --set tag=abc123d --set repo=UA-MIS/lab1-jsmith | grep image:
+helm template t platform-services/lab-hosting/chart --set studentApp=true --set labSlug=lab1 --set username=jsmith --set tag=abc123d --set repo=UA-MIS/totally-different-repo-name | grep image:
+```
+
+**`lab-tag-sync.yaml` cannot be verified this way** — it's a GitHub Actions
+workflow, not a Helm template. Round-3 review found a real bash syntax error
+(H-1 above) that inspection alone missed for two whole rounds; verifying it
+now REQUIRES actually running it, not just reading it:
+
+```bash
+# 1. Extract each step's `run:` block exactly the way Actions parses it
+#    (yaml.safe_load -> steps[].run), and bash -n each one — must be clean:
+python3 -c "
+import yaml
+doc = yaml.safe_load(open('.github/workflows/lab-tag-sync.yaml'))
+for i, step in enumerate(doc['jobs']['sync']['steps']):
+    if 'run' in step:
+        open(f'/tmp/step_{i}.sh', 'w').write('#!/usr/bin/env bash\n' + step['run'])
+"
+for f in /tmp/step_*.sh; do bash -n "$f" || echo "SYNTAX ERROR in $f"; done
+
+# 2. Actually execute the extracted "poll + write tag files" step against a
+#    real local git repo standing in for capstone-labs-fleet, with a fake
+#    `curl` on PATH stubbing the GitHub API responses (default_branch + HEAD
+#    sha), covering: a normal username, an all-digit-first-12-chars sha
+#    (proves M-4's quoting prevents numeric coercion), and a username of
+#    literally `no` (proves it prevents YAML 1.1 boolean coercion). Confirm
+#    the written files are valid YAML with all THREE values still strings,
+#    then run the whole thing a second time unchanged and confirm zero new
+#    commits (idempotence) — see the PR thread for the full transcript.
 ```
 
 ---

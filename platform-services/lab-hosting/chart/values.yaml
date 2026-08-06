@@ -72,8 +72,14 @@ limitRange:
 #   would NOT fix a case-mismatched merge — it would hide the symptom while
 #   the underlying join still silently never happens.
 username: unset-username
-# repo: informational only (org/name of the student's repo) — carried through as a
-#   label/annotation for traceability; NOT used to derive the image name (see below).
+# repo: org/name of the student's repo. REQUIRED + format-validated, and
+#   LOAD-BEARING for the GHCR image ref (adversarial review M-1, round 3 —
+#   CHANGED from rounds 1-2, which derived the ref by reconstructing
+#   `ua-mis/<labSlug>-<username>` and only stayed correct because a since-
+#   removed identity check in lab-build.yaml enforced that convention as a
+#   side effect; see _helpers.tpl `lab-app.image`/`lab-app.repo` for the full
+#   reasoning). `appName` (labSlug-username) is still authoritative for k8s
+#   object names / the Ingress host — only the pull ref now comes from here.
 repo: UA-MIS/unset-repo
 # tag: the git commit SHA of the student's default-branch HEAD at last poll,
 #   written into labs/<labSlug>/tags/<username>.yaml by the SCHEDULED
@@ -92,8 +98,8 @@ tag: ""
 # GHCR, not Harbor" for why: Harbor sits behind the Cloudflare-proxied tunnel,
 # which caps request bodies at 100MB, and a GitHub-hosted runner has no path
 # around it the way ARC/Kaniko builders do via a Traefik ClusterIP hostAlias).
-# No `ghcrRepo` value here — DERIVED from labSlug+username, see _helpers.tpl
-# `lab-app.image`. PACKAGES ARE PUBLIC (adversarial review H-3 — see README
+# No `ghcrRepo` value here — DERIVED from `repo` (adversarial review M-1),
+# see _helpers.tpl `lab-app.image`. PACKAGES ARE PUBLIC (adversarial review H-3 — see README
 # "Registry: GHCR, not Harbor" / "H-3"): the app is already public via its
 # Ingress with no SSO gate, so there is no `imagePullSecrets` on the
 # Deployment and no pull-credential plumbing anywhere in this chart.

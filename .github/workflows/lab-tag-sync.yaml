@@ -52,10 +52,12 @@ jobs:
           YQ_SHA256: a2c097180dd884a8d50c956ee16a9cec070f30a7947cf4ebf87d5f36213e9ed7
         run: |
           set -eu
-          curl -fsSL -o /usr/local/bin/yq \
-            "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
-          echo "${YQ_SHA256}  /usr/local/bin/yq" | sha256sum -c -
-          chmod +x /usr/local/bin/yq
+          # L-1: ubuntu-latest is not the root ARC runner every other pinned
+          # -install in this repo targets — `sudo` here, trivially, rather
+          # than assume the hosted runner's default /usr/local/bin ownership.
+          curl -fsSL -o /tmp/yq "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+          echo "${YQ_SHA256}  /tmp/yq" | sha256sum -c -
+          sudo install -o root -g root -m 0755 /tmp/yq /usr/local/bin/yq
           yq --version
 
       # ADVERSARIAL REVIEW: TWO separate credentials, deliberately — a broad
@@ -69,7 +71,13 @@ jobs:
           GH_TOKEN: ${{ secrets.LAB_FLEET_WRITE_TOKEN }}
         run: |
           set -eu
-          git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/UA-MIS/capstone-labs-fleet.git" fleet
+          # L-2: a FULL clone, not --depth 1 — the commit+push step's
+          # `git pull --rebase` retry path can fail against shallow history
+          # (rebase needs the merge-base, which a depth-1 clone doesn't have
+          # once a concurrent write has moved origin/main). The fleet repo is
+          # tiny (a handful of small YAML files per lab), so a full clone
+          # costs nothing meaningful here.
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/UA-MIS/capstone-labs-fleet.git" fleet
 
       - name: Poll each student's default-branch HEAD, update tag files
         id: sync
@@ -86,11 +94,15 @@ jobs:
             COUNT="$(yq '. | length' "$students_file")"
             i=0
             while [ "$i" -lt "$COUNT" ]; do
+              ROW="$i"
               USERNAME="$(yq -r ".[$i].username" "$students_file")"
               REPO="$(yq -r ".[$i].repo" "$students_file")"
               i=$((i + 1))
+              # L-3: report $ROW (the row just read), not $i (already
+              # incremented past it) — otherwise the WARN always names the
+              # NEXT row instead of the one that actually failed.
               if [ -z "$USERNAME" ] || [ "$USERNAME" = "null" ] || [ -z "$REPO" ] || [ "$REPO" = "null" ]; then
-                echo "WARN: ${students_file} row $i missing username/repo, skipping"
+                echo "WARN: ${students_file} row ${ROW} missing username/repo, skipping"
                 continue
               fi
               DEFAULT_BRANCH="$(curl -sS -H "Authorization: Bearer ${READ_TOKEN}" \
@@ -127,11 +139,28 @@ jobs:
               # to be a YAML 1.1 boolean word (`on`, `no`, `yes`, `off`, …)
               # hits the same class of coercion. Quoting every field removes
               # the whole class.
-              cat > "$TAG_FILE" <<EOF
-              username: "${USERNAME}"
-              labSlug: "${LAB_SLUG}"
-              tag: "${TAG}"
-              EOF
+              #
+              # ADVERSARIAL REVIEW H-1 (round 3, CRITICAL): this used to be a
+              # `cat > "$TAG_FILE" <<EOF ... EOF` heredoc, indented to match
+              # the surrounding script (both the body AND the `EOF`
+              # delimiter) for readability inside this nested for/while loop.
+              # That is a real bash syntax error, NOT a cosmetic one: a
+              # heredoc delimiter must sit at column 0 (`<<-EOF` strips only
+              # LEADING TABS, never spaces, and this was plain `<<EOF`
+              # anyway) — verified live by extracting this exact step via
+              # `yaml.safe_load` (the same parse GitHub Actions performs) and
+              # running `bash -n` on it: `here-document ... delimited by
+              # end-of-file (wanted 'EOF')` / `syntax error: unexpected end
+              # of file`. The broken heredoc silently swallowed the rest of
+              # the script (both loop `done`s and the `changed=` output),
+              # meaning this workflow — the SOLE writer to `tags/*.yaml`
+              # after the H-2 fix — never wrote a single file, ever: every
+              # student was permanently pinned on `:unreleased`. `printf`
+              # sidesteps the whole indentation-sensitive heredoc class
+              # rather than just re-indenting it correctly, so a future edit
+              # inside this loop can't reintroduce the same bug.
+              printf 'username: "%s"\nlabSlug: "%s"\ntag: "%s"\n' \
+                "$USERNAME" "$LAB_SLUG" "$TAG" > "$TAG_FILE"
               echo "==> ${TAG_FILE} -> ${TAG}"
               CHANGED=1
             done

@@ -46,7 +46,11 @@ metadata:
   annotations:
     # Traceability back to the source repo (informational only — nothing reads
     # this back programmatically).
-    platform.capstone/lab-repo: {{ .Values.repo | quote }}
+    # `include "lab-app.repo"` (not raw `.Values.repo`), so a malformed repo
+    # field fails loudly here too, not just when `lab-app.image` happens to
+    # be rendered later in the same template execution (adversarial review
+    # M-1 — this field became load-bearing for the image ref this round).
+    platform.capstone/lab-repo: {{ include "lab-app.repo" . | quote }}
 spec:
   replicas: 1
   revisionHistoryLimit: 2
