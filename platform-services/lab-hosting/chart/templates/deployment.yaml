@@ -10,8 +10,14 @@
 # concern the README previously flagged as a judgment call.
 #
 # IMAGE: GHCR, not Harbor (adversarial review B-2 — see README "Registry:
-# GHCR, not Harbor"), PUBLIC packages (adversarial review H-3 — no
-# `imagePullSecrets` anywhere in this file; see README for why). IMAGE TAG:
+# GHCR, not Harbor"), PRIVATE packages pulled with an image pull secret. There
+# is deliberately no `imagePullSecrets` IN THIS FILE — it lives on the
+# ServiceAccount this pod runs as (templates/serviceaccount.yaml), which is
+# this repo's established convention for pull credentials, and the admission
+# plugin copies it into every Pod created with that SA. #426 shipped the
+# opposite ("packages are PUBLIC, no pull secret at all"); that rested on a
+# GitHub API endpoint that does not exist — see README "Pull: private GHCR
+# packages + an image pull secret". IMAGE TAG:
 # see templates/_helpers.tpl `lab-app.imageTag` — never `:latest` (Kyverno
 # `disallow-latest-tag` is Enforce and lab-* is not excluded) and STRICTLY
 # VALIDATED (adversarial review B-4). A fresh student (no tag written yet)

@@ -57,6 +57,26 @@ lab-feature context this builds on (`hosted` flag, `labAppUrl()`,
 > sections of this document. Kept as originally numbered (not renumbered) so
 > every ID stays traceable back to the actual review comment it came from;
 > each occurrence below says which fix it is in the surrounding prose.
+>
+> **POST-MERGE CORRECTION (this PR, after #426 was merged and live).** Six
+> rounds of adversarial review did not catch that the ONE operator step the
+> whole pull path depended on was fabricated: `gh api -X PATCH
+> "/orgs/UA-MIS/packages/container/<name>" -f visibility=public`. GitHub's
+> organization-package REST resource has no `PATCH` verb and no `visibility`
+> field — only `GET`, `DELETE`, and `POST .../restore`. Because student CI
+> pushes from PRIVATE repos, every package is created private and #426 had no
+> working way to change that, so with no `imagePullSecrets` in the chart every
+> lab pod would have sat in `ImagePullBackOff` forever. The feature could not
+> have worked as merged. **`H-3` "GHCR packages are PUBLIC — no pull secret at
+> all" is therefore REVERSED**, not softened: packages stay private and the
+> chart now ships a real pull secret (see "Pull: private GHCR packages + an
+> image pull secret"). The fabricated command has been DELETED from this
+> document and from OPERATOR ACTIONS — it is not retained as an alternative,
+> because it does not work. Worth noting what this says about the six rounds:
+> every round verified renders, guards, and shell scripts by EXECUTION, but no
+> round ever executed — or even checked the existence of — an external API
+> call the design depended on. Nothing else from those rounds is changed by
+> this PR.
 
 This directory is EXCLUDED from the generic `platform-services` directory
 ApplicationSet (see the exclude entry + comment in
@@ -68,6 +88,12 @@ standalone Application. It is consumed two ways instead:
   `applicationsets/labs-students-appset.yaml`).
 - `../external-secrets/vault-policies/labs-*.sh` — operator-run scripts, never
   auto-applied (same shape as `platform-services/harbor-onboarding/`).
+- `../slides-vault-ca/` — a sibling platform-service directory (NOT part of this
+  chart, and not excluded from the `platform-services` generator) that lands the
+  platform Vault CA as Secret `vault-ca` in ns `slides`, so the slides app can
+  verify TLS when it writes the per-student DB credentials this chart's
+  `ExternalSecret` later reads. Same "platform-infra-owned service deploying into
+  a namespace another repo owns" shape as `../lab-db/`. See its own README.
 - `.github/workflows/lab-build.yaml` (student-repo reusable CI) and
   `.github/workflows/lab-tag-sync.yaml` (platform-infra-only scheduled sync —
   see "Image tag propagation" / H-2) — both live in this repo's `.github/`,
@@ -607,48 +633,124 @@ deliberately NONCONFORMING `repo=UA-MIS/totally-different-repo-name` row
 `ghcr.io/ua-mis/totally-different-repo-name:<tag>` — reflecting the real
 field instead of silently reconstructing the wrong one.
 
-## Pull: GHCR packages are PUBLIC — no pull secret at all (adversarial review H-3/M-2 — CHANGED from round 1)
+## Pull: private GHCR packages + an image pull secret (REVERSES #426's H-3 "packages are PUBLIC" decision — it rested on an endpoint that does not exist)
 
-**Round 1 planned to reseal ONE static PAT as a `docker-registry` Secret
-(`labs-pull`) into every `lab-<slug>` namespace**, and round-1's own README
-even said so — but round-2 review found the plan never actually landed
-anywhere GitOps would apply it (the SealedSecret's proposed path,
-`platform-services/lab-hosting/`, is EXCLUDED from the `platform-services`
-directory generator by this SAME PR, and the two `labs-*-appset.yaml`
-ApplicationSets only ever render `chart/` — nothing in the design applied it).
-Separately, round-2 review also confirmed a factual gap in the round-1 plan
-(M-2): GitHub Packages authentication requires a **classic** PAT, not the
-fine-grained PAT round 1 offered as the primary option, and a private package
-inherits its linked repo's access — meaning a single pull identity would need
-explicit read access GRANTED on every current AND future student repo, an
-ever-growing list the operator would have to maintain by hand.
+**#426 shipped "make GHCR packages PUBLIC, delete the pull-secret mechanism
+entirely" (its H-3/M-2). That decision was not implementable.** It depended on
+one operator step, stated in this README and in the OPERATOR ACTIONS list as
+the exact command to run:
 
-**Decision: make GHCR packages PUBLIC, and delete the pull-secret mechanism
-entirely** rather than solve either problem. Reasoning: every hosted-lab app
-is ALREADY fully public (no SSO gate, that's the whole design point of this
-layer) — the running application, its behavior, and everything a professor or
-anyone else can observe by visiting the URL are already unauthenticated and
-world-reachable. Making the CONTAINER IMAGE that produces that same running
-app also publicly pullable adds no meaningful new exposure: the image doesn't
-(and must not, by ordinary Docker hygiene any public open-source project
-already has to observe) contain secrets baked in — database credentials arrive
-at runtime via the ExternalSecret/`envFrom`, never the image. Public GHCR
-visibility does NOT affect the PUSH side at all (still gated by the
-repo-scoped `GITHUB_TOKEN`, still only that repo's own CI can push to it) —
-only pull/read visibility changes. This deletes `imagePullSecrets` from
-`chart/templates/deployment.yaml` entirely (confirmed: `grep -i pullsecret`
-against the rendered chart output returns nothing — see "Local verification"),
-deletes the classic-vs-fine-grained-PAT problem (M-2, moot — there is no PAT),
-and deletes the "where does the SealedSecret land" problem (H-3, moot — there
-is no SealedSecret).
+```
+gh api -X PATCH "/orgs/UA-MIS/packages/container/<name>" -f visibility=public
+```
 
-**Operator action required**: each student's GHCR package defaults to private
-on first push and must be flipped to Public once — see "OPERATOR ACTIONS"
-below for the exact API call and a bulk script covering the whole current
-roster. This is the one piece of this decision that costs operator effort; it
-was chosen anyway because the alternative (classic PAT, ever-growing read
-grants, actually finding a real place to land a SealedSecret) was assessed as
-more total ongoing effort, not less.
+**That endpoint does not exist.** GitHub's REST API for organization packages
+exposes only `GET /orgs/{org}/packages/container/{name}`, `DELETE` on the same
+path, and `POST .../restore`. There is no `PATCH` verb on the resource and no
+`visibility` field anywhere in its schema — package visibility is a per-package
+setting changeable only through the web UI, with no scripted equivalent and no
+bulk form. The command above was fabricated, not verified; it would have failed
+with a 404 the first time an operator ran it, and the "bulk script covering the
+whole current roster" built on it would have failed once per student.
+
+The consequence was not cosmetic. Student CI pushes from **private** repos, and
+a GHCR package inherits the visibility of the repo it is linked to — so every
+package is created private, and #426 contained no working mechanism to change
+that. With no `imagePullSecrets` anywhere in the chart, every hosted lab pod
+would have sat in `ImagePullBackOff` forever with an authentication error. The
+feature could not have worked end to end as merged.
+
+**Decision: keep packages private and ship a real pull secret** — which is what
+round 1 originally wanted, before H-3 talked itself out of it on the strength of
+that nonexistent endpoint. The two objections H-3 raised against round 1 are
+both answered by *where* the secret now lands, not by wishing it away:
+
+- *"a private package inherits its linked repo's access, so one pull identity
+  would need read access granted on every current AND future student repo, an
+  ever-growing list maintained by hand"* — not so for an **organization-owned**
+  package pulled by an **org member**. The staged credential belongs to an
+  operator account with org-level visibility of `UA-MIS`'s packages, verified
+  against the live API before this PR was written: it exchanges for a real
+  `ghcr.io` pull token and can already see the org's packages. No per-repo grant
+  is minted, and none is needed when a new student is onboarded.
+- *"the round-1 SealedSecret landed nowhere GitOps would apply it"* — that was a
+  genuine finding and it is the reason this is an **ExternalSecret rendered by
+  the chart's `namespaceBootstrap` mode** (`chart/templates/namespace-bootstrap.yaml`),
+  not a SealedSecret dropped into `platform-services/lab-hosting/` (still
+  excluded from the `platform-services` directory generator, exactly as #426
+  described). The two `labs-*-appset.yaml` ApplicationSets only ever render
+  `chart/` — so putting it *in* `chart/` is precisely what makes it apply.
+
+**Shape.** One `ghcr-pull` Secret per LAB namespace, not per student: the
+credential is a single platform-owned read-only identity, identical for
+everyone, so rendering it per-student would put N Applications in charge of the
+same object in the same namespace — the shared-resource ownership fight that
+"Two ApplicationSets, not one" exists to avoid. It is deliberately NOT gated on
+`withDatabase` (unlike `chart/templates/externalsecret.yaml`): every lab pulls an
+image, database or not.
+
+**Credential.** A **classic** PAT with `read:packages` scope ONLY, staged by the
+operator at Vault `secret/platform/labs-ghcr-pull` under keys `GHCR_USERNAME`
+and `GHCR_TOKEN`. GHCR **requires** a classic PAT — GitHub's own documentation
+states Packages "only supports authentication using a personal access token
+(classic)"; fine-grained PATs and GitHub App installation tokens are not
+accepted for package auth, so none of the platform's existing fine-grained
+tokens can be reused here. (#426's M-2 was correct on this point; it was the
+conclusion drawn from it — abandon the pull secret — that did not hold.)
+
+**No new Vault policy is needed.** `external-secrets-ro` (see
+`../external-secrets/vault-policies/eso-role.sh`) already grants read on
+`secret/data/platform/*`, which is why every sibling service on the same
+`platform/<name>` convention resolves today with no per-service grant
+(`platform-services/lab-db/externalsecret.yaml` → `platform/lab-db`, slidedeck →
+`platform/slidedeck`). This is UNLIKE `secret/data/labs/*` (the per-student DB
+credentials), which genuinely does still need `labs-read-role.sh`.
+
+**Where `imagePullSecrets` is set: the ServiceAccount, not the pod spec.** This
+is the established convention in this repo — every `imagePullSecrets` in
+platform-infra sits on a ServiceAccount (all ~10 Backstage scaffolder skeletons'
+`.devops/chart/base/serviceaccount.yaml`, whose own comment reads "Set on the SA
+(not the pod spec) so it applies to every pod using this SA"); there is not one
+Deployment-pod-spec-level `imagePullSecrets` anywhere in the repo. The lab chart
+already gives each student a dedicated ServiceAccount (M-3), so the reference
+goes there and `chart/templates/deployment.yaml` needs no change. This does not
+interact with `automountServiceAccountToken: false` — that governs the projected
+API-server token, while pull secrets are resolved by the kubelet at image-pull
+time. The pod still gets no API access.
+
+### Ordering: BEST-EFFORT, not guaranteed — and self-healing
+
+`ghcr-pull` is created by the **`labs-namespace`** Application; the pods that
+need it are created by a **separate `labs-students`** Application. **Nothing
+orders those two.** ArgoCD sync waves order resources *within* one Application
+(and Applications within an app-of-apps whose parent syncs them) — but these
+Applications are generated by two independent ApplicationSets and are not
+children of a common parent that syncs them, so a wave annotation on either
+would not sequence them against each other. Stated plainly rather than papered
+over: **there is no ordering guarantee here, and this PR does not add one.**
+
+It does not need one, because the failure mode is self-correcting and identical
+in shape to the `:unreleased` case this design already accepts. If a student pod
+is created before `ghcr-pull` has synced, the kubelet fails the pull and retries
+with exponential backoff; the ServiceAccount admission plugin copies the
+`imagePullSecrets` reference into the pod regardless of whether the Secret
+exists yet, so once ESO materializes it the very next retry succeeds with no
+human action and no pod restart required. The observable symptom during that
+window is a pod in `ImagePullBackOff` — the same symptom, and the same recovery,
+as a student who has not pushed yet.
+
+### `ignoreDifferences` — required, not cosmetic
+
+Adding this ExternalSecret put the **first** `ExternalSecret` into
+`namespaceBootstrap` mode, which means `applicationsets/labs-namespace-appset.yaml`
+now needs the same `ignoreDifferences` block `labs-students-appset.yaml` has
+always carried. ESO's mutating webhook defaults four fields onto every
+`spec.data[].remoteRef` it admits (`conversionStrategy`, `decodingStrategy`,
+`metadataPolicy`, `nullBytePolicy` — confirmed live against an existing
+ExternalSecret). The chart does not set them, so without the block the live
+object differs from the desired manifest on every reconcile and the Application
+sits permanently OutOfSync — and with `selfHeal: true` that is a sync loop, not
+merely UI noise. The two blocks are byte-identical and must be kept in sync.
 
 ## Security hardening (adversarial review B-4, round-4 path traversal)
 
@@ -812,10 +914,10 @@ edit needed as labs come and go.
   `withDatabase`, lives in the dedicated `lab-mariadb` instance in ns
   `slides`, never a per-app PVC). A future lab that genuinely needs a PVC must
   raise this quota explicitly.
-- **M-2 (this section's M-2 is the resource-governance one — see "Pull: GHCR
-  packages are PUBLIC" above for the OTHER M-2, about PAT scoping, which this
-  numbering collision is left as-is from the original review rather than
-  renumbered) — no intra-namespace traffic**: the original NetworkPolicies
+- **M-2 (this section's M-2 is the resource-governance one — see "Pull: private
+  GHCR packages + an image pull secret" above for the OTHER M-2, about PAT
+  scoping, which this numbering collision is left as-is from the original
+  review rather than renumbered) — no intra-namespace traffic**: the original NetworkPolicies
   allowed unrestricted pod-to-pod traffic within a `lab-<slug>` namespace
   (`podSelector: {}` both directions), copied from the tenant model where one
   namespace = one TRUSTED team. Here one namespace = up to 15 MUTUALLY
@@ -865,9 +967,14 @@ edit needed as labs come and go.
   data after teardown is an accepted, low-cost byproduct (it's inert once
   nothing reads it) — cleaning it up, if ever wanted, is a slides-side or
   manual Vault-admin action, not something this PR's teardown path performs.
-  Similarly, each torn-down student's GHCR package (and its now-Public
-  visibility, see "Pull: GHCR packages are PUBLIC") is NOT deleted or
-  re-privatized by teardown — an intentionally-scoped decision to keep
+  Similarly, each torn-down student's GHCR package is NOT deleted by teardown
+  (it stays private, as it always was — see "Pull: private GHCR packages + an
+  image pull secret"; there is no visibility flip to undo, because #426's
+  public-packages step was never implementable and has been removed). The
+  shared `ghcr-pull` Secret in the lab namespace is pruned automatically with
+  the rest of the namespace; the Vault credential behind it is
+  platform-wide and deliberately survives teardown for the other labs still
+  using it. This is an intentionally-scoped decision to keep
   teardown to "stop serving traffic + free cluster resources," not "erase
   every trace," matching how student repos themselves are only ever ARCHIVED
   (never deleted) elsewhere in slidedeck's own teardown flow.
@@ -1006,8 +1113,28 @@ helm template t platform-services/lab-hosting/chart --set namespaceBootstrap=tru
 helm template t platform-services/lab-hosting/chart --set studentApp=true --set labSlug=lab1 --set username=jsmith --set tag=abc123d
 helm template t platform-services/lab-hosting/chart --set studentApp=true --set labSlug=lab1 --set username=jsmith --set tag=abc123d --set withDatabase=true
 
-# confirm no pull secret anywhere (H-3):
-helm template t platform-services/lab-hosting/chart --set studentApp=true --set labSlug=lab1 --set username=jsmith | grep -i pullsecret   # expect: no output
+# pull secret (REPLACES #426's "confirm no pull secret anywhere" check, which
+# asserted the now-reversed H-3 decision):
+#   - the per-student ServiceAccount carries imagePullSecrets: [ghcr-pull]
+#   - the Deployment does NOT (it is on the SA, per repo convention)
+helm template t platform-services/lab-hosting/chart --set studentApp=true --set labSlug=lab1 --set username=jsmith --set repo=UA-MIS/lab1-jsmith \
+  | yq 'select(.kind=="ServiceAccount").imagePullSecrets'                          # expect: - name: "ghcr-pull"
+helm template t platform-services/lab-hosting/chart --set studentApp=true --set labSlug=lab1 --set username=jsmith --set repo=UA-MIS/lab1-jsmith \
+  | yq 'select(.kind=="Deployment").spec.template.spec.imagePullSecrets'           # expect: null
+# the ghcr-pull ExternalSecret renders in namespaceBootstrap mode, in BOTH
+# withDatabase states (it is not gated on it):
+helm template t platform-services/lab-hosting/chart --set namespaceBootstrap=true --set labSlug=lab1 | yq 'select(.kind=="ExternalSecret").metadata.name'
+
+# PROVE THE dockerconfigjson IS ACTUALLY VALID — do not ship this on inspection.
+# A malformed dockerconfigjson fails at PULL time with an opaque kubelet error,
+# never at apply time, so the rendering is verified by EXECUTION: extract the
+# template string the chart really emits, evaluate it through a Go-template+sprig
+# engine (what ESO engineVersion v2 is) with the two fetched keys bound, then
+# assert the result parses as JSON and that `auth` b64-decodes to
+# "<username>:<token>". Full harness in the PR thread; the assertion that matters:
+#   json.loads(rendered)["auths"]["ghcr.io"]  ->  {username, password, auth}
+#   base64.b64decode(auth) == f"{username}:{password}"
+# Verified passing against the real rendered template with the real key names.
 
 # fail-guards (should each error loudly, scoped to this one render):
 helm template t platform-services/lab-hosting/chart --set studentApp=true --set labSlug=lab1 --set username=JSmith        # C-1: not lowercase
@@ -1097,26 +1224,35 @@ are classifier-gated for agents; read-only verification only
    won't fire usefully until secrets exist (step 5) and the fleet repo has
    real data (step 1) — no action needed beyond merging for it to start
    working once those are in place.
-4. **GHCR — make each student's package Public** (adversarial review H-3/M-2
-   — replaces the round-1 Harbor-robot / round-1-revision static-PAT-pull
-   plans entirely; see README "Pull: GHCR packages are PUBLIC" for why this
-   was chosen over maintaining a pull credential):
-   ```bash
-   # one-time, per student, after their FIRST successful push creates the
-   # package (idempotent — safe to re-run):
-   gh api -X PATCH "/orgs/UA-MIS/packages/container/<labSlug>-<username>" -f visibility=public
+4. **GHCR — stage the pull credential in Vault.** (This REPLACES #426's
+   "make each student's package Public" step, which has been DELETED: the
+   `gh api -X PATCH ... -f visibility=public` command it told you to run does
+   not exist — there is no PATCH verb and no `visibility` field on GitHub's
+   organization-package resource. See "Pull: private GHCR packages + an image
+   pull secret". **Packages stay private; nothing per-student is ever
+   flipped, and there is no bulk script to run as students are onboarded.**)
 
-   # bulk, covering the whole CURRENT roster (run periodically, or after
-   # onboarding a batch of students) — requires a token with admin:org or the
-   # package-admin equivalent, which a plain repo-scoped GITHUB_TOKEN does NOT
-   # have (verified by this PR's own review as a real constraint, not
-   # assumed) — use an operator PAT, not the CI token:
-   for repo in $(yq -r '.[] | .labSlug + "-" + .username' labs/*/students.yaml); do
-     gh api -X PATCH "/orgs/UA-MIS/packages/container/${repo}" -f visibility=public || echo "WARN: ${repo} (package may not exist yet — no push since last run)"
-   done
+   ONE-TIME, not per student. Mint a **classic** PAT (GHCR accepts nothing
+   else — not fine-grained PATs, not App tokens) with `read:packages` as its
+   ONLY scope, on an account with visibility of `UA-MIS`'s packages, then:
+   ```sh
+   kubectl -n vault exec -i vault-0 -- env VAULT_CACERT=/vault/userconfig/vault-server-tls/ca.crt sh -c \
+     'vault kv put secret/platform/labs-ghcr-pull GHCR_USERNAME="<user>" GHCR_TOKEN="<classic-pat>"'
    ```
-   No `imagePullSecrets`, no SealedSecret, no per-namespace anything — the
-   Deployment has none of that (confirmed — see "Local verification").
+   Verify the token really works BEFORE relying on it — a bad credential
+   surfaces only as an opaque `ImagePullBackOff` on a student's pod:
+   ```sh
+   # must return a JSON token, not 401:
+   curl -sS -u "<user>:<classic-pat>" "https://ghcr.io/token?service=ghcr.io&scope=repository:ua-mis/<some-lab-repo>:pull" | head -c 80
+   ```
+   No Vault POLICY change is needed for this path — `external-secrets-ro`
+   already covers `secret/data/platform/*` (step 7 below is a DIFFERENT grant,
+   for `secret/data/labs/*`, and is still required).
+
+   Rotation: overwrite the same Vault path; ESO re-syncs every `lab-<slug>`
+   namespace's `ghcr-pull` within its 1h `refreshInterval` (or immediately if
+   you delete the materialized Secret and let ESO recreate it). Nothing in git
+   changes.
 5. **GHCR — no push-side secret needed.** Each student repo's CI uses its own
    automatic `GITHUB_TOKEN` (with `permissions: packages: write` — declared in
    both the reusable workflow and the caller, see `.github/workflows/
@@ -1169,14 +1305,29 @@ are classifier-gated for agents; read-only verification only
 - **`*.uamishub.com` vs `*.labs.uamishub.com`** for the one-time wildcard —
   the former was used (zero incremental TLS cost); a reasonable alternative
   for tighter zone-scoping, not taken.
-- **Public GHCR packages vs. a maintained pull credential** (H-3/M-2) — chosen
-  after concluding the private-package path required either a classic PAT
-  with an ever-growing per-repo grant list, or a nontrivial GitOps landing
-  spot for a per-namespace SealedSecret that the round-1 design never
-  actually resolved. A reasonable operator could still prefer private
-  packages for other reasons (e.g. hiding student source/Dockerfile
-  structure, not just the running app); that tradeoff is now explicit rather
-  than defaulted-into.
+- **~~Public GHCR packages vs. a maintained pull credential~~ (H-3/M-2) —
+  REVERSED, and it was never a real choice.** #426 recorded this as a
+  deliberate tradeoff, but the option it selected depended on a GitHub API
+  endpoint that does not exist (`PATCH /orgs/{org}/packages/container/{name}`
+  with `visibility=public`), so "public packages" was not actually available
+  at any price. Packages are now private and pulled with a credential — see
+  "Pull: private GHCR packages + an image pull secret". The genuinely
+  judgment-shaped part that remains: the pull identity is ONE org-level
+  classic PAT shared by every lab, rather than a per-lab or per-student
+  credential. Chosen because a lab image is not sensitive relative to the app
+  it produces (which is already world-reachable with no SSO gate), and
+  because per-student pull identities would reintroduce exactly the
+  ever-growing manual grant list #426's M-2 correctly objected to. The cost is
+  a single credential whose compromise would allow reading every lab image in
+  the org; it is `read:packages`-only and rotatable in one Vault write.
+- **Vault CA into ns `slides` as a committed manifest, not an ExternalSecret**
+  — see `platform-services/slides-vault-ca/secret.yaml`'s header for the full
+  reasoning and the two rejected ESO alternatives. Short form: a CA
+  certificate is PUBLIC key material, this is already how the platform
+  distributes this exact CA in three other namespaces, and the ESO
+  Kubernetes-provider alternative would have required granting a
+  slides-namespace identity `list`/`watch` on every Secret in ns `vault`,
+  including the auto-unseal transit token.
 - **`withDatabase` duplicated across `lab.yaml` and every `students.yaml` row**
   rather than joined via a nested `matrix` generator — chosen because the
   `matrix` approach could not be verified against a live ArgoCD controller

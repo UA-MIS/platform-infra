@@ -73,6 +73,24 @@ spec:
       destination:
         server: https://kubernetes.default.svc
         namespace: 'lab-{{ if hasKey . "labSlug" }}{{.labSlug}}{{ end }}'
+      # ESO's mutating webhook DEFAULTS four fields onto every `spec.data[].
+      # remoteRef` it admits (conversionStrategy/decodingStrategy/metadataPolicy/
+      # nullBytePolicy — confirmed live on an existing ExternalSecret). The chart
+      # does not set them, so without this block the live object differs from the
+      # desired manifest on every reconcile and the Application sits permanently
+      # OutOfSync, which with `selfHeal: true` becomes a sync loop rather than
+      # just UI noise. Required here as of the GHCR pull-secret change, which put
+      # the FIRST ExternalSecret into namespaceBootstrap mode; byte-identical to
+      # the block labs-students-appset.yaml has always carried for the per-student
+      # DB ExternalSecret (same cause, same fix — keep the two in sync).
+      ignoreDifferences:
+        - group: external-secrets.io
+          kind: ExternalSecret
+          jqPathExpressions:
+            - '.spec.data[].remoteRef.conversionStrategy'
+            - '.spec.data[].remoteRef.decodingStrategy'
+            - '.spec.data[].remoteRef.metadataPolicy'
+            - '.spec.data[].remoteRef.nullBytePolicy'
       syncPolicy:
         automated:
           prune: true

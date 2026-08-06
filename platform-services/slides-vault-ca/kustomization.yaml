@@ -1,0 +1,41 @@
+# platform-services/slides-vault-ca — the platform Vault CA, materialized in ns
+# `slides` so the slides app (UA-MIS/slidedeck) can verify TLS when it writes
+# per-student lab DB credentials to Vault. Picked up by the platform-services
+# directory generator (applicationsets/platform-services-appset.yaml) as
+# Application `platform-svc-slides-vault-ca`.
+#
+# NAMESPACE OWNERSHIP: same shape as platform-services/lab-db/ — ns `slides` is
+# created and owned by the SEPARATE `slidedeck` Application (source repo
+# UA-MIS/slidedeck, path deploy/). This dir deliberately ships NO Namespace
+# object; secret.yaml pins `namespace: slides` explicitly, which overrides the
+# appset template's neutral `kube-system` destination for namespaced objects.
+# The single object here (`vault-ca`) is disjoint from every slidedeck-owned
+# object, so the two Applications never contend: ArgoCD prune/self-heal only
+# touches objects carrying its OWN tracking id.
+#
+# A SEPARATE DIRECTORY rather than a file dropped into lab-db/: lab-db owns the
+# per-student MariaDB tier (a database), whereas this is TLS trust material for
+# the slides app's VAULT client. They share a namespace and nothing else, and
+# lab-db's kustomization needs `includeSelectors: false` for its NetworkPolicy
+# podSelectors — a constraint this dir does not have. Keeping them apart means
+# either can be pruned or re-synced without touching the other.
+#
+# See secret.yaml's header for why this is a committed manifest rather than an
+# ExternalSecret (short version: a CA certificate is PUBLIC key material, this is
+# already the platform's established pattern in three other namespaces, and the
+# ESO Kubernetes-provider alternative would require granting read access to every
+# Secret in ns `vault`, including the auto-unseal transit token).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - secret.yaml
+
+# Platform component label on metadata only. There are no selectors in this dir
+# today, but includeSelectors: false matches the convention lab-db/ and db-admin/
+# use and keeps the label transformer from reaching into any future object's
+# selector by surprise.
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false
