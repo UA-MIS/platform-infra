@@ -33,9 +33,12 @@
 # The chart default (reloadOnCreate: false) only reloads on an UPDATE to an existing, already-
 # watched Secret — it does nothing the FIRST time a Secret appears. That is exactly backwards for
 # this race: the failure mode is a pod that started with the Secret ABSENT, and the fix is Secret
-# CREATION triggering the rollout. Verified by execution (evidence bundle) — with reloadOnCreate
-# left at the chart default, a from-scratch tenant's first-ever ESO materialization does NOT
-# trigger a restart and the race reproduces exactly as filed.
+# CREATION triggering the rollout. Per the chart's own documented behavior (README: "When false,
+# new resource creations have no effect") and confirmed via `helm template` (the Add handler is
+# gated behind `--reload-on-create=true` as a real controller arg) — with reloadOnCreate left at
+# the chart default, a from-scratch tenant's first-ever ESO materialization would NOT trigger a
+# restart and the race would reproduce exactly as filed. Live race-replay evidence lands in the
+# task's evidence bundle post-merge.
 #
 # ── scoping (no restart storms) ────────────────────────────────────────────────
 # autoReloadAll stays the chart default (false) — Reloader only acts on workloads carrying the
@@ -44,7 +47,10 @@
 # namespace, including unrelated platform-managed Secrets like harbor-pull or vault-ca). Applying
 # this annotation to existing live tenant Deployments does not itself trigger anything — Reloader
 # only acts on a subsequent Secret CREATE/UPDATE event, never on its own startup or on a workload
-# annotation being added (verified: see evidence bundle's no-disruption-at-deploy check).
+# annotation being added — this follows from how the controller is wired (it watches Secret/
+# ConfigMap objects via an informer and reacts to THEIR events; a Deployment-annotation edit
+# touches no watched object, so no event fires). Live no-disruption-at-deploy proof (Deployment
+# generation may bump, revision + pod UIDs must not) lands in the evidence bundle post-merge.
 #
 # watchGlobally: true — tenant Secrets/Deployments/Rollouts span every team's own
 # <team>-{dev,staging,prod} namespace (Reloader has no way to know which namespaces exist ahead
