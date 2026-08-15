@@ -249,6 +249,39 @@ def expected_build_artifacts(composed):
     return artifacts
 
 
+# The ONLY directory GitHub Actions discovers and runs workflows from, at the repo root
+# (GitHub platform behavior, not a platform-infra convention — see NO_TEMPLATE above, which
+# already treats .github/** as shipped-verbatim for this reason).
+GITHUB_WORKFLOWS_DIR = ".github/workflows/"
+
+
+def mobile_workflow_reachability(composed):
+    """For every mobile-artifact component, whether its buildWorkflow file lands where
+    GitHub Actions actually executes it (F-3/D-058).
+
+    expected_build_artifacts() above only proves the buildWorkflow file EXISTS on disk at
+    <targetDir>/<buildWorkflow> — that was the gate's full check before D-058, and it is NOT
+    sufficient: a mobile fragment declaring `buildWorkflow: .mobile-ci/build.yaml` composes
+    to `mobile/.mobile-ci/build.yaml`, which exists, satisfies (a), and is NEVER discovered
+    or run by GitHub Actions, because it is not under GITHUB_WORKFLOWS_DIR at the repo root.
+    That produced a false green: CI stayed green, the backend deployed, and no .apk/.ipa was
+    ever built — silently, for every mobile fragment.
+
+    Returns [(component_name, repo_rel_path, reachable_bool), ...], one entry per
+    mobile-artifact component (container/static components build via Kaniko from a
+    Dockerfile, not a GH Actions workflow file, so they are out of scope here).
+    """
+    results = []
+    comp_by_name = {c["name"]: c for c in composed.plan["components"]}
+    for comp_name, rel_path in expected_build_artifacts(composed):
+        comp = comp_by_name.get(comp_name, {})
+        if comp.get("buildType") != "mobile-artifact":
+            continue
+        reachable = rel_path.startswith(GITHUB_WORKFLOWS_DIR)
+        results.append((comp_name, rel_path, reachable))
+    return results
+
+
 def kustomize_tool():
     """Return an argv PREFIX for a kustomize build, or None if neither tool is installed."""
     kz = shutil.which("kustomize")

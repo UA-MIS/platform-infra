@@ -182,5 +182,105 @@ class IntegrationTests(unittest.TestCase):
             shutil.rmtree(frag_dir, ignore_errors=True)
 
 
+class WorkflowReachabilityTests(unittest.TestCase):
+    """F-3/D-058: (a) build-file only proves the buildWorkflow file EXISTS; these prove the
+    NEW check catches it existing in the wrong place (not under .github/workflows/)."""
+
+    def _fake_composed(self, components, copies, metas):
+        return compose_lib.Composed(out=Path("/nowhere"), plan={"components": components,
+                                    "copies": copies}, values={}, metas=metas, srcdirs={},
+                                    selection={})
+
+    def test_mobile_ci_path_is_unreachable(self):
+        # This is exactly what every shipped mobile fragment declares today.
+        comp = {"name": "mobile", "context": "mobile", "buildType": "mobile-artifact", "dockerfile": ""}
+        meta = {"id": "m", "buildType": "mobile-artifact", "buildWorkflow": ".mobile-ci/build.yaml"}
+        c = self._fake_composed([comp], [{"fragment": {"id": "m"}, "targetDir": "mobile"}],
+                                {"mobile": meta})
+        self.assertEqual(compose_lib.mobile_workflow_reachability(c),
+                         [("mobile", "mobile/.mobile-ci/build.yaml", False)])
+
+    def test_github_workflows_path_is_reachable(self):
+        # Simulate a fixed fragment whose targetDir composes INTO .github/workflows/ — the
+        # shape a real fix would need, without actually moving any files (deferred, D-058).
+        # context must match the copy's targetDir (compose_lib links components to copies by
+        # that field) — see expected_build_artifacts().
+        comp = {"name": "mobile", "context": ".github/workflows", "buildType": "mobile-artifact",
+               "dockerfile": ""}
+        meta = {"id": "m", "buildType": "mobile-artifact", "buildWorkflow": ".mobile-ci/build.yaml"}
+        c = self._fake_composed([comp], [{"fragment": {"id": "m"}, "targetDir": ".github/workflows"}],
+                                {"mobile": meta})
+        self.assertTrue(compose_lib.mobile_workflow_reachability(c)[0][2])
+
+    def test_container_components_are_not_in_scope(self):
+        comp = {"name": "app", "context": "app", "buildType": "container", "dockerfile": "Dockerfile"}
+        meta = {"id": "x", "dockerfile": "Dockerfile", "buildType": "container"}
+        c = self._fake_composed([comp], [{"fragment": {"id": "x"}, "targetDir": "app"}],
+                                {"single": meta})
+        self.assertEqual(compose_lib.mobile_workflow_reachability(c), [])
+
+
+class QuarantineTests(unittest.TestCase):
+    def test_only_the_four_mobile_fragments_are_quarantined(self):
+        for rel in ("mobile/android-kotlin", "mobile/flutter", "mobile/ios-swift", "mobile/react-native"):
+            self.assertIn(rel, gc.QUARANTINE, f"{rel} must be quarantined (F-3/D-058)")
+        for rel in compose_lib.discover_fragments():
+            if not rel.startswith("mobile/"):
+                self.assertNotIn(rel, gc.QUARANTINE,
+                                 f"only the F-3/D-058 mobile fragments may be quarantined, found {rel}")
+
+    def test_quarantine_hides_known_red_from_the_default_sweep(self):
+        results = [{"fragment": "mobile/flutter", "ok": False},
+                   {"fragment": "backend/express", "ok": True}]
+        passed, quarantined, failed = gc.partition_results(results, quarantine_active=True)
+        self.assertEqual([r["fragment"] for r in passed], ["backend/express"])
+        self.assertEqual([r["fragment"] for r in quarantined], ["mobile/flutter"])
+        self.assertEqual(failed, [], "a quarantined fragment must not block the default gate")
+
+    def test_quarantine_inactive_reports_true_status(self):
+        # This is the --only path: the fragment's true RED status must surface, proving the
+        # reachability assertion is not silently defanged by quarantine.
+        results = [{"fragment": "mobile/flutter", "ok": False}]
+        passed, quarantined, failed = gc.partition_results(results, quarantine_active=False)
+        self.assertEqual(quarantined, [])
+        self.assertEqual([r["fragment"] for r in failed], ["mobile/flutter"])
+
+    def test_ok_fragment_is_never_quarantined(self):
+        # A fragment that's genuinely green must count as passed even if it happens to be
+        # listed in QUARANTINE (defensive — quarantine should never mask a real pass/fail).
+        results = [{"fragment": "mobile/flutter", "ok": True}]
+        passed, quarantined, failed = gc.partition_results(results, quarantine_active=True)
+        self.assertEqual([r["fragment"] for r in passed], ["mobile/flutter"])
+        self.assertEqual(quarantined, [])
+
+
+@unittest.skipUnless(HAVE_NODE and HAVE_KUSTOMIZE, "needs node + kustomize/kubectl")
+class MobileIntegrationTests(unittest.TestCase):
+    """Proves the assertion catches the REAL shipped mobile fragments, not just a fixture."""
+
+    def setUp(self):
+        self.workdir = Path(tempfile.mkdtemp(prefix="green-check-test-mobile-"))
+
+    def tearDown(self):
+        shutil.rmtree(self.workdir, ignore_errors=True)
+
+    def test_real_mobile_fragment_is_caught_red(self):
+        r = gc.check_fragment("mobile/flutter", self.workdir)
+        self.assertFalse(r["ok"], "mobile/flutter's .mobile-ci/build.yaml is not under "
+                         ".github/workflows/ — the fragment must be caught RED (F-3/D-058)")
+        names = [c["name"] for c in r["checks"]]
+        self.assertTrue(any(n.startswith("workflow-reachable") for n in names))
+        unreachable = [c for c in r["checks"]
+                      if c["name"].startswith("workflow-reachable") and not c["ok"]]
+        self.assertTrue(unreachable, "expected a failed workflow-reachable check")
+        # The build-file check (file EXISTS) should still PASS — proves this is specifically
+        # the NEW reachability gap, not a re-detection of the old exists-check.
+        self.assertTrue(all(c["ok"] for c in r["checks"] if c["name"].startswith("build-file")),
+                        "the buildWorkflow file does exist; only its LOCATION is wrong")
+        # kustomize should still be unaffected — isolates the RED to the workflow path only.
+        self.assertTrue(all(c["ok"] for c in r["checks"] if c["name"].startswith("kustomize")),
+                        "overlays should still build; only workflow reachability is wrong")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
