@@ -6,13 +6,14 @@
 //	GET /healthz     : 200 "ok" — liveness/readiness probe (the .devops chart probes THIS
 //	                   path; DB-independent so the pod is Ready even with no DB).
 //	GET /api/health  : 200 JSON — app name + whether the DB is configured/reachable.
-//	/api/items       : a sample database/sql CRUD over MySQL.
+//	/api/items       : a sample database/sql CRUD over MySQL or PostgreSQL.
 //
 // Edit this freely — it is YOUR app code. (Do not edit .devops/.)
 //
-// The MySQL connection is built from the DATABASE_URL env (see db.go). A freshly
-// scaffolded app has no DATABASE_URL and still starts cleanly: /healthz stays green and
-// the data routes return a clear 503. NEVER hardcode credentials.
+// The database connection is built from the DATABASE_URL env (see db.go) — either
+// engine, auto-detected from the URI scheme (FIX-16/D-092). A freshly scaffolded app
+// has no DATABASE_URL and still starts cleanly: /healthz stays green and the data
+// routes return a clear 503. NEVER hardcode credentials.
 package main
 
 import (
@@ -28,12 +29,12 @@ import (
 const appName = "${{ values.appName }}"
 
 func main() {
-	db := OpenDB() // *sql.DB, or nil when DATABASE_URL is unset
+	db, driver := OpenDB() // *sql.DB (+ which dialect), or (nil, "") when DATABASE_URL is unset
 	if db != nil {
 		defer db.Close()
 	}
 
-	router := buildRouter(db)
+	router := buildRouter(db, driver)
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -47,7 +48,7 @@ func main() {
 
 // buildRouter wires every route. Kept separate from main() so tests can construct the
 // router with a nil (or fake) DB.
-func buildRouter(db *sql.DB) *gin.Engine {
+func buildRouter(db *sql.DB, driver Driver) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
@@ -80,6 +81,6 @@ func buildRouter(db *sql.DB) *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "app": appName, "db": dbStatus})
 	})
 
-	registerItemRoutes(r, db)
+	registerItemRoutes(r, db, driver)
 	return r
 }

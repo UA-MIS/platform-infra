@@ -8,7 +8,8 @@
 # runners. Build context = this skeleton dir (the engine sets context + dockerfile).
 #
 # NO apt is needed: the MySQL driver is pure-Python PyMySQL (installed as MySQLdb in
-# project/__init__.py) and gunicorn/Django install as wheels, so there is no
+# project/__init__.py), the Postgres driver psycopg[binary] vendors its own libpq
+# build as a wheel, and gunicorn/Django install as wheels too — so there is no
 # compiler/system-lib step (and no :443 apt gotcha — see the note at the bottom).
 
 # ---- build stage: resolve deps into an isolated venv ----
