@@ -98,13 +98,18 @@ else
   assert_eq "numeric sed no double-quote" "$(grep -c 'newTag: ""' "${K5}")" "0"
 fi
 
-# 3) COMMIT=1 makes a [skip ci] commit (the GitOps signal that won't re-trigger CI).
+# 3) COMMIT=1 makes the GitOps-signal commit -- and FIX-18/D-030: it must NOT carry
+# `[skip ci]` (GitHub's skip-ci detection is COMMIT-level, not ref-level -- it would
+# permanently suppress any FUTURE tag push referencing this same commit too, which is
+# exactly what broke vX.Y.Z re-promotion; loop-prevention now lives in build-and-push
+# .yaml's `resolve` job `if:` guard instead, keyed on the commit author identity).
 R3="$(make_repo)"
 COMMIT=1 bash "${R3}/.devops/ci/bump-image.sh" dev "9.9.9" >/tmp/bump.log 2>&1
 LAST="$(git -C "${R3}" log -1 --pretty=%s 2>/dev/null)"
 case "${LAST}" in
-  *"[skip ci]"*) PASS=$((PASS+1)) ;;
-  *) FAIL=$((FAIL+1)); echo "FAIL [commit]: last commit subject lacks [skip ci]: '${LAST}'" ;;
+  *"[skip ci]"*) FAIL=$((FAIL+1)); echo "FAIL [commit]: commit subject must NOT carry [skip ci] (FIX-18): '${LAST}'" ;;
+  "ci: bump dev images to 9.9.9") PASS=$((PASS+1)) ;;
+  *) FAIL=$((FAIL+1)); echo "FAIL [commit]: unexpected commit subject: '${LAST}'" ;;
 esac
 
 echo "== FINAL: $PASS passed, $FAIL failed =="

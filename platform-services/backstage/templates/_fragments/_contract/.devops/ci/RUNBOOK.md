@@ -126,8 +126,12 @@ CI run brings **all three environments up green out of the box**, no release req
 It is a **one-time initial condition, not auto-prod**: once staging/prod hold a real tag
 (`!= v0.0.0`), the seed is a no-op, so **every subsequent push bumps ONLY `dev`**. From then
 on staging/prod advance **solely via the promote-to-prod gate** (`promote.sh` — below): a
-push never auto-deploys to prod. The seed reuses `bump-image.sh` (the one write path) and its
-`[skip ci]` commit, so it never re-triggers the workflow.
+push never auto-deploys to prod. The seed reuses `bump-image.sh` (the one write path); loop
+prevention is a `resolve`-job `if:` guard in `build-and-push.yaml` keyed on the commit
+author identity, **not** a `[skip ci]` commit marker — the old `[skip ci]` approach is what
+broke `vX.Y.Z` tag pushes (FIX-18/D-030, see `bump-image.sh`'s header comment): GitHub's
+skip-ci detection is commit-level, so it silently and permanently blackholed any later tag
+pointing at a bump/seed commit too, not just that commit's own push.
 
 - **runs-on: `ua-mis-kaniko`** — the ARC `gha-runner-scale-set` name (the scale-set
   model selects runners by set name). CI ↔ workflow contract with the platform

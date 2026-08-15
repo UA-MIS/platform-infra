@@ -85,12 +85,17 @@ echo "==> overlay now pins:"
 if command -v yq >/dev/null 2>&1; then yq '.images' "${KUSTOMIZATION}"; else grep -E 'newName:|newTag:' "${KUSTOMIZATION}"; fi
 
 # The GitOps signal: commit the overlay change so ArgoCD reconciles it.
-# NOTE the `[skip ci]` in the commit message: when the CI bump job (build-and-push.yaml,
-# push-to-main) runs this with COMMIT=1, the resulting commit must NOT re-trigger
-# build-and-push (which is `on: push: branches: [main]`) — otherwise every build bumps
-# the overlay, which pushes a commit, which triggers another build = an infinite loop.
-# GitHub Actions skips a workflow run when the head commit message contains `[skip ci]`.
-# (Harmless for the local/manual path — it's just a commit-message tag.)
+# FIX-18/D-030: the commit message deliberately does NOT carry `[skip ci]`. It used to —
+# to stop the CI bump job's own push-to-main from re-triggering build-and-push (an
+# infinite bump loop) — but GitHub's `[skip ci]` detection is COMMIT-level, not
+# ref-level: it permanently suppresses EVERY future push event referencing that commit,
+# branch OR TAG. A student's natural release flow (`git pull && git tag vX.Y.Z` right
+# after their own push builds, so main's tip IS this bump commit) tags exactly that
+# commit — and `[skip ci]` silently blackholed the tag push forever, live-confirmed
+# broken (readiness-report-2026-08-19.md). Loop-prevention now lives in
+# build-and-push.yaml's `resolve` job instead: an `if:` guard that skips a BRANCH push
+# authored by this exact identity (GIT_AUTHOR_EMAIL below), and ONLY a branch push — a
+# tag push referencing the same commit is never skipped there.
 if [ "${COMMIT:-0}" = "1" ]; then
   echo "==> committing bump (GitOps signal)"
   # ARC's container-hook runs git as a different UID than the checkout-dir owner, so git's
@@ -100,7 +105,7 @@ if [ "${COMMIT:-0}" = "1" ]; then
   # container/HOME -> the global config persists). (Fix C.)
   git config --global --add safe.directory "${REPO_DIR}"
   git -C "${REPO_DIR}" add "${KUSTOMIZATION}"
-  git -C "${REPO_DIR}" commit -m "ci: bump ${ENV} images to ${NEW_TAG} [skip ci]" \
+  git -C "${REPO_DIR}" commit -m "ci: bump ${ENV} images to ${NEW_TAG}" \
     && echo "committed. ArgoCD will sync ${ENV} on next reconcile." \
     || echo "nothing to commit (tag unchanged)."
 else
