@@ -17,25 +17,18 @@
 # reconstructible cache of a public upstream), so force-destroy has no data-loss
 # implication, unlike a tenant's own project.
 #
-# registryId (hardcoded 1), NOT registryIdRef — deliberate, and NOT the
-# architecturally-preferred choice. Verified live (2026-08-15) against this
-# cluster's provider-harbor v0.1.1: the Registry MR (registry.yaml) creates the
-# registry successfully in Harbor (confirmed via GET /api/v2.0/registries/1 as
-# BOTH harbor-admin and robot$provisioner — 200 OK, id=1 — so this is NOT a
-# permissions gap) but the provider never populates the MR's
-# status.atProvider back (stays `{}` indefinitely; Ready stays False/Creating
-# forever), which is exactly what registryIdRef needs to resolve
-# ("referenced field was empty"). This looks like an Observe-path defect in
-# provider-harbor specific to the Registry kind — Project/RobotAccount MRs
-# elsewhere in this repo (apis/composition.yaml) reach Ready=True normally, so
-# it isn't a systemic provider outage. Matches the provider's own documented
-# maturity risk (providers/provider-harbor.yaml: "community provider, v0.1.1.
-# Pin and watch"). registry_id 1 is Harbor's own assigned, stable identifier
-# for the ONE dockerhub Registry this repo creates (id only changes if that
-# Registry is deleted and recreated) — if a future provider version fixes the
-# Observe gap, switch back to `registryIdRef: {name: dockerhub}` (the CRD
-# supports both; this is a pragmatic substitution of one valid field for
-# another, not a workaround of a missing feature).
+# registryIdRef (not a hardcoded registryId): a from-scratch apply of this
+# Registry/Project pair has a SLOW async reconcile — observed live (2026-08-15)
+# on provider-harbor v0.1.1: Registry reached Ready=True (atProvider populated)
+# roughly 10 minutes after creation, Project roughly 5 minutes. Both sit
+# Synced=True/Ready=False/reason=Creating for that window, which looks alarming
+# on first read but is a bounded creation delay, not a permanent gap — an
+# earlier version of this file hardcoded registryId after observing the
+# Ready=False state for only a few minutes and wrongly concluding it was
+# permanent (caught in review). registryIdRef is correct as-is; ArgoCD will
+# correctly show platform-svc-harbor-dockerhub-proxy as Progressing for that
+# window and Healthy once both resources settle — no override needed (see
+# the removed argocd-cm.yaml customization for why one was tried and reverted).
 apiVersion: project.harbor.crossplane.io/v1alpha1
 kind: Project
 metadata:
@@ -46,7 +39,8 @@ spec:
   forProvider:
     name: dockerhub-proxy
     public: true
-    registryId: 1
+    registryIdRef:
+      name: dockerhub
     vulnerabilityScanning: false   # proxy-cached upstream content, not platform-built; scanning it is not actionable here
     forceDestroy: true
   providerConfigRef:
