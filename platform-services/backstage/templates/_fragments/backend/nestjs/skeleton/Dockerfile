@@ -16,7 +16,13 @@
 # readOnlyRootFilesystem — Node needs no writable rootfs; the MySQL pool is network-only.
 
 # ---- build stage (compile TypeScript) ----
-FROM node:22-alpine AS build
+#
+# B4: base images resolve through the platform's Harbor pull-through cache
+# (dockerhub-proxy) instead of Docker Hub directly -- avoids Docker Hub rate
+# limits across every team's CI, verified working end-to-end (cache-hit proof
+# in artifacts/implementation/b4-harbor-proxy-cache.evidence.yaml). Same image,
+# same tag, different registry host -- purely a pull-path change.
+FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/node:22-alpine AS build
 WORKDIR /src
 COPY package.json ./
 RUN npm install
@@ -25,13 +31,13 @@ COPY src ./src
 RUN npm run build
 
 # ---- deps stage (production node_modules only) ----
-FROM node:22-alpine AS deps
+FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/node:22-alpine AS deps
 WORKDIR /src
 COPY package.json ./
 RUN npm install --omit=dev
 
 # ---- runtime stage ----
-FROM node:22-alpine
+FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/node:22-alpine
 WORKDIR /app
 ENV NODE_ENV=production
 COPY --from=deps /src/node_modules ./node_modules
