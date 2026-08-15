@@ -84,9 +84,22 @@ spec:
           # annotation as the base Deployment) — see the sync-wave note above for why the
           # RBAC this needs is present from Reloader's very first render.
           isArgoRollouts: true
-          # Cluster-wide: tenant namespaces are created on-demand per team/env, so a
-          # namespace-scoped Role can't be pre-enumerated.
+          # RBAC (FIX9-PRE-005): watchGlobally: true installs a cluster-wide ClusterRole
+          # with list/get/watch on Secrets+ConfigMaps in every namespace. This is NOT
+          # reducible by a scoped Role — tenant namespaces are created on-demand per
+          # team/env (the chart's alternative, reloader.namespaces, is a STATIC list and
+          # can't be pre-enumerated), and confirmed by rendering the chart with
+          # namespaceSelector set: the ClusterRole is byte-identical with or without it
+          # (Kubernetes RBAC has no "list secrets in namespaces matching a label"
+          # primitive — namespaceSelector is a controller-side filter, not an RBAC
+          # scope). What namespaceSelector DOES do is bound the blast radius of ACTION:
+          # Reloader only reconciles/rolls workloads in namespaces matching the
+          # selector below, so it can never act in vault/harbor/argocd/dex/etc. even
+          # though its ServiceAccount can technically read their Secrets. Every tenant
+          # namespace carries platform.capstone/team (bare-key selector = "key exists,
+          # any value" — matches every team); no platform-internal namespace does.
           watchGlobally: true
+          namespaceSelector: "platform.capstone/team"
           reloadStrategy: default
           # PodSecurity "restricted" compliance (this flag also wires the /tmp emptyDir
           # Reloader needs once the root filesystem is read-only — verified via
