@@ -19,7 +19,8 @@
 # It reuses bump-image.sh for the actual write (+ optional commit) so there is ONE write
 # path for every env — identical to how promote.sh re-points an env at an existing tag.
 # COMMIT is inherited by the child bump-image.sh (COMMIT=1 -> each SEEDED env gets its own
-# "[skip ci]" commit; the bump-dev workflow does the single push).
+# commit -- NOT `[skip ci]`, see bump-image.sh's header comment, FIX-18/D-030; the
+# bump-dev workflow does the single push).
 #
 # Reads the env->overlay mapping from promotion.yaml (the single source of truth), same as
 # bump-image.sh/promote.sh, so a convention change stays a one-file edit.

@@ -54,8 +54,12 @@ concurrency:
 jobs:
   promote:
     runs-on: ua-mis-kaniko
+    # FULL node image (NOT -slim): the Promote step below git-commits the overlay bump
+    # and this job `git push`es it to main -- -slim ships no git (git: not found, exit
+    # 127; live-confirmed, readiness-report-2026-08-19.md). Parity with build-and-push
+    # .yaml's bump-dev job, which uses the same full image for the same reason.
     container:
-      image: node:24-trixie-slim
+      image: node:24-trixie
     steps:
       - name: Guard — from and to must differ
         run: |
@@ -79,8 +83,12 @@ jobs:
         run: |
           set -eu
           # promote.sh reads the live tag from `from`'s overlay and hands off to
-          # bump-image.sh (COMMIT=1) for the write + "[skip ci]" commit — the SAME
-          # write path every other env-bump goes through (see .devops/ci/promote.sh).
+          # bump-image.sh (COMMIT=1) for the write + commit — the SAME write path
+          # every other env-bump goes through (see .devops/ci/promote.sh). The commit
+          # does NOT carry `[skip ci]` (FIX-18/D-030) — this push authored by
+          # GIT_AUTHOR_EMAIL above is instead recognized and skipped by
+          # build-and-push.yaml's `resolve` job `if:` guard, which (unlike
+          # `[skip ci]`) never poisons a later TAG push pointing at this same commit.
           COMMIT=1 sh .devops/ci/promote.sh "${{ inputs.from }}" "${{ inputs.to }}"
           git push origin HEAD:main
       - name: Summary

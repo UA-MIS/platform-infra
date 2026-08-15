@@ -85,14 +85,17 @@ case "${DIRTY}" in
   *) FAIL=$((FAIL+1)); echo "FAIL [uncommitted]: expected a dirty prod overlay, got: '${DIRTY}'" ;;
 esac
 
-# 3) COMMIT=1 promotes AND commits (the GitOps signal), tagged [skip ci].
+# 3) COMMIT=1 promotes AND commits (the GitOps signal) -- FIX-18/D-030: must NOT carry
+# `[skip ci]` (permanently suppresses any future tag push on this commit too; see
+# bump-image.sh's header comment).
 R2="$(make_repo)"
 COMMIT=1 bash "${R2}/.devops/ci/promote.sh" staging prod >/tmp/promote.log 2>&1; RC=$?
 assert_eq "commit rc" "${RC}" "0"
 LAST="$(git -C "${R2}" log -1 --pretty=%s 2>/dev/null)"
 case "${LAST}" in
-  *"[skip ci]"*) PASS=$((PASS+1)) ;;
-  *) FAIL=$((FAIL+1)); echo "FAIL [commit]: last commit subject lacks [skip ci]: '${LAST}'" ;;
+  *"[skip ci]"*) FAIL=$((FAIL+1)); echo "FAIL [commit]: commit subject must NOT carry [skip ci] (FIX-18): '${LAST}'" ;;
+  "ci: bump prod images to 1.2.3") PASS=$((PASS+1)) ;;
+  *) FAIL=$((FAIL+1)); echo "FAIL [commit]: unexpected commit subject: '${LAST}'" ;;
 esac
 PK2="${R2}/.devops/chart/overlays/prod/kustomization.yaml"
 assert_eq "committed prod tag count" "$(count_tag '1.2.3' "${PK2}")" "2"

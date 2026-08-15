@@ -6,7 +6,8 @@
 #      every component rewritten; dev is NOT touched by the seed (bump-dev owns dev).
 #   2) SUBSEQUENT build: staging/prod already at a real tag are LEFT UNCHANGED (promotion
 #      gate preserved) — the seed is a one-time initial condition, not auto-prod.
-#   3) COMMIT=1 makes a [skip ci] commit per seeded env (the GitOps signal, no CI re-trigger).
+#   3) COMMIT=1 makes a commit per seeded env (the GitOps signal; no `[skip ci]` -- see
+#      bump-image.sh's header comment, FIX-18/D-030).
 #   4) A mobile-artifact-only overlay (no images[]) is a safe no-op.
 # Exercises both the yq path and the no-yq awk/sed fallback. Requires: bash, git (yq optional).
 # Run: .devops/ci/seed-initial-envs.test.sh
@@ -115,15 +116,18 @@ assert_eq "gate prod kept"    "$(count_tag 'first99' "${PRD2}")" "2"
 assert_eq "gate staging not-bumped" "$(count_tag 'second88' "${STG2}")" "0"
 assert_eq "gate prod not-bumped"    "$(count_tag 'second88' "${PRD2}")" "0"
 
-# 3) COMMIT=1 makes a [skip ci] commit for a seeded env.
+# 3) COMMIT=1 makes a commit for a seeded env -- FIX-18/D-030: must NOT carry `[skip ci]`
+# (permanently suppresses any future tag push on this commit too; see bump-image.sh's
+# header comment).
 R3="$(make_repo)"
 COMMIT=1 sh "${R3}/.devops/ci/seed-initial-envs.sh" "9.9.9" >/tmp/seed.log 2>&1
 LAST="$(git -C "${R3}" log -1 --pretty=%s 2>/dev/null)"
 case "${LAST}" in
-  *"[skip ci]"*) PASS=$((PASS+1)) ;;
-  *) FAIL=$((FAIL+1)); echo "FAIL [commit]: last commit subject lacks [skip ci]: '${LAST}'" ;;
+  *"[skip ci]"*) FAIL=$((FAIL+1)); echo "FAIL [commit]: commit subject must NOT carry [skip ci] (FIX-18): '${LAST}'" ;;
+  "ci: bump prod images to 9.9.9") PASS=$((PASS+1)) ;;
+  *) FAIL=$((FAIL+1)); echo "FAIL [commit]: unexpected commit subject: '${LAST}'" ;;
 esac
-# both staging + prod seeds committed -> 2 [skip ci] commits on top of the 1 init.
+# both staging + prod seeds committed -> 2 commits on top of the 1 init.
 NCOMMITS="$(git -C "${R3}" rev-list --count HEAD 2>/dev/null)"
 assert_eq "commit count" "${NCOMMITS}" "3"
 
