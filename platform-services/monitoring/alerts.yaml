@@ -251,10 +251,26 @@ spec:
         # 20m (not 10m): tenant provisioning legitimately has a window where the
         # ExternalSecret exists before Vault has been seeded and the Secret
         # materialises. 20m clears normal onboarding without hiding a real outage.
+        #
+        # FIX-15/MON-007: the `unless` join's right-hand side comes from
+        # kube-state-metrics (kube_secret_info), a DIFFERENT exporter than the left
+        # side (ESO's own externalsecret_status_condition). If KSM stops reporting
+        # while ESO keeps reporting, the right side goes empty and EVERY tenant DB
+        # ExternalSecret matches — a fleet-wide critical, student-facing false page
+        # ("your database secrets have been wiped") on a KSM outage, which runs as a
+        # single replica here. `and on() (count(kube_secret_info) > 0)` gates the
+        # whole rule on that data source actually being present, so a KSM outage
+        # produces 0 series instead of one critical per tenant. Verified live:
+        #   count(kube_secret_info) right now                          = 187 (present)
+        #   guard clause `and on() (count(kube_secret_info) > 0)`       = passes (1)
+        #   simulated absence (count() of a namespace with 0 Secrets)   = 0 (blocks)
         - alert: TenantDatabaseSecretMissing
           expr: >-
-            max by (exported_namespace, name) (
-              externalsecret_status_condition{condition="Ready", status="True", name=~".+-db"} == 1
+            (
+              max by (exported_namespace, name) (
+                externalsecret_status_condition{condition="Ready", status="True", name=~".+-db"} == 1
+              )
+              and on () (count(kube_secret_info) > 0)
             )
             unless on (exported_namespace, name) (
               label_replace(
@@ -283,6 +299,9 @@ spec:
               ClusterSecretStore, then confirm the tenant's Vault path
               `tenants/<team>/<env>/db` still holds its keys. Expect this to fire for
               MANY tenants at once — that is the signature, not a coincidence.
+              (If kube-state-metrics itself is down, THIS alert stays silent by
+              design — check TargetDown / KSM's own pod status instead; that is a
+              different outage from "secrets were wiped".)
 
     # ── (c) ArgoCD app Degraded or stuck OutOfSync ────────────────────────────
     # Excludes platform-netpol-controlplane: it is INTENTIONALLY OutOfSync (SEC-011
@@ -412,29 +431,93 @@ spec:
     #                `lab-*` namespace, so they are matched on dest_namespace;
     #                app tenants get their own AppProject, so they are matched as
     #                "any project that is not platform/default".
+    # FIX-15/MON-014 (ROLLOUT-SUSPENDED, filed by FIX-14): widened Degraded-only to
+    # also catch Missing and Unknown — Argo CD's other two "something is wrong and
+    # nobody would notice" health states (Missing: a resource ArgoCD expects never
+    # got created; Unknown: the health check itself errored). Suspended is
+    # DELIBERATELY NOT included here — Argo Rollouts' bundled health check maps a
+    # PAUSED canary (a legitimate, common mid-promotion state) to Suspended, and a
+    # short pause must not page the same way a broken app does. It gets its own
+    # sibling rule below with a much longer window instead of being silently folded
+    # in here or silently dropped altogether (the FIX-14 finding this closes).
+    #
+    # PARTITION ARITHMETIC RE-VERIFIED LIVE (2026-08-15, after this widening):
+    # the platform/tenant split is a NAMESPACE partition (project/dest_namespace),
+    # orthogonal to which health_status values a rule cares about — widening the
+    # VALUES this rule matches cannot reopen the exact-complement NAMESPACE split
+    # ArgoCDAppDegraded and this rule already verified against each other. Live:
+    #   count(project=~"platform|default", dest_namespace!~"lab-.*")        = 84
+    #   count(project!~"platform|default" or dest_namespace=~"lab-.*")     =  8
+    #   total argocd_app_info series                                       = 92
+    # 84 + 8 = 92 — still exact, no overlap, no gap, at the NAMESPACE level.
+    # What DOES change: ArgoCDAppDegraded (the platform-side sibling, unchanged by
+    # this task) still matches health_status="Degraded" ONLY — a platform app that
+    # goes Missing or Unknown is not covered by any rule after this change. That
+    # asymmetry is real and intentionally out of THIS task's scope (task brief:
+    # "widen main TENANT rule to Missing|Unknown" — the tenant side only); flagging
+    # it here rather than leaving it silently discoverable only by reading the diff.
     - name: tenant-delivery
       rules:
         - alert: TenantAppDegraded
           expr: >-
-            argocd_app_info{health_status="Degraded", project!~"platform|default"} == 1
+            argocd_app_info{health_status=~"Degraded|Missing|Unknown", project!~"platform|default"} == 1
             or
-            argocd_app_info{health_status="Degraded", dest_namespace=~"lab-.*"} == 1
+            argocd_app_info{health_status=~"Degraded|Missing|Unknown", dest_namespace=~"lab-.*"} == 1
           for: 30m
           labels:
             severity: warning
             impact: student-facing
           annotations:
-            summary: "Tenant app {{ $labels.name }} has been broken for 30m"
+            summary: "Tenant app {{ $labels.name }} has been broken for 30m ({{ $labels.health_status }})"
             description: >-
               The tenant/lab ArgoCD Application {{ $labels.name }} (namespace
-              {{ $labels.dest_namespace }}) has been Degraded for 30 minutes — a
-              student's app is down and they are probably stuck. THIS IS THE ALERT
-              THAT WOULD HAVE CAUGHT THE 9-DAY-DEAD LAB TENANTS. Most common cause
-              by far: their image was never published, because the `build` workflow
-              in their repo failed and was never retried — check the Actions tab of
-              {{ $labels.repo }} first and re-run the failed run. Then
-              `argocd app get {{ $labels.name }}` and
+              {{ $labels.dest_namespace }}) has been {{ $labels.health_status }} for
+              30 minutes — a student's app is down and they are probably stuck. THIS
+              IS THE ALERT THAT WOULD HAVE CAUGHT THE 9-DAY-DEAD LAB TENANTS. Most
+              common cause by far: their image was never published, because the
+              `build` workflow in their repo failed and was never retried — check
+              the Actions tab of {{ $labels.repo }} first and re-run the failed run.
+              Missing usually means a manifest never applied (check `argocd app
+              get {{ $labels.name }}` for a sync error); Unknown usually means
+              Argo CD itself could not evaluate health (check the
+              application-controller logs). Then
               `kubectl -n {{ $labels.dest_namespace }} get pods`.
+
+        # FIX-15 (ROLLOUT-SUSPENDED, FIX-14): the Argo Rollouts bundled health check
+        # maps ANY paused canary — spec.paused:true OR a non-empty pauseConditions —
+        # to Argo CD health "Suspended", including the platform's own DEFAULT
+        # 25%->(30s)->50%->(30s)->100% auto-advancing canary steps
+        # (_contract/.devops/chart/overlays/prod/rollout.yaml), which pass through
+        # Suspended TWICE for ~30s each on every completely normal rollout. A short
+        # for: window here would page on routine promotions, not stuck ones — hence
+        # a MUCH longer window (2h, ~240x the ~30s a normal timed pause lasts) than
+        # TenantAppDegraded's 30m. The real failure mode this closes is a MANUAL
+        # hold (an empty `pause:` step, or `kubectl argo rollouts pause`) that
+        # nobody ever promotes: prod silently keeps serving the OLD version
+        # indefinitely, with no crash and no Degraded status, so nothing else on
+        # this platform would ever notice. severity: warning (not critical) — the
+        # app is still SERVING, just not on the new version.
+        - alert: TenantAppSuspended
+          expr: >-
+            argocd_app_info{health_status="Suspended", project!~"platform|default"} == 1
+            or
+            argocd_app_info{health_status="Suspended", dest_namespace=~"lab-.*"} == 1
+          for: 2h
+          labels:
+            severity: warning
+            impact: student-facing
+          annotations:
+            summary: "Tenant app {{ $labels.name }} canary paused for 2h — nobody promoted it"
+            description: >-
+              The tenant/lab ArgoCD Application {{ $labels.name }} (namespace
+              {{ $labels.dest_namespace }}) has been Suspended (a paused Argo
+              Rollouts canary) for 2 hours — far longer than this platform's
+              default ~30s auto-advancing timed pause, so this is very likely a
+              MANUAL hold nobody has promoted. Prod is still serving the OLD
+              version; nothing is crashing, which is why no other alert caught
+              this. Check with `kubectl argo rollouts get rollout <name> -n
+              {{ $labels.dest_namespace }}` and, once ready,
+              `kubectl argo rollouts promote <name> -n {{ $labels.dest_namespace }}`.
 
         - alert: TenantAppWorkloadStuck
           expr: kube_pod_container_status_waiting_reason{reason=~"CrashLoopBackOff|ImagePullBackOff|ErrImagePull|CreateContainerConfigError", namespace=~"lab-.*|.*-(dev|staging|prod)"} == 1
