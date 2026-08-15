@@ -281,11 +281,13 @@ spec:
             spec:
               providerConfigRef:
                 name: default
-              # Object is Ready only when the AppProject actually exists (so the XR's
-              # function-auto-ready Ready reflects real provisioning — the signal the
-              # tenant deploy waits on).
+              # Object is Ready as soon as the AppProject is created (D-055: AppProjects
+              # publish no status conditions, so DeriveFromObject never resolves and left
+              # every claim Ready=False forever — SuccessfulCreate is "Ready when it
+              # exists", which is what this Object actually needs to signal to the XR's
+              # function-auto-ready Ready).
               readiness:
-                policy: DeriveFromObject
+                policy: SuccessfulCreate
               forProvider:
                 manifest:
                   apiVersion: argoproj.io/v1alpha1
@@ -365,8 +367,11 @@ spec:
             spec:
               providerConfigRef:
                 name: default
+              # D-055: core Namespaces publish no Ready condition either, so
+              # DeriveFromObject here had the same never-Ready bug as the AppProject
+              # Object above — SuccessfulCreate ("Ready when it exists") fixed.
               readiness:
-                policy: DeriveFromObject
+                policy: SuccessfulCreate
               forProvider:
                 manifest:
                   apiVersion: v1
@@ -730,7 +735,8 @@ spec:
               # provider-kubernetes `dependsOn` blocks this Object's apply until each
               # referenced Object exists; ArgoCD's own retry/self-heal covers residual
               # readiness. (The XR's overall Ready, via function-auto-ready + the
-              # DeriveFromObject readiness on these Objects, is the signal to gate on.)
+              # SuccessfulCreate readiness on these Objects (D-055), is the signal to
+              # gate on.)
               references:
                 - dependsOn:
                     apiVersion: kubernetes.crossplane.io/v1alpha1
