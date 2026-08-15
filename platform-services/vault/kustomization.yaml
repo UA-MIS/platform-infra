@@ -14,6 +14,7 @@ kind: Kustomization
 resources:
   - namespace.yaml
   - raft-snapshot.yaml   # Track-2 DR: periodic `vault operator raft snapshot save` -> Ceph PVC
+  - transit-token-renewer.yaml   # FIX-4: renews the transit-unseal token (32d ceiling, was expiring 2026-09-02)
 
 labels:
   - pairs:
