@@ -22,6 +22,13 @@ drift) into a temp repo and asserts the repo is buildable exactly as the tenant 
   (c) DOCKERFILE LINT / BUILD (optional, --docker-build) — actually `docker build` each
         container/static component's Dockerfile. Off by default (heavy + network); the build-file
         + kustomize checks are the durable, hermetic gate.
+  (d) WIZARD SCHEMA (WIZ-001, FIX-1-REVIEW) — a ONE-TIME, non-per-fragment check (skipped
+        under --only): template.yaml's web/single `singleFragment` enum matches the fragment
+        library's ground truth (gen-wizard-enums.py), its rjsf `oneOf` database-question
+        groups are an EXACT partition of that enum (rjsf silently DROPS the whole dependency
+        block — no error — on a fragment matching zero or 2+ groups), every needsDB fragment
+        lands in a group that offers `database`, and `host-postgres` is never offered
+        alongside a driver-owning fragment. See check_wizard_template().
 
 Fragments are DISCOVERED from disk, so a new fragment (e.g. blank/bring-your-own once PR-A lands)
 is covered automatically — the gate needs no edit to cover a new stack. A fragment that would
@@ -43,6 +50,7 @@ Usage:
   green-check.py --keep               # keep the composed repos under --workdir for inspection
 """
 import argparse
+import importlib.util
 import json
 import shutil
 import subprocess
@@ -50,11 +58,16 @@ import sys
 import tempfile
 from pathlib import Path
 
+import yaml
+
 import compose_lib
 from compose_lib import (ComposeError, compose, discover_fragments,
                          expected_build_artifacts, kustomize_overlays,
                          kustomize_tool, mobile_workflow_reachability,
                          scenario_for, load_meta)
+
+HERE = Path(__file__).resolve().parent
+TEMPLATE_PATH = compose_lib.FRAGMENTS.parent / "new-project" / "template.yaml"
 
 # QUARANTINE (F-3/D-058) — fragments with a KNOWN, TRACKED red finding that the wizard no
 # longer offers a path to (mobile is hidden from the new-project template, see
@@ -96,6 +109,147 @@ def partition_results(results, quarantine_active):
         else:
             failed.append(r)
     return passed, quarantined, failed
+
+
+def _load_gen_wizard_enums():
+    """Import gen-wizard-enums.py (hyphenated filename, loaded like a sibling module — same
+    trick green-check.test.py already uses for green-check.py itself)."""
+    spec = importlib.util.spec_from_file_location(
+        "gen_wizard_enums", HERE / "gen-wizard-enums.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _single_fragment_groups(template_doc):
+    """Extract the web/single `singleFragment` master enum + its `oneOf` dependency groups
+    from a parsed template.yaml. Returns (master_enum, [group, ...]), where each group is
+    {"fragments": [...], "database_enum": [...] or None (no `database` property)}.
+
+    Raises ComposeError on unexpected shape — fail closed (WIZ-001): if this navigation ever
+    breaks because the template's structure changed, that is itself something the gate must
+    surface, not silently skip.
+    """
+    try:
+        web = template_doc["spec"]["parameters"][1]["dependencies"]["projectType"]["oneOf"][0]
+        single_layout = web["dependencies"]["layout"]["oneOf"][0]
+        master_enum = single_layout["properties"]["singleFragment"]["enum"]
+        oneof = single_layout["dependencies"]["singleFragment"]["oneOf"]
+    except (KeyError, IndexError, TypeError) as e:
+        raise ComposeError(
+            f"template.yaml: could not locate the web/single singleFragment schema ({e}) — "
+            "the template's structure changed in a way this WIZ-001 check does not expect")
+    groups = []
+    for i, g in enumerate(oneof):
+        frags = g.get("properties", {}).get("singleFragment", {}).get("enum")
+        if frags is None:
+            raise ComposeError(f"template.yaml: singleFragment oneOf group {i} has no fragment enum")
+        db = g.get("properties", {}).get("database", {}).get("enum")
+        groups.append({"fragments": frags, "database_enum": db})
+    return master_enum, groups
+
+
+def check_wizard_template():
+    """WIZ-001 (FIX-1-REVIEW finding): static-audit template.yaml's web/single `database`
+    question for the exact hazard the reviewer demonstrated — rjsf silently DROPS the whole
+    `dependencies.singleFragment.oneOf` block (no throw, no validation error) if a fragment
+    matches zero or more-than-one of its groups, which happens the moment a new needsDB
+    fragment is added to the master `singleFragment` enum (per gen-wizard-enums.py's own
+    fan-out instructions) without also being filed into exactly one oneOf group. A fragment
+    silently losing its Database question is the SAME green-CI/broken-runtime bug class FIX-1
+    exists to prevent — just reached a different way.
+
+    Unlike check_fragment(), this does NOT compose anything — it is a pure schema +
+    fragment-metadata cross-check, so it is fast and needs no node/kustomize.
+
+    Checks:
+      1. template.yaml's `singleFragment` master enum == gen-wizard-enums.py's single-slot
+         derivation (ground truth from fragment.yaml `slots:`), same members, same order.
+      2. The oneOf groups are an EXACT partition of that master enum: every member in
+         exactly one group (no gaps, no overlaps, no dead/extra entries).
+      3. Every needsDB fragment (fragment.yaml `needsDB: true`) is in a group that offers
+         `database` — never in the DB-less group.
+      4. `host-postgres`, wherever offered, is scoped ONLY to blank/bring-your-own — the one
+         fragment independently confirmed (FIX-1-REVIEW's per-language driver-manifest
+         audit) to ship no database driver of its own. If a future group ever offers
+         host-postgres alongside a driver-owning fragment, that is exactly the class of bug
+         D-054 existed to prevent. (This is deliberately narrower than "detect whether a
+         fragment ships a driver" in general — that would need a per-language source/lockfile
+         grep, which is one-off review work, not a durable structural signal. Broadening the
+         set of driver-free fragments is a deliberate, reviewed change to this assumption,
+         not something this check infers on its own.)
+    """
+    result = {"fragment": "new-project/template.yaml", "scenario": None, "ok": False,
+              "checks": [], "errors": []}
+
+    def add(name, ok, detail=""):
+        result["checks"].append({"name": name, "ok": ok, "detail": detail})
+        if not ok:
+            result["errors"].append(f"{name}: {detail}")
+
+    try:
+        doc = yaml.safe_load(TEMPLATE_PATH.read_text())
+        master_enum, groups = _single_fragment_groups(doc)
+    except (ComposeError, OSError, yaml.YAMLError) as e:
+        add("parse", False, str(e))
+        result["errors"].insert(0, str(e))
+        return result
+    add("parse", True, f"{len(master_enum)} singleFragment members, {len(groups)} oneOf groups")
+
+    # (1) master enum matches the fragment library's ground truth (gen-wizard-enums.py).
+    try:
+        genmod = _load_gen_wizard_enums()
+        ground_truth = [d["_path"] for d in genmod.by_slot(genmod.load(), "single")]
+    except Exception as e:
+        add("master-enum-matches-slot-truth", False, f"could not derive ground truth: {e}")
+        ground_truth = None
+    if ground_truth is not None:
+        add("master-enum-matches-slot-truth", master_enum == ground_truth,
+            "" if master_enum == ground_truth else
+            f"template != gen-wizard-enums.py single-slot output — "
+            f"template={master_enum} ground_truth={ground_truth}")
+
+    # (2) exact partition of the master enum across the oneOf groups.
+    membership = {}
+    for gi, g in enumerate(groups):
+        for f in g["fragments"]:
+            membership.setdefault(f, []).append(gi)
+    missing = [f for f in master_enum if f not in membership]
+    multi = {f: gi for f, gi in membership.items() if len(gi) > 1}
+    extra = sorted(f for f in membership if f not in master_enum)
+    partition_ok = not missing and not multi and not extra
+    add("exact-partition", partition_ok,
+        "" if partition_ok else
+        f"missing-from-any-group={missing} in-multiple-groups={multi} not-in-master-enum={extra}")
+
+    # (3) every needsDB fragment is in a database-offering group.
+    db_offering_frags = set()
+    for g in groups:
+        if g["database_enum"] is not None:
+            db_offering_frags.update(g["fragments"])
+    needsdb_dropped = []
+    for rel in master_enum:
+        try:
+            meta, _ = load_meta(rel)
+        except ComposeError as e:
+            add(f"fragment-meta[{rel}]", False, str(e))
+            continue
+        if meta.get("needsDB") and rel not in db_offering_frags:
+            needsdb_dropped.append(rel)
+    add("needsdb-fragments-offer-database", not needsdb_dropped,
+        "" if not needsdb_dropped else
+        f"needsDB fragment(s) with NO reachable database question: {needsdb_dropped}")
+
+    # (4) host-postgres scoped to blank/bring-your-own only.
+    for gi, g in enumerate(groups):
+        if g["database_enum"] and "host-postgres" in g["database_enum"]:
+            driver_owning = [f for f in g["fragments"] if not f.startswith("blank/")]
+            add(f"host-postgres-scoped-to-driver-free[group {gi}]", not driver_owning,
+                "" if not driver_owning else
+                f"host-postgres offered alongside driver-owning fragment(s): {driver_owning}")
+
+    result["ok"] = all(c["ok"] for c in result["checks"])
+    return result
 
 
 def check_fragment(rel, workdir, *, do_docker=False, kz_tool=None):
@@ -204,6 +358,14 @@ def main():
     finally:
         if not a.keep and not a.workdir:
             shutil.rmtree(workdir, ignore_errors=True)
+
+    # WIZ-001 (FIX-1-REVIEW): the wizard SCHEMA itself, not any one fragment's scaffold — a
+    # separate concern from the per-fragment sweep above, so it is skipped for a targeted
+    # --only fragment check but always runs on the default (CI-gate) sweep. Never
+    # quarantine-eligible (not in QUARANTINE) — a broken partition is a live, unfixed hazard,
+    # not a known/tracked/deferred one, so it must always fail the gate.
+    if a.only is None:
+        results.append(check_wizard_template())
 
     # Quarantine only ever applies to the UNFILTERED default sweep (the CI gate). An
     # explicit --only is a deliberate, targeted check — it always reports the truth, which is

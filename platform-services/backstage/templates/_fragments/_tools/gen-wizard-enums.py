@@ -33,6 +33,14 @@ def load():
     return out
 
 
+def by_slot(frags, slot):
+    """The fragments (in `load()` order) that fill `slot`. Hoisted to module level (was a
+    main()-local lambda) so green-check.py's WIZ-001 assertion can import this exact
+    derivation as ground truth for template.yaml's singleFragment enum — one source of
+    truth for "what fills a slot", not a second hand-copied definition."""
+    return [d for d in frags if slot in (d.get("slots") or [])]
+
+
 def block(title, frags):
     print(f"# --- {title} ---")
     print("  enum:")
@@ -46,12 +54,11 @@ def block(title, frags):
 
 def main():
     frags = load()
-    by_slot = lambda slot: [d for d in frags if slot in (d.get("slots") or [])]
     print("# Generated from _fragments/*/*/fragment.yaml — paste into new-project/template.yaml\n")
-    block("single slot (web/single singleFragment)", by_slot("single"))
-    block("frontend slot (web/frontend-backend frontendFragment)", by_slot("frontend"))
-    block("backend slot (backendFragment)", by_slot("backend"))
-    block("mobile slot (mobileFragment)", by_slot("mobile"))
+    block("single slot (web/single singleFragment)", by_slot(frags, "single"))
+    block("frontend slot (web/frontend-backend frontendFragment)", by_slot(frags, "frontend"))
+    block("backend slot (backendFragment)", by_slot(frags, "backend"))
+    block("mobile slot (mobileFragment)", by_slot(frags, "mobile"))
 
 
 if __name__ == "__main__":

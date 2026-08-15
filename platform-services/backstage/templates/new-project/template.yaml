@@ -293,11 +293,11 @@ spec:
                                   title: Database
                                   type: string
                                   description: >-
-                                    host-mysql auto-provisions a per-environment database for you.
-                                    Pick bring-your-own to set DATABASE_URL yourself via the Secrets
-                                    tab, or none for a DB-less stack (e.g. the static site). (D-054:
-                                    Auto PostgreSQL is not offered here — every needsDB fragment in
-                                    this group is MySQL-only.)
+                                    host-mysql auto-provisions a per-environment MySQL database for
+                                    you. PostgreSQL isn't available for this stack — it ships with a
+                                    MySQL driver. Pick bring-your-own if you need a different
+                                    database (set DATABASE_URL yourself via the Secrets tab), or none
+                                    if your app doesn't use a database.
                                   enum: [host-mysql, bring-your-own, none]
                                   enumNames:
                                     - 'Auto MySQL (host-mysql) — provisioned for you'
@@ -395,6 +395,12 @@ spec:
                         database:
                           title: Database
                           type: string
+                          description: >-
+                            host-mysql auto-provisions a per-environment MySQL database for you.
+                            PostgreSQL isn't available for this backend — it ships with a MySQL
+                            driver. Pick bring-your-own if you need a different database (set
+                            DATABASE_URL yourself via the Secrets tab), or none if your app
+                            doesn't use a database.
                           enum: [host-mysql, bring-your-own, none]
                           enumNames:
                             - 'Auto MySQL (host-mysql) — provisioned for you'
@@ -464,6 +470,12 @@ spec:
                 database:
                   title: Database (for the backend)
                   type: string
+                  description: >-
+                    host-mysql auto-provisions a per-environment MySQL database for you.
+                    PostgreSQL isn't available for this backend — it ships with a MySQL
+                    driver. Pick bring-your-own if you need a different database (set
+                    DATABASE_URL yourself via the Secrets tab), or none if your backend
+                    doesn't use a database.
                   enum: [host-mysql, bring-your-own, none]
                   enumNames:
                     - 'Auto MySQL (host-mysql) — provisioned for you'
