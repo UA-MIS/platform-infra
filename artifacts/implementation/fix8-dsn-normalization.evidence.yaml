@@ -13,7 +13,18 @@ root_cause: >
   (no mysqlclient/MySQLdb, to keep the image apt-free), so create_engine() raised
   ModuleNotFoundError the instant app/db.py was imported — crash-looping the pod on
   every boot as soon as real DB credentials were injected. This was masked pre-FIX-3 by
-  the SQLite fallback path (DATABASE_URL unset).
+  the SQLite fallback path (DATABASE_URL unset): with no credential, provider-vault
+  could never mint a tenant's role, DATABASE_URL never materialized, and the fastapi
+  fragment's engine defaulted to SQLite and never touched create_engine("mysql://...")
+  at all -- so the bug ran silently "green but no data" rather than crash-looping.
+
+  IMPORTANT FRAMING: FIX-3 (task #17, restoring the dead provider-vault credential)
+  did NOT cause this defect -- it UNMASKED it. Once the secret plane started
+  delivering real DATABASE_URL values, the pre-existing driver mismatch became a
+  hard CrashLoopBackOff instead of a silent no-op. See
+  fix3-provider-vault-token.evidence.yaml's addendum_2026_08_15_env_pickup for the
+  ordering context (that document is in the orchestrator repo's
+  artifacts/implementation/, not this platform-infra repo).
 
 fix: >
   app/db.py now normalizes a leading `mysql://` to `mysql+pymysql://` before
@@ -181,14 +192,50 @@ verification:
       Post-fix repro: `DATABASE_URL=mysql://molly_demo_dev:...@host:3306/molly_demo_dev`
       + `from app.db import engine` succeeds; engine.driver == "pymysql",
       engine.dialect.name == "mysql".
+  independent_live_confirmation:
+    source: devops-vault, during FIX-3 (#17) env-pickup verification, 2026-08-15
+    citation: >
+      artifacts/implementation/fix3-provider-vault-token.evidence.yaml,
+      section defect_B_dsn_driver (orchestrator repo, not this platform-infra repo).
+    finding: >
+      Independently and by direct observation (not by re-running this PR's fix):
+      once FIX-3 restored the dead provider-vault credential, fastapi replicas that
+      started AFTER the Secret existed picked up a real DATABASE_URL and then
+      CrashLoopBackOff'd, in BOTH staging and prod, with an identical live stack
+      trace ending in:
+        File "/app/app/db.py", line 37, in <module>
+          engine = create_engine(DATABASE_URL, **_engine_kwargs)
+        ...sqlalchemy/dialects/mysql/mysqldb.py ... ModuleNotFoundError: No module
+        named 'MySQLdb'
+      This is the exact bug this PR fixes, confirmed live and pre-dating this PR's
+      own manual repro in this evidence file. A pre-secret replica in the same
+      ReplicaSet ran fine env-less (kubelet resolves secretKeyRefs per container
+      start, not per pod), which is why the two symptom classes (silent-no-DB vs.
+      hard-crash) coexisted across replicas of the same tenant.
+    scope_note: >
+      This confirms the PRE-fix crash live, in-cluster, from an independent source —
+      it does NOT yet confirm this PR's fix resolves it live (that replica ran the
+      unfixed image). The devops-fragments Tier-A ask below covers that gap: it
+      needs to run against an image built from this branch.
+
   integration_pending:
     status: NOT YET RUN — coordinating with devops-fragments (VERIFY-4)
     plan: >
-      devops-fragments' Tier-A DB-backed-endpoint assertions are the empirical gate.
-      At minimum: scaffold (or reuse) a fastapi + host-mysql tenant post-merge, wire
-      real DATABASE_URL via the Secrets tab, and confirm the pod goes Ready + /api/items
-      CRUD works against the real MariaDB, not just that the pod boots.
+      devops-fragments' Tier-A DB-backed-endpoint assertions are the empirical gate
+      for the POST-fix state. At minimum: scaffold (or reuse) a fastapi + host-mysql
+      tenant built from this branch, wire real DATABASE_URL via the Secrets tab, and
+      confirm the pod goes Ready + /api/items CRUD works against the real MariaDB,
+      not just that the pod boots.
 
 open_items:
-  - "PR not yet opened — pending this evidence bundle + devops-fragments live confirmation."
+  - "Awaiting devops-fragments live confirmation against an image built from this branch (PR #434) before FIX-8-REVIEW gates the merge."
   - "DSN-contract redesign (platform emits per-backend driver-qualified DSNs) is punch-listed per D-062, intentionally out of scope for this go-live-blocker fix."
+
+related_defects_out_of_scope:
+  - id: defect_A_env_injection_race (fix3 evidence addendum)
+    summary: >
+      Pods that win the race against ESO start before the Secret materializes and
+      never re-pick it up (secretKeyRef optional:true resolves once, at container
+      start). Tracked separately as FIX-9 (task #29/#30, Reloader or equivalent).
+      Unrelated to this DSN fix; no coordination needed beyond awareness that
+      rollout-restart behavior may appear on shared test tenants while FIX-9 lands.
