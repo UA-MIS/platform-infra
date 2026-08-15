@@ -314,6 +314,22 @@ spec:
             access: admin
         # No `token:` — authenticates via integrations.github (the platform GitHub App).
 
+    # 3b) WAIT for GitHub to actually serve the just-pushed catalog-info.yaml before
+    #     `register` below reads it (FIX-19/CATALOG-001 -- same root cause + fix as
+    #     new-project/template.yaml; see waitForRepoContent.ts for the full writeup).
+    #     catalog:register performs a SYNCHRONOUS first read of catalog-info.yaml the
+    #     moment it runs; called immediately after `publish`, that raced GitHub's own
+    #     read-after-write propagation on a freshly created repo + first push +
+    #     branch-protection setup. This polls the SAME file at the EXACT commit
+    #     `publish` just created, with exponential backoff, before `register` runs.
+    - id: wait-for-content
+      name: Wait for GitHub to serve catalog-info.yaml
+      action: capstone:wait-for-repo-content
+      input:
+        repo: ${{ parameters.appName }}
+        commitHash: ${{ steps['publish'].output.commitHash }}
+        catalogInfoPath: '/catalog-info.yaml'
+
     # 4) Register the component so it appears in The Process catalog right away.
     - id: register
       name: Register in catalog
