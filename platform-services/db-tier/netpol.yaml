@@ -176,6 +176,41 @@ spec:
     - from:
         - ipBlock:
             cidr: 10.237.168.0/22
+    # ns `monitoring` -> the two METRICS EXPORTER ports (FIX-7 / BLOCK-3).
+    #
+    # This was the missing door behind the `TargetDown` alerts for
+    # `db-tier/capstone-pg`, `db-tier/capstone-tenant-pg` and
+    # `capstone-mariadb-mariadb-cluster-metrics` — all three reporting "100% of
+    # targets down" since the db-tier default-deny went in. The scrape configs were
+    # never the problem and are NOT ours to add: CNPG's operator ships the
+    # `capstone-pg` / `capstone-tenant-pg` PodMonitors and mariadb-operator ships
+    # the `capstone-mariadb-...-metrics` ServiceMonitor, all present and correctly
+    # targeted. The exporters were listening and their Endpoints were populated.
+    # Prometheus simply could not REACH them.
+    #
+    # ⚠ THE DIAGNOSTIC THAT IDENTIFIES THIS CLASS OF BUG: the Prometheus target
+    # error was `context deadline exceeded` (a TIMEOUT), not `connection refused`.
+    # A refused connection means the port is reachable but nothing is listening —
+    # a broken/disabled exporter. A timeout means the packets are being silently
+    # dropped — a NetworkPolicy blackhole. Reading that distinction is what
+    # separates "the DB exporters are broken" (they are not) from "the DB tier
+    # never allowed the scraper in" (it did not).
+    #
+    # Port-scoped exactly like every other rule in this policy — 9187 and 9104 are
+    # metrics-only endpoints, so this grants Prometheus NO access to 5432/3306 and
+    # therefore no path to actual database data.
+    #   9187 — CNPG's built-in postgres exporter (both `capstone-pg` and
+    #          `capstone-tenant-pg` instance pods; the port CNPG's PodMonitors scrape)
+    #   9104 — the mariadb-operator `...-metrics` mysqld-exporter Deployment
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9187
+        - protocol: TCP
+          port: 9104
 ---
 # --- EGRESS: DNS, intra-cluster (pod + service CIDRs — covers Galera/CNPG peer
 #     replication over pod IPs, the MinIO ClusterIP on 9000, and the operators'

@@ -170,8 +170,14 @@ spec:
     # manual security gate), the one known-permanent drift.
     - name: argocd
       rules:
+        # SCOPED TO PLATFORM APPS (FIX-7): tenant + lab apps are handled by
+        # TenantAppDegraded in the `tenant-delivery` group at the bottom of this
+        # file, which pages with student-facing wording and a longer window. The
+        # two selectors are EXACT COMPLEMENTS, verified live against Prometheus —
+        # every Degraded app matches exactly one of the two rules, never both
+        # (no duplicate page) and never neither (no coverage hole).
         - alert: ArgoCDAppDegraded
-          expr: argocd_app_info{health_status="Degraded"} == 1
+          expr: argocd_app_info{health_status="Degraded", project=~"platform|default", dest_namespace!~"lab-.*"} == 1
           for: 10m
           labels:
             severity: warning
@@ -195,8 +201,15 @@ spec:
     # ── (d) Pod CrashLoopBackOff / ImagePullBackOff ───────────────────────────
     - name: workloads
       rules:
+        # SCOPED TO PLATFORM NAMESPACES (FIX-7) — tenant/lab namespaces are
+        # covered by TenantAppWorkloadStuck below. Exact complement of that rule's
+        # selector (verified live: 1 platform + 7 tenant = 8 total waiting
+        # containers, so the split loses nothing). The namespace pattern is the
+        # tenancy naming convention: `lab-<course>` for the lab tenants and
+        # `<team>-<env>` for scaffolded app tenants; no platform namespace ends in
+        # -dev/-staging/-prod (verified live).
         - alert: PodCrashLoopOrImagePullBackOff
-          expr: kube_pod_container_status_waiting_reason{reason=~"CrashLoopBackOff|ImagePullBackOff|ErrImagePull"} == 1
+          expr: kube_pod_container_status_waiting_reason{reason=~"CrashLoopBackOff|ImagePullBackOff|ErrImagePull", namespace!~"lab-.*|.*-(dev|staging|prod)"} == 1
           for: 10m
           labels:
             severity: warning
@@ -235,3 +248,84 @@ spec:
             description: >-
               Node {{ $labels.node }} has been NotReady for 10m. Pods on it may be
               evicted/unschedulable. Check `kubectl describe node {{ $labels.node }}`.
+
+    # ── (g) TENANT / LAB DELIVERY PATH (FIX-7, BLOCK-1 durable half) ──────────
+    # WHY THIS GROUP EXISTS. Two student lab tenants sat completely broken for
+    # NINE DAYS and nobody found out. Their images were never published (the
+    # single `build` run in each repo died in a transient GitHub Actions incident
+    # on 2026-08-06 and was never retried), so their pods sat in ImagePullBackOff,
+    # their ArgoCD apps sat Degraded, and their public URLs served 503 — for the
+    # entire time, with no retry and no notification.
+    #
+    # The failure was NOT that nothing fired. Generic rules DID fire the whole
+    # time. The failure was that (a) alert delivery was broken (BLOCK-2: ntfy was
+    # rejecting ~62% of notifications with a message-size 400) and (b) what did
+    # get through was indistinguishable from ~79 alerts of mostly structural
+    # noise. So this group is not "another alert" — it SPLITS the student-facing
+    # delivery path out of the generic platform rules above into alerts that name
+    # the affected tenant and say what to actually do about it. The generic rules
+    # were narrowed to the exact complement of these selectors, so total alert
+    # volume does not increase and nothing is covered twice.
+    #
+    # WHY 30m AND NOT 10m: a student's app is legitimately broken-then-fixed many
+    # times an hour while they are working on it — that is the point of the
+    # platform, not an incident. 30m is long enough that normal iteration never
+    # pages, and short enough that a genuinely stuck tenant surfaces within the
+    # hour instead of in nine days.
+    #
+    # HOW TENANT/LAB WORKLOADS ARE IDENTIFIED (verified live, 2026-08-15) — by
+    # NAMING CONVENTION, deliberately not by namespace label:
+    # `kube_namespace_labels` is NOT emitted by kube-state-metrics in this install
+    # (the only series carrying `label_platform_capstone_team` come from opencost,
+    # and they cover just the three molly-demo namespaces — the lab namespaces are
+    # absent entirely). A label-join would therefore have silently MISSED the exact
+    # tenants this group exists to catch.
+    #   namespaces : `lab-<course>` (lab tenants) and `<team>-<env>` where env is
+    #                dev|staging|prod (scaffolded app tenants). No platform
+    #                namespace matches either shape.
+    #   argocd apps: lab apps live in the `platform` project but deploy into a
+    #                `lab-*` namespace, so they are matched on dest_namespace;
+    #                app tenants get their own AppProject, so they are matched as
+    #                "any project that is not platform/default".
+    - name: tenant-delivery
+      rules:
+        - alert: TenantAppDegraded
+          expr: >-
+            argocd_app_info{health_status="Degraded", project!~"platform|default"} == 1
+            or
+            argocd_app_info{health_status="Degraded", dest_namespace=~"lab-.*"} == 1
+          for: 30m
+          labels:
+            severity: warning
+            impact: student-facing
+          annotations:
+            summary: "Tenant app {{ $labels.name }} has been broken for 30m"
+            description: >-
+              The tenant/lab ArgoCD Application {{ $labels.name }} (namespace
+              {{ $labels.dest_namespace }}) has been Degraded for 30 minutes — a
+              student's app is down and they are probably stuck. THIS IS THE ALERT
+              THAT WOULD HAVE CAUGHT THE 9-DAY-DEAD LAB TENANTS. Most common cause
+              by far: their image was never published, because the `build` workflow
+              in their repo failed and was never retried — check the Actions tab of
+              {{ $labels.repo }} first and re-run the failed run. Then
+              `argocd app get {{ $labels.name }}` and
+              `kubectl -n {{ $labels.dest_namespace }} get pods`.
+
+        - alert: TenantAppWorkloadStuck
+          expr: kube_pod_container_status_waiting_reason{reason=~"CrashLoopBackOff|ImagePullBackOff|ErrImagePull", namespace=~"lab-.*|.*-(dev|staging|prod)"} == 1
+          for: 30m
+          labels:
+            severity: warning
+            impact: student-facing
+          annotations:
+            summary: "Tenant pod {{ $labels.namespace }}/{{ $labels.pod }} stuck ({{ $labels.reason }}) 30m"
+            description: >-
+              Container {{ $labels.container }} in tenant/lab pod
+              {{ $labels.namespace }}/{{ $labels.pod }} has been stuck in
+              {{ $labels.reason }} for 30 minutes. ImagePullBackOff/ErrImagePull
+              almost always means the tenant's image was never pushed — their build
+              failed and nothing retried it; re-run the failed `build` workflow in
+              their repo. CrashLoopBackOff means the image exists but the app dies
+              on boot — check `kubectl -n {{ $labels.namespace }} logs
+              {{ $labels.pod }} --previous` (a bad DB connection string or a missing
+              secret are the usual causes on this platform).

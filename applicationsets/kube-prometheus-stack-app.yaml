@@ -104,6 +104,60 @@ spec:
         # retro) live in platform-services/monitoring/alerts.yaml.
         defaultRules:
           create: true
+          # ── ADV-5: rules that are STRUCTURALLY FALSE on Talos + Cilium ──────
+          # These three upstream mixin groups alert on control-plane components
+          # that either do not exist on this cluster or are not reachable on the
+          # endpoints the mixin assumes. They fired CONTINUOUSLY — and an alert
+          # that is always firing carries zero information, while actively
+          # training people to ignore the channel that the rest of FIX-7 works to
+          # make trustworthy. Verified live before disabling (see each note).
+          rules:
+            # `KubeProxyDown` = absent(up{job="kube-proxy"}). There are NO
+            # kube-proxy pods on this cluster and never will be — Cilium replaces
+            # kube-proxy entirely (kubeProxyReplacement, clusters/real-talos/).
+            # The rule is unsatisfiable by construction, not "currently broken".
+            kubeProxy: false
+            # `KubeSchedulerInstanceUnreachable` / `KubeControllerManagerInstance
+            # Unreachable` (+ their TargetDown entries). Verified live from the
+            # Prometheus targets API: all 3 control-plane endpoints return
+            #   dial tcp 10.237.171.{5,6,8}:{10259,10257}: connect: connection refused
+            # i.e. Talos binds these components to localhost, so they are not
+            # scrapeable from the pod network on their default ports.
+            #
+            # ⚠ TRADE-OFF, STATED PLAINLY: this DOES give up direct alerting on the
+            # scheduler and controller-manager. That is a real reduction in
+            # coverage, accepted here because the alerts carried no signal (always
+            # firing) and because failure of either component still surfaces
+            # indirectly and quickly — pods stop being scheduled/replaced, which
+            # trips KubePodNotReady / KubeDeploymentReplicasMismatch / NodeNotReady.
+            # ⚠ HOW TO GET THE COVERAGE BACK PROPERLY (follow-up, NOT a values
+            # change): set `--bind-address=0.0.0.0` for kube-scheduler and
+            # kube-controller-manager in the Talos machine config
+            # (cluster.scheduler.extraArgs / cluster.controllerManager.extraArgs),
+            # roll the control-plane nodes, then flip these back to `true` and
+            # re-enable the two component blocks below. That is a node-rolling
+            # change and was deliberately NOT bundled into a pre-semester PR.
+            kubeSchedulerAlerting: false
+            kubeControllerManager: false
+
+        # ── ADV-5 (cont.): stop DECLARING scrape targets that cannot be scraped ──
+        # Disabling the rules above silences the *-InstanceUnreachable alerts, but
+        # `TargetDown` (general.rules, computed straight off `up`) would keep firing
+        # for as long as these ServiceMonitors exist and keep failing — it is a
+        # generic rule and cannot be disabled per-job without dropping TargetDown for
+        # everything. Turning the components off removes the Service + ServiceMonitor,
+        # so the `up` series disappear and TargetDown has nothing to evaluate.
+        # This is what clears the kube-scheduler / kube-controller-manager TargetDown
+        # pair; it is the same one decision as the `defaultRules.rules` flags above
+        # and must be reverted together with them (see the Talos bind-address note).
+        # kubeProxy is included for the same reason and is unconditionally correct —
+        # there is no kube-proxy to scrape.
+        kubeProxy:
+          enabled: false
+        kubeScheduler:
+          enabled: false
+        kubeControllerManager:
+          enabled: false
 
         prometheusOperator:
           # Resource-reclaim (VPA-driven, task follow-up): live VPA target is the
