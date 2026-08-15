@@ -1,11 +1,18 @@
 # B4 consumer repoint — go/no-go and rollback
 
-Split out of PR #442 (Harbor `dockerhub-proxy` infra) per reviewer-readiness's
-B4-002 finding: the consumer repoint (shared CI job container +
-20 scaffolder Dockerfiles) turns a rate-limit annoyance into a single point of
-failure across all tenant CI, with no fallback if Harbor is unreachable at
-build time. That risk deserves its own explicit decision, not a bundled
-merge — this document is that decision surface.
+**DECIDED: D-087 — the repoint STAYS.** Team-lead signed off after weighing
+the risk analysis below. Rationale (team-lead's own words): two live 429s
+during light testing today make Tuesday rate-limiting near-certain, while
+Harbor-down is lower-probability, well-alerted, build-only, and self-healing.
+This document is kept (not deleted) as the record of that decision and the
+risk it was made against — see "Decision" below for the full reasoning, and
+"Known caveat" for one operational gap the decision doesn't resolve.
+
+Originally split out of PR #442 (Harbor `dockerhub-proxy` infra) per
+reviewer-readiness's B4-002 finding: the consumer repoint (shared CI job
+container + 20 scaffolder Dockerfiles) turns a rate-limit annoyance into a
+single point of failure across all tenant CI, with no fallback if Harbor is
+unreachable at build time.
 
 ## What this PR does
 
@@ -45,31 +52,61 @@ so it is not risk-neutral.
 | **B. Add a documented fallback** | e.g. Kaniko/BuildKit multi-registry FROM fallback, or a CI-level retry that falls back to `docker.io` if the proxy 5xxs | Removes the SPOF; more moving parts, needs its own verification |
 | **C. Hold indefinitely** | Keep base images on Docker Hub directly; treat B4 as infra-only (cache exists, opt-in per-consumer later) | Zero new risk; Docker Hub rate-limit exposure remains exactly as it is today |
 
-No fallback mechanism is implemented in this PR — Option B is scoped but not
-built. This PR as committed is Option A.
+No fallback mechanism is implemented in this PR — Option B remains a scoped,
+unbuilt follow-up (see "Known caveat" and the backlog note below). This PR as
+committed is Option A.
 
-## Recommendation
+## Decision (D-087 — Option A, signed off by team-lead)
 
-Given classes start 2026-08-19 and Harbor has already shown one real
-provider-level surprise this session (the async-reconcile misread that caused
-B4-001), the safer default is **C now, B later**: hold this PR, ship #442
-(infra only) for the semester start, and revisit the repoint — likely with a
-retry/fallback wrapper — once there's a normal week to verify it properly
-rather than four days before go-live.
+My original recommendation was Option C (hold). Team-lead's ruling was
+Option A (merge as-is), on this reasoning:
 
-This is a recommendation, not a unilateral call — flagged to the orchestrator
-per the reviewer's request. Whoever approves this PR is making the go/no-go
-decision; this document exists so that decision is explicit rather than
-implicit in a merge click.
+- **The rate-limit side is no longer theoretical.** Two separate live Docker
+  Hub 429s were hit during ordinary testing today (one during this task's own
+  work, one during an unrelated FIX-9 race-replay test) — both from light,
+  single-agent traffic. Scaled to ~20 teams' CI running concurrently on
+  2026-08-19, rate-limiting is treated as near-certain, not a tail risk.
+- **The Harbor-down side is comparatively contained.** Harbor already has to
+  be up for every tenant's *push* step to work — this repoint only moves that
+  same dependency earlier in the pipeline (deps/build stage, not just push).
+  A Harbor outage is lower-probability than Docker Hub rate-limiting, is
+  already alertable (ArgoCD/Harbor health monitoring), fails at *build* time
+  (loud, visible in the CI log — not a silent runtime failure), and is
+  self-healing the moment Harbor recovers (no stuck state, no manual cleanup).
 
-## Rollback (if merged and then reverted)
+Net: the risk this document flagged is real but was judged smaller than the
+risk it was traded against. Option B (a retry/fallback wrapper) remains the
+better long-term shape and is left as a backlog item, not a blocker for this
+decision.
+
+## Known caveat (does not block D-087, but must be tracked)
+
+**Copy-at-scaffold means a future rollback of this template will NOT reach
+already-scaffolded repos.** The tenant contract
+(`platform-services/backstage/templates/_fragments/_contract/`) is copied
+into each team's repo at scaffold time, not referenced live — this is the
+same "copy-not-reference" pattern already flagged elsewhere in this platform
+as the root cause of several past onboarding bugs (a template fix ships, but
+repos scaffolded before the fix keep the old content forever unless someone
+manually backports it). Concretely: if `dockerhub-proxy` is ever
+decommissioned or this decision is later reversed, every repo scaffolded
+*after* this PR merges keeps its proxied `FROM` lines and the shared CI job
+container reference regardless of what the template says going forward —
+they do not follow a template-level revert. A platform-level rollback of this
+PR only changes what *new* scaffolds get; existing repos would need an
+individual, per-repo fix (or a documented "if this ever needs to be undone,
+here is the sed/PR-bot pass across live repos" runbook, which does not exist
+today).
+
+## Rollback (template level — see caveat above for its limits)
 
 Single clean revert: `git revert <this-PR's-merge-commit>` restores every
 `FROM` line and the CI container image to their pre-repoint (Docker Hub
-direct) values. No data migration, no state to clean up — this is a pure
-pull-path change with no persistent side effects. The `dockerhub-proxy`
-project itself (from #442) is unaffected either way and can stay live
-whether or not this PR merges.
+direct) values **for future scaffolds**. No data migration, no platform-side
+state to clean up — this is a pure pull-path change with no persistent side
+effects at the platform layer. The `dockerhub-proxy` project itself (from
+#442) is unaffected either way. Already-scaffolded repos are NOT touched by
+this revert — see "Known caveat" above.
 
 ## Verification already done (carries over from the reverted commit)
 
