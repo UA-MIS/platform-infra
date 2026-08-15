@@ -61,7 +61,16 @@ spec:
             {{- $robotPushUser := printf "robot$%s+%s-push" $team $team }}
             {{- $repoUrl := printf "https://github.com/UA-MIS/%s" $app }}
             {{- $infraUrl := "https://github.com/UA-MIS/platform-infra" }}
-            {{- /* env quota tiers — dev/staging modest, prod higher (mirrors tenants/_template/namespaces/*) */}}
+            {{- /* env quota tiers — dev/staging modest, prod higher.
+                   ⚠ MUST STAY IN SYNC with tenants/_template/namespaces/{dev,staging,prod}.yaml.
+                   Both are LIVE tenant-creation paths (this Composition serves the
+                   CapstoneTenant claim path; the blueprint is rendered into
+                   tenants/team-<name>/ by the Backstage new-capstone-project wizard),
+                   and nothing references the other — alignment is manual only.
+                   These HAD drifted: prod here was cpu 4/8 + pods 20 while the blueprint
+                   still said cpu 2/4 + pods 15, so a team's prod ceiling depended on which
+                   onboarding path created it. Realigned 2026-08-15 (health audit / B5);
+                   the blueprint was moved UP to these values. Change BOTH or neither. */}}
             {{- $envs := list
                   (dict "name" "dev"     "cpuReq" "2" "memReq" "2Gi" "cpuLim" "4" "memLim" "4Gi"  "pods" "10" "storageReq" "5Gi"  "pvcs" "4")
                   (dict "name" "staging" "cpuReq" "2" "memReq" "2Gi" "cpuLim" "4" "memLim" "4Gi"  "pods" "10" "storageReq" "5Gi"  "pvcs" "4")
