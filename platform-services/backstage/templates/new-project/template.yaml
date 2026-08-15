@@ -9,8 +9,13 @@
 #   web + single             -> pick one app fragment (a backend API, a static site, ...)
 #   web + frontend+backend   -> pick a frontend + a backend (deployed behind one ingress:
 #                               / -> frontend, /api -> backend)
-#   mobile                   -> pick a mobile app fragment (build-artifact .ipa/.apk, NOT a
-#                               k8s workload) + a backend fragment (its API, deployed normally)
+#   mobile                   -> HIDDEN pre-Tuesday (F-3/D-058/FIX-5): mobile app fragment
+#                               (build-artifact .ipa/.apk, NOT a k8s workload) + a backend
+#                               fragment. Every mobile fragment's build workflow composes
+#                               outside .github/workflows/, so GitHub Actions never runs it —
+#                               no artifact ever built, silently. See the projectType comment
+#                               below for the restore path; green-check.py's QUARANTINE
+#                               tracks the underlying bug.
 # VM workloads keep their own dedicated "New VM" template (vm-app, #149) — the second
 # top-level button — because a KubeVirt VM is a fundamentally different workload than a
 # container; folding it into the compose engine adds risk with no benefit (ADR-034 §VM).
@@ -138,7 +143,20 @@ spec:
     # ----------------------------------------------------------------------------------
     # What are you building? The projectType choice REVEALS the relevant follow-up fields
     # (JSON-schema dependencies + oneOf — the Backstage conditional-parameter pattern).
-    # ----------------------------------------------------------------------------------
+    #
+    # MOBILE IS HIDDEN (F-3/D-058, FIX-5, catalog-refresh-only): every mobile fragment
+    # composes its build workflow to <targetDir>/.mobile-ci/build.yaml, which GitHub Actions
+    # never discovers (it only reads .github/workflows/ at the repo root) — so no .apk/.ipa
+    # was EVER built for a mobile scaffold, silently, while the paired backend deployed and
+    # CI stayed all-green (192/499 = 38% of the wizard surface). Decision: hide the option
+    # rather than fix-forward pre-Tuesday — rerouting the workflow files is real work with
+    # billing implications (GitHub-hosted macos-14 minutes against the org's Free-plan pool).
+    # RESTORE: put 'mobile' back in the enum + enumNames below; the MOBILE oneOf branch
+    # further down (`# ===================== MOBILE =====================`) is untouched and
+    # still valid — it simply has no reachable path into it while 'mobile' is absent here.
+    # green-check.py's new mobile_workflow_reachability check (compose_lib.py) still catches
+    # the underlying bug on disk (fragments are quarantined there, not deleted) — see
+    # green-check.py's QUARANTINE for the tracking reference.
     - title: What are you building?
       required:
         - projectType
@@ -146,10 +164,9 @@ spec:
         projectType:
           title: Project type
           type: string
-          enum: [web, mobile]
+          enum: [web]
           enumNames:
             - 'Web app (deployed to the cluster)'
-            - 'Mobile app (build .ipa/.apk) + a backend API'
           default: web
       dependencies:
         projectType:
@@ -385,6 +402,9 @@ spec:
                             - 'None'
                           default: host-mysql
             # ===================== MOBILE =====================
+            # HIDDEN, not deleted (F-3/D-058/FIX-5) — unreachable while 'mobile' is absent
+            # from the projectType enum above. Left byte-for-byte valid so restoring the
+            # option is a one-line enum edit; see the comment above projectType.
             - required: [mobileFragment, backendFragment, database]
               properties:
                 projectType:
