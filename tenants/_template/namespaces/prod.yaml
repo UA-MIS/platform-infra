@@ -21,7 +21,20 @@ metadata:
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/enforce-version: v1.31
 ---
-# ResourceQuota — non-prod starting values (§3.2). Tunable per team later.
+# ResourceQuota — prod starting values (§3.2). Tunable per team later.
+#
+# ⚠ MUST STAY IN SYNC with the prod row of the env list in
+# platform-services/crossplane/apis/composition.yaml (search `"name" "prod"`).
+# Both are LIVE tenant-creation paths — this blueprint is rendered into
+# tenants/team-<name>/ by the Backstage new-capstone-project wizard (picked up by
+# tenants-appset, which excludes only tenants/_*), while the Composition serves
+# the CapstoneTenant claim path. There is no reference between them, so they can
+# only be kept aligned by hand.
+#
+# They had already drifted: this file said cpu 2/4 and pods 15 while the
+# Composition said cpu 4/8 and pods 20, so a team's prod ceiling depended on
+# which onboarding path created it. Corrected to match the Composition
+# (health audit 2026-08-15 / B5). dev and staging were already identical.
 apiVersion: v1
 kind: ResourceQuota
 metadata:
@@ -34,11 +47,11 @@ metadata:
 spec:
   # Prod = higher ceiling than non-prod (§3.2).
   hard:
-    requests.cpu: "2"
+    requests.cpu: "4"
     requests.memory: 4Gi
-    limits.cpu: "4"
+    limits.cpu: "8"
     limits.memory: 8Gi
-    pods: "15"
+    pods: "20"
     services: "5"
     # Storage cap (replica-3 Ceph starvation fence). Prod = higher ceiling than non-prod.
     requests.storage: 20Gi
