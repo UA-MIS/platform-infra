@@ -15,7 +15,13 @@
 # package manager, and a read-only-friendly filesystem.
 
 # ---- build stage (compile a static binary) ----
-FROM golang:1.23 AS build
+#
+# B4: base images resolve through the platform's Harbor pull-through cache
+# (dockerhub-proxy) instead of Docker Hub directly -- avoids Docker Hub rate
+# limits across every team's CI, verified working end-to-end (cache-hit proof
+# in artifacts/implementation/b4-harbor-proxy-cache.evidence.yaml). Same image,
+# same tag, different registry host -- purely a pull-path change.
+FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/golang:1.23 AS build
 WORKDIR /src
 # Resolve modules first (cached when only source changes).
 COPY go.mod go.sum ./

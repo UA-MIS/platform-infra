@@ -17,7 +17,13 @@
 # read-only rootfs (under /dev/shm + stdout/stderr), so it runs clean with no writable volume.
 
 # ---- build stage ----
-FROM node:22-alpine AS build
+#
+# B4: base images resolve through the platform's Harbor pull-through cache
+# (dockerhub-proxy) instead of Docker Hub directly -- avoids Docker Hub rate
+# limits across every team's CI, verified working end-to-end (cache-hit proof
+# in artifacts/implementation/b4-harbor-proxy-cache.evidence.yaml). Same image,
+# same tag, different registry host -- purely a pull-path change.
+FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/node:22-alpine AS build
 WORKDIR /src
 
 # Install deps first (layer-cached), then copy the source and build. No lockfile is shipped
@@ -29,7 +35,7 @@ COPY . .
 RUN npm run build
 
 # ---- runtime stage ----
-FROM nginx:1.27-alpine
+FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/nginx:1.27-alpine
 
 # Custom config: listen on the component port, SPA fallback, /healthz, and a fully
 # read-only-rootfs-compatible runtime (pid + temp under /dev/shm, logs to stdout/stderr).
