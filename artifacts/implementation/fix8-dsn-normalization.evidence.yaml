@@ -1,0 +1,334 @@
+task: "FIX-8 (go-live blocker): DATABASE_URL driver normalization — fastapi + all-fragment audit"
+task_id: "26"
+owner: dev-dsn
+branch: fix/fastapi-mysql-dsn-normalization
+date: 2026-08-15
+
+root_cause: >
+  The platform hands every scaffolded fragment a bare `mysql://` DSN via DATABASE_URL
+  (ESO -> Vault -> Kubernetes Secret). The default wizard combo (backend/fastapi +
+  host-mysql) passed this straight to SQLAlchemy's create_engine(). SQLAlchemy resolves
+  the DBAPI driver at create_engine() call time (not lazily at first query), and a bare
+  `mysql://` scheme defaults to the MySQLdb driver. The fastapi image ships PyMySQL only
+  (no mysqlclient/MySQLdb, to keep the image apt-free), so create_engine() raised
+  ModuleNotFoundError the instant app/db.py was imported — crash-looping the pod on
+  every boot as soon as real DB credentials were injected. This was masked pre-FIX-3 by
+  the SQLite fallback path (DATABASE_URL unset): with no credential, provider-vault
+  could never mint a tenant's role, DATABASE_URL never materialized, and the fastapi
+  fragment's engine defaulted to SQLite and never touched create_engine("mysql://...")
+  at all -- so the bug ran silently "green but no data" rather than crash-looping.
+
+  IMPORTANT FRAMING: FIX-3 (task #17, restoring the dead provider-vault credential)
+  did NOT cause this defect -- it UNMASKED it. Once the secret plane started
+  delivering real DATABASE_URL values, the pre-existing driver mismatch became a
+  hard CrashLoopBackOff instead of a silent no-op. See
+  fix3-provider-vault-token.evidence.yaml's addendum_2026_08_15_env_pickup for the
+  ordering context (that document is in the orchestrator repo's
+  artifacts/implementation/, not this platform-infra repo).
+
+fix: >
+  app/db.py now normalizes a leading `mysql://` to `mysql+pymysql://` before
+  create_engine(), via a new `_normalize_mysql_url()` helper. Mirrors the existing
+  flask fragment's inline normalization and the dotnet-aspnet fragment's
+  ConnectionStringHelper.NormalizeMySql (commit 66d5660) — same house style: minimal,
+  per-fragment normalization at the DSN entry point, sqlite/already-qualified values
+  pass through unchanged. Per D-062, per-fragment normalization is the Tuesday-safe
+  contract; a DSN-contract redesign (platform emits driver-qualified DSNs per backend)
+  is punch-listed separately, not in scope here.
+
+files_changed:
+  - platform-services/backstage/templates/_fragments/backend/fastapi/skeleton/app/db.py
+  - platform-services/backstage/templates/_fragments/backend/fastapi/skeleton/tests/test_db_normalization.py
+
+audit_table:
+  # fragment | driver/ORM | accepts bare mysql:// natively? | status
+  - fragment: dotnet-aspnet
+    driver: MySqlConnector / Pomelo.EntityFrameworkCore.MySql
+    accepts_bare_mysql_uri: false
+    status: already-fixed
+    note: >
+      ConnectionStringHelper.NormalizeMySql, commit 66d5660 (pre-existing, verified
+      present and covered by ConnectionStringHelperTests.cs).
+
+  - fragment: fastapi
+    driver: SQLAlchemy 2.x + PyMySQL
+    accepts_bare_mysql_uri: false
+    status: fixed-this-pr
+    note: >
+      create_engine() resolves the DBAPI at call time (not lazy) — crashes at import,
+      not first query. Bug confirmed live: `create_engine("mysql://...")` raises
+      ModuleNotFoundError("No module named 'MySQLdb'") in this environment (only
+      PyMySQL is installed). Fixed via _normalize_mysql_url() in app/db.py.
+      DSN-002 rework (retry 1/2): _resolve_database_url() also treats a blank/
+      whitespace DATABASE_URL the same as unset (falls back to sqlite), matching
+      every other fragment (flask/go/spring/rust already guard this) — a
+      transiently-empty value used to reach create_engine() with "" and crash at
+      import via the identical CrashLoopBackOff door, reachable via FIX-9's
+      env-injection race.
+
+  - fragment: flask
+    driver: SQLAlchemy 2.x + PyMySQL
+    accepts_bare_mysql_uri: false
+    status: already-fixed
+    note: >
+      app/db.py get_engine() already rewrites mysql:// -> mysql+pymysql:// inline
+      (pre-existing; confirmed by fragment.yaml description and source read). Lazy
+      engine (built on first request), so it boots clean regardless either way —
+      traced the actual normalization code, did not trust the clean boot.
+
+  - fragment: django
+    driver: dj-database-url + PyMySQL (django.db.backends.mysql)
+    accepts_bare_mysql_uri: false
+    status: already-fixed
+    note: >
+      dj_database_url.parse() maps the `mysql` scheme to django.db.backends.mysql,
+      which uses the MySQLdb DBAPI. project/__init__.py already calls
+      `pymysql.install_as_MySQLdb()` before Django imports the backend, so PyMySQL
+      satisfies the MySQLdb import. Lazy connection (Django connects on first query,
+      not at startup/import) — traced the actual shim rather than trusting a clean
+      boot, per the task's explicit warning about lazy-engine frameworks.
+
+  - fragment: express
+    driver: mysql2
+    accepts_bare_mysql_uri: true
+    status: already-ok
+    note: >
+      mysql.createPool(url) / createConnection(url) — mysql2's own documented examples
+      use `mysql://root:password@host:port/db` directly as the canonical connection
+      string form (verified via Context7 /sidorares/node-mysql2 docs). No scheme
+      validation; it just extracts host/port/user/pass/database from the URL.
+
+  - fragment: nestjs
+    driver: mysql2 (raw pool, not TypeORM)
+    accepts_bare_mysql_uri: true
+    status: already-ok
+    note: "Same DbService pattern as express — mysql.createPool(url) with bare mysql://."
+
+  - fragment: node-bare
+    driver: mysql2
+    accepts_bare_mysql_uri: true
+    status: already-ok
+    note: "Same pattern as express/nestjs."
+
+  - fragment: go
+    driver: go-sql-driver/mysql
+    accepts_bare_mysql_uri: false
+    status: already-fixed
+    note: >
+      go-sql-driver/mysql does not accept a URI at all — it needs its own DSN form
+      (user:pass@tcp(host:port)/db). db.go's toDSN() already converts DATABASE_URL to
+      this form (pre-existing, confirmed by source read). sql.Open is lazy but toDSN
+      runs eagerly in OpenDB(), so a malformed/unconvertible URL is caught immediately,
+      not deferred to first query.
+
+  - fragment: laravel
+    driver: PDO MySQL (Laravel's ConfigurationUrlParser)
+    accepts_bare_mysql_uri: true
+    status: already-ok
+    note: >
+      config/database.php sets 'url' => env('DATABASE_URL') on the 'mysql' connection.
+      Laravel's URL scheme->driver mapping treats `mysql://` as the canonical DSN form
+      for the mysql driver (this is Laravel's own documented DATABASE_URL convention).
+      Laravel builds PDO connections lazily on first query — traced the parser, not
+      just the boot.
+
+  - fragment: rails
+    driver: Trilogy (via adapter rewrite)
+    accepts_bare_mysql_uri: false
+    status: already-fixed
+    note: >
+      config/database.yml already rewrites the URL: `ENV["DATABASE_URL"].sub(%r{\Amysql2?://}, "trilogy://")`
+      before Rails parses it (pre-existing; Rails maps URL scheme -> adapter, and
+      there is no bundled `mysql` adapter, only Trilogy). ActiveRecord connects
+      lazily — traced the actual regex rewrite, not just the boot.
+
+  - fragment: rust-axum
+    driver: sqlx (MySqlPool)
+    accepts_bare_mysql_uri: true
+    status: already-ok
+    note: >
+      sqlx's own MySQL connector uses `mysql://` as its canonical/native scheme.
+      connect_lazy() defers the actual connection but eagerly parses/validates the
+      URL scheme, so a truly incompatible scheme would fail at pool-build time, not
+      silently at first query.
+
+  - fragment: spring-boot
+    driver: HikariCP + JDBC (mysql-connector)
+    accepts_bare_mysql_uri: false
+    status: already-fixed
+    note: >
+      JDBC needs jdbc:mysql://... , not a bare URI. Db.java's toJdbcUrl() already
+      converts it (pre-existing, confirmed by source read); HikariConfig is built
+      eagerly in @PostConstruct init() (initializationFailTimeout=-1 only suppresses
+      blocking on an *unreachable* DB, not a malformed URL/JdbcUrl construction).
+
+  - fragment: nextjs (fullstack)
+    driver: Prisma (mysql provider) + mysql2 (not touched by Prisma's own client)
+    accepts_bare_mysql_uri: true
+    status: already-ok
+    note: >
+      prisma/schema.prisma declares `provider = "mysql"` with `url = env("DATABASE_URL")`.
+      `mysql://` is Prisma's own canonical/documented scheme for the mysql provider —
+      no normalization needed. PrismaClient connects lazily on first query; traced the
+      schema's provider/url contract rather than trusting `next build` (which needs no
+      DATABASE_URL and would not have caught a runtime-only failure anyway).
+
+  - fragment: nuxt (fullstack)
+    driver: Drizzle ORM over mysql2
+    accepts_bare_mysql_uri: true
+    status: already-ok
+    note: "server/utils/db.ts wraps mysql2.createPool(url) — same as express/nestjs."
+
+  - fragment: sveltekit (fullstack)
+    driver: Drizzle ORM over mysql2
+    accepts_bare_mysql_uri: true
+    status: already-ok
+    note: "src/lib/server/db.ts wraps mysql2.createPool(url) — same as nuxt."
+
+verification:
+  unit:
+    - "cd platform-services/backstage/templates/_fragments/backend/fastapi/skeleton && pytest -q"
+    - "Result: 14 passed (10 pre-existing + 4 new in tests/test_db_normalization.py)."
+  manual_repro:
+    - >
+      Pre-fix repro: `create_engine('mysql://user:pass@host:3306/db')` in this venv
+      (PyMySQL installed, MySQLdb not) raises
+      `ModuleNotFoundError: No module named 'MySQLdb'` — confirms the crash-loop cause.
+    - >
+      Post-fix repro: `DATABASE_URL=mysql://exampleteam_dev:not-a-real-password@host:3306/exampleteam_dev`
+      + `from app.db import engine` succeeds; engine.driver == "pymysql",
+      engine.dialect.name == "mysql".
+  independent_live_confirmation:
+    source: devops-vault, during FIX-3 (#17) env-pickup verification, 2026-08-15
+    citation: >
+      artifacts/implementation/fix3-provider-vault-token.evidence.yaml,
+      section defect_B_dsn_driver (orchestrator repo, not this platform-infra repo).
+    finding: >
+      Independently and by direct observation (not by re-running this PR's fix):
+      once FIX-3 restored the dead provider-vault credential, fastapi replicas that
+      started AFTER the Secret existed picked up a real DATABASE_URL and then
+      CrashLoopBackOff'd, in BOTH staging and prod, with an identical live stack
+      trace ending in:
+        File "/app/app/db.py", line 37, in <module>
+          engine = create_engine(DATABASE_URL, **_engine_kwargs)
+        ...sqlalchemy/dialects/mysql/mysqldb.py ... ModuleNotFoundError: No module
+        named 'MySQLdb'
+      This is the exact bug this PR fixes, confirmed live and pre-dating this PR's
+      own manual repro in this evidence file. A pre-secret replica in the same
+      ReplicaSet ran fine env-less (kubelet resolves secretKeyRefs per container
+      start, not per pod), which is why the two symptom classes (silent-no-DB vs.
+      hard-crash) coexisted across replicas of the same tenant.
+    scope_note: >
+      This confirms the PRE-fix crash live, in-cluster, from an independent source —
+      it does NOT yet confirm this PR's fix resolves it live (that replica ran the
+      unfixed image). The devops-fragments Tier-A ask below covers that gap: it
+      needs to run against an image built from this branch.
+
+  integration_pending:
+    status: >
+      SATISFIED via podman runtime evidence (devops-fragments, 2026-08-15) — see
+      empirical_confirmation below. Per D-075 (decision-log), a separate in-cluster
+      Tier-A confirmation is DROPPED as a merge precondition: this runtime evidence
+      plus the venv reproduction above carries the merge; the in-cluster leg happens
+      naturally in the FINAL e2e (task #11), which scaffolds the default
+      fastapi+host-mysql combo post-merge.
+
+  empirical_confirmation:
+    source: devops-fragments (VERIFY-4), 2026-08-15
+    method: >
+      Composed backend/fastapi + host-mysql through dry-render.py (the same
+      compose_lib the live scaffolder action uses), built the image with podman,
+      ran it against a live MariaDB 11.8 with the contract's exact bare-scheme DSN
+      form (`DATABASE_URL=mysql://appuser:apppw@f8-mysql:3306/appdb`, matching what
+      database.externalsecret.yaml actually renders), and queried MariaDB directly
+      afterward to rule out the SQLite-fallback false-positive (a 200 on a data
+      route could otherwise just be the in-memory fallback silently serving).
+    result: >
+      Container stable (no crash-loop). GET /healthz -> 200. GET /api/items -> 200
+      []. POST /api/items -> 201, item created. GET /api/items read-back -> 200
+      with the created row. Direct MariaDB query afterward: SHOW TABLES lists
+      `items`; SELECT * FROM items returns the row physically persisted in
+      MariaDB — confirms this is NOT the SQLite fallback path.
+    negative_control: >
+      Same DSN form, same MariaDB image, PRE-fix code: container Exited (1),
+      `ModuleNotFoundError: No module named 'MySQLdb'` raised from create_engine
+      at app/db.py:37, gunicorn "Worker failed to boot." Matches this evidence
+      file's own venv reproduction above and the independent live confirmation
+      from devops-vault. The only variable that changed between crash-loop and
+      working CRUD is the normalization fix.
+    diff_review: >
+      devops-fragments independently reviewed the diff and confirmed the shape is
+      correct: _normalize_mysql_url only rewrites a leading bare mysql://, leaves
+      already-driver-qualified or sqlite URLs untouched, and the platform DSN
+      template (database.externalsecret.yaml) is NOT modified — preserving the
+      bare form every other fragment (django/express/go/flask/laravel/...) parses
+      correctly. Runtime-verified those five directly under the same conditions;
+      none regress. This independently corroborates D-070 (F-6 finalized as
+      contract mismatch, fix stays fragment-side, shared template untouched).
+    scope_note: >
+      Fragment-level runtime confirmation, not in-cluster: the DSN string used was
+      read directly from database.externalsecret.yaml's canonical form, not one
+      ESO actually materialized into a pod. Does not exercise ESO delivery itself.
+      Tested against commit ca17471 (pre-DSN-001-rework); devops-fragments noted
+      the normalization code is unchanged by the rework (only the test fixture and
+      the DSN-002 blank-handling guard changed) and does not expect a different
+      result, but offered to re-run against the reworked branch on request.
+    citation: >
+      Full 19-fragment matrix (17 PASS / 2 FAIL pre-fix, fastapi and
+      static/react-static/FIX-12 the only failures — both single-file, invisible
+      to every existing gate, per D-073): artifacts/exploration/
+      fragment-matrix-2026-08-15.md (orchestrator repo).
+
+rework_history:
+  - round: 1
+    review: artifacts/reviews/review-fix8-dsn.md (reviewer-wizard, D-062)
+    verdict: REJECTED
+    blocking_finding: >
+      DSN-001 (HIGH): the round-1 test fixture embedded a REAL, live molly-demo-dev
+      database password (SHA-256-confirmed against the live cluster Secret by the
+      reviewer, without printing it) — copied verbatim from the dotnet-aspnet
+      fragment's ConnectionStringHelperTests.cs (present on main since 66d5660,
+      itself unflagged in that PR's review). Because `_fragments/**/skeleton/` is
+      copied into every scaffolded student repo, and fastapi is the wizard's
+      DEFAULT backend, this meant a live tenant's DB password would land in a
+      large fraction of student repos' git history and CI logs.
+    remediation_this_round:
+      - "Replaced the fixture in tests/test_db_normalization.py with a sanitized shape (same host/scheme structure, fake user/password — 'exampleteam_dev' / 'not-a-real-password')."
+      - "Scrubbed the two pre-existing dotnet-aspnet copies carrying the same live credential (_fragments/backend/dotnet-aspnet and the legacy templates/dotnet-aspnet-api) with the same sanitized fixture, for consistency and to close the exposure everywhere it appears in this repo."
+      - "Scrubbed the one remaining reference (tenant username only, password already redacted) in this evidence file."
+      - "Credential ROTATION is explicitly NOT this PR's job — tracked separately as FIX-11 (#35, devops-vault, URGENT security), since scrubbing files does not un-publish an already-exposed value."
+      - "Fixed DSN-002 (non-blocking finding, promoted into this rework per the reviewer's note that it reaches the same CrashLoopBackOff this task exists to eliminate): DATABASE_URL blank/whitespace now falls back to sqlite like every other fragment, via a new _resolve_database_url() helper. 4 new tests added (unset/empty/whitespace/normalizes)."
+      - "DSN-003 (merge should be gated on live integration evidence, not unit-only) — SATISFIED: devops-fragments' podman runtime evidence (empirical_confirmation above) plus the venv reproduction carries the merge per D-075 (decision-log); a separate in-cluster Tier-A run is no longer a precondition, and rides along with the FINAL e2e (#11) instead."
+      - "DSN-004 (DSN template doesn't URL-encode userinfo) — out of scope per reviewer, filed to the D-062 DSN-contract-redesign backlog (tracked in decision-log D-071, not duplicated here)."
+      - "DSN-005 (flask/go/spring/rails normalization has no regression test) and DSN-007 (unregistered legacy template dirs carry dead-weight secret copies) — reviewer flagged these as follow-ups, not this PR's job; noted here for traceability, not actioned."
+    test_status_this_round: "18 passed (10 pre-existing + 4 DSN-001-round normalization tests + 4 new DSN-002 blank/whitespace tests)."
+
+rereview: >
+  FIX-8-RE-REVIEW (#36): APPROVED (artifacts/reviews/review-fix8-rereview.md,
+  reviewer-wizard). Independently re-verified DSN-001 via a repo-wide credential
+  hash scan (923 files, 45 credential-shaped values from live cluster secrets,
+  zero occurrences of the exposed password) and DSN-002 via in-situ module
+  imports. Also closed a gap I could not: compiled and ran the dotnet-aspnet
+  suite (14/14 pass, DOTNET_ROLL_FORWARD=LatestMajor) since only .NET 10 runtime
+  was available in my environment. Confirmed the prior-approved normalization
+  logic and 15-fragment audit are untouched by the rework (diff scoped to
+  fastapi + dotnet-aspnet only).
+
+merge_status: >
+  D-075 (decision-log) + the re-review's APPROVED verdict together clear this
+  PR to merge: DSN-003 is satisfied by devops-fragments' podman evidence
+  (empirical_confirmation above), so no further gate remains.
+
+open_items:
+  - "DSN-contract redesign (platform emits per-backend driver-qualified DSNs) is punch-listed per D-062, intentionally out of scope for this go-live-blocker fix. DSN-004 (userinfo URL-encoding) is appended to that same backlog entry, not a new item here."
+  - "Credential rotation for the exposed molly-demo-dev password is FIX-11's job (#35, devops-vault), not this PR's — do not consider this evidence bundle a substitute for confirming that rotation happened. Merging this PR does NOT remediate the historical exposure; only rotation does."
+  - "DSN-005 (no regression test for flask/go/spring/rails normalization) and DSN-007 (legacy uncatalogued template dirs, now scrubbed but still dead weight) remain open low-priority follow-ups per the re-review, not actioned here."
+
+related_defects_out_of_scope:
+  - id: defect_A_env_injection_race (fix3 evidence addendum)
+    summary: >
+      Pods that win the race against ESO start before the Secret materializes and
+      never re-pick it up (secretKeyRef optional:true resolves once, at container
+      start). Tracked separately as FIX-9 (task #29/#30, Reloader or equivalent).
+      Unrelated to this DSN fix; no coordination needed beyond awareness that
+      rollout-restart behavior may appear on shared test tenants while FIX-9 lands.
