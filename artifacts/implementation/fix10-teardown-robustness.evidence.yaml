@@ -111,22 +111,46 @@ scope_additions_status:
       NOT fixed in this PR. The original task ask ("root-cause whether
       prune is misconfigured ... fix in the contract/appset if so") is
       answered: prune is NOT misconfigured; there is nothing to fix in
-      ArgoCD's prune scope. The REAL findings devops-e2e surfaced (no
-      canary abort/rollback safety net; a placeholder stable revision with
-      no viable fallback; Rollout health invisible to ArgoCD) are genuine
-      and worth fixing, but are NOT teardown-robustness issues — they are
-      an ongoing, live tenant's deploy-health and progressive-delivery
-      design gap, orthogonal to this task's actual scope (de-provisioning).
-      Fixing them well requires decisions this task shouldn't make
-      unilaterally: whether/how to configure Rollout `analysis`/
-      `progressDeadlineAbort` (an ADR-037 progressive-delivery-policy call),
-      why the first-deploy seed didn't complete for this tenant (a separate
-      CI investigation), and coordination with whoever owns FIX-7's
-      Degraded-app alert (the Rollout-health-visibility gap directly
-      affects that alert's correctness). Recommending this be spun out as
-      its own task rather than folded into FIX-10 — reported to team-lead
-      for a scoping call.
+      ArgoCD's prune scope. Two genuine, non-prune findings — no canary
+      abort/rollback safety net, and a placeholder stable revision with no
+      viable fallback — are worth fixing but are NOT teardown-robustness
+      issues; they are a live tenant's deploy-health / progressive-delivery
+      design gap, orthogonal to this task's scope (de-provisioning). Fixing
+      them requires decisions this task shouldn't make unilaterally
+      (Rollout `analysis`/`progressDeadlineAbort` is an ADR-037
+      progressive-delivery-policy call; why the first-deploy seed didn't
+      complete needs a separate CI investigation). Reported to team-lead
+      for a scoping call rather than folded in here.
     status: "RESOLVED (investigation complete, confirmed by devops-e2e's live diagnostics). No code change in this PR — see decision above."
+
+    correction_2026_08_15_fix14: >
+      CORRECTION, per FIX-14's investigation (dev-observability, task #46,
+      artifacts/implementation/fix14-rollout-health.evidence.yaml). The
+      "Rollout health invisible to ArgoCD" claim above (and devops-e2e's
+      corroboration of it) is WRONG and should NOT be relied on. FIX-14
+      found that Argo CD v3.4.3 (the version actually running,
+      quay.io/argoproj/argocd:v3.4.3) ships a BUNDLED health check for
+      argoproj.io/Rollout — compiled into the binary, not dependent on any
+      argocd-cm entry — and executed that exact bundled check against the
+      live molly-demo-prod Rollout object, which correctly returned
+      Degraded for the ProgressDeadlineExceeded state. The Application
+      molly-demo-prod IS health=Degraded (confirmed live), and FIX-7's
+      TenantAppDegraded rule ALREADY fires for it. The error in my original
+      reasoning: absence of a `resource.customizations.health.*`
+      CUSTOMIZATION does not mean absence of a health CHECK — Argo CD ships
+      defaults for many common CRDs, Rollout included, and this cluster
+      does not override that default. Do NOT add a hand-rolled
+      `resource.customizations.health.argoproj.io_Rollout` on the strength
+      of this evidence bundle's earlier text — FIX-14 explicitly closed
+      with NO CODE CHANGE for exactly that reason (it would shadow and
+      eventually drift from the upstream-maintained check).
+
+      What FIX-14 DID find, that remains real: a PAUSED Rollout (not the
+      ProgressDeadlineExceeded state seen here) maps to Argo CD health
+      "Suspended", and FIX-7's tenant rule only matches "Degraded" — so a
+      tenant Rollout paused mid-canary awaiting a manual promotion that
+      never comes IS invisible to today's alert. That gap is tracked
+      separately (FIX-15, task #50), not here.
 
 # ============================================================================
 # 1. F-7 — ArgoCD sync race during teardown
