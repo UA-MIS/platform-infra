@@ -14,11 +14,26 @@
 #   (b) `kustomize build` succeeds on all four overlays (dev/staging/prod/preview).
 # A fragment that would scaffold RED fails this check and blocks the merge.
 #
-# HERMETIC + SECRETLESS: pure validation (no Harbor push, no cluster, no tokens), so this
-# runs on a GitHub-hosted ubuntu runner (which ships node + kubectl) rather than the
-# secret-bearing self-hosted ARC runners the image/tenant builds use. A fresh fragment is
-# DISCOVERED from disk, so this gate covers new stacks (e.g. blank/bring-your-own) with no
-# workflow edit.
+# TWO ADDITIONAL JOBS close GATE-1 (#33, D-067/D-071):
+#   - boot-and-probe: the RUNTIME half the static checks above cannot cover — actually
+#     BUILD and RUN each single-slot fragment's image under the chart's real
+#     `--read-only --tmpfs /tmp --tmpfs /dev/shm:size=64m` contract, against a real
+#     disposable MariaDB with the platform's exact bare `mysql://` DSN, then probe
+#     /healthz on the chart's real startupProbe schedule. See green-check.py's --boot-probe
+#     and boot_probe.py. This is what catches a fragment that builds and renders fine but
+#     crash-loops in-cluster (F-6/fastapi, FINDING-6/react-static) — both invisible to the
+#     green-check job. Reference green set: artifacts/exploration/fragment-readonly-smoke-
+#     2026-08-15.md.
+#   - secret-scan: pattern + entropy scan of every _fragments/** file that ships verbatim
+#     into a student's scaffolded repo (DSN-001/D-071 — a real, live credential has been
+#     committed into a fragment skeleton TWICE). See secret_scan.py.
+#
+# HERMETIC + SECRETLESS: pure validation (no Harbor push, no cluster, no tokens), so all
+# three jobs run on GitHub-hosted ubuntu runners rather than the secret-bearing self-hosted
+# ARC runners the image/tenant builds use — ARC's containerMode:kubernetes/Kaniko-rootless
+# design has no docker socket, which boot-and-probe specifically needs (see boot_probe.py's
+# module docstring). A fresh fragment is DISCOVERED from disk, so every job here covers new
+# stacks (e.g. blank/bring-your-own) with no workflow edit.
 # ============================================================================
 name: wizard-green-check
 
@@ -71,3 +86,58 @@ jobs:
       - name: Green-out-of-box check — every fragment must scaffold GREEN
         working-directory: ${{ env.TOOLS_DIR }}
         run: "$RUNNER_TEMP/venv/bin/python green-check.py"
+
+  boot-and-probe:
+    # GATE-1 (#33, D-067/D-071): the RUNTIME half — build + run each single-slot fragment's
+    # image under the chart's real --read-only contract against a real MariaDB, then probe
+    # /healthz on the chart's real startupProbe schedule. Needs a working docker daemon
+    # (ubuntu-latest ships one); the self-hosted ARC runners do not (Kaniko-rootless, no
+    # docker socket by design), so this job stays on ubuntu-latest like green-check above.
+    # SEQUENTIAL BY DESIGN (green-check.py --boot-probe builds/runs one fragment's image at
+    # a time, sharing one MariaDB fixture) — do not add a matrix/parallel strategy here; a
+    # bulk-parallel build sweep is exactly the failure mode this stage was built to avoid.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      TOOLS_DIR: platform-services/backstage/templates/_fragments/_tools
+    steps:
+      - name: Checkout (fragments + compose engine + harness)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Tooling versions (node + docker ship on the runner)
+        run: |
+          node --version
+          docker version
+          kubectl version --client
+
+      - name: Python render deps (pyyaml + jinja2) in an isolated venv
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet pyyaml jinja2
+
+      - name: Boot-probe harness self-tests (unit + a real single-container integration case)
+        working-directory: ${{ env.TOOLS_DIR }}
+        run: "$RUNNER_TEMP/venv/bin/python boot_probe.test.py"
+
+      - name: Boot-and-probe — every single-slot fragment must boot read-only against real MariaDB
+        working-directory: ${{ env.TOOLS_DIR }}
+        run: "$RUNNER_TEMP/venv/bin/python green-check.py --boot-probe"
+
+  secret-scan:
+    # GATE-1 item 3 (DSN-001/D-071): pattern + entropy scan of every _fragments/** file that
+    # ships VERBATIM into a student's scaffolded repo. Pure stdlib (no deps, no docker) —
+    # cheap and fast, so it is its own job rather than folded into green-check.
+    runs-on: ubuntu-latest
+    env:
+      TOOLS_DIR: platform-services/backstage/templates/_fragments/_tools
+    steps:
+      - name: Checkout (fragments)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Secret-scan harness self-tests (proves the scanner catches a planted credential)
+        working-directory: ${{ env.TOOLS_DIR }}
+        run: python3 secret_scan.test.py
+
+      - name: Secret scan — _fragments/** must ship zero credential-shaped values
+        working-directory: ${{ env.TOOLS_DIR }}
+        run: python3 secret_scan.py

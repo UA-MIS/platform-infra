@@ -18,6 +18,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -180,6 +181,66 @@ class IntegrationTests(unittest.TestCase):
                             "overlays should still build; only the Dockerfile is missing")
         finally:
             shutil.rmtree(frag_dir, ignore_errors=True)
+
+
+@unittest.skipUnless(HAVE_NODE and HAVE_KUSTOMIZE, "needs node + kustomize/kubectl")
+class BootProbeWiringTests(unittest.TestCase):
+    """GATE-1's --boot-probe wiring (check_fragment's `mariadb` param), WITHOUT a real docker
+    daemon: boot_probe.boot_probe_component() is mocked, so these assert the SELECTION logic
+    (which fragments get boot-probed, and how a result propagates) — boot_probe.py's own
+    build/run/probe behavior is covered separately by boot_probe.test.py."""
+
+    def setUp(self):
+        self.workdir = Path(tempfile.mkdtemp(prefix="green-check-test-bootprobe-"))
+
+    def tearDown(self):
+        shutil.rmtree(self.workdir, ignore_errors=True)
+
+    def test_boot_probe_runs_for_a_single_slot_fragment_when_mariadb_given(self):
+        with patch.object(gc.boot_probe, "boot_probe_component",
+                          return_value=(True, "fake healthy")) as m:
+            r = gc.check_fragment("backend/express", self.workdir, mariadb=object())
+        m.assert_called_once()
+        # First positional arg is the composed 'app' component (the single-slot component name).
+        called_comp = m.call_args[0][0]
+        self.assertEqual(called_comp["name"], "app")
+        names = [c["name"] for c in r["checks"]]
+        self.assertIn("boot-probe", names)
+        self.assertTrue(r["ok"])
+
+    def test_boot_probe_skipped_when_mariadb_not_given(self):
+        # Default (no --boot-probe): the existing checks run, but boot-probe never fires —
+        # this is what keeps green-check.py's normal (fast, docker-less) path unchanged.
+        r = gc.check_fragment("backend/express", self.workdir)
+        names = [c["name"] for c in r["checks"]]
+        self.assertNotIn("boot-probe", names)
+
+    def test_boot_probe_skipped_for_a_frontend_backend_partner_fragment(self):
+        # frontend/react's OWN scenario is frontend-backend (it only fills the 'frontend'
+        # slot, see compose_lib.scenario_for) — it must NOT be independently boot-probed even
+        # when mariadb is available, matching the reference smoke's 19-fragment (single-slot
+        # only) scope. See check_fragment's docstring for why.
+        with patch.object(gc.boot_probe, "boot_probe_component") as m:
+            r = gc.check_fragment("frontend/react", self.workdir, mariadb=object())
+        m.assert_not_called()
+        names = [c["name"] for c in r["checks"]]
+        self.assertNotIn("boot-probe", names)
+
+    def test_boot_probe_failure_marks_the_fragment_red(self):
+        with patch.object(gc.boot_probe, "boot_probe_component",
+                          return_value=(False, "container exited before healthy")):
+            r = gc.check_fragment("backend/express", self.workdir, mariadb=object())
+        self.assertFalse(r["ok"], "a failed boot-probe must fail the fragment overall")
+        self.assertTrue(any("boot-probe" in e for e in r["errors"]))
+
+    def test_boot_probe_environment_error_is_reported_not_raised(self):
+        # BootProbeError from boot_probe_component (docker missing, etc.) must become a
+        # finding, not an unhandled exception that kills the whole sweep mid-run.
+        with patch.object(gc.boot_probe, "boot_probe_component",
+                          side_effect=gc.boot_probe.BootProbeError("docker/podman not found")):
+            r = gc.check_fragment("backend/express", self.workdir, mariadb=object())
+        self.assertFalse(r["ok"])
+        self.assertTrue(any("environment error" in e for e in r["errors"]))
 
 
 if __name__ == "__main__":
