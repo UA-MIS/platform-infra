@@ -187,7 +187,7 @@ residue_2b_vault_kv:
     committed (not an oversight). So a bare `deletionPolicy: Delete` flip
     would not even work — ESO would 403 trying to delete.
 
-  decision: "D-079 (artifacts/context/decision-log.md) — KEEP-BY-DESIGN."
+  decision: "D-082 (artifacts/context/decision-log.md) — KEEP-BY-DESIGN."
   decision_summary: >
     Do not set deletionPolicy: Delete; do not widen the crossplane-push
     writer's grant to include delete. Reasoning: the retained data is
@@ -216,8 +216,8 @@ residue_2b_vault_kv:
     appended here when it lands.
 
   files_changed:
-    - tenants/_claims/README.md (documents the decision + D-079 pointer)
-    - artifacts/context/decision-log.md (D-079, orchestrator repo)
+    - tenants/_claims/README.md (documents the decision + D-082 pointer)
+    - artifacts/context/decision-log.md (D-082, orchestrator repo)
 
   no_code_change: >
     Per the task's explicit instruction ("Do not change deletionPolicy
@@ -296,5 +296,5 @@ f5_bump_dev_image:
 
 open_items:
   - "F-7: requesting devops-e2e re-run a teardown with a deliberately in-flight/unhealthy sync on this branch and confirm clean, fast convergence (the task's own execution-based verification bar)."
-  - "Residue 2b: devops-vault's live `vault kv list` confirmation is requested and pending; will be appended to D-079 and this file when it lands, but does not block the decision already made."
+  - "Residue 2b: devops-vault's live `vault kv list` confirmation is requested and pending; will be appended to D-082 and this file when it lands, but does not block the decision already made."
   - "F-5: -slim+bootstrap for bump-dev (and the same digest-pin for prepare/bump-staging) is a well-evidenced follow-up, intentionally not implemented here — see f5_bump_dev_image.decision."

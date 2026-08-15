@@ -37,7 +37,7 @@ ESO plumbing, env/preview ApplicationSets).
      per-environment database passwords) is **not** deleted — no tenant
      PushSecret sets `deletionPolicy: Delete`, so ESO's default (retain the
      remote value) applies. This is a **deliberate KEEP-BY-DESIGN decision**
-     (decision-log `D-079`), not a bug and not an oversight: the writer identity
+     (decision-log `D-082`), not a bug and not an oversight: the writer identity
      these PushSecrets use (`crossplane-push`, see
      `platform-services/external-secrets/vault-policies/crossplane-push-role.sh`)
      is intentionally granted `create`/`read`/`update` only — no `delete` — so
@@ -45,7 +45,7 @@ ESO plumbing, env/preview ApplicationSets).
      radius. The retained data is also functionally inert the instant teardown
      completes (the underlying MySQL database/user and the Harbor robot are
      themselves deleted by the same cascade), so there is nothing live left to
-     protect by deleting the Vault copy sooner. See `D-079` for the full
+     protect by deleting the Vault copy sooner. See `D-082` for the full
      reasoning and the punch-listed follow-up (an out-of-band, separately-
      credentialed KV garbage-collector, not a change to this writer's grant).
 
