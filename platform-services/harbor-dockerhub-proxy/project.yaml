@@ -17,26 +17,31 @@
 # reconstructible cache of a public upstream), so force-destroy has no data-loss
 # implication, unlike a tenant's own project.
 #
-# registryId (hardcoded 1), NOT registryIdRef — deliberate, confirmed correct
-# in review. A from-scratch apply of this Registry/Project pair has a SLOW
-# async reconcile — observed live (2026-08-15) on provider-harbor v0.1.1:
-# Registry reached Ready=True (atProvider populated) roughly 10 minutes after
-# creation, Project roughly 5 minutes. registryIdRef genuinely CANNOT resolve
-# during that window ("referenced field was empty" — Registry.atProvider is
-# still empty), so a fresh apply using the reference would sit
-# Synced=False/ReconcileError for up to ~10 minutes before self-healing once
-# Registry's status catches up. That's a real, if transient and harmless,
-# error-looking state; the earlier draft of this file over-corrected from it
-# (wrongly concluded the gap was PERMANENT after only watching it for a few
-# minutes — caught in review, see B4-001 in the evidence bundle). The
-# resolution: KEEP registryId hardcoded — avoids that transient
-# Synced=False window entirely, at the small, accepted cost that this value
-# must be updated manually if the dockerhub Registry is ever deleted and
-# recreated (registry_id 1 is Harbor's own stable identifier for it; verified
-# it does not change across normal reconciles). No ArgoCD health override is
-# needed either way — with the hardcoded ID, Ready reaches True on its own
-# normal timeline (no reference to wait on), and ArgoCD's default assessment
-# is accurate throughout (Progressing, then Healthy).
+# registryIdRef (not a hardcoded registryId) — this is the correct, restored
+# state. A prior revision hardcoded registryId: 1 believing the reference
+# "genuinely cannot resolve" during the Registry/Project pair's slow
+# from-scratch reconcile (Registry reaches Ready=True ~10 minutes after
+# creation, Project ~5 minutes on provider-harbor v0.1.1) — that reasoning
+# was itself wrong, and its own review had already caught the same mistake
+# once before, in the earlier draft this comment used to describe (see
+# B4-001 in the evidence bundle). The corrected position, honestly stated:
+#
+#   - The transient MR unresolved/Synced=False window (~5-10 minutes) IS
+#     real, but it is ACCEPTABLE, not something to engineer around. It sits
+#     comfortably under FIX-4's CrossplaneManagedResourceNotSynced alert
+#     threshold (15 minutes), so it never pages anyone, and it converges to
+#     Synced=True/Ready=True permanently on its own once Registry.atProvider
+#     populates. No ArgoCD health override is needed — ArgoCD's default
+#     assessment is accurate throughout (Progressing, then Healthy).
+#   - A hardcoded registryId trades that harmless, bounded, alert-covered
+#     window for a SILENT failure mode with no bound and no alert coverage:
+#     if the dockerhub Registry is ever deleted and recreated, Harbor issues
+#     it a new numeric id, and the hardcoded value here goes stale with no
+#     signal — the Project MR keeps reconciling against a registry_id that
+#     no longer exists, or worse, now points at a DIFFERENT registry. The
+#     ref re-resolves automatically in that scenario; the hardcode does not.
+#
+# registryIdRef is therefore the right default, not just the approved one.
 apiVersion: project.harbor.crossplane.io/v1alpha1
 kind: Project
 metadata:
@@ -47,7 +52,8 @@ spec:
   forProvider:
     name: dockerhub-proxy
     public: true
-    registryId: 1
+    registryIdRef:
+      name: dockerhub
     vulnerabilityScanning: false   # proxy-cached upstream content, not platform-built; scanning it is not actionable here
     forceDestroy: true
   providerConfigRef:
