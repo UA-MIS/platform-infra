@@ -7,9 +7,10 @@
 # on the self-hosted ARC runners. Build context = this `app/` dir (.devops/ci +
 # resolve-components.sh set context=app, dockerfile=Dockerfile).
 #
-# NO apt is needed: PyMySQL is pure-Python and uvicorn[standard] installs as wheels,
-# so there is no compiler/system-lib step (and no :443 apt gotcha — see the note at
-# the bottom if you ever add one).
+# NO apt is needed: PyMySQL is pure-Python, psycopg[binary] vendors its own libpq
+# build as a wheel, and uvicorn[standard] installs as wheels too — so there is no
+# compiler/system-lib step (and no :443 apt gotcha — see the note at the bottom if
+# you ever add one).
 
 # ---- build stage: resolve deps into an isolated venv ----
 #

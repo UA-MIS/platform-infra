@@ -6,4 +6,8 @@ SQLAlchemy==2.0.51
 # Pure-Python MySQL driver — no system libs / compiler, so the image stays slim and
 # apt-free. The MySQL DSN is mysql+pymysql://user:pass@host:3306/db (see app/db.py).
 PyMySQL==1.2.0
+# Postgres driver (psycopg 3, the [binary] extra vendors its own libpq build — no
+# apt/system libs, same "slim and apt-free" property as PyMySQL above). The DSN is
+# postgresql+psycopg://user:pass@host:5432/db (see app/db.py). FIX-16/D-092.
+psycopg[binary]==3.2.10
 pydantic==2.13.4

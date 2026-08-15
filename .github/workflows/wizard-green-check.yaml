@@ -14,6 +14,15 @@
 #   (b) `kustomize build` succeeds on all four overlays (dev/staging/prod/preview).
 # A fragment that would scaffold RED fails this check and blocks the merge.
 #
+# Also asserts (check_wizard_template.py, FIX-16/D-092, recommended by
+# review-fix1-wizard-postgres-guard.md WIZ-002/D-067): new-project/template.yaml's
+# hand-maintained rjsf `oneOf` database-enum groups EXACTLY partition the fragment
+# library's single/backend slots, and host-postgres is offered if and only if every
+# fragment in a group actually ships a Postgres driver (or none at all). Without this,
+# a maintainer adding a fragment to the wizard's enum but forgetting to file it into a
+# oneOf group silently drops the Database question — green-check.py alone would never
+# catch it, since it never reads template.yaml.
+#
 # HERMETIC + SECRETLESS: pure validation (no Harbor push, no cluster, no tokens), so this
 # runs on a GitHub-hosted ubuntu runner (which ships node + kubectl) rather than the
 # secret-bearing self-hosted ARC runners the image/tenant builds use. A fresh fragment is
@@ -26,12 +35,14 @@ on:
   pull_request:
     paths:
       - "platform-services/backstage/templates/_fragments/**"
+      - "platform-services/backstage/templates/new-project/template.yaml"
       - "platform-services/backstage/app/plugins/scaffolder-backend-module-capstone/src/actions/composePlan.mjs"
       - ".github/workflows/wizard-green-check.yaml"
   push:
     branches: [main]
     paths:
       - "platform-services/backstage/templates/_fragments/**"
+      - "platform-services/backstage/templates/new-project/template.yaml"
       - "platform-services/backstage/app/plugins/scaffolder-backend-module-capstone/src/actions/composePlan.mjs"
       - ".github/workflows/wizard-green-check.yaml"
 
@@ -71,3 +82,11 @@ jobs:
       - name: Green-out-of-box check — every fragment must scaffold GREEN
         working-directory: ${{ env.TOOLS_DIR }}
         run: "$RUNNER_TEMP/venv/bin/python green-check.py"
+
+      - name: Wizard template partition self-tests (hazard mutations must still bite)
+        working-directory: ${{ env.TOOLS_DIR }}
+        run: "$RUNNER_TEMP/venv/bin/python check_wizard_template.test.py"
+
+      - name: Wizard template enum/database partition check
+        working-directory: ${{ env.TOOLS_DIR }}
+        run: "$RUNNER_TEMP/venv/bin/python check_wizard_template.py"

@@ -7,3 +7,8 @@ dj-database-url==2.3.0
 # Pure-Python MySQL driver (installed as MySQLdb in project/__init__.py) — no system
 # libs / compiler, so the image stays slim and apt-free. The DSN is mysql://... .
 PyMySQL==1.1.1
+# Postgres driver — Django 4.2+ supports psycopg 3 natively (django.db.backends.postgresql
+# auto-selects it). The [binary] extra vendors its own libpq build, so the image stays
+# apt-free. dj-database-url maps postgres:// / postgresql:// to this backend on its own
+# (no settings.py branching needed — FIX-16/D-092). The DSN is postgresql://... .
+psycopg[binary]==3.2.10

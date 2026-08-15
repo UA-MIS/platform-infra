@@ -1,8 +1,15 @@
 import express from 'express'
 import type { Request, Response, NextFunction } from 'express'
-import type { RowDataPacket, ResultSetHeader } from 'mysql2'
-import type { Pool } from 'mysql2/promise'
-import { getPool, isConfigured, ensureSchema } from './db'
+import {
+  isConfigured,
+  ensureSchema,
+  ping,
+  listItems,
+  getItem,
+  createItem,
+  updateItem,
+  deleteItem,
+} from './db'
 
 const app = express()
 app.use(express.json())
@@ -40,7 +47,7 @@ app.get(
     let db = 'unconfigured'
     if (isConfigured()) {
       try {
-        await getPool()!.query('SELECT 1')
+        await ping()
         db = 'up'
       } catch {
         db = 'down'
@@ -50,80 +57,66 @@ app.get(
   }),
 )
 
-// Return the pool, or send a 503 (and return undefined) when DATABASE_URL is not set yet.
-function requireDb(res: Response): Pool | undefined {
-  const pool = getPool()
-  if (!pool) {
+// Send a 503 (and return false) when DATABASE_URL is not set yet.
+function requireDb(res: Response): boolean {
+  if (!isConfigured()) {
     res.status(503).json({
       error:
         'DATABASE_URL is not set. Add it via The Process "Secrets" tab (key: DATABASE_URL).',
     })
-    return undefined
+    return false
   }
-  return pool
+  return true
 }
 
 // ---- sample CRUD: /api/items ------------------------------------------------
 app.get(
   '/api/items',
   wrap(async (_req, res) => {
-    const pool = requireDb(res)
-    if (!pool) return
-    const [rows] = await pool.query<RowDataPacket[]>('SELECT id, name FROM items ORDER BY id')
-    res.json({ items: rows })
+    if (!requireDb(res)) return
+    const items = await listItems()
+    res.json({ items })
   }),
 )
 
 app.get(
   '/api/items/:id',
   wrap(async (req, res) => {
-    const pool = requireDb(res)
-    if (!pool) return
-    const [rows] = await pool.query<RowDataPacket[]>(
-      'SELECT id, name FROM items WHERE id = ?',
-      [req.params.id],
-    )
-    if (rows.length === 0) {
+    if (!requireDb(res)) return
+    const item = await getItem(req.params.id)
+    if (!item) {
       res.status(404).json({ error: 'not found' })
       return
     }
-    res.json(rows[0])
+    res.json(item)
   }),
 )
 
 app.post(
   '/api/items',
   wrap(async (req, res) => {
-    const pool = requireDb(res)
-    if (!pool) return
+    if (!requireDb(res)) return
     const name = String(req.body?.name ?? '').trim()
     if (!name) {
       res.status(400).json({ error: 'name is required' })
       return
     }
-    const [result] = await pool.query<ResultSetHeader>(
-      'INSERT INTO items (name) VALUES (?)',
-      [name],
-    )
-    res.status(201).json({ id: result.insertId, name })
+    const item = await createItem(name)
+    res.status(201).json(item)
   }),
 )
 
 app.put(
   '/api/items/:id',
   wrap(async (req, res) => {
-    const pool = requireDb(res)
-    if (!pool) return
+    if (!requireDb(res)) return
     const name = String(req.body?.name ?? '').trim()
     if (!name) {
       res.status(400).json({ error: 'name is required' })
       return
     }
-    const [result] = await pool.query<ResultSetHeader>(
-      'UPDATE items SET name = ? WHERE id = ?',
-      [name, req.params.id],
-    )
-    if (result.affectedRows === 0) {
+    const updated = await updateItem(req.params.id, name)
+    if (!updated) {
       res.status(404).json({ error: 'not found' })
       return
     }
@@ -134,13 +127,9 @@ app.put(
 app.delete(
   '/api/items/:id',
   wrap(async (req, res) => {
-    const pool = requireDb(res)
-    if (!pool) return
-    const [result] = await pool.query<ResultSetHeader>(
-      'DELETE FROM items WHERE id = ?',
-      [req.params.id],
-    )
-    if (result.affectedRows === 0) {
+    if (!requireDb(res)) return
+    const deleted = await deleteItem(req.params.id)
+    if (!deleted) {
       res.status(404).json({ error: 'not found' })
       return
     }
