@@ -6,6 +6,63 @@ date: 2026-08-15
 source_finding: artifacts/exploration/golden-path-e2e-2026-08-15.md (VERIFY-2, devops-e2e)
 
 # ============================================================================
+# 0. Scope additions (added by team-lead after the initial PR #443 was opened)
+# ============================================================================
+scope_additions_status:
+  broken_tenant_teardown_test:
+    ask: >
+      VERIFY-2's clean-teardown evidence only covers a HEALTHY tenant (FIX-3
+      landed 3 minutes before that teardown ran). Broken tenants (stuck
+      Synced=False MRs) are the case operators actually delete. Need a
+      deliberately half-provisioned throwaway torn down to verify convergence.
+    status: >
+      PENDING — requested from devops-e2e, combined with the F-7 live
+      verification ask (one throwaway specimen serving both: half-provision
+      one MR against an unreachable dependency AND put an env Application
+      into an in-flight sync before deleting the claim, then confirm clean
+      convergence on this branch).
+
+  prod_overlay_prune_gap:
+    ask: >
+      molly-demo-prod (a LIVE, in-use tenant — NOT to be torn down) has zero
+      Deployments but 2 live ReplicaSets + 4 pods (2 known/expected
+      crash-looping on a pre-66d5660 image, not the subject of this
+      investigation). Root-cause whether ArgoCD's prune is misconfigured for
+      the prod overlay's resource kinds; fix in the contract/appset if so.
+    investigation_so_far: >
+      Read the code before asking anyone to run anything live. Prod overlay
+      for a single-component tenant runs an Argo Rollouts `Rollout` in place
+      of a Deployment (ADR-037: rollout.yaml + a kustomize
+      `$patch: delete` on the base Deployment of the same name) — so "zero
+      Deployments" in prod is EXPECTED architecture, not automatically an
+      anomaly on its own. platform-services/argocd-config/argocd-cm.yaml has
+      NO `resource.customizations.health.argoproj.io_Rollout` entry — ArgoCD
+      has no special health/resource-tree awareness of Rollout beyond
+      installing the controller (applicationsets/argo-rollouts-app.yaml).
+
+      Per Argo Rollouts' own docs/source (Context7 /argoproj/argo-rollouts):
+      a canary's `pause` steps (even timed ones) only begin counting once the
+      preceding `setWeight` step's canary pods are Available; at
+      `setWeight: 100` the stable RS scales to 0. If the new revision's pods
+      never become Ready — which matches "2 crash-looping pods" — the Rollout
+      can hang indefinitely at a partial step with BOTH stable and canary
+      ReplicaSets holding live, non-zero pods. This strategy has no
+      `analysis`/automated-abort step configured (rollout.yaml), so nothing
+      would ever un-stick it or roll it back automatically.
+
+      Working hypothesis, NOT yet confirmed: this may not be an ArgoCD prune
+      gap at all — it could be a Rollout stuck mid-canary on a permanently-
+      unhealthy image, which is a different (if related) problem: the
+      canary strategy has no failure-abort path, so a broken image just
+      burns double resources forever instead of the deploy failing loudly.
+      Requested devops-e2e pull the live Rollout status, each ReplicaSet's
+      ownerReferences (do they point at the live Rollout, or are they
+      genuinely orphaned/ownerless), and the ArgoCD Application's tracked
+      resources (does it even list these RS) to distinguish "stuck canary"
+      from "true prune gap" before committing to a contract fix.
+    status: "PENDING — diagnostic request sent to devops-e2e, read-only, specimen preserved."
+
+# ============================================================================
 # 1. F-7 — ArgoCD sync race during teardown
 # ============================================================================
 f7_argocd_sync_race:
