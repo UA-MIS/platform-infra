@@ -1,14 +1,19 @@
 # db.py — SQLAlchemy 2.x engine, session factory, declarative Base, and the
 # FastAPI `get_db` dependency.
 #
-# DATABASE_URL (env) is the ONE knob. In the cluster it is a MySQL DSN supplied by
-# the platform Secrets tab (ESO -> Vault -> a Kubernetes Secret env'd into the pod),
-# e.g.:
+# DATABASE_URL (env) is the ONE knob. In the cluster it is a bare MySQL DSN supplied
+# by the platform Secrets tab (ESO -> Vault -> a Kubernetes Secret env'd into the
+# pod), e.g.:
 #
-#     mysql+pymysql://<user>:<password>@<host>:3306/<database>
+#     mysql://<user>:<password>@<host>:3306/<database>
 #
-# (`pymysql` is the pure-Python driver shipped in requirements.txt — no system libs
-# or compiler needed, which keeps the image slim and apt-free; see app/Dockerfile.)
+# SQLAlchemy needs the driver-qualified form mysql+pymysql://..., so a bare mysql://
+# URI (the contract's canonical form) is normalized below. A raw pass-through would
+# make SQLAlchemy default to MySQLdb, which isn't installed (only pymysql is — see
+# requirements.txt), raising ModuleNotFoundError at import time and crash-looping the
+# pod on every boot. `pymysql` is the pure-Python driver shipped in requirements.txt —
+# no system libs or compiler needed, which keeps the image slim and apt-free; see
+# app/Dockerfile.
 #
 # If DATABASE_URL is UNSET (a freshly scaffolded app with no DB wired yet, or the
 # unit tests) it falls back to an in-memory SQLite database so the app still boots,
@@ -21,9 +26,38 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+
+def _normalize_mysql_url(url: str) -> str:
+    """Normalize the contract's canonical `mysql://` URI to the pymysql driver
+    SQLAlchemy expects. A URL that already names a driver (mysql+pymysql://,
+    sqlite+pysqlite://, ...) is left untouched.
+    """
+    if url.startswith("mysql://"):
+        return "mysql+pymysql://" + url[len("mysql://"):]
+    return url
+
+
+def _resolve_database_url(raw: str | None) -> str:
+    """Resolve the effective DATABASE_URL: UNSET *and* blank/whitespace both fall
+    back to the in-memory SQLite default, then whatever's left is normalized.
+
+    `os.getenv("DATABASE_URL", <default>)` alone only substitutes the default when
+    the var is unset — a transiently EMPTY value (e.g. the env-injection race FIX-9
+    exists to close: a container starting a beat before ESO materializes the
+    secret) would pass straight through, normalize to "", and blow up
+    create_engine() at import with the identical CrashLoopBackOff this module
+    exists to prevent, reached by a different door. Blank must degrade exactly
+    like unset.
+    """
+    value = (raw or "").strip()
+    if not value:
+        return "sqlite+pysqlite:///:memory:"
+    return _normalize_mysql_url(value)
+
+
 # Zero-config default = in-memory SQLite. Wire MySQL by setting DATABASE_URL via the
 # Secrets tab (see README "Database wiring"). NEVER hardcode credentials here.
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+pysqlite:///:memory:")
+DATABASE_URL = _resolve_database_url(os.getenv("DATABASE_URL"))
 
 # SQLite needs two extra kwargs to behave under FastAPI's threadpool + share a single
 # in-memory database across connections. MySQL (and every other backend) wants neither,

@@ -7,16 +7,20 @@ namespace App.Tests;
 // platform as a mysql:// URI, but MySqlConnector/Pomelo needs ADO.NET key=value syntax.
 // A raw pass-through throws at DbContext construction and crash-loops the pod on every
 // boot (see .devops/chart/overlays/*/database.externalsecret.yaml for the URI shape).
+//
+// Fixture note (DSN-001): the DSN below is a SANITIZED shape, not a captured real
+// value — same host/scheme structure a real tenant secret has, fake user/password.
+// Do not replace it with a real credential (artifacts/reviews/review-fix8-dsn.md).
 public class ConnectionStringHelperTests
 {
     [Fact]
     public void NormalizeMySql_converts_uri_to_adonet_keyvalue_form()
     {
         var result = ConnectionStringHelper.NormalizeMySql(
-            "mysql://molly_demo_dev:OcBvFI0gmEkd2F89ufiDakgihu1@capstone-mariadb-mariadb-cluster-primary.db-tier.svc.cluster.local:3306/molly_demo_dev");
+            "mysql://exampleteam_dev:not-a-real-password@capstone-mariadb-mariadb-cluster-primary.db-tier.svc.cluster.local:3306/exampleteam_dev");
 
         Assert.Equal(
-            "Server=capstone-mariadb-mariadb-cluster-primary.db-tier.svc.cluster.local;Port=3306;Database=molly_demo_dev;User ID=molly_demo_dev;Password=OcBvFI0gmEkd2F89ufiDakgihu1;",
+            "Server=capstone-mariadb-mariadb-cluster-primary.db-tier.svc.cluster.local;Port=3306;Database=exampleteam_dev;User ID=exampleteam_dev;Password=not-a-real-password;",
             result);
     }
 
