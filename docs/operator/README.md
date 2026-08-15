@@ -205,6 +205,7 @@ These are **live-verified** weak spots a successor should close:
 | [crossplane-onboarding.md](crossplane-onboarding.md) | Zero-touch tenant onboarding internals |
 | [tenant-on-off-switch.md](tenant-on-off-switch.md) | Reversibly pause/restore a tenant |
 | [secrets-eso.md](secrets-eso.md) · [vault-and-dr.md](vault-and-dr.md) | Runtime secrets (ESO) + Vault DR |
+| [vault-restore-drill.md](vault-restore-drill.md) | **Vault break-glass restore** — seal-path precondition, unsealer-down variant, what is verified vs unrehearsed |
 | [dr-backup.md](dr-backup.md) | Platform-wide backups (MinIO on node-local disk + Velero) + tested-restore drill |
 | [harbor.md](harbor.md) | Harbor registry ops (projects, robots, OIDC) |
 | [argocd-gitops.md](argocd-gitops.md) | GitOps model, bootstrap, the `argocd-cm` SSA-wipe gotcha |
