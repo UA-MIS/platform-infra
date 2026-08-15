@@ -18,7 +18,7 @@ make tenant-off TEAM=sample DRY_RUN=false \
   KUBE_CONTEXT=admin@capstone KUBECONFIG=clusters/real-talos/talos-kubeconfig
 ```
 
-Implementation: [`hack/tenant-onoff.sh`](../../hack/tenant-onoff.sh). The Makefile
+Implementation: [`hack/tenant-onoff.sh`](https://github.com/UA-MIS/platform-infra/blob/main/hack/tenant-onoff.sh). The Makefile
 targets are thin wrappers.
 
 | Var | Default | Meaning |

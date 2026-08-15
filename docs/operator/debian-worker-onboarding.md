@@ -209,7 +209,7 @@ giving the Debian box its own local KubePrism equivalent. It runs **before**
 
 **Operational dependency you MUST maintain — `controlplane_api_endpoints`.** The
 HAProxy backends are **static**, listed in `controlplane_api_endpoints` in
-[`ansible/inventory/group_vars/mac_workers.yml`](../../ansible/inventory/group_vars/mac_workers.yml).
+[`ansible/inventory/group_vars/mac_workers.yml`](https://github.com/UA-MIS/platform-infra/blob/main/ansible/inventory/group_vars/mac_workers.yml).
 It defaults to the three control-plane **Tailscale** IPs:
 
 | Node | Backend (Tailscale IP:port) |
@@ -516,7 +516,7 @@ To re-onboard, mint a fresh token (§4.1) and re-run the play.
 
 ## 10. Reference — files
 
-- Playbook & roles: [`ansible/`](../../ansible/) — see [`ansible/README.md`](../../ansible/README.md)
+- Playbook & roles: [`ansible/`](../../ansible/) — see [`ansible/README.md`](https://github.com/UA-MIS/platform-infra/blob/main/ansible/README.md)
 - Cilium-on-Talos design & the Tailscale-overlay hazard:
   [`docs/cilium-cni-runbook.md`](../cilium-cni-runbook.md)
 

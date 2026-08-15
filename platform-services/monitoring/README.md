@@ -30,11 +30,11 @@ speculative scale-up. Scale further only if volume ever actually demands it.
   metrics" below) are pre-wired datasources. **Sign in with Dex (GitHub / UA-MIS)**
   is the primary login path (see "Grafana SSO (Dex)" below); the admin/password
   form (creds from the **`grafana-admin` SealedSecret**, `grafana.admin.
-  existingSecret`) stays as a **break-glass fallback**, never removed. **⚠ the
-  grafana-admin seal ships as a placeholder that does not decrypt — reseal real
-  values before go-live** (runbook below); until then the Grafana pod stays
-  `CreateContainerConfigError`. (The OAuth client secret, `grafana-oauth`
-  SealedSecret, is a REAL seal already — no reseal needed for SSO to work.)
+  existingSecret`) stays as a **break-glass fallback**, never removed. The
+  `grafana-admin` seal is a REAL seal, verified live 2026-08-15 (login with the
+  stored credential returns HTTP 200, `isGrafanaAdmin: true`) — no reseal
+  needed. (The OAuth client secret, `grafana-oauth` SealedSecret, is also a
+  REAL seal — no reseal needed for SSO to work either.)
 - **Prometheus / Alertmanager** — ClusterIP only (internal ops). Port-forward:
   `kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090` /
   `... svc/kube-prometheus-stack-alertmanager 9093`.
@@ -100,7 +100,7 @@ client/secret/redirect-URI details and the role-mapping table (`labmx` ->
   (`sealedsecret-grafana-oauth.yaml`), same posture as oauth2-proxy's
   `OAUTH2_PROXY_CLIENT_SECRET` (`db-console-auth/deployment.yaml`). This is a
   REAL seal (sealed live against this cluster) — no reseal needed before
-  go-live, unlike `grafana-admin`.
+  go-live, same as `grafana-admin` (both verified live 2026-08-15).
 - `disable_login_form: false` + `auth.generic_oauth.auto_login: false` — the
   admin/password login form stays visible as break-glass, never auto-skipped
   past.
@@ -704,8 +704,9 @@ and reference it by `*_file` (e.g. `slack_configs[].api_url_file`), not inline.
 
 Grafana reads `grafana.admin.existingSecret: grafana-admin` (keys `admin-user` /
 `admin-password`) instead of the chart default. The committed
-`sealedsecret-grafana-admin.yaml` holds a **placeholder** that does not decrypt — until
-you reseal real values the Grafana pod stays `CreateContainerConfigError`.
+`sealedsecret-grafana-admin.yaml` is a **REAL seal** (verified live 2026-08-15 —
+login with the stored credential returns HTTP 200, `isGrafanaAdmin: true`), not
+a placeholder. Use the runbook below to ROTATE the password, not to seed it.
 
 ### Reseal runbook — the Grafana admin creds (LOCAL shell, **fish**)
 
@@ -727,7 +728,7 @@ echo "Grafana admin password (store in your password manager NOW): $GRAFANA_PW"
 set -e GRAFANA_PW
 ```
 
-This **overwrites** the placeholder with a real seal. Commit on a branch + PR. After it
+This **overwrites** the existing seal with a freshly rotated one. Commit on a branch + PR. After it
 syncs, the `grafana-admin` Secret appears and the Grafana pod starts; log in at
 `https://grafana.capstone.uamishub.com` as `admin` / `<the password printed above>`.
 (If Grafana already created its own admin user from a prior password, delete the

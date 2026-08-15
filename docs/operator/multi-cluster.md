@@ -56,9 +56,9 @@ hundreds-of-clusters fleets — over-engineered for "one homelab box").
 
 | Piece | File | What it does |
 |---|---|---|
-| ApplicationSet | [`applicationsets/satellite-clusters-appset.yaml`](../../applicationsets/satellite-clusters-appset.yaml) | `clusters` generator, selector `capstone.platform/tier: satellite`. One Application per matched cluster. |
+| ApplicationSet | [`applicationsets/satellite-clusters-appset.yaml`](https://github.com/UA-MIS/platform-infra/blob/main/applicationsets/satellite-clusters-appset.yaml) | `clusters` generator, selector `capstone.platform/tier: satellite`. One Application per matched cluster. |
 | Baseline workload | [`clusters/_shared/satellite-baseline/`](../../clusters/_shared/satellite-baseline/) | Namespace + default-deny NetworkPolicy + a `cluster-registered` ConfigMap marker — the "proof of life" payload the appset ships today. |
-| AppProject fence | [`bootstrap/platform-appproject.yaml`](../../bootstrap/platform-appproject.yaml) `destinations` | Adds `name: 'satellite-*'` so a matched cluster's Application is actually admitted (not just generated). |
+| AppProject fence | [`bootstrap/platform-appproject.yaml`](https://github.com/UA-MIS/platform-infra/blob/main/bootstrap/platform-appproject.yaml) `destinations` | Adds `name: 'satellite-*'` so a matched cluster's Application is actually admitted (not just generated). |
 | Registration helper | `make cluster-register` (Makefile) | Wraps `argocd cluster add` with the naming + label + least-privilege-namespace contract below. |
 
 **Naming + label contract** (belt-and-suspenders, same "two independent gates" pattern
