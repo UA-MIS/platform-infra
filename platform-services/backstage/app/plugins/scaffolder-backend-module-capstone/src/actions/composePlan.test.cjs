@@ -117,6 +117,17 @@ test('blank/BYO single + host-mysql -> db provisioned + wired (wizard DB questio
   assert.equal(p.dbWired, true);
 });
 
+// WIZ-007 (FIX-1-REVIEW): blank/bring-your-own + host-postgres was, pre-FIX-16, the ONE
+// wizard-reachable Postgres path for a driver-free fragment. FIX-16 added four more
+// (django/express/fastapi/go, each with a real driver) — this test pins the driver-free
+// case specifically, since it works for a structurally different reason (nothing to
+// conflict with, vs. an actual dual-engine driver).
+test('blank/BYO single + host-postgres -> postgres provisioned + wired (driver-free path)', () => {
+  const p = planComposition({ projectType: 'web', layout: 'single', fragments: { single: blank }, database: 'host-postgres', port: 8080 });
+  assert.equal(p.database, 'postgres');
+  assert.equal(p.dbWired, true);
+});
+
 test('slot misuse is rejected (react cannot fill single)', () => {
   assert.throws(() => planComposition({ projectType: 'web', layout: 'single', fragments: { single: react }, database: 'none' }), /cannot fill the 'single' slot/);
 });
