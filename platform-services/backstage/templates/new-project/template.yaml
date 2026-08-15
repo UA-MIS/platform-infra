@@ -9,8 +9,13 @@
 #   web + single             -> pick one app fragment (a backend API, a static site, ...)
 #   web + frontend+backend   -> pick a frontend + a backend (deployed behind one ingress:
 #                               / -> frontend, /api -> backend)
-#   mobile                   -> pick a mobile app fragment (build-artifact .ipa/.apk, NOT a
-#                               k8s workload) + a backend fragment (its API, deployed normally)
+#   mobile                   -> HIDDEN pre-Tuesday (F-3/D-058/FIX-5): mobile app fragment
+#                               (build-artifact .ipa/.apk, NOT a k8s workload) + a backend
+#                               fragment. Every mobile fragment's build workflow composes
+#                               outside .github/workflows/, so GitHub Actions never runs it —
+#                               no artifact ever built, silently. See the projectType comment
+#                               below for the restore path; green-check.py's QUARANTINE
+#                               tracks the underlying bug.
 # VM workloads keep their own dedicated "New VM" template (vm-app, #149) — the second
 # top-level button — because a KubeVirt VM is a fundamentally different workload than a
 # container; folding it into the compose engine adds risk with no benefit (ADR-034 §VM).
@@ -143,6 +148,22 @@ spec:
     # ----------------------------------------------------------------------------------
     # What are you building? The projectType choice REVEALS the relevant follow-up fields
     # (JSON-schema dependencies + oneOf — the Backstage conditional-parameter pattern).
+    #
+    # MOBILE IS HIDDEN (F-3/D-058, FIX-5, catalog-refresh-only): every mobile fragment
+    # composes its build workflow to <targetDir>/.mobile-ci/build.yaml, which GitHub Actions
+    # never discovers (it only reads .github/workflows/ at the repo root) — so no .apk/.ipa
+    # was EVER built for a mobile scaffold, silently, while the paired backend deployed and
+    # CI stayed all-green (192/499 = 38% of the wizard surface). Decision: hide the option
+    # rather than fix-forward pre-Tuesday — rerouting the workflow files is real work with
+    # billing implications (GitHub-hosted macos-14 minutes against the org's Free-plan pool).
+    # RESTORE: put 'mobile' back in the enum + enumNames below, AND remove the four mobile/*
+    # entries from green-check.py's QUARANTINE dict — _tools/check_wizard_template.py's
+    # mobile-quarantine-consistency check (MOB-002) enforces that second step is not
+    # forgotten, failing loudly if 'mobile' is reachable while any mobile/* fragment is still
+    # quarantined (which would silently re-arm the F-3 bug with no CI signal). The MOBILE
+    # oneOf branch further down (`# ===================== MOBILE =====================`) is
+    # untouched and still valid — it simply has no reachable path into it while 'mobile' is
+    # absent here.
     # ----------------------------------------------------------------------------------
     - title: What are you building?
       required:
@@ -151,10 +172,9 @@ spec:
         projectType:
           title: Project type
           type: string
-          enum: [web, mobile]
+          enum: [web]
           enumNames:
             - 'Web app (deployed to the cluster)'
-            - 'Mobile app (build .ipa/.apk) + a backend API'
           default: web
       dependencies:
         projectType:
@@ -280,11 +300,11 @@ spec:
                                   title: Database
                                   type: string
                                   description: >-
-                                    host-mysql auto-provisions a per-environment database for you.
-                                    Pick bring-your-own to set DATABASE_URL yourself via the Secrets
-                                    tab, or none for a DB-less stack (e.g. the static site). (D-054:
-                                    Auto PostgreSQL is not offered here — every needsDB fragment in
-                                    this group is MySQL-only.)
+                                    host-mysql auto-provisions a per-environment MySQL database for
+                                    you. PostgreSQL isn't available for this stack — it ships with a
+                                    MySQL driver. Pick bring-your-own if you need a different
+                                    database (set DATABASE_URL yourself via the Secrets tab), or none
+                                    if your app doesn't use a database.
                                   enum: [host-mysql, bring-your-own, none]
                                   enumNames:
                                     - 'Auto MySQL (host-mysql) — provisioned for you'
@@ -309,10 +329,10 @@ spec:
                                   type: string
                                   description: >-
                                     host-mysql and host-postgres each auto-provision a per-environment
-                                    database for you. Pick bring-your-own to set DATABASE_URL yourself
-                                    via the Secrets tab, or none for a DB-less stack. This stack ships
-                                    both a MySQL and a PostgreSQL driver (FIX-16), so Auto PostgreSQL
-                                    genuinely works here.
+                                    database for you. Pick bring-your-own if you need a different
+                                    database (set DATABASE_URL yourself via the Secrets tab), or none
+                                    if your app doesn't use a database. This stack ships both a MySQL
+                                    and a PostgreSQL driver, so Auto PostgreSQL genuinely works here.
                                   enum: [host-mysql, host-postgres, bring-your-own, none]
                                   enumNames:
                                     - 'Auto MySQL (host-mysql) — provisioned for you'
@@ -429,6 +449,12 @@ spec:
                                 database:
                                   title: Database
                                   type: string
+                                  description: >-
+                                    host-mysql auto-provisions a per-environment MySQL database for
+                                    you. PostgreSQL isn't available for this backend — it ships with
+                                    a MySQL driver. Pick bring-your-own if you need a different
+                                    database (set DATABASE_URL yourself via the Secrets tab), or none
+                                    if your backend doesn't use a database.
                                   enum: [host-mysql, bring-your-own, none]
                                   enumNames:
                                     - 'Auto MySQL (host-mysql) — provisioned for you'
@@ -446,6 +472,13 @@ spec:
                                 database:
                                   title: Database
                                   type: string
+                                  description: >-
+                                    host-mysql and host-postgres each auto-provision a per-environment
+                                    database for you. Pick bring-your-own if you need a different
+                                    database (set DATABASE_URL yourself via the Secrets tab), or none
+                                    if your backend doesn't use a database. This backend ships both a
+                                    MySQL and a PostgreSQL driver, so Auto PostgreSQL genuinely works
+                                    here.
                                   enum: [host-mysql, host-postgres, bring-your-own, none]
                                   enumNames:
                                     - 'Auto MySQL (host-mysql) — provisioned for you'
@@ -454,6 +487,10 @@ spec:
                                     - 'None'
                                   default: host-mysql
             # ===================== MOBILE =====================
+            # HIDDEN, not deleted (F-3/D-058/FIX-5) — unreachable while 'mobile' is absent
+            # from the projectType enum above. Left byte-for-byte valid (including FIX-16's
+            # database-group split within it) so restoring the option is a one-line enum edit
+            # plus the QUARANTINE cleanup named there; see the comment above projectType.
             - required: [mobileFragment, backendFragment]
               properties:
                 projectType:
@@ -529,6 +566,12 @@ spec:
                         database:
                           title: Database (for the backend)
                           type: string
+                          description: >-
+                            host-mysql auto-provisions a per-environment MySQL database for you.
+                            PostgreSQL isn't available for this backend — it ships with a MySQL
+                            driver. Pick bring-your-own if you need a different database (set
+                            DATABASE_URL yourself via the Secrets tab), or none if your backend
+                            doesn't use a database.
                           enum: [host-mysql, bring-your-own, none]
                           enumNames:
                             - 'Auto MySQL (host-mysql) — provisioned for you'
@@ -546,6 +589,12 @@ spec:
                         database:
                           title: Database (for the backend)
                           type: string
+                          description: >-
+                            host-mysql and host-postgres each auto-provision a per-environment
+                            database for you. Pick bring-your-own if you need a different database
+                            (set DATABASE_URL yourself via the Secrets tab), or none if your
+                            backend doesn't use a database. This backend ships both a MySQL and a
+                            PostgreSQL driver, so Auto PostgreSQL genuinely works here.
                           enum: [host-mysql, host-postgres, bring-your-own, none]
                           enumNames:
                             - 'Auto MySQL (host-mysql) — provisioned for you'

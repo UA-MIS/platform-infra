@@ -72,6 +72,11 @@ def _minimal_doc():
             "parameters": [
                 {},
                 {
+                    # Mobile absent here (mirrors the real, shipped, post-FIX-5 state) so
+                    # these fixture-driven hazard tests don't also trip the MOB-002
+                    # mobile-quarantine-consistency check, which has its own dedicated
+                    # tests below.
+                    "properties": {"projectType": {"enum": ["web"]}},
                     "dependencies": {
                         "projectType": {
                             "oneOf": [
@@ -275,6 +280,64 @@ class HazardMutationTest(unittest.TestCase):
         fragments = FRAGMENTS_FIXTURE + [{"_path": "backend/undeclared", "slots": ["single"]}]
         errors = cwt.run(doc=doc, fragments=fragments)
         self.assertTrue(any("does not match gen-wizard-enums.py" in e for e in errors), errors)
+
+
+class MobileQuarantineConsistencyTests(unittest.TestCase):
+    """MOB-002 (review-fix5-mobile-hide.md): green-check.py's QUARANTINE dict has no
+    structural link to template.yaml's projectType enum on its own -- these tests prove
+    check_mobile_quarantine_consistency() supplies that missing link, both as a pure
+    function (fast, no doc parsing) and wired end-to-end through run().
+    """
+
+    def test_mobile_unreachable_with_quarantine_populated_is_fine(self):
+        # The REAL, current, shipped state (FIX-5): mobile hidden, four mobile/* fragments
+        # still quarantined (they are genuinely broken; hiding does not fix them, D-058).
+        errors = []
+        cwt.check_mobile_quarantine_consistency(["web"], {"mobile/flutter": "..."}, errors)
+        self.assertEqual(errors, [])
+
+    def test_mobile_reachable_with_empty_quarantine_is_fine(self):
+        # A COMPLETE, correct restore: 'mobile' put back AND the quarantine cleared.
+        errors = []
+        cwt.check_mobile_quarantine_consistency(["web", "mobile"], {}, errors)
+        self.assertEqual(errors, [])
+
+    def test_mobile_reachable_with_nonmobile_quarantine_entries_is_fine(self):
+        # A quarantine entry for something other than mobile/* must not false-positive.
+        errors = []
+        cwt.check_mobile_quarantine_consistency(["web", "mobile"], {"backend/flask": "unrelated"}, errors)
+        self.assertEqual(errors, [])
+
+    def test_hazard_mobile_restored_with_quarantine_still_populated_is_caught(self):
+        # THE bug MOB-002 exists to prevent: someone follows the documented restore's
+        # first step (put 'mobile' back) and forgets the second (clear QUARANTINE) --
+        # F-3/D-058 re-arms with the gate still green, silently, unless this catches it.
+        errors = []
+        cwt.check_mobile_quarantine_consistency(
+            ["web", "mobile"],
+            {"mobile/android-kotlin": "...", "mobile/flutter": "...",
+             "mobile/ios-swift": "...", "mobile/react-native": "..."},
+            errors,
+        )
+        self.assertEqual(len(errors), 1)
+        self.assertIn("mobile-quarantine-consistency", errors[0])
+        for rel in ("mobile/android-kotlin", "mobile/flutter", "mobile/ios-swift", "mobile/react-native"):
+            self.assertIn(rel, errors[0])
+
+    def test_wired_end_to_end_through_run(self):
+        # Proves the wiring, not just the standalone function: run() with a doc whose
+        # projectType enum includes 'mobile' and a quarantine dict that still lists it.
+        doc = copy.deepcopy(_minimal_doc())
+        doc["spec"]["parameters"][1]["properties"]["projectType"]["enum"] = ["web", "mobile"]
+        errors = cwt.run(doc=doc, fragments=FRAGMENTS_FIXTURE, quarantine={"mobile/flutter": "..."})
+        self.assertTrue(any("mobile-quarantine-consistency" in e for e in errors), errors)
+
+    def test_load_quarantine_reads_the_real_green_check_module(self):
+        # Not a mock -- proves this script actually imports green-check.py's real QUARANTINE,
+        # so a change to that dict is picked up automatically, not hand-copied here.
+        q = cwt.load_quarantine()
+        for rel in ("mobile/android-kotlin", "mobile/flutter", "mobile/ios-swift", "mobile/react-native"):
+            self.assertIn(rel, q)
 
 
 if __name__ == "__main__":
