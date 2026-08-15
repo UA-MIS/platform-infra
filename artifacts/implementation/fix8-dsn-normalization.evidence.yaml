@@ -1,0 +1,194 @@
+task: "FIX-8 (go-live blocker): DATABASE_URL driver normalization — fastapi + all-fragment audit"
+task_id: "26"
+owner: dev-dsn
+branch: fix/fastapi-mysql-dsn-normalization
+date: 2026-08-15
+
+root_cause: >
+  The platform hands every scaffolded fragment a bare `mysql://` DSN via DATABASE_URL
+  (ESO -> Vault -> Kubernetes Secret). The default wizard combo (backend/fastapi +
+  host-mysql) passed this straight to SQLAlchemy's create_engine(). SQLAlchemy resolves
+  the DBAPI driver at create_engine() call time (not lazily at first query), and a bare
+  `mysql://` scheme defaults to the MySQLdb driver. The fastapi image ships PyMySQL only
+  (no mysqlclient/MySQLdb, to keep the image apt-free), so create_engine() raised
+  ModuleNotFoundError the instant app/db.py was imported — crash-looping the pod on
+  every boot as soon as real DB credentials were injected. This was masked pre-FIX-3 by
+  the SQLite fallback path (DATABASE_URL unset).
+
+fix: >
+  app/db.py now normalizes a leading `mysql://` to `mysql+pymysql://` before
+  create_engine(), via a new `_normalize_mysql_url()` helper. Mirrors the existing
+  flask fragment's inline normalization and the dotnet-aspnet fragment's
+  ConnectionStringHelper.NormalizeMySql (commit 66d5660) — same house style: minimal,
+  per-fragment normalization at the DSN entry point, sqlite/already-qualified values
+  pass through unchanged. Per D-062, per-fragment normalization is the Tuesday-safe
+  contract; a DSN-contract redesign (platform emits driver-qualified DSNs per backend)
+  is punch-listed separately, not in scope here.
+
+files_changed:
+  - platform-services/backstage/templates/_fragments/backend/fastapi/skeleton/app/db.py
+  - platform-services/backstage/templates/_fragments/backend/fastapi/skeleton/tests/test_db_normalization.py
+
+audit_table:
+  # fragment | driver/ORM | accepts bare mysql:// natively? | status
+  - fragment: dotnet-aspnet
+    driver: MySqlConnector / Pomelo.EntityFrameworkCore.MySql
+    accepts_bare_mysql_uri: false
+    status: already-fixed
+    note: >
+      ConnectionStringHelper.NormalizeMySql, commit 66d5660 (pre-existing, verified
+      present and covered by ConnectionStringHelperTests.cs).
+
+  - fragment: fastapi
+    driver: SQLAlchemy 2.x + PyMySQL
+    accepts_bare_mysql_uri: false
+    status: fixed-this-pr
+    note: >
+      create_engine() resolves the DBAPI at call time (not lazy) — crashes at import,
+      not first query. Bug confirmed live: `create_engine("mysql://...")` raises
+      ModuleNotFoundError("No module named 'MySQLdb'") in this environment (only
+      PyMySQL is installed). Fixed via _normalize_mysql_url() in app/db.py.
+
+  - fragment: flask
+    driver: SQLAlchemy 2.x + PyMySQL
+    accepts_bare_mysql_uri: false
+    status: already-fixed
+    note: >
+      app/db.py get_engine() already rewrites mysql:// -> mysql+pymysql:// inline
+      (pre-existing; confirmed by fragment.yaml description and source read). Lazy
+      engine (built on first request), so it boots clean regardless either way —
+      traced the actual normalization code, did not trust the clean boot.
+
+  - fragment: django
+    driver: dj-database-url + PyMySQL (django.db.backends.mysql)
+    accepts_bare_mysql_uri: false
+    status: already-fixed
+    note: >
+      dj_database_url.parse() maps the `mysql` scheme to django.db.backends.mysql,
+      which uses the MySQLdb DBAPI. project/__init__.py already calls
+      `pymysql.install_as_MySQLdb()` before Django imports the backend, so PyMySQL
+      satisfies the MySQLdb import. Lazy connection (Django connects on first query,
+      not at startup/import) — traced the actual shim rather than trusting a clean
+      boot, per the task's explicit warning about lazy-engine frameworks.
+
+  - fragment: express
+    driver: mysql2
+    accepts_bare_mysql_uri: true
+    status: already-ok
+    note: >
+      mysql.createPool(url) / createConnection(url) — mysql2's own documented examples
+      use `mysql://root:password@host:port/db` directly as the canonical connection
+      string form (verified via Context7 /sidorares/node-mysql2 docs). No scheme
+      validation; it just extracts host/port/user/pass/database from the URL.
+
+  - fragment: nestjs
+    driver: mysql2 (raw pool, not TypeORM)
+    accepts_bare_mysql_uri: true
+    status: already-ok
+    note: "Same DbService pattern as express — mysql.createPool(url) with bare mysql://."
+
+  - fragment: node-bare
+    driver: mysql2
+    accepts_bare_mysql_uri: true
+    status: already-ok
+    note: "Same pattern as express/nestjs."
+
+  - fragment: go
+    driver: go-sql-driver/mysql
+    accepts_bare_mysql_uri: false
+    status: already-fixed
+    note: >
+      go-sql-driver/mysql does not accept a URI at all — it needs its own DSN form
+      (user:pass@tcp(host:port)/db). db.go's toDSN() already converts DATABASE_URL to
+      this form (pre-existing, confirmed by source read). sql.Open is lazy but toDSN
+      runs eagerly in OpenDB(), so a malformed/unconvertible URL is caught immediately,
+      not deferred to first query.
+
+  - fragment: laravel
+    driver: PDO MySQL (Laravel's ConfigurationUrlParser)
+    accepts_bare_mysql_uri: true
+    status: already-ok
+    note: >
+      config/database.php sets 'url' => env('DATABASE_URL') on the 'mysql' connection.
+      Laravel's URL scheme->driver mapping treats `mysql://` as the canonical DSN form
+      for the mysql driver (this is Laravel's own documented DATABASE_URL convention).
+      Laravel builds PDO connections lazily on first query — traced the parser, not
+      just the boot.
+
+  - fragment: rails
+    driver: Trilogy (via adapter rewrite)
+    accepts_bare_mysql_uri: false
+    status: already-fixed
+    note: >
+      config/database.yml already rewrites the URL: `ENV["DATABASE_URL"].sub(%r{\Amysql2?://}, "trilogy://")`
+      before Rails parses it (pre-existing; Rails maps URL scheme -> adapter, and
+      there is no bundled `mysql` adapter, only Trilogy). ActiveRecord connects
+      lazily — traced the actual regex rewrite, not just the boot.
+
+  - fragment: rust-axum
+    driver: sqlx (MySqlPool)
+    accepts_bare_mysql_uri: true
+    status: already-ok
+    note: >
+      sqlx's own MySQL connector uses `mysql://` as its canonical/native scheme.
+      connect_lazy() defers the actual connection but eagerly parses/validates the
+      URL scheme, so a truly incompatible scheme would fail at pool-build time, not
+      silently at first query.
+
+  - fragment: spring-boot
+    driver: HikariCP + JDBC (mysql-connector)
+    accepts_bare_mysql_uri: false
+    status: already-fixed
+    note: >
+      JDBC needs jdbc:mysql://... , not a bare URI. Db.java's toJdbcUrl() already
+      converts it (pre-existing, confirmed by source read); HikariConfig is built
+      eagerly in @PostConstruct init() (initializationFailTimeout=-1 only suppresses
+      blocking on an *unreachable* DB, not a malformed URL/JdbcUrl construction).
+
+  - fragment: nextjs (fullstack)
+    driver: Prisma (mysql provider) + mysql2 (not touched by Prisma's own client)
+    accepts_bare_mysql_uri: true
+    status: already-ok
+    note: >
+      prisma/schema.prisma declares `provider = "mysql"` with `url = env("DATABASE_URL")`.
+      `mysql://` is Prisma's own canonical/documented scheme for the mysql provider —
+      no normalization needed. PrismaClient connects lazily on first query; traced the
+      schema's provider/url contract rather than trusting `next build` (which needs no
+      DATABASE_URL and would not have caught a runtime-only failure anyway).
+
+  - fragment: nuxt (fullstack)
+    driver: Drizzle ORM over mysql2
+    accepts_bare_mysql_uri: true
+    status: already-ok
+    note: "server/utils/db.ts wraps mysql2.createPool(url) — same as express/nestjs."
+
+  - fragment: sveltekit (fullstack)
+    driver: Drizzle ORM over mysql2
+    accepts_bare_mysql_uri: true
+    status: already-ok
+    note: "src/lib/server/db.ts wraps mysql2.createPool(url) — same as nuxt."
+
+verification:
+  unit:
+    - "cd platform-services/backstage/templates/_fragments/backend/fastapi/skeleton && pytest -q"
+    - "Result: 14 passed (10 pre-existing + 4 new in tests/test_db_normalization.py)."
+  manual_repro:
+    - >
+      Pre-fix repro: `create_engine('mysql://user:pass@host:3306/db')` in this venv
+      (PyMySQL installed, MySQLdb not) raises
+      `ModuleNotFoundError: No module named 'MySQLdb'` — confirms the crash-loop cause.
+    - >
+      Post-fix repro: `DATABASE_URL=mysql://molly_demo_dev:...@host:3306/molly_demo_dev`
+      + `from app.db import engine` succeeds; engine.driver == "pymysql",
+      engine.dialect.name == "mysql".
+  integration_pending:
+    status: NOT YET RUN — coordinating with devops-fragments (VERIFY-4)
+    plan: >
+      devops-fragments' Tier-A DB-backed-endpoint assertions are the empirical gate.
+      At minimum: scaffold (or reuse) a fastapi + host-mysql tenant post-merge, wire
+      real DATABASE_URL via the Secrets tab, and confirm the pod goes Ready + /api/items
+      CRUD works against the real MariaDB, not just that the pod boots.
+
+open_items:
+  - "PR not yet opened — pending this evidence bundle + devops-fragments live confirmation."
+  - "DSN-contract redesign (platform emits per-backend driver-qualified DSNs) is punch-listed per D-062, intentionally out of scope for this go-live-blocker fix."
