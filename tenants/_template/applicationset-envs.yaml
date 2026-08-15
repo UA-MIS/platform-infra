@@ -78,8 +78,13 @@ spec:
   # preserveResourcesOnDeletion: true makes Application pruning NON-cascading (no
   # finalizer added, so no wait): ArgoCD just removes its own Application CR, and
   # the ACTUAL cleanup of the deployed resources is Crossplane's job anyway --
-  # deleting the tenant namespace already reclaims everything in it. This is the
-  # SAME pattern already used for the identical class of problem in
+  # deleting the tenant namespace already reclaims everything in it. THIS
+  # NAMESPACE-RECLAIM ARGUMENT COVERS THIS ENV APPSET ONLY -- the preview appset's
+  # `<team>-pr-<n>` namespaces are CreateNamespace=true (ArgoCD-created, not a
+  # Crossplane k8s-ns-* Object), so nothing reclaims them the same way; do not
+  # extend preserveResourcesOnDeletion there on this same justification without
+  # re-deriving it (FIX10-002, review-fix10.md). This is the SAME pattern already
+  # used for the identical class of problem in
   # applicationsets/platform-services-appset.yaml, whose own comment states the
   # trade-off exactly: "a dir removed WITHOUT a successor app leaves its live
   # objects orphaned for manual cleanup -- for this platform that beats a
