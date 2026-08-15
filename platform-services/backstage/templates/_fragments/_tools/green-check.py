@@ -22,6 +22,20 @@ drift) into a temp repo and asserts the repo is buildable exactly as the tenant 
   (c) DOCKERFILE LINT / BUILD (optional, --docker-build) — actually `docker build` each
         container/static component's Dockerfile. Off by default (heavy + network); the build-file
         + kustomize checks are the durable, hermetic gate.
+  (d) BOOT-AND-PROBE (optional, --boot-probe; GATE-1) — the RUNTIME half static checks (a)-(c)
+        cannot cover: actually BUILD and RUN each single-slot-capable fragment's image, under
+        the chart's real `--read-only --tmpfs /tmp --tmpfs /dev/shm:size=64m` contract, against
+        a REAL disposable MariaDB with the platform's exact bare `mysql://` DSN shape, then
+        probe GET /healthz on the chart's real startupProbe schedule (periodSeconds=2,
+        failureThreshold=30). This is what caught backend/fastapi (F-6, eager DBAPI resolution)
+        and static/react-static (FINDING-6, nginx writing to a read-only /var/cache) — both
+        invisible to (a)-(c), which only prove a fragment WOULD build/render, never that it
+        BOOTS. See boot_probe.py and artifacts/exploration/fragment-readonly-smoke-2026-08-15.md
+        (the reference green set this stage reproduces). Off by default: heavy (needs a working
+        docker/podman daemon) and this repo's self-hosted ARC runners have none by design
+        (containerMode:kubernetes, Kaniko-rootless) — see wizard-green-check.yaml's
+        boot-and-probe job, which runs this on GitHub-hosted ubuntu-latest instead, same as the
+        existing hermetic green-check job.
 
 Fragments are DISCOVERED from disk, so a new fragment (e.g. blank/bring-your-own once PR-A lands)
 is covered automatically — the gate needs no edit to cover a new stack. A fragment that would
@@ -43,6 +57,7 @@ Usage:
   green-check.py                      # check every fragment (needs node + kustomize/kubectl)
   green-check.py --only backend/go    # one fragment (bypasses quarantine — always true status)
   green-check.py --docker-build       # also docker-build each Dockerfile (slow)
+  green-check.py --boot-probe         # also boot + probe each single-slot fragment (GATE-1)
   green-check.py --json               # machine-readable results on stdout
   green-check.py --keep               # keep the composed repos under --workdir for inspection
 """
@@ -54,6 +69,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+import boot_probe
 import compose_lib
 from compose_lib import (ComposeError, compose, discover_fragments,
                          expected_build_artifacts, kustomize_overlays,
@@ -109,8 +125,18 @@ def partition_results(results, quarantine_active):
     return passed, quarantined, failed
 
 
-def check_fragment(rel, workdir, *, do_docker=False, kz_tool=None):
+def check_fragment(rel, workdir, *, do_docker=False, kz_tool=None, mariadb=None):
     """Compose `rel` into workdir/<rel> and run the green-out-of-box assertions.
+
+    `mariadb`, when given a started boot_probe.MariaDBFixture, additionally boot-probes the
+    fragment (GATE-1, see module docstring's (d)) — but ONLY for a fragment whose OWN scenario
+    resolves to the single-slot layout (scenario_for() picks "single" when 'single' is in the
+    fragment's slots). This is deliberately the same 19-fragment set the reference smoke
+    (artifacts/exploration/fragment-readonly-smoke-2026-08-15.md) covers: a fragment used only
+    as a DEFAULT_FRONTEND/DEFAULT_BACKEND partner for some OTHER fragment's scenario is not
+    independently boot-probed here (it gets exercised as a partner in that other fragment's
+    kustomize/build-file checks already). Mobile fragments never resolve to "single", so they
+    are naturally out of scope — no explicit quarantine list needed here.
 
     Returns a result dict: {fragment, scenario, ok, checks:[...], errors:[...]}. `checks`
     is a list of (name, ok, detail) so the report can show every gate, green or not.
@@ -180,6 +206,19 @@ def check_fragment(rel, workdir, *, do_docker=False, kz_tool=None):
             add(f"docker-build[{comp['name']}]", r.returncode == 0,
                 "" if r.returncode == 0 else r.stderr.strip()[:600])
 
+    # (d) boot-and-probe (GATE-1) — only for THIS fragment's own single-slot scenario; see
+    # the docstring above for why frontend/backend "partner" fragments are skipped here.
+    if mariadb is not None and sel.get("layout") == "single" and sel.get("single") == rel:
+        app = next((c for c in composed.plan["components"] if c["name"] == "app"), None)
+        if app is None:
+            add("boot-probe", False, "no 'app' component in the single-slot plan (unexpected)")
+        else:
+            try:
+                ok, detail = boot_probe.boot_probe_component(app, out, mariadb)
+                add("boot-probe", ok, detail)
+            except boot_probe.BootProbeError as e:
+                add("boot-probe", False, f"environment error: {e}")
+
     result["ok"] = all(c["ok"] for c in result["checks"])
     return result
 
@@ -190,6 +229,10 @@ def main():
                     help="check only these fragment rel-paths (repeatable); default = all")
     ap.add_argument("--docker-build", action="store_true",
                     help="also `docker build` each Dockerfile (slow; needs docker + network)")
+    ap.add_argument("--boot-probe", action="store_true",
+                    help="also boot + probe each single-slot fragment against real MariaDB, "
+                         "under the chart's --read-only contract (GATE-1; slow, sequential, "
+                         "needs docker/podman + network)")
     ap.add_argument("--json", action="store_true", help="emit machine-readable results")
     ap.add_argument("--keep", action="store_true", help="keep composed repos in --workdir")
     ap.add_argument("--workdir", default=None, help="where to compose repos (default: a temp dir)")
@@ -207,14 +250,29 @@ def main():
               "cannot run. Install kustomize (or kubectl) before gating.", file=sys.stderr)
         return 2
 
+    # ONE MariaDB container, shared across the whole sweep (see boot_probe.py's module
+    # docstring) — started once here, reused per-fragment via mariadb.make_database(), torn
+    # down once at the end. Fragments are still checked ONE AT A TIME below (a plain list
+    # comprehension, no parallelism) — boot-probe builds/runs one image at a time by design.
+    mariadb = None
+    if a.boot_probe:
+        try:
+            mariadb = boot_probe.MariaDBFixture.start()
+        except boot_probe.BootProbeError as e:
+            print(f"green-check: FATAL — --boot-probe environment error: {e}", file=sys.stderr)
+            return 2
+
     workdir = Path(a.workdir) if a.workdir else Path(tempfile.mkdtemp(prefix="green-check-"))
     workdir.mkdir(parents=True, exist_ok=True)
     try:
-        results = [check_fragment(rel, workdir, do_docker=a.docker_build, kz_tool=kz_tool)
+        results = [check_fragment(rel, workdir, do_docker=a.docker_build, kz_tool=kz_tool,
+                                  mariadb=mariadb)
                    for rel in fragments]
     finally:
         if not a.keep and not a.workdir:
             shutil.rmtree(workdir, ignore_errors=True)
+        if mariadb is not None:
+            mariadb.stop()
 
     # Quarantine only ever applies to the UNFILTERED default sweep (the CI gate). An
     # explicit --only is a deliberate, targeted check — it always reports the truth, which is

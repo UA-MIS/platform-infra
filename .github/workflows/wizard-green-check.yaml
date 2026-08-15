@@ -23,13 +23,44 @@
 # fragment in a group actually ships a Postgres driver (or none at all). Without this,
 # a maintainer adding a fragment to the wizard's enum but forgetting to file it into a
 # oneOf group silently drops the Database question — green-check.py alone would never
-# catch it, since it never reads template.yaml.
+# catch it, since it never reads template.yaml. These steps run INSIDE the green-check
+# job (below) — pure Python/YAML, no node needed, so they reuse that job's existing venv
+# rather than paying for a second job's worth of setup.
 #
-# HERMETIC + SECRETLESS: pure validation (no Harbor push, no cluster, no tokens), so this
-# runs on a GitHub-hosted ubuntu runner (which ships node + kubectl) rather than the
-# secret-bearing self-hosted ARC runners the image/tenant builds use. A fresh fragment is
-# DISCOVERED from disk, so this gate covers new stacks (e.g. blank/bring-your-own) with no
-# workflow edit.
+# TWO ADDITIONAL JOBS close GATE-1 (#33, D-067/D-071):
+#   - boot-and-probe: the RUNTIME half the static checks above cannot cover — actually
+#     BUILD and RUN each single-slot fragment's image under the chart's real
+#     `--read-only --tmpfs /tmp --tmpfs /dev/shm:size=64m` contract, against a real
+#     disposable MariaDB with the platform's exact bare `mysql://` DSN, then probe
+#     /healthz on the chart's real startupProbe schedule. See green-check.py's --boot-probe
+#     and boot_probe.py. This is what catches a fragment that builds and renders fine but
+#     crash-loops in-cluster (F-6/fastapi, FINDING-6/react-static) — both invisible to the
+#     green-check job. Reference green set: artifacts/exploration/fragment-readonly-smoke-
+#     2026-08-15.md.
+#   - secret-scan: pattern + entropy scan of every _fragments/** file that ships verbatim
+#     into a student's scaffolded repo (DSN-001/D-071 — a real, live credential has been
+#     committed into a fragment skeleton TWICE). See secret_scan.py.
+#
+# RUNNER CHOICE, per job (this repo is a PRIVATE GitHub repo on the org's Free plan —
+# 2,000 GitHub-hosted minutes/month, SHARED across every repo; see D-058, which hid mobile
+# CI over the same billing exposure):
+#   - green-check (incl. the wizard template partition check) + secret-scan are HERMETIC
+#     + SECRETLESS and need no docker daemon, so they run on the self-hosted ARC fleet
+#     (runs-on: ua-mis-kaniko) at ZERO GitHub-hosted minute cost — the same
+#     containerMode:kubernetes shape tenant-build.yaml / backstage-process-build-push.yaml
+#     already use (every job needs its own `container:` image; see those files' header
+#     comments).
+#   - boot-and-probe is the one job that GENUINELY cannot move to ARC: it needs a working
+#     docker/podman daemon to build+run real containers, and ARC's containerMode:kubernetes
+#     + Kaniko-rootless design has no docker socket, full stop (see boot_probe.py's module
+#     docstring). It stays on GitHub-hosted ubuntu-latest, but is COST-SCOPED to control
+#     minute spend: pull_request runs boot-probe ONLY the fragment(s) the PR actually
+#     touched (0-2, typically, vs a full 19-fragment build+run sweep) — see this PR's own
+#     evidence file (artifacts/implementation/gate1-boot-probe.evidence.yaml) for the actual
+#     measured minutes/run once CI has exercised both paths; not asserted here unmeasured.
+#     The FULL 19-fragment sweep instead runs on push-to-main, workflow_dispatch (on-demand),
+#     and a weekly Monday cron — catching drift from an engine-wide change (composePlan.mjs,
+#     compose_lib.py, the shared _contract/) without taxing every PR for it.
 # ============================================================================
 name: wizard-green-check
 
@@ -47,6 +78,11 @@ on:
       - "platform-services/backstage/templates/new-project/template.yaml"
       - "platform-services/backstage/app/plugins/scaffolder-backend-module-capstone/src/actions/composePlan.mjs"
       - ".github/workflows/wizard-green-check.yaml"
+  workflow_dispatch: {}
+  schedule:
+    # Weekly full 19-fragment boot-and-probe sweep (Monday 06:00 UTC) — catches drift a
+    # changed-fragments-only PR run cannot see (e.g. a base image's upstream tag moving).
+    - cron: "0 6 * * 1"
 
 # Least privilege: this gate only reads the repo (no push, no packages, no id-token).
 permissions:
@@ -58,7 +94,14 @@ concurrency:
 
 jobs:
   green-check:
-    runs-on: ubuntu-latest
+    # Hermetic + secretless, no docker needed -> self-hosted ARC (free), not billed
+    # GitHub-hosted minutes. containerMode:kubernetes requires a job `container:` (see
+    # tenant-build.yaml's header comment) — node:24-trixie (ships node + a real
+    # /etc/ssl/certs bundle) matches backstage-process-build-push.yaml's own choice for a
+    # non-Kaniko ARC step.
+    runs-on: ua-mis-kaniko
+    container:
+      image: node:24-trixie
     env:
       TOOLS_DIR: platform-services/backstage/templates/_fragments/_tools
     steps:
@@ -66,15 +109,30 @@ jobs:
         # Digest-pinned (SEC, matches tenant-build.yaml): sha = actions/checkout v4.3.1.
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
-      - name: Tooling versions (node + kubectl/kustomize ship on the runner)
+      - name: Tooling versions (node + curl + a stripped-down venv module ship in the image)
+        # NO apt-get here: ARC's runner egress NetworkPolicy is :443-ONLY (SEC-014,
+        # capstone-runner-netpol-443-only) and node:24-trixie's default apt sources are
+        # plain http://deb.debian.org:80 -- confirmed broken here (first attempt: "Network
+        # is unreachable" on :80). kubectl is a static binary over HTTPS, so a plain curl
+        # works fine and needs nothing from apt.
         run: |
           node --version
+          curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/$(curl -fsSL -L https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x /usr/local/bin/kubectl
           kubectl version --client
 
       - name: Python render deps (pyyaml + jinja2) in an isolated venv
-        # A venv sidesteps PEP-668 (externally-managed system python) with no extra action.
+        # This image's python3 -m venv normally bootstraps pip via the stdlib `ensurepip`
+        # module -- ABSENT here (Debian splits it into the python3.13-venv apt package,
+        # which the apt-get above can't reach). Two HTTPS-only steps route around it instead
+        # of installing anything system-wide (PEP-668's externally-managed guard blocks
+        # that anyway): create the venv with --without-pip, then bootstrap pip INSIDE it via
+        # PyPA's official get-pip.py bootstrap script -- a venv's own site-packages is
+        # exempt from PEP-668, so this succeeds where a system-wide install would not.
         run: |
-          python3 -m venv "$RUNNER_TEMP/venv"
+          python3 -m venv --without-pip "$RUNNER_TEMP/venv"
+          curl -fsSL https://bootstrap.pypa.io/get-pip.py -o "$RUNNER_TEMP/get-pip.py"
+          "$RUNNER_TEMP/venv/bin/python3" "$RUNNER_TEMP/get-pip.py" --quiet
           "$RUNNER_TEMP/venv/bin/pip" install --quiet pyyaml jinja2
 
       - name: Harness self-tests (prove the gate itself catches a red scaffold)
@@ -92,3 +150,132 @@ jobs:
       - name: Wizard template enum/database partition check
         working-directory: ${{ env.TOOLS_DIR }}
         run: "$RUNNER_TEMP/venv/bin/python check_wizard_template.py"
+
+  boot-and-probe:
+    # GATE-1 (#33, D-067/D-071): the RUNTIME half — build + run each single-slot fragment's
+    # image under the chart's real --read-only contract against a real MariaDB, then probe
+    # /healthz on the chart's real startupProbe schedule. Needs a working docker daemon
+    # (ubuntu-latest ships one); ARC does not (Kaniko-rootless, no docker socket by design)
+    # — see the RUNNER CHOICE header comment above for the full cost-scoping rationale.
+    # SEQUENTIAL BY DESIGN (green-check.py --boot-probe builds/runs one fragment's image at
+    # a time, sharing one MariaDB fixture) — do not add a matrix/parallel strategy here; a
+    # bulk-parallel build sweep is exactly the failure mode this stage was built to avoid.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      TOOLS_DIR: platform-services/backstage/templates/_fragments/_tools
+    steps:
+      - name: Checkout (fragments + compose engine + harness, full history for the PR diff)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - name: Tooling versions (node + docker ship on the runner)
+        run: |
+          node --version
+          docker version
+          kubectl version --client
+
+      - name: Python render deps (pyyaml + jinja2) in an isolated venv
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet pyyaml jinja2
+
+      - name: Boot-probe harness self-tests (unit + a real single-container integration case)
+        working-directory: ${{ env.TOOLS_DIR }}
+        run: "$RUNNER_TEMP/venv/bin/python boot_probe.test.py"
+
+      - name: Determine scope — full 19-fragment sweep vs changed-fragments-only
+        id: scope
+        # push-to-main / workflow_dispatch / schedule always run the FULL sweep (the drift
+        # net this stage exists for). pull_request scopes to just the fragment(s) the diff
+        # touched, further filtered to single-slot-capable ones (the only ones boot-probe
+        # ever checks — see check_fragment()'s docstring) — an engine-wide file (the
+        # compose planner, compose_lib/boot_probe/green-check.py, the shared _contract/, or
+        # this workflow file) can silently affect EVERY fragment, so that still forces FULL.
+        run: |
+          set -euo pipefail
+          case "${GITHUB_EVENT_NAME}" in
+            push|workflow_dispatch|schedule)
+              echo "mode=full" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          CHANGED="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+
+          ENGINE_WIDE_PATTERN='^(platform-services/backstage/app/plugins/scaffolder-backend-module-capstone/src/actions/composePlan\.mjs|platform-services/backstage/templates/_fragments/_tools/(compose_lib|boot_probe|green-check)\.py|platform-services/backstage/templates/_fragments/_contract/|\.github/workflows/wizard-green-check\.yaml)'
+          if echo "$CHANGED" | grep -qE "$ENGINE_WIDE_PATTERN"; then
+            echo "mode=full" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          CANDIDATES="$(echo "$CHANGED" \
+            | grep -oE '^platform-services/backstage/templates/_fragments/[^/_][^/]*/[^/_][^/]*/' \
+            | sed -E 's#^platform-services/backstage/templates/_fragments/##; s#/$##' \
+            | sort -u || true)"
+
+          SINGLE_SLOT=""
+          for frag in $CANDIDATES; do
+            meta="platform-services/backstage/templates/_fragments/${frag}/fragment.yaml"
+            if [ -f "$meta" ] && grep -qE '^\s*-\s*single\s*$' "$meta"; then
+              SINGLE_SLOT="${SINGLE_SLOT}${frag}"$'\n'
+            fi
+          done
+
+          if [ -z "$SINGLE_SLOT" ]; then
+            echo "mode=none" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "mode=partial" >> "$GITHUB_OUTPUT"
+          {
+            echo "fragments<<BOOTPROBE_EOF"
+            printf '%s' "$SINGLE_SLOT"
+            echo "BOOTPROBE_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Boot-and-probe — single-slot fragment(s) must boot read-only against real MariaDB
+        if: steps.scope.outputs.mode != 'none'
+        working-directory: ${{ env.TOOLS_DIR }}
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.scope.outputs.mode }}" = "full" ]; then
+            echo "Scope: FULL 19-fragment sweep (${GITHUB_EVENT_NAME})"
+            "$RUNNER_TEMP/venv/bin/python" green-check.py --boot-probe
+          else
+            echo "Scope: PARTIAL — only the fragment(s) this PR touched:"
+            echo "${{ steps.scope.outputs.fragments }}"
+            ARGS=()
+            while IFS= read -r frag; do
+              [ -n "$frag" ] && ARGS+=(--only "$frag")
+            done <<< "${{ steps.scope.outputs.fragments }}"
+            "$RUNNER_TEMP/venv/bin/python" green-check.py --boot-probe "${ARGS[@]}"
+          fi
+
+      - name: No boot-relevant fragment changed — skipped
+        if: steps.scope.outputs.mode == 'none'
+        run: echo "No single-slot fragment changed by this PR; boot-and-probe has nothing to check here (full sweep still runs on push-to-main/dispatch/weekly)."
+
+  secret-scan:
+    # GATE-1 item 3 (DSN-001/D-071): pattern + entropy scan of every _fragments/** file that
+    # ships VERBATIM into a student's scaffolded repo. Pure stdlib (no deps, no docker) —
+    # cheap, fast, and needs nothing docker can give it, so (per the RUNNER CHOICE header
+    # comment) it runs on the self-hosted ARC fleet at zero GitHub-hosted minute cost.
+    runs-on: ua-mis-kaniko
+    container:
+      image: python:3.12-slim
+    env:
+      TOOLS_DIR: platform-services/backstage/templates/_fragments/_tools
+    steps:
+      - name: Checkout (fragments)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Secret-scan harness self-tests (proves the scanner catches a planted credential)
+        working-directory: ${{ env.TOOLS_DIR }}
+        run: python3 secret_scan.test.py
+
+      - name: Secret scan — _fragments/** must ship zero credential-shaped values
+        working-directory: ${{ env.TOOLS_DIR }}
+        run: python3 secret_scan.py
