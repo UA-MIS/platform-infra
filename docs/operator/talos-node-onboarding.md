@@ -10,10 +10,13 @@ deeper [`docs/phase-4-runbook.md`](../phase-4-runbook.md); for the **CNI** see
 
 > **⚠️ Mac Minis do NOT run Talos.** Late-2014 Mac Minis (`Macmini7,1`) **cannot boot
 > Talos v1.13.4** (a Talos-build-specific early boot hang; the same box boots Debian 13
-> fine). Those boxes join as **Debian workers** instead — use
+> fine). Such a box would have to join as a **Debian worker** instead — see
 > [`docs/operator/debian-worker-onboarding.md`](debian-worker-onboarding.md), **not**
-> this runbook. This runbook is for Talos-capable hardware (the Dell OptiPlex 7080
-> control-plane class).
+> this runbook. This runbook is for Talos-capable hardware (the Dell OptiPlex 7080 class).
+>
+> *No Mac Mini is in the fleet as of 2026-08-15* — the worker tier is `capstone-w1` /
+> `capstone-w2` (Dell OptiPlex 7080). This note is retained because the finding still
+> constrains any future attempt to use that hardware.
 
 ---
 
@@ -21,7 +24,7 @@ deeper [`docs/phase-4-runbook.md`](../phase-4-runbook.md); for the **CNI** see
 
 | Fact | Value |
 |---|---|
-| Nodes | `capstone-n1`, `-n2`, `-n3` — 3× Dell OptiPlex 7080, **all control-plane + untainted (converged)**, plus `mac-debian-01` (Debian worker) |
+| Nodes | `capstone-n1`, `-n2`, `-n3` — 3× Dell OptiPlex 7080, **all control-plane + untainted (converged)**, plus `capstone-w1` and `capstone-w2` (Debian workers, also OptiPlex 7080) |
 | Talos | **v1.13.4** (kernel `6.18.34-talos`) |
 | Kubernetes | **v1.31.5** |
 | CNI | Cilium v1.17.4 (installed post-bootstrap; `cniConfig.name: none` in talconfig, kube-proxy disabled) |

@@ -34,7 +34,7 @@ outbound-only) to in-cluster **Traefik**.
 | Layer | Component | Version | Role |
 |---|---|---|---|
 | Node OS / k8s | **Talos Linux** | v1.13.4 / k8s **v1.31.5** | Immutable, API-only OS; 3× OptiPlex 7080, all control-plane + **untainted (converged)** + etcd quorum |
-| Worker (Mac tier) | **Debian 13** | kernel 6.12 | Late-2014 Mac Minis that **can't boot Talos** → join as kubelet workers (`mac-debian-01` live) |
+| Worker tier | **Debian 13** | kernel 6.12 | `capstone-w1` + `capstone-w2` — 2× Dell OptiPlex 7080 joined as kubelet workers (pool `capstone.io/pool=build`); host the CI runner scale-sets, the MinIO DR target, and Ceph OSDs |
 | CNI | **Cilium** | v1.17.4 | eBPF dataplane, `kubeProxyReplacement`, VXLAN tunnel, **NetworkPolicy enforcement** (kube-proxy is absent) |
 | Overlay | **Tailscale** | `ualaims` tailnet | The network fabric — stable `100.x` addressing across LANs; node-to-node + API |
 | Storage | **Rook-Ceph** | operator v1.19.7 / Ceph v20.2.1 | replica-3 block storage on each node's SATA SSD; `ceph-block` default StorageClass |
@@ -88,7 +88,7 @@ belong in the **handoff vault** — see [OPERATIONS §5](../OPERATIONS-AND-HANDO
   `talhelper genconfig`, `talosctl apply-config`. Endpoints are the nodes' Tailscale
   `100.x` IPs. → **[talos-node-onboarding.md](talos-node-onboarding.md)** (first-time
   3-node bring-up: [phase-4-runbook.md](../phase-4-runbook.md)).
-- **Debian worker** (Mac Minis — they **cannot boot Talos**): an Ansible play
+- **Debian worker** (`capstone-w1/w2`, the non-Talos worker tier): an Ansible play
   (`ansible/`) TLS-bootstraps the kubelet onto the cluster. Needs a bootstrap-token +
   a Tailscale key, and a **local KubePrism stand-in** (Cilium hardcodes `127.0.0.1:7445`).
   → **[debian-worker-onboarding.md](debian-worker-onboarding.md)**.
@@ -143,8 +143,8 @@ install-owned and **not** GitOps-reconciled — after a PR touching `bootstrap/`
 ### 4.7 Platform backups
 
 **Velero** backs up every namespace's objects + PV data (file-system backup, not
-CSI snapshots) nightly into a dedicated **MinIO** instance pinned to a mac-debian
-node's local disk — deliberately **outside** the Rook-Ceph data path, so a
+CSI snapshots) nightly into a dedicated **MinIO** instance pinned to `capstone-w1`'s
+local disk — deliberately **outside** the Rook-Ceph data path, so a
 Ceph-level or cluster-wide failure doesn't take the backups down with it. →
 **[dr-backup.md](dr-backup.md)** (architecture, day-2 checks, and the **tested-restore
 drill an operator must run** to actually prove this works).
@@ -199,7 +199,7 @@ These are **live-verified** weak spots a successor should close:
 |---|---|
 | [OPERATIONS-AND-HANDOFF.md](../OPERATIONS-AND-HANDOFF.md) | The full successor manual — architecture, access, day-2, **continuance**, gotchas |
 | [talos-node-onboarding.md](talos-node-onboarding.md) | Add/replace a Talos node (talhelper) |
-| [debian-worker-onboarding.md](debian-worker-onboarding.md) | Onboard a Debian (Mac Mini) worker |
+| [debian-worker-onboarding.md](debian-worker-onboarding.md) | Onboard a Debian worker (the `capstone-w1/w2` tier) |
 | [phase-4-runbook.md](../phase-4-runbook.md) | First-time 3-node Talos + Rook-Ceph bring-up |
 | [cilium-cni-runbook.md](../cilium-cni-runbook.md) | The Cilium CNI (design + the Tailscale/eBPF hazard) |
 | [crossplane-onboarding.md](crossplane-onboarding.md) | Zero-touch tenant onboarding internals |

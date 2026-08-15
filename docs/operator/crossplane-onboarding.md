@@ -227,7 +227,8 @@ prune**, one tenant at a time:
 **Never delete multiple wedged claims simultaneously.** Do them **one at a time**,
 watching **cilium-agent and kube-apiserver CPU** between each — the 2026-07-10
 incident was a duplicate-claim apply-fight that pinned cilium and saturated a node
-(`mac-debian-01`) until vault raft snapshots stalled. Serialize and watch.
+(`mac-debian-01`, a worker since retired) until vault raft snapshots stalled.
+Serialize and watch.
 
 ### 3. "ArgoCD app shows Suspended" is (usually) not a teardown signal
 

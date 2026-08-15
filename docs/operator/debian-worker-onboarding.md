@@ -1,6 +1,26 @@
-# Debian Mac-Mini worker onboarding
+# Debian worker onboarding
 
-**Turn a fresh Debian 13 Mac Mini into a Ready Kubernetes worker in the Talos cluster.**
+**Turn a fresh Debian 13 box into a Ready Kubernetes worker in the Talos cluster.**
+
+> **⚠️ Status (2026-08-15): the Mac-Mini framing below is HISTORICAL. The procedure is not.**
+>
+> This runbook was written for a planned fleet of ~20 Late-2014 Mac Minis. **No Mac Mini
+> is in the cluster today.** The live worker tier is `capstone-w1` and `capstone-w2` —
+> Dell OptiPlex 7080 boxes running Debian 13, labelled `capstone.io/pool=build`. The
+> earlier `mac-debian-01` / `mac-debian-02` workers are gone; `mac-debian-02` was retired
+> in [#416](https://github.com/UA-MIS/platform-infra/pull/416) with its MinIO DR target
+> re-homed to `capstone-w1` in [#415](https://github.com/UA-MIS/platform-infra/pull/415),
+> and Ceph was expanded onto the OptiPlex workers' NVMe in
+> [#414](https://github.com/UA-MIS/platform-infra/pull/414).
+>
+> **The procedure itself is current and hardware-agnostic** — it is what the OptiPlex
+> workers were onboarded with, and it is the right runbook for adding any Debian worker.
+> Read "Mac Mini" below as "the Debian worker box", and note that the `~20 Mac Minis`
+> and `capstone.io/pool=mac-debian` references reflect the original plan, not the fleet.
+>
+> Whether the Mac tier is revived or formally retired is an open decision for the
+> platform owner (punch-listed, D-077). Until that is answered this runbook is kept
+> as-is rather than rewritten, so no procedural detail is lost.
 
 Audience: platform operator. Tooling: an Ansible controller + `kubectl`/`talosctl`
 with cluster admin, and access to the Tailscale admin console for tailnet
