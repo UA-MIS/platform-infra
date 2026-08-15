@@ -410,6 +410,46 @@ spec:
                 - receiver: 'null'
                   matchers:
                     - alertname = "Watchdog"
+                # FIX-15/MON-009: kube-prometheus-stack's bundled KubeClientCertificate
+                # Expiration (both the warning and critical variant — same alertname,
+                # different `severity` label, so ONE matcher on alertname covers both)
+                # is a structural false positive on this cluster, the same class ADV-5
+                # already removed elsewhere (kube-scheduler/controller-manager/proxy):
+                # it fires CONTINUOUSLY, carries zero information, and trains people to
+                # ignore the channel FIX-7 exists to make trustworthy.
+                #
+                # ROOT-CAUSED LIVE (not assumed), 2026-08-15: the expr is
+                #   histogram_quantile(0.01, rate(apiserver_client_certificate_
+                #   expiration_seconds_bucket{job="apiserver"}[5m])) < <threshold>
+                # i.e. the 1st percentile of remaining lifetime across EVERY client
+                # cert the apiserver has observed. On two of the three control-plane
+                # instances, ~30104 of ~325k observed certs sit in the <=30-minute
+                # bucket PERMANENTLY (a genuine, constant population of very
+                # short-lived, presumably auto-rotating certs — not a snapshot
+                # artifact: a 6h range query shows the quantile pinned between ~170s
+                # and ~1800s the entire window, never once clearing even the 24h
+                # CRITICAL threshold, let alone the 7d warning one). Nothing is
+                # actually about to expire; the 1st-percentile statistic is
+                # structurally dominated by a population that rotates on a timescale
+                # the alert was never designed to tolerate.
+                #
+                # WHY A ROUTE, NOT `kubernetesSystem: false`: that flag is the ONLY
+                # chart-native on/off switch, but it disables the WHOLE
+                # kubernetes-system-apiserver rule group — 5 OTHER, genuinely useful
+                # alerts live there too (KubeAPIDown, KubeAPIInstanceUnreachable,
+                # KubeAggregatedAPIErrors, KubeAggregatedAPIDown, KubeAPITerminated
+                # Requests), confirmed by rendering the chart's own rule templates.
+                # Losing KubeAPIDown/KubeAPIInstanceUnreachable to silence one noisy
+                # alert would be a materially worse trade than the ADV-5 cases (whose
+                # entire groups WERE dead). This route is the surgical alternative,
+                # following the exact pattern already established one line above for
+                # Watchdog: the rule keeps evaluating and stays visible in
+                # Prometheus's own /alerts view (so it is not a "blanket deletion" —
+                # nothing that queries Prometheus directly loses information), it
+                # simply never reaches a human via ntfy.
+                - receiver: 'null'
+                  matchers:
+                    - alertname = "KubeClientCertificateExpiration"
                 - receiver: 'platform-oncall'
                   matchers:
                     - severity =~ "critical|warning"

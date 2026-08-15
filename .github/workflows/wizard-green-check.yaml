@@ -10,9 +10,11 @@
 # buildable exactly as the tenant CI (build-and-push.yaml) would build it:
 #   (a) every deployable component ships its build file — <context>/<Dockerfile> for a
 #       container/static component (Kaniko), or <targetDir>/<buildWorkflow> for a mobile
-#       component; and
+#       component (further checked for GitHub Actions reachability, F-3/D-058); and
 #   (b) `kustomize build` succeeds on all four overlays (dev/staging/prod/preview).
-# A fragment that would scaffold RED fails this check and blocks the merge.
+# A fragment that would scaffold RED fails this check and blocks the merge (unless
+# QUARANTINEd in green-check.py — currently just the four F-3/D-058 mobile fragments,
+# hidden from the wizard while the underlying workflow-path bug is deferred, FIX-5).
 #
 # Also asserts (check_wizard_template.py, FIX-16/D-092, recommended by
 # review-fix1-wizard-postgres-guard.md WIZ-002/D-067): new-project/template.yaml's

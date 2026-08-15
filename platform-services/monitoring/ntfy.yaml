@@ -145,8 +145,16 @@ data:
 # v2.25.0 run locally against the reconstructed webhook payloads for ALL 43
 # alert groups live on the cluster at the time of the fix —
 #   built-in template: 4/43 groups rejected with the exact 40041 error above
-#   this override:     0/43 rejected, max rendered size 1613 B of 4096 (2.5x
-#                      headroom on the worst real group)
+#   this override:     0/43 rejected
+# FIX-15/MON-004: this number previously disagreed with the MON-002 disclosure
+# ten lines below (854 B) and with README.md's own figure — three different
+# numbers for the same claim, at least two stale. Reconciled to the one number
+# that also matches the README: 854 B of 4096 on the widest real group
+# measured (ArgoCD, 7 alerts) — see the MON-002 note below for how that number
+# was obtained and its scope. Re-measure via the replay harness (this file's
+# own corpus) rather than trusting either number if this claim is doubted; the
+# render size moves with the live alert corpus, so treat both as a snapshot,
+# not a permanent constant.
 #
 # ⚠ NO SealedSecret RESEAL NEEDED: ntfy resolves a file named `<name>.yml` in
 # template-dir AHEAD of its built-in of the same name, so the existing

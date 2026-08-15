@@ -11,6 +11,12 @@ drift) into a temp repo and asserts the repo is buildable exactly as the tenant 
         - container/static component -> <context>/<dockerfile>  (Kaniko build in tenant CI's
           build-and-push.yaml matrix);
         - mobile-artifact component  -> <targetDir>/<buildWorkflow>  (its own mobile workflow).
+  (a2) WORKFLOW REACHABILITY (F-3/D-058) — for a mobile-artifact component, (a) only proves
+        the buildWorkflow file EXISTS; this additionally asserts it lands under
+        .github/workflows/ at the repo root, the ONLY place GitHub Actions discovers and
+        runs a workflow. A file that exists elsewhere (e.g. <targetDir>/.mobile-ci/
+        build.yaml, every shipped mobile fragment today) is a FALSE GREEN: CI stays green,
+        no .apk/.ipa is ever built, silently. See compose_lib.mobile_workflow_reachability.
   (b) KUSTOMIZE — `kustomize build` succeeds on ALL FOUR overlays (dev/staging/prod/preview),
         i.e. ArgoCD can render the chart the wizard emitted.
   (c) DOCKERFILE LINT / BUILD (optional, --docker-build) — actually `docker build` each
@@ -33,14 +39,23 @@ drift) into a temp repo and asserts the repo is buildable exactly as the tenant 
 
 Fragments are DISCOVERED from disk, so a new fragment (e.g. blank/bring-your-own once PR-A lands)
 is covered automatically — the gate needs no edit to cover a new stack. A fragment that would
-scaffold red fails this check, so the platform-infra CI workflow that runs it blocks the merge.
+scaffold red fails this check, so the platform-infra CI workflow that runs it blocks the merge —
+UNLESS it is in QUARANTINE (below), a known-tracked, wizard-hidden exception, currently just the
+four mobile/* fragments (F-3/D-058).
 
-Exit 0 = every fragment green. Exit 1 = at least one fragment is NOT green out of the box (the
-per-fragment table + a FINDINGS section say which and why). Exit 2 = harness/environment error.
+The WIZARD SCHEMA itself (template.yaml's rjsf database-question partition, WIZ-001) is a
+SEPARATE, standalone check — see _tools/check_wizard_template.py + .test.py, wired into
+wizard-green-check.yaml as its own steps. It is not part of this per-fragment sweep.
+
+Exit 0 = every non-quarantined fragment green. Exit 1 = at least one non-quarantined fragment is
+NOT green out of the box (the per-fragment table + a FINDINGS section say which and why); a
+quarantined fragment is still composed, checked, and reported every run (see the QUARANTINED
+section), it just does not affect the exit code, UNLESS explicitly selected via --only, which
+always reports the TRUE status. Exit 2 = harness/environment error.
 
 Usage:
   green-check.py                      # check every fragment (needs node + kustomize/kubectl)
-  green-check.py --only backend/go    # one fragment
+  green-check.py --only backend/go    # one fragment (bypasses quarantine — always true status)
   green-check.py --docker-build       # also docker-build each Dockerfile (slow)
   green-check.py --boot-probe         # also boot + probe each single-slot fragment (GATE-1)
   green-check.py --json               # machine-readable results on stdout
@@ -58,7 +73,56 @@ import boot_probe
 import compose_lib
 from compose_lib import (ComposeError, compose, discover_fragments,
                          expected_build_artifacts, kustomize_overlays,
-                         kustomize_tool, scenario_for, load_meta)
+                         kustomize_tool, mobile_workflow_reachability,
+                         scenario_for, load_meta)
+
+# QUARANTINE (F-3/D-058) — fragments with a KNOWN, TRACKED red finding that the wizard no
+# longer offers a path to (mobile is hidden from the new-project template, see
+# templates/new-project/template.yaml). Every mobile buildWorkflow composes to
+# <targetDir>/.mobile-ci/build.yaml, which GitHub Actions never discovers or runs (see
+# compose_lib.mobile_workflow_reachability) — a real, currently-unfixed bug. Re-routing the
+# workflow files is DEFERRED (D-058: billing implications, GitHub-hosted macos-14 minutes
+# against the org's Free-plan pool) — NOT a pre-Tuesday fix.
+#
+# Quarantining is a VISIBILITY-PRESERVING skip, not a silent one: a quarantined fragment is
+# still composed and still checked every run (see main() below) and still shows up RED in
+# the report — it just does not fail the unfiltered default sweep's exit code, so the
+# platform-infra CI gate (wizard-green-check.yaml) is not permanently blocked by a known,
+# tracked, wizard-hidden issue. An explicit `--only <fragment>` ALWAYS reports the fragment's
+# true status, quarantine or not — this is how devops-fragments (and this gate's own tests)
+# prove the reachability assertion actually catches the bug: `green-check.py --only
+# mobile/flutter` still exits 1.
+#
+# COUPLING (MOB-002, review-fix5-mobile-hide.md): this dict has NO structural link to
+# template.yaml's `projectType` enum — restoring `mobile` there without also emptying this
+# dict re-arms the F-3 bug with the gate still green. _tools/check_wizard_template.py's
+# mobile-quarantine-consistency check enforces that coupling (asserts 'mobile' reachable
+# implies no mobile/* fragment remains here), so the restore step above cannot be forgotten
+# silently.
+QUARANTINE = {
+    "mobile/android-kotlin": "F-3/D-058: buildWorkflow not under .github/workflows/",
+    "mobile/flutter": "F-3/D-058: buildWorkflow not under .github/workflows/",
+    "mobile/ios-swift": "F-3/D-058: buildWorkflow not under .github/workflows/",
+    "mobile/react-native": "F-3/D-058: buildWorkflow not under .github/workflows/",
+}
+
+
+def partition_results(results, quarantine_active):
+    """Split check_fragment() results into (passed, quarantined, failed).
+
+    `quarantined` = results that are NOT ok, whose fragment is in QUARANTINE, AND
+    quarantine_active is True. Pure function (no I/O) so the aggregation logic is unit
+    tested without a real compose/kustomize run — see green-check.test.py.
+    """
+    passed, quarantined, failed = [], [], []
+    for r in results:
+        if r["ok"]:
+            passed.append(r)
+        elif quarantine_active and r["fragment"] in QUARANTINE:
+            quarantined.append(r)
+        else:
+            failed.append(r)
+    return passed, quarantined, failed
 
 
 def check_fragment(rel, workdir, *, do_docker=False, kz_tool=None, mariadb=None):
@@ -111,6 +175,17 @@ def check_fragment(rel, workdir, *, do_docker=False, kz_tool=None, mariadb=None)
         exists = f.is_file() and f.stat().st_size > 0
         add(f"build-file[{comp_name}]", exists,
             rel_path if exists else f"MISSING or empty: {rel_path}")
+
+    # (a2) mobile buildWorkflow must land where GitHub Actions actually executes it, not
+    # merely EXIST on disk (F-3/D-058 — see compose_lib.mobile_workflow_reachability).
+    try:
+        for comp_name, rel_path, reachable in mobile_workflow_reachability(composed):
+            add(f"workflow-reachable[{comp_name}]", reachable,
+                "" if reachable else
+                f"{rel_path} is not under {compose_lib.GITHUB_WORKFLOWS_DIR} — GitHub "
+                "Actions will never discover or run this workflow (F-3/D-058)")
+    except ComposeError as e:
+        add("workflow-reachable", False, str(e))
 
     # (b) kustomize builds all four overlays.
     try:
@@ -199,11 +274,16 @@ def main():
         if mariadb is not None:
             mariadb.stop()
 
-    passed = [r for r in results if r["ok"]]
-    failed = [r for r in results if not r["ok"]]
+    # Quarantine only ever applies to the UNFILTERED default sweep (the CI gate). An
+    # explicit --only is a deliberate, targeted check — it always reports the truth, which is
+    # exactly how this assertion's effectiveness is proven (see QUARANTINE docstring above).
+    quarantine_active = a.only is None
+    passed, quarantined, failed = partition_results(results, quarantine_active)
 
     if a.json:
         json.dump({"total": len(results), "passed": len(passed),
+                   "quarantined": [{"fragment": r["fragment"], "reason": QUARANTINE[r["fragment"]]}
+                                    for r in quarantined],
                    "failed": [r["fragment"] for r in failed], "results": results},
                   sys.stdout, indent=2)
         sys.stdout.write("\n")
@@ -215,11 +295,24 @@ def main():
           f"docker-build: {'on' if a.docker_build else 'off'}\n")
     width = max(len(r["fragment"]) for r in results)
     for r in sorted(results, key=lambda x: x["fragment"]):
-        status = "GREEN" if r["ok"] else "RED  "
+        if r["ok"]:
+            status = "GREEN"
+        elif quarantine_active and r["fragment"] in QUARANTINE:
+            status = "QUAR "
+        else:
+            status = "RED  "
         ncheck = len(r["checks"])
         nfail = sum(1 for c in r["checks"] if not c["ok"])
         detail = f"{ncheck} checks" if r["ok"] else f"{nfail}/{ncheck} FAILED"
         print(f"  [{status}] {r['fragment']:<{width}}  {detail}")
+
+    if quarantined:
+        print("\n--- QUARANTINED (known-red, tracked, does not block this gate) ---")
+        for r in quarantined:
+            print(f"\n* {r['fragment']}  ({QUARANTINE[r['fragment']]})")
+            for err in r["errors"]:
+                print(f"    - {err}")
+        print("\n  Re-run with --only <fragment> to see the TRUE status (bypasses quarantine).")
 
     if failed:
         print("\n--- FINDINGS (fragments NOT green out of the box) ---")
@@ -228,7 +321,8 @@ def main():
             for err in r["errors"]:
                 print(f"    - {err}")
 
-    print(f"\n{len(passed)}/{len(results)} fragments GREEN out of the box.")
+    print(f"\n{len(passed)}/{len(results)} fragments GREEN"
+          f"{f', {len(quarantined)} quarantined' if quarantined else ''} out of the box.")
     print("=== GREEN-CHECK " + ("OK ===" if not failed else "FAILED ===") + "\n")
     return 0 if not failed else 1
 

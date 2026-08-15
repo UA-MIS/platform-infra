@@ -21,7 +21,8 @@ FRAGMENTS = os.path.dirname(HERE)
 def load():
     out = []
     for f in sorted(glob.glob(os.path.join(FRAGMENTS, "*", "*", "fragment.yaml"))):
-        d = yaml.safe_load(open(f))
+        with open(f) as fh:
+            d = yaml.safe_load(fh)
         cat = os.path.basename(os.path.dirname(os.path.dirname(f)))
         # Skip the _contract dir (a category starting with "_") AND placeholder/example
         # fragments whose id starts with "_" (e.g. mobile/_EXAMPLE) — those document the
@@ -31,6 +32,14 @@ def load():
         d["_path"] = f"{cat}/{d['id']}"
         out.append(d)
     return out
+
+
+def by_slot(frags, slot):
+    """The fragments (in `load()` order) that fill `slot`. Hoisted to module level (was a
+    main()-local lambda) so green-check.py's WIZ-001 assertion can import this exact
+    derivation as ground truth for template.yaml's singleFragment enum — one source of
+    truth for "what fills a slot", not a second hand-copied definition."""
+    return [d for d in frags if slot in (d.get("slots") or [])]
 
 
 def block(title, frags):
@@ -46,12 +55,11 @@ def block(title, frags):
 
 def main():
     frags = load()
-    by_slot = lambda slot: [d for d in frags if slot in (d.get("slots") or [])]
     print("# Generated from _fragments/*/*/fragment.yaml — paste into new-project/template.yaml\n")
-    block("single slot (web/single singleFragment)", by_slot("single"))
-    block("frontend slot (web/frontend-backend frontendFragment)", by_slot("frontend"))
-    block("backend slot (backendFragment)", by_slot("backend"))
-    block("mobile slot (mobileFragment)", by_slot("mobile"))
+    block("single slot (web/single singleFragment)", by_slot(frags, "single"))
+    block("frontend slot (web/frontend-backend frontendFragment)", by_slot(frags, "frontend"))
+    block("backend slot (backendFragment)", by_slot(frags, "backend"))
+    block("mobile slot (mobileFragment)", by_slot(frags, "mobile"))
 
 
 if __name__ == "__main__":
