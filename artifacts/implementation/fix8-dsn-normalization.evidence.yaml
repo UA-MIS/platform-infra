@@ -225,13 +225,59 @@ verification:
       needs to run against an image built from this branch.
 
   integration_pending:
-    status: NOT YET RUN — coordinating with devops-fragments (VERIFY-4)
-    plan: >
-      devops-fragments' Tier-A DB-backed-endpoint assertions are the empirical gate
-      for the POST-fix state. At minimum: scaffold (or reuse) a fastapi + host-mysql
-      tenant built from this branch, wire real DATABASE_URL via the Secrets tab, and
-      confirm the pod goes Ready + /api/items CRUD works against the real MariaDB,
-      not just that the pod boots.
+    status: >
+      SATISFIED via podman runtime evidence (devops-fragments, 2026-08-15) — see
+      empirical_confirmation below. Per D-075 (decision-log), a separate in-cluster
+      Tier-A confirmation is DROPPED as a merge precondition: this runtime evidence
+      plus the venv reproduction above carries the merge; the in-cluster leg happens
+      naturally in the FINAL e2e (task #11), which scaffolds the default
+      fastapi+host-mysql combo post-merge.
+
+  empirical_confirmation:
+    source: devops-fragments (VERIFY-4), 2026-08-15
+    method: >
+      Composed backend/fastapi + host-mysql through dry-render.py (the same
+      compose_lib the live scaffolder action uses), built the image with podman,
+      ran it against a live MariaDB 11.8 with the contract's exact bare-scheme DSN
+      form (`DATABASE_URL=mysql://appuser:apppw@f8-mysql:3306/appdb`, matching what
+      database.externalsecret.yaml actually renders), and queried MariaDB directly
+      afterward to rule out the SQLite-fallback false-positive (a 200 on a data
+      route could otherwise just be the in-memory fallback silently serving).
+    result: >
+      Container stable (no crash-loop). GET /healthz -> 200. GET /api/items -> 200
+      []. POST /api/items -> 201, item created. GET /api/items read-back -> 200
+      with the created row. Direct MariaDB query afterward: SHOW TABLES lists
+      `items`; SELECT * FROM items returns the row physically persisted in
+      MariaDB — confirms this is NOT the SQLite fallback path.
+    negative_control: >
+      Same DSN form, same MariaDB image, PRE-fix code: container Exited (1),
+      `ModuleNotFoundError: No module named 'MySQLdb'` raised from create_engine
+      at app/db.py:37, gunicorn "Worker failed to boot." Matches this evidence
+      file's own venv reproduction above and the independent live confirmation
+      from devops-vault. The only variable that changed between crash-loop and
+      working CRUD is the normalization fix.
+    diff_review: >
+      devops-fragments independently reviewed the diff and confirmed the shape is
+      correct: _normalize_mysql_url only rewrites a leading bare mysql://, leaves
+      already-driver-qualified or sqlite URLs untouched, and the platform DSN
+      template (database.externalsecret.yaml) is NOT modified — preserving the
+      bare form every other fragment (django/express/go/flask/laravel/...) parses
+      correctly. Runtime-verified those five directly under the same conditions;
+      none regress. This independently corroborates D-070 (F-6 finalized as
+      contract mismatch, fix stays fragment-side, shared template untouched).
+    scope_note: >
+      Fragment-level runtime confirmation, not in-cluster: the DSN string used was
+      read directly from database.externalsecret.yaml's canonical form, not one
+      ESO actually materialized into a pod. Does not exercise ESO delivery itself.
+      Tested against commit ca17471 (pre-DSN-001-rework); devops-fragments noted
+      the normalization code is unchanged by the rework (only the test fixture and
+      the DSN-002 blank-handling guard changed) and does not expect a different
+      result, but offered to re-run against the reworked branch on request.
+    citation: >
+      Full 19-fragment matrix (17 PASS / 2 FAIL pre-fix, fastapi and
+      static/react-static/FIX-12 the only failures — both single-file, invisible
+      to every existing gate, per D-073): artifacts/exploration/
+      fragment-matrix-2026-08-15.md (orchestrator repo).
 
 rework_history:
   - round: 1
@@ -252,15 +298,31 @@ rework_history:
       - "Scrubbed the one remaining reference (tenant username only, password already redacted) in this evidence file."
       - "Credential ROTATION is explicitly NOT this PR's job — tracked separately as FIX-11 (#35, devops-vault, URGENT security), since scrubbing files does not un-publish an already-exposed value."
       - "Fixed DSN-002 (non-blocking finding, promoted into this rework per the reviewer's note that it reaches the same CrashLoopBackOff this task exists to eliminate): DATABASE_URL blank/whitespace now falls back to sqlite like every other fragment, via a new _resolve_database_url() helper. 4 new tests added (unset/empty/whitespace/normalizes)."
-      - "DSN-003 (merge should be gated on live integration evidence, not unit-only) — unchanged position: still requesting devops-fragments' Tier-A confirmation before merge, see integration_pending below."
+      - "DSN-003 (merge should be gated on live integration evidence, not unit-only) — SATISFIED: devops-fragments' podman runtime evidence (empirical_confirmation above) plus the venv reproduction carries the merge per D-075 (decision-log); a separate in-cluster Tier-A run is no longer a precondition, and rides along with the FINAL e2e (#11) instead."
       - "DSN-004 (DSN template doesn't URL-encode userinfo) — out of scope per reviewer, filed to the D-062 DSN-contract-redesign backlog (tracked in decision-log D-071, not duplicated here)."
       - "DSN-005 (flask/go/spring/rails normalization has no regression test) and DSN-007 (unregistered legacy template dirs carry dead-weight secret copies) — reviewer flagged these as follow-ups, not this PR's job; noted here for traceability, not actioned."
     test_status_this_round: "18 passed (10 pre-existing + 4 DSN-001-round normalization tests + 4 new DSN-002 blank/whitespace tests)."
 
+rereview: >
+  FIX-8-RE-REVIEW (#36): APPROVED (artifacts/reviews/review-fix8-rereview.md,
+  reviewer-wizard). Independently re-verified DSN-001 via a repo-wide credential
+  hash scan (923 files, 45 credential-shaped values from live cluster secrets,
+  zero occurrences of the exposed password) and DSN-002 via in-situ module
+  imports. Also closed a gap I could not: compiled and ran the dotnet-aspnet
+  suite (14/14 pass, DOTNET_ROLL_FORWARD=LatestMajor) since only .NET 10 runtime
+  was available in my environment. Confirmed the prior-approved normalization
+  logic and 15-fragment audit are untouched by the rework (diff scoped to
+  fastapi + dotnet-aspnet only).
+
+merge_status: >
+  D-075 (decision-log) + the re-review's APPROVED verdict together clear this
+  PR to merge: DSN-003 is satisfied by devops-fragments' podman evidence
+  (empirical_confirmation above), so no further gate remains.
+
 open_items:
-  - "Awaiting devops-fragments live confirmation against an image built from this branch before FIX-8-REVIEW gates the merge (DSN-003)."
   - "DSN-contract redesign (platform emits per-backend driver-qualified DSNs) is punch-listed per D-062, intentionally out of scope for this go-live-blocker fix. DSN-004 (userinfo URL-encoding) is appended to that same backlog entry, not a new item here."
-  - "Credential rotation for the exposed molly-demo-dev password is FIX-11's job (#35, devops-vault), not this PR's — do not consider this evidence bundle a substitute for confirming that rotation happened."
+  - "Credential rotation for the exposed molly-demo-dev password is FIX-11's job (#35, devops-vault), not this PR's — do not consider this evidence bundle a substitute for confirming that rotation happened. Merging this PR does NOT remediate the historical exposure; only rotation does."
+  - "DSN-005 (no regression test for flask/go/spring/rails normalization) and DSN-007 (legacy uncatalogued template dirs, now scrubbed but still dead weight) remain open low-priority follow-ups per the re-review, not actioned here."
 
 related_defects_out_of_scope:
   - id: defect_A_env_injection_race (fix3 evidence addendum)
