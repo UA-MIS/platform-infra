@@ -28,6 +28,16 @@ metadata:
   labels:
     app.kubernetes.io/name: ${{ values.appName }}
     app.kubernetes.io/component: ${{ c.name }}
+  annotations:
+    # Reloader (FIX-9/D-065) — MIRRORS base/deployments.yaml's annotation per this
+    # file's own KEEP-IN-SYNC note above. Reloader supports Argo Rollouts natively:
+    # a secret change here advances through the SAME canary steps as an image bump
+    # (25% -> 50% -> 100%), not a hard replace-all-pods restart.
+{%- if c.needsDb and (values.database == 'mysql' or values.database == 'postgres') %}
+    secret.reloader.stakater.com/reload: "${{ values.appName }}-secret,${{ values.appName }}-db"
+{%- else %}
+    secret.reloader.stakater.com/reload: "${{ values.appName }}-secret"
+{%- endif %}
 spec:
   replicas: 1   # overlays/prod patches this to 3 (JSON6902 replace, targets the Rollout GVK).
   selector:

@@ -1,0 +1,128 @@
+# stakater/Reloader Application (FIX-9/D-065 — env-injection race). Closes Defect A from
+# devops-vault's live verification: tenant app Deployments read APP_SECRET/DATABASE_URL via
+# `optional: true` secretKeyRefs, which the kubelet resolves ONCE, at container START. A pod
+# that starts before ESO materializes its Secret (from a fresh scaffold, or any transient ESO/
+# Vault miss) comes up green (HTTP 200, /healthz passes) but permanently env-less — nothing in
+# the cluster re-resolves a running container's env, so same-ReplicaSet pods can silently end up
+# with opposite outcomes depending on pure timing. With ~20 teams onboarding simultaneously on
+# 2026-08-19, some fraction were guaranteed to lose this race with no signal anywhere.
+#
+# Reloader watches Secrets/ConfigMaps and, on change (or first CREATION — see reloadOnCreate
+# below), triggers a rolling restart of any Deployment/Rollout/StatefulSet/DaemonSet that opts
+# in via a `secret.reloader.stakater.com/reload: "<names>"` annotation. That annotation is added
+# to the tenant contract's Deployment (base/deployments.yaml) and the prod-only canary Rollout
+# (overlays/prod/rollout.yaml), scoped to exactly that component's own app-secret/db-secret — see
+# those files for the annotation and platform-services/backstage/templates/_fragments/_contract/
+# for the full tenant contract this deploys into every scaffolded repo.
+#
+# Deploy method A (D-022/D-028, same as VPA/Goldilocks/Descheduler): pinned official chart + the
+# chart repo added to the `platform` AppProject sourceRepos allowlist (bootstrap/
+# platform-appproject.yaml). ⚠ INSTALL-OWNED — reaches the live AppProject only via
+# `make bootstrap`/`make bootstrap-reapply` + VERIFY (the AppProject is bootstrap-managed, not
+# GitOps-reconciled), else this app InvalidSpecErrors "repo not permitted".
+#
+# ── depends on Argo Rollouts (sync-wave 1) ────────────────────────────────────
+# The chart's ClusterRole conditionally adds an argoproj.io/rollouts RBAC rule, but ONLY when
+# Helm's live-cluster capability check (`.Capabilities.APIVersions.Has "argoproj.io/v1alpha1"`,
+# which ArgoCD's repo-server evaluates against the ACTUAL destination cluster at render time,
+# not a static default) sees the CRD already registered. platform-argo-rollouts is sync-wave 0;
+# this app is wave 1 so Reloader's first render on a from-scratch bootstrap already sees the CRD
+# and gets the rule — no manual re-sync needed to pick up rollouts.argoproj.io RBAC later.
+#
+# ── why reloadOnCreate: true (the actual bug this closes) ─────────────────────
+# The chart default (reloadOnCreate: false) only reloads on an UPDATE to an existing, already-
+# watched Secret — it does nothing the FIRST time a Secret appears. That is exactly backwards for
+# this race: the failure mode is a pod that started with the Secret ABSENT, and the fix is Secret
+# CREATION triggering the rollout. Verified by execution (evidence bundle) — with reloadOnCreate
+# left at the chart default, a from-scratch tenant's first-ever ESO materialization does NOT
+# trigger a restart and the race reproduces exactly as filed.
+#
+# ── scoping (no restart storms) ────────────────────────────────────────────────
+# autoReloadAll stays the chart default (false) — Reloader only acts on workloads carrying the
+# secret.reloader.stakater.com/reload annotation with an EXPLICIT, named secret list (never the
+# blanket reloader.stakater.com/auto, which would fire on ANY Secret change in a tenant's
+# namespace, including unrelated platform-managed Secrets like harbor-pull or vault-ca). Applying
+# this annotation to existing live tenant Deployments does not itself trigger anything — Reloader
+# only acts on a subsequent Secret CREATE/UPDATE event, never on its own startup or on a workload
+# annotation being added (verified: see evidence bundle's no-disruption-at-deploy check).
+#
+# watchGlobally: true — tenant Secrets/Deployments/Rollouts span every team's own
+# <team>-{dev,staging,prod} namespace (Reloader has no way to know which namespaces exist ahead
+# of onboarding), so this needs the ClusterRole, not a per-namespace Role.
+#
+# Chart: reloader 2.2.16 (appVersion v1.4.21), pinned. Bump deliberately.
+# Root-app recurses applicationsets/, so this Application is registered.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-reloader
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"   # after Argo Rollouts CRDs (platform-argo-rollouts = wave 0)
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://stakater.github.io/stakater-charts   # PINNED chart repo (sourceRepos allowlist)
+    chart: reloader
+    targetRevision: 2.2.16                                # pinned chart version (appVersion v1.4.21); no ^/~/latest
+    helm:
+      releaseName: reloader
+      values: |
+        reloader:
+          # Opt-in only, via the secret.reloader.stakater.com/reload annotation on each
+          # workload — never restart something that didn't ask to be watched.
+          autoReloadAll: false
+          # THE fix: without this, Reloader ignores a Secret's first-ever appearance
+          # (chart default is update-only) and the exact race this app exists to close
+          # would still reproduce on every from-scratch tenant.
+          reloadOnCreate: true
+          # Enables the Rollout-aware reload path (prod's canary Rollout carries the same
+          # annotation as the base Deployment) — see the sync-wave note above for why the
+          # RBAC this needs is present from Reloader's very first render.
+          isArgoRollouts: true
+          # Cluster-wide: tenant namespaces are created on-demand per team/env, so a
+          # namespace-scoped Role can't be pre-enumerated.
+          watchGlobally: true
+          reloadStrategy: default
+          # PodSecurity "restricted" compliance (this flag also wires the /tmp emptyDir
+          # Reloader needs once the root filesystem is read-only — verified via
+          # `helm template`, no manual volume plumbing required).
+          readOnlyRootFileSystem: true
+          deployment:
+            securityContext:
+              runAsNonRoot: true
+              runAsUser: 65534
+              seccompProfile:
+                type: RuntimeDefault
+            containerSecurityContext:
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop: ["ALL"]
+            # Single, small, stateless controller (no HA needed — a restart just resumes
+            # watching from the current Secret/ConfigMap state, no missed events tracked
+            # across a brief gap). Sized from the chart's own recommendation footprint;
+            # revisit via Goldilocks (already watching every platform namespace) if actual
+            # usage drifts.
+            resources:
+              requests: { cpu: 20m, memory: 64Mi }
+              limits: { cpu: 200m, memory: 128Mi }
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: reloader
+  syncPolicy:
+    managedNamespaceMetadata:
+      labels:
+        platform.capstone/component: platform
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true    # dedicated `reloader` namespace
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

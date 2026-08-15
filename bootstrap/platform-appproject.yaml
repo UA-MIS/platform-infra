@@ -224,6 +224,15 @@ spec:
     # VERIFY (the AppProject is bootstrap-managed, not GitOps-reconciled) or
     # platform-descheduler will InvalidSpecError "repo not permitted".
     - https://kubernetes-sigs.github.io/descheduler/       # Descheduler (platform-descheduler Application)
+    # Reloader (FIX-9/D-065, env-injection race, applicationsets/reloader-app.yaml): the
+    # official stakater Helm chart repo. ONE named source, chart version pinned in the
+    # Application (reloader @ 2.2.16). Watches tenant Secrets and rolls the annotated
+    # Deployment/Rollout on change/creation — see the Application's header for the full
+    # rationale. ⚠ INSTALL-OWNED (same as every add above): reaches the live `platform`
+    # AppProject only via `make bootstrap`/`make bootstrap-reapply` + VERIFY (the
+    # AppProject is bootstrap-managed, not GitOps-reconciled) or platform-reloader will
+    # InvalidSpecError "repo not permitted".
+    - https://stakater.github.io/stakater-charts            # Reloader (platform-reloader Application)
 
   # Platform services are cluster-wide; allow any namespace on the in-cluster API.
   destinations:
