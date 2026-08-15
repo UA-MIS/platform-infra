@@ -40,6 +40,19 @@ metadata:
   labels:
     app.kubernetes.io/name: ${{ values.appName }}
     app.kubernetes.io/component: ${{ c.name }}
+  annotations:
+    # Reloader (FIX-9/D-065): a rolling restart on secret CHANGE closes the
+    # env-injection race above — optional:true secretKeyRefs resolve at container
+    # START ONLY, so a pod that started before ESO materialized the Secret runs
+    # permanently env-less (kubelet never re-resolves a running container's env).
+    # Named-secret form (not reloader.stakater.com/auto, which reacts to ANY
+    # Secret change in the namespace) scopes this to exactly the Secret(s) this
+    # component's env actually reads, matching the mapping below.
+{%- if c.needsDb and (values.database == 'mysql' or values.database == 'postgres') %}
+    secret.reloader.stakater.com/reload: "${{ values.appName }}-secret,${{ values.appName }}-db"
+{%- else %}
+    secret.reloader.stakater.com/reload: "${{ values.appName }}-secret"
+{%- endif %}
 spec:
   replicas: 1
   selector:
