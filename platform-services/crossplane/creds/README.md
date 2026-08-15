@@ -296,6 +296,26 @@ rm -f /tmp/gh.json
 # Repeat for harbor-provider-creds and vault-provider-creds with their scoped values.
 ```
 
+> ⚠ **When you mint this token, it expires in 32 days — not a year (D-061).** The
+> Vault token mount is tuned `max_lease_ttl=768h`, which caps EVERY issuance
+> regardless of `-period`; Vault returns a warning saying so. A periodic token
+> survives only because something renews it, and that something is the
+> `provider-vault-token-renewer` CronJob
+> (`platform-services/crossplane/config/provider-vault-token-renewer.yaml`), which
+> calls `auth/token/renew-self` nightly. If you mint a replacement token, you do
+> NOT need to touch the renewer — it reads whatever token is in the Secret. But if
+> the renewer is broken or removed, the credential dies ~32 days later and
+> new-tenant onboarding silently stops (finding F-2). `VaultTokenRenewerStale`
+> alerts on that. Full explanation: `docs/operator/vault-and-dr.md` §"Token
+> lifetimes".
+>
+> Mint it with:
+> ```bash
+> vault token create -policy=tenant-provisioner -period=8760h -orphan \
+>   -display-name=crossplane-provider-vault
+> ```
+> then reseal `vault-provider-creds` per the resealing recipe above.
+
 The `tenant-provisioner` Vault policy (run once, alongside the ESO/tenant policies
 in `platform-services/external-secrets/vault-policies/`):
 
