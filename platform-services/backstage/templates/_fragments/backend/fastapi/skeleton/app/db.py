@@ -37,9 +37,27 @@ def _normalize_mysql_url(url: str) -> str:
     return url
 
 
+def _resolve_database_url(raw: str | None) -> str:
+    """Resolve the effective DATABASE_URL: UNSET *and* blank/whitespace both fall
+    back to the in-memory SQLite default, then whatever's left is normalized.
+
+    `os.getenv("DATABASE_URL", <default>)` alone only substitutes the default when
+    the var is unset — a transiently EMPTY value (e.g. the env-injection race FIX-9
+    exists to close: a container starting a beat before ESO materializes the
+    secret) would pass straight through, normalize to "", and blow up
+    create_engine() at import with the identical CrashLoopBackOff this module
+    exists to prevent, reached by a different door. Blank must degrade exactly
+    like unset.
+    """
+    value = (raw or "").strip()
+    if not value:
+        return "sqlite+pysqlite:///:memory:"
+    return _normalize_mysql_url(value)
+
+
 # Zero-config default = in-memory SQLite. Wire MySQL by setting DATABASE_URL via the
 # Secrets tab (see README "Database wiring"). NEVER hardcode credentials here.
-DATABASE_URL = _normalize_mysql_url(os.getenv("DATABASE_URL", "sqlite+pysqlite:///:memory:"))
+DATABASE_URL = _resolve_database_url(os.getenv("DATABASE_URL"))
 
 # SQLite needs two extra kwargs to behave under FastAPI's threadpool + share a single
 # in-memory database across connections. MySQL (and every other backend) wants neither,

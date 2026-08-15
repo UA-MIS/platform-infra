@@ -59,6 +59,12 @@ audit_table:
       not first query. Bug confirmed live: `create_engine("mysql://...")` raises
       ModuleNotFoundError("No module named 'MySQLdb'") in this environment (only
       PyMySQL is installed). Fixed via _normalize_mysql_url() in app/db.py.
+      DSN-002 rework (retry 1/2): _resolve_database_url() also treats a blank/
+      whitespace DATABASE_URL the same as unset (falls back to sqlite), matching
+      every other fragment (flask/go/spring/rust already guard this) — a
+      transiently-empty value used to reach create_engine() with "" and crash at
+      import via the identical CrashLoopBackOff door, reachable via FIX-9's
+      env-injection race.
 
   - fragment: flask
     driver: SQLAlchemy 2.x + PyMySQL
@@ -189,7 +195,7 @@ verification:
       (PyMySQL installed, MySQLdb not) raises
       `ModuleNotFoundError: No module named 'MySQLdb'` — confirms the crash-loop cause.
     - >
-      Post-fix repro: `DATABASE_URL=mysql://molly_demo_dev:...@host:3306/molly_demo_dev`
+      Post-fix repro: `DATABASE_URL=mysql://exampleteam_dev:not-a-real-password@host:3306/exampleteam_dev`
       + `from app.db import engine` succeeds; engine.driver == "pymysql",
       engine.dialect.name == "mysql".
   independent_live_confirmation:
@@ -227,9 +233,34 @@ verification:
       confirm the pod goes Ready + /api/items CRUD works against the real MariaDB,
       not just that the pod boots.
 
+rework_history:
+  - round: 1
+    review: artifacts/reviews/review-fix8-dsn.md (reviewer-wizard, D-062)
+    verdict: REJECTED
+    blocking_finding: >
+      DSN-001 (HIGH): the round-1 test fixture embedded a REAL, live molly-demo-dev
+      database password (SHA-256-confirmed against the live cluster Secret by the
+      reviewer, without printing it) — copied verbatim from the dotnet-aspnet
+      fragment's ConnectionStringHelperTests.cs (present on main since 66d5660,
+      itself unflagged in that PR's review). Because `_fragments/**/skeleton/` is
+      copied into every scaffolded student repo, and fastapi is the wizard's
+      DEFAULT backend, this meant a live tenant's DB password would land in a
+      large fraction of student repos' git history and CI logs.
+    remediation_this_round:
+      - "Replaced the fixture in tests/test_db_normalization.py with a sanitized shape (same host/scheme structure, fake user/password — 'exampleteam_dev' / 'not-a-real-password')."
+      - "Scrubbed the two pre-existing dotnet-aspnet copies carrying the same live credential (_fragments/backend/dotnet-aspnet and the legacy templates/dotnet-aspnet-api) with the same sanitized fixture, for consistency and to close the exposure everywhere it appears in this repo."
+      - "Scrubbed the one remaining reference (tenant username only, password already redacted) in this evidence file."
+      - "Credential ROTATION is explicitly NOT this PR's job — tracked separately as FIX-11 (#35, devops-vault, URGENT security), since scrubbing files does not un-publish an already-exposed value."
+      - "Fixed DSN-002 (non-blocking finding, promoted into this rework per the reviewer's note that it reaches the same CrashLoopBackOff this task exists to eliminate): DATABASE_URL blank/whitespace now falls back to sqlite like every other fragment, via a new _resolve_database_url() helper. 4 new tests added (unset/empty/whitespace/normalizes)."
+      - "DSN-003 (merge should be gated on live integration evidence, not unit-only) — unchanged position: still requesting devops-fragments' Tier-A confirmation before merge, see integration_pending below."
+      - "DSN-004 (DSN template doesn't URL-encode userinfo) — out of scope per reviewer, filed to the D-062 DSN-contract-redesign backlog (tracked in decision-log D-071, not duplicated here)."
+      - "DSN-005 (flask/go/spring/rails normalization has no regression test) and DSN-007 (unregistered legacy template dirs carry dead-weight secret copies) — reviewer flagged these as follow-ups, not this PR's job; noted here for traceability, not actioned."
+    test_status_this_round: "18 passed (10 pre-existing + 4 DSN-001-round normalization tests + 4 new DSN-002 blank/whitespace tests)."
+
 open_items:
-  - "Awaiting devops-fragments live confirmation against an image built from this branch (PR #434) before FIX-8-REVIEW gates the merge."
-  - "DSN-contract redesign (platform emits per-backend driver-qualified DSNs) is punch-listed per D-062, intentionally out of scope for this go-live-blocker fix."
+  - "Awaiting devops-fragments live confirmation against an image built from this branch before FIX-8-REVIEW gates the merge (DSN-003)."
+  - "DSN-contract redesign (platform emits per-backend driver-qualified DSNs) is punch-listed per D-062, intentionally out of scope for this go-live-blocker fix. DSN-004 (userinfo URL-encoding) is appended to that same backlog entry, not a new item here."
+  - "Credential rotation for the exposed molly-demo-dev password is FIX-11's job (#35, devops-vault), not this PR's — do not consider this evidence bundle a substitute for confirming that rotation happened."
 
 related_defects_out_of_scope:
   - id: defect_A_env_injection_race (fix3 evidence addendum)
