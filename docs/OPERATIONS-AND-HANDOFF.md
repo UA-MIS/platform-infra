@@ -103,7 +103,7 @@ is what makes the whole thing reproducible and recoverable.
 | Layer | Component | Version (live) | Responsibility | Decision |
 | --- | --- | --- | --- | --- |
 | Node OS / k8s | **Talos Linux** | v1.13.4 / k8s **v1.31.5** | Immutable, API-only node OS (no SSH); 3-node converged HA control plane + etcd quorum | D-024/ADR-017, D-035, **D-040** |
-| Worker (Mac tier) | **Debian 13** (Mac Minis) | kernel 6.12 | Late-2014 Mac Minis that **can't boot Talos** → join as kubelet workers (`mac-debian-01` live). See `operator/debian-worker-onboarding.md` | — |
+| Worker tier | **Debian 13** (Dell OptiPlex 7080) | kernel 6.12 | `capstone-w1` + `capstone-w2` — Debian kubelet workers (not Talos), labelled `capstone.io/pool=build`; carry the CI runner scale-sets, the MinIO DR target, and Ceph OSDs. Onboarded via `operator/debian-worker-onboarding.md` | — |
 | CNI | **Cilium** (LIVE) | v1.17.4 | eBPF dataplane, `kubeProxyReplacement` (kube-proxy absent), VXLAN tunnel, **NetworkPolicy enforced** | D-036 |
 | Storage | **Rook-Ceph** | operator **v1.19.7** (Ceph v20.2.1) | replica-3 block storage; `ceph-block` default StorageClass | D-037 |
 | GitOps | **ArgoCD** | v3.4.3 | Reconciles the whole platform from `platform-infra` (app-of-apps) | T3, D-012 |
@@ -374,8 +374,8 @@ branches and PRs but **not** push to `main` directly (server-side protection + c
 | Runbook | Covers |
 | --- | --- |
 | **`docs/operator/README.md`** | **The task-oriented Operator Guide — start here** (component map + common ops) |
-| `docs/operator/talos-node-onboarding.md` | Add/replace a Talos node (talhelper); the Mac-Mini-can't-boot-Talos finding |
-| `docs/operator/debian-worker-onboarding.md` | Onboard a Debian (Mac Mini) worker: TLS bootstrap + KubePrism stand-in |
+| `docs/operator/talos-node-onboarding.md` | Add/replace a Talos node (talhelper) |
+| `docs/operator/debian-worker-onboarding.md` | Onboard a Debian worker (`capstone-w1/w2` tier): TLS bootstrap + KubePrism stand-in. Written for the Mac-Mini tier; the procedure is hardware-agnostic and is what the OptiPlex workers were onboarded with |
 | `docs/phase-4-runbook.md` | First-time 3-node Talos install, etcd bootstrap, Rook-Ceph bring-up, pre-apply gate |
 | `docs/cilium-cni-runbook.md` | The flannel→Cilium swap on Talos+Tailscale (COMPLETE — reference for a rebuild) |
 | `docs/db-tier-runbook.md` | Postgres 17 + MariaDB 11.8 on `ua-mis-db-1`, pgBackRest, nftables, SSH key-only |
@@ -478,8 +478,9 @@ summarizes, it does not replace it. See §8 for an index of the load-bearing one
 
 ### 6.1 What is LIVE and working
 
-- **3-node Talos cluster** (all Ready, HA 3-member etcd, k8s v1.31.5 / Talos v1.13.4) **+ a Debian
-  worker** (`mac-debian-01`; the Mac-Mini tier that can't boot Talos — `operator/debian-worker-onboarding.md`).
+- **3-node Talos cluster** (all Ready, HA 3-member etcd, k8s v1.31.5 / Talos v1.13.4) **+ two Debian
+  workers** (`capstone-w1`, `capstone-w2` — Dell OptiPlex 7080, pool `capstone.io/pool=build`;
+  onboarded via `operator/debian-worker-onboarding.md`).
 - **Cilium v1.17.4** is the live CNI (kube-proxy absent, `cni:none`, NetworkPolicy **enforced**).
 - **Rook-Ceph replica-3**, `HEALTH_OK`, `ceph-block` default StorageClass, PVCs bind.
 - **ArgoCD v3.4.3** app-of-apps reconciling the platform; the large majority of apps `Synced/Healthy`.

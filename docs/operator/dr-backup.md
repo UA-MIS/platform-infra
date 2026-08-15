@@ -21,7 +21,7 @@ vault-unsealer.
 **Read this before touching MinIO.** Because the nightly schedule backs up **every
 namespace's Kubernetes Secrets** (`includedNamespaces: ["*"]`, only `minio` itself is
 excluded — `applicationsets/velero-app.yaml`), the `velero` bucket on
-`mac-debian-01`'s local disk (`/var/lib/minio-dr-backup`) is, in aggregate, a copy of
+`capstone-w1`'s local disk (`/var/lib/minio-dr-backup`) is, in aggregate, a copy of
 **every credential this platform has**: Harbor robot tokens, the Dex/OIDC client
 secrets, Vault's own unseal material to the extent it's stored as a Secret, and —
 critically — **the sealed-secrets controller's own signing key**. Anyone who reads
@@ -42,7 +42,7 @@ sensitive than almost anything else on the platform. Treat it accordingly:
   (`hardening/netpol-controlplane/minio-netpol.yaml`) — same MANUAL-SYNC,
   default-deny posture as Vault/ArgoCD/Dex (`hardening/netpol-controlplane/`).
   This does **not** by itself protect the data at rest on disk or over anyone with
-  direct SSH/filesystem access to `mac-debian-01` — it only stops other in-cluster
+  direct SSH/filesystem access to `capstone-w1` — it only stops other in-cluster
   pods from reaching the S3 API.
 - Anyone doing filesystem-level backup/restore/copy of `/var/lib/minio-dr-backup`
   (e.g. the "Relocating MinIO" procedure below) is handling that same crown-jewels
@@ -65,7 +65,7 @@ sensitive than almost anything else on the platform. Treat it accordingly:
   │  Velero (velero ns)               │  S3    │  MinIO (minio ns)            │
   │  velero-plugin-for-aws + node-    │ ─────▶ │  StatefulSet, 1 replica       │
   │  agent DaemonSet (Kopia fs-backup)│        │  hostPath PV pinned to        │
-  │                                    │        │  mac-debian-01's LOCAL disk   │
+  │                                    │        │  capstone-w1's LOCAL disk     │
   └───────────────────────────────────┘        │  (/var/lib/minio-dr-backup)   │
                                                  │  bucket: velero               │
                                                  └──────────────────────────────┘
@@ -78,7 +78,7 @@ sensitive than almost anything else on the platform. Treat it accordingly:
   failure. See `platform-services/minio/namespace.yaml` for the full rationale.
 - **Why one node, one replica:** MinIO here is a DR target, not an HA service.
   Distributed/erasure-coded MinIO needs 4+ drives — gold-plating for a homelab. If
-  `mac-debian-01` is down, backup/restore is paused (an availability gap, not a
+  `capstone-w1` is down, backup/restore is paused (an availability gap, not a
   data-loss risk — existing snapshots on disk are untouched) until it returns.
 - **Why file-system backup (Kopia), not CSI/volume snapshots:** this cluster has no
   `VolumeSnapshotClass` wired for the Rook-Ceph RBD CSI driver yet (a documented
@@ -119,7 +119,7 @@ sensitive than almost anything else on the platform. Treat it accordingly:
 
 ### ⚠ Residual risk: this is not truly *off-site*
 
-`mac-debian-01` sits in the same physical location as every other node. This backup
+`capstone-w1` sits in the same physical location as every other node. This backup
 protects against **logical** failures (bad `kubectl delete`, corrupt etcd, a botched
 upgrade, even a full-site power outage the cluster otherwise doesn't survive
 cleanly) — it does **not** protect against **physical loss of the site itself**
@@ -283,7 +283,7 @@ The disk is pinned to one node deliberately (see architecture above). To move it
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
-| `minio-0` Pending, `node(s) had volume node affinity conflict` | pod scheduled off `mac-debian-01` for some other reason (taint/drain) or the PV's nodeAffinity/StatefulSet nodeSelector got out of sync | confirm `mac-debian-01` is `Ready` + untainted; confirm both files in "Relocating MinIO" step 2 agree |
+| `minio-0` Pending, `node(s) had volume node affinity conflict` | pod scheduled off `capstone-w1` for some other reason (taint/drain) or the PV's nodeAffinity/StatefulSet nodeSelector got out of sync | confirm `capstone-w1` is `Ready` + untainted; confirm both files in "Relocating MinIO" step 2 agree |
 | `minio-provision` Job `CrashLoopBackOff` / stuck retrying "MinIO not reachable" | `minio-0` itself isn't Ready yet | check `kubectl -n minio get pod minio-0`; the Job retries for ~5m, which should be enough once MinIO starts |
 | Velero pod `CrashLoopBackOff`, BackupStorageLocation `Unavailable` | `velero-minio-credentials` Secret missing/wrong, or MinIO unreachable | `kubectl -n velero describe backupstoragelocation default`; confirm the SealedSecret decrypted (`kubectl -n velero get secret velero-minio-credentials`) and the `minio-provision` Job actually created the scoped IAM user (`mc admin user list local` from a debug pod, or the console) |
 | Backup `PartiallyFailed`, node-agent errors in the backup's logs | node-agent DaemonSet pod not Ready on the node the workload's PV lives on | `kubectl -n velero get pods -l name=node-agent -o wide`; `kubectl -n velero logs -l name=node-agent` |

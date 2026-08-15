@@ -158,7 +158,7 @@ design, none started):
   an auth story).
 - **CI runner offload** — a second `gha-runner-scale-set` (ARC) on the satellite for
   extra Kaniko build capacity, so tenant CI isn't capped by the hub's fixed
-  OptiPlex/Mac-mini capacity. Needs its own Harbor push-robot + netpol posture
+  OptiPlex capacity. Needs its own Harbor push-robot + netpol posture
   ([runner-netpol :443-only](gotchas-and-lessons.md)) re-derived for a different box.
 - **Tenant preview/dev overflow** — extending `applicationsets/tenants-appset.yaml`'s
   per-team env ApplicationSets to optionally target a satellite destination for
