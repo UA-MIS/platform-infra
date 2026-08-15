@@ -66,6 +66,49 @@ spec:
               revision: HEAD
               files:
                 - path: .devops/promotion.yaml
+  # Non-cascading prune (F-7, FIX-10): by DEFAULT (preserveResourcesOnDeletion:
+  # false), the ApplicationSet controller adds the ArgoCD resources-finalizer to
+  # every generated Application, so pruning one (ApplicationSet deleted, or an env
+  # element drops out of the matrix) makes ArgoCD individually delete its deployed
+  # resources first -- and if a namespace vanishes mid-sync (Crossplane's cascade
+  # deletes the tenant namespace independently and roughly concurrently during
+  # teardown), ArgoCD won't run that finalizer while the sync operation is still
+  # retrying, wedging the whole delete chain (Application -> AppProject -> the
+  # Crossplane Object -> XR -> claim) until the retry budget exhausts. Setting
+  # preserveResourcesOnDeletion: true makes Application pruning NON-cascading (no
+  # finalizer added, so no wait): ArgoCD just removes its own Application CR, and
+  # the ACTUAL cleanup of the deployed resources is Crossplane's job anyway --
+  # deleting the tenant namespace already reclaims everything in it. THIS
+  # NAMESPACE-RECLAIM ARGUMENT COVERS THIS ENV APPSET ONLY -- the preview appset's
+  # `<team>-pr-<n>` namespaces are CreateNamespace=true (ArgoCD-created, not a
+  # Crossplane k8s-ns-* Object), so nothing reclaims them the same way; do not
+  # extend preserveResourcesOnDeletion there on this same justification without
+  # re-deriving it (FIX10-002, review-fix10.md). This is the SAME pattern already
+  # used for the identical class of problem in
+  # applicationsets/platform-services-appset.yaml, whose own comment states the
+  # trade-off exactly: "a dir removed WITHOUT a successor app leaves its live
+  # objects orphaned for manual cleanup -- for this platform that beats a
+  # glob/exclude edit being able to delete a live service." The tenant path
+  # accepts the identical trade-off below.
+  #
+  # Does NOT touch the AppProject's own resources-finalizer (composition.yaml,
+  # xp-<team>-appproject) -- that finalizer is a DIFFERENT mechanism (per ArgoCD's
+  # own docs: "AppProjects use finalizers to ensure a project is not deleted
+  # while it is still referenced by any application"), a safety check, not a
+  # cascade-delete of deployed resources. Leaving it in place still costs one
+  # extra reconcile-latency leg during teardown (observed ~70s, devops-e2e
+  # live run) after the Application race above is eliminated -- expect
+  # convergence in the ~2-2.5 min range, not ~90s, until/unless that leg is
+  # addressed as its own deliberate decision (out of scope here).
+  #
+  # Trade-off (accepted, same as the precedent above): an env Application pruned
+  # WITHOUT its namespace also going away (e.g. a malformed promotion.yaml drops
+  # an element from the matrix) would leave its live workload resources running
+  # until the namespace itself is cleaned up -- for a tenant env this is a
+  # non-issue in the actual teardown path (the namespace goes with it), and is a
+  # lesser risk than a tenant wedged Terminating indefinitely.
+  syncPolicy:
+    preserveResourcesOnDeletion: true
   template:
     metadata:
       name: '__TEAM__-{{.env}}'

@@ -1,0 +1,452 @@
+task: "FIX-10: Teardown robustness — ArgoCD sync race (F-7) + residue policy + bump-dev image pin"
+task_id: "31"
+owner: dev-dsn
+branch: fix/teardown-robustness
+date: 2026-08-15
+source_finding: artifacts/exploration/golden-path-e2e-2026-08-15.md (VERIFY-2, devops-e2e)
+
+# ============================================================================
+# 0. Scope additions (added by team-lead after the initial PR #443 was opened)
+# ============================================================================
+scope_additions_status:
+  broken_tenant_teardown_test:
+    ask: >
+      VERIFY-2's clean-teardown evidence only covers a HEALTHY tenant (FIX-3
+      landed 3 minutes before that teardown ran). Broken tenants (stuck
+      Synced=False MRs) are the case operators actually delete. Need a
+      deliberately half-provisioned throwaway torn down to verify convergence.
+    status: >
+      PENDING — requested from devops-e2e, combined with the F-7 live
+      verification ask (one throwaway specimen serving both: half-provision
+      one MR against an unreachable dependency AND put an env Application
+      into an in-flight sync before deleting the claim, then confirm clean
+      convergence on this branch).
+
+  prod_overlay_prune_gap:
+    ask: >
+      molly-demo-prod (a LIVE, in-use tenant — NOT to be torn down) has zero
+      Deployments but 2 live ReplicaSets + 4 pods (2 known/expected
+      crash-looping on a pre-66d5660 image, not the subject of this
+      investigation). Root-cause whether ArgoCD's prune is misconfigured for
+      the prod overlay's resource kinds; fix in the contract/appset if so.
+    investigation_so_far: >
+      Read the code before asking anyone to run anything live. Prod overlay
+      for a single-component tenant runs an Argo Rollouts `Rollout` in place
+      of a Deployment (ADR-037: rollout.yaml + a kustomize
+      `$patch: delete` on the base Deployment of the same name) — so "zero
+      Deployments" in prod is EXPECTED architecture, not automatically an
+      anomaly on its own. platform-services/argocd-config/argocd-cm.yaml has
+      NO `resource.customizations.health.argoproj.io_Rollout` entry — ArgoCD
+      has no special health/resource-tree awareness of Rollout beyond
+      installing the controller (applicationsets/argo-rollouts-app.yaml).
+
+      Per Argo Rollouts' own docs/source (Context7 /argoproj/argo-rollouts):
+      a canary's `pause` steps (even timed ones) only begin counting once the
+      preceding `setWeight` step's canary pods are Available; at
+      `setWeight: 100` the stable RS scales to 0. If the new revision's pods
+      never become Ready — which matches "2 crash-looping pods" — the Rollout
+      can hang indefinitely at a partial step with BOTH stable and canary
+      ReplicaSets holding live, non-zero pods. This strategy has no
+      `analysis`/automated-abort step configured (rollout.yaml), so nothing
+      would ever un-stick it or roll it back automatically.
+
+    confirmed_by_devops_e2e: >
+      CONFIRMED on every point, via live read-only diagnostics (Rollout
+      status, ReplicaSet ownerReferences, ArgoCD Application resource
+      tracking) — this is a stuck canary, NOT an ArgoCD prune gap.
+
+      Rollout `molly-demo-app` (15d old): phase=Degraded, message=
+      "ProgressDeadlineExceeded: ReplicaSet molly-demo-app-754964c949 has
+      timed out progressing", currentStepIndex=0 (NEVER ADVANCED past the
+      first canary step), replicas=4, readyReplicas=None,
+      availableReplicas=None. Both ReplicaSets are controller-owned by this
+      SAME live Rollout (owners=[(Rollout, molly-demo-app,
+      controller=True)]) — not orphans, nothing ownerless for ArgoCD to
+      target. ArgoCD's Application molly-demo-prod is sync=Synced,
+      health=Degraded, and its `.status.resources` lists the Rollout itself
+      but correctly does NOT list the child ReplicaSets (they're
+      controller-owned children of a resource ArgoCD DOES track, not
+      git-declared resources of their own) — ArgoCD has nothing to prune
+      here; it is fully in sync with what git describes.
+
+      THE SHARPER ROOT CAUSE (devops-e2e's finding, corrects my original
+      framing): the STABLE revision (ReplicaSet
+      molly-demo-app-5667b7c966, revision 1) is pinned at image
+      `molly-demo/molly-demo-app:v0.0.0` — the ApplicationSet's FIRST-DEPLOY
+      PLACEHOLDER SENTINEL (rollout.yaml / kustomization.yaml's
+      `newTag: v0.0.0` comment) — which has NEVER existed in Harbor. So
+      there has never been a genuinely healthy stable revision to fall back
+      to. The canary revision (754964c949, revision 2, real image
+      `ff1d5ba`) crash-loops on the pre-66d5660 DSN bug (4450 restarts).
+      Neither revision is healthy, so `currentStepIndex` never advances past
+      0 and BOTH ReplicaSets sit with live pods indefinitely (4 pods, 15
+      days, zero ready replicas). `progressDeadlineSeconds`,
+      `progressDeadlineAbort`, and `strategy.canary.analysis` are all UNSET
+      on the Rollout — ProgressDeadlineExceeded is reported in status but
+      nothing acts on it.
+
+      This means my original "add automated abort/rollback" framing was
+      INSUFFICIENT on its own: an abort would just roll back to the equally-
+      dead v0.0.0 placeholder. devops-e2e's sharper framing splits this into
+      two real findings, neither of which is a teardown/prune bug:
+        (a) no automated abort on a failed canary (real, but insufficient
+            alone — there's nothing good to abort TO here);
+        (b) prod can be seeded with an unpullable placeholder (v0.0.0) as
+            its "stable" revision if the first-deploy seed
+            (bump-dev/seed-initial-envs.sh) never successfully runs for a
+            tenant — so that tenant's first REAL release has no safety net
+            by construction, because the revision Argo Rollouts would roll
+            back to was never viable either.
+      Also surfaced: argocd-cm.yaml has
+      `resource.customizations.ignoreResourceUpdates.argoproj.io_Rollout`
+      but no `resource.customizations.health.argoproj.io_Rollout` — Rollout
+      health is invisible to ArgoCD's own health rollup (shows health=None
+      in the Application's resource list), which is a live concern for
+      FIX-7's Degraded-app alert: if that alert keys on ArgoCD Application
+      health and Rollout health doesn't roll up correctly, it may not fire
+      for Rollout-based prod workloads — which is EVERY single-component
+      tenant's prod overlay, not an edge case.
+
+    decision: >
+      NOT fixed in this PR. The original task ask ("root-cause whether
+      prune is misconfigured ... fix in the contract/appset if so") is
+      answered: prune is NOT misconfigured; there is nothing to fix in
+      ArgoCD's prune scope. The REAL findings devops-e2e surfaced (no
+      canary abort/rollback safety net; a placeholder stable revision with
+      no viable fallback; Rollout health invisible to ArgoCD) are genuine
+      and worth fixing, but are NOT teardown-robustness issues — they are
+      an ongoing, live tenant's deploy-health and progressive-delivery
+      design gap, orthogonal to this task's actual scope (de-provisioning).
+      Fixing them well requires decisions this task shouldn't make
+      unilaterally: whether/how to configure Rollout `analysis`/
+      `progressDeadlineAbort` (an ADR-037 progressive-delivery-policy call),
+      why the first-deploy seed didn't complete for this tenant (a separate
+      CI investigation), and coordination with whoever owns FIX-7's
+      Degraded-app alert (the Rollout-health-visibility gap directly
+      affects that alert's correctness). Recommending this be spun out as
+      its own task rather than folded into FIX-10 — reported to team-lead
+      for a scoping call.
+    status: "RESOLVED (investigation complete, confirmed by devops-e2e's live diagnostics). No code change in this PR — see decision above."
+
+# ============================================================================
+# 1. F-7 — ArgoCD sync race during teardown
+# ============================================================================
+f7_argocd_sync_race:
+  finding: >
+    The final teardown delete chain stalled 4+ minutes on three orphaned
+    Applications (e2efall26-{dev,staging,prod}): "Retrying attempt #5",
+    "Skipping retrying in-progress operation." This resolved only because the
+    retry budget (limit: 5) exhausted — a longer/unbounded retry policy would
+    wedge a tenant in Terminating indefinitely.
+
+  root_cause: >
+    Confirmed against the ArgoCD ApplicationSet documentation (Context7
+    /argoproj/applicationset, Application-Deletion.md), not inferred: "If the
+    .syncPolicy.preserveResourcesOnDeletion is set to false [the DEFAULT], these
+    Application resources also have an Argo CD finalizer. When an ApplicationSet
+    is deleted, its Application resources are deleted, and subsequently, the
+    resources deployed by those Applications are also deleted by Argo CD."
+
+    The tenant env ApplicationSet (rendered by composition.yaml AND mirrored in
+    tenants/_template/applicationset-envs.yaml) does NOT set
+    preserveResourcesOnDeletion, so it defaults to false. When teardown deletes
+    this ApplicationSet's Object (as part of the XR cascade), the ApplicationSet
+    controller therefore CASCADE-deletes its generated dev/staging/prod
+    Applications: it adds the resources-finalizer, then deletes, which makes
+    ArgoCD try to individually delete each Application's deployed resources
+    before letting the Application CR itself go. Crossplane's own k8s-ns-*
+    Objects delete the SAME tenant namespaces independently and roughly
+    concurrently (no explicit ordering between the two deletion paths). If the
+    namespace vanishes while an Application's sync is still retrying (e.g. the
+    workload was unhealthy — F-6/CrashLoopBackOff — and mid-retry when teardown
+    landed), ArgoCD won't run the deletion finalizer while that operation is
+    "in progress", so the Application (and everything above it — AppProject,
+    Object, XR, claim) is stuck until the retry budget (limit 5, exponential
+    backoff 5s/10s/20s/40s/80s, capped maxDuration 3m) exhausts.
+
+  fix: >
+    Add `syncPolicy.preserveResourcesOnDeletion: true` to the tenant env
+    ApplicationSet spec (sibling to `generators`/`template`, NOT the per-env
+    Application's own syncPolicy in templatePatch — those are different fields
+    at different levels). This makes Application pruning NON-cascading: ArgoCD
+    just removes its own Application CR (no finalizer added, no wait). The
+    actual cleanup of deployed resources is Crossplane's job anyway — deleting
+    the tenant namespace already reclaims everything in it — so nothing is lost,
+    only the redundant/racy cascade-prune step is skipped.
+
+    This is not a novel pattern: it is the SAME fix already used in this repo
+    for the identical problem class — applicationsets/platform-services-appset.yaml
+    sets preserveResourcesOnDeletion: true with the comment "Non-cascading prune
+    of generator-removed Applications ... the appset controller deletes the
+    generated Application WITHOUT the resources-finalizer cascade, so the LIVE
+    objects survive". FIX-10 applies the same reasoning to the tenant path.
+
+  fix_candidate_selection: >
+    The task offered three candidates: (a) order deletion so
+    Applications/AppProjects terminate before namespaces, (b) terminate
+    in-progress operations in the teardown flow, (c) bound retries
+    deliberately. Chose a FOURTH, stronger option once the actual mechanism was
+    understood: eliminate the cascade-delete finalizer entirely, so there is no
+    operation-in-progress state to race against a vanishing namespace at all.
+    This is strictly better than (c) (bound retries) — bounding retries would
+    only shrink the worst-case stall, not remove the race — and safer than (b)
+    (teardownCore.ts explicitly has NO k8s/ArgoCD client by design — "it never
+    talks to the cluster directly ... the whole platform is GitOps-driven" — so
+    adding a live ArgoCD API call there would be an unreviewed architecture
+    change, not a config tuning). (a) (explicit deletion ordering) was not
+    pursued because Crossplane's provider-kubernetes `dependsOn` only gates
+    CREATION ("blocks this Object's apply until each referenced Object
+    exists" — composition.yaml's own comment), not deletion, and no ordering
+    primitive (e.g. a `Usage` resource) is used elsewhere in this repo for
+    deletion ordering; introducing one would be new, untested surface area
+    versus reusing an existing, proven pattern.
+
+  files_changed:
+    - tenants/_template/applicationset-envs.yaml
+    - platform-services/crossplane/apis/composition.yaml
+
+  trade_off_accepted: >
+    Same trade-off the precedent (platform-services-appset.yaml) already
+    accepts: an env Application pruned WITHOUT its namespace also being
+    removed (e.g. a malformed promotion.yaml drops an element from the
+    ApplicationSet's generator matrix) would leave its live workload running
+    until the namespace itself is cleaned up some other way. This is a
+    non-issue in the ACTUAL teardown path (the namespace goes with it via
+    Crossplane regardless of what ArgoCD does), and is a materially smaller
+    risk than a tenant wedged Terminating indefinitely.
+
+  verification:
+    structural: >
+      Both edits verified to parse as valid YAML at the correct nesting level
+      (syncPolicy sibling to generators/template, not nested under
+      templatePatch) — tenants/_template/applicationset-envs.yaml verified
+      with `python3 -c "import yaml; yaml.safe_load(...)"` directly (plain
+      YAML, no templating); composition.yaml verified by indentation
+      cross-check against sibling keys (`cat -A`) since the file is a Go
+      Template string block (function-go-templating) not independently
+      parseable without the Crossplane function pipeline.
+    live_execution: >
+      NOT YET RUN pre-merge (correctly so — see sequencing note below). The
+      task's own verification bar is "run a teardown WITH a deliberately
+      in-flight sync and show clean convergence"; devops-e2e (who ran the
+      original VERIFY-2 teardown that surfaced F-7) reviewed this PR and will
+      execute it POST-merge, per team-lead's sequencing call, against a
+      throwaway tenant that is ALSO the broken-tenant teardown specimen (task
+      brief item 2) — one specimen serving both tests.
+
+    sequencing_note: >
+      Running this pre-merge would also have hit a real blocker devops-e2e
+      correctly escalated rather than deciding unilaterally: this fix lives in
+      the Composition, which the cluster picks up via ArgoCD app
+      platform-crossplane-apis (automated.selfHeal: true, targetRevision
+      HEAD) — testing pre-merge would require either repointing that shared
+      app's targetRevision to this branch or suspending its auto-sync, both
+      writes to shared platform GitOps state with several agents mid-flight.
+      Running the test POST-merge sidesteps this entirely: main will already
+      carry the fix once #443 merges, so the live cluster picks it up through
+      its normal sync — no repoint, no suspend, no shared-state risk.
+
+    convergence_estimate_corrected: >
+      Originally estimated "clean convergence in the normal ~90s window".
+      devops-e2e caught that this over-claims: the fix only eliminates the
+      Application-level race (the 4+ minute stall). It does NOT touch the
+      AppProject's own resources-finalizer (composition.yaml,
+      xp-<team>-appproject), which is a DIFFERENT mechanism per ArgoCD's own
+      docs ("AppProjects use finalizers to ensure a project is not deleted
+      while it is still referenced by any application") — a safety check, not
+      a cascade-delete, and not something to disable casually. devops-e2e's
+      own VERIFY-2 timings show the AppProject leg alone took ~70s (13:14:05
+      Applications finalized -> 13:15:18 AppProject cleared) even AFTER the
+      Applications were already gone. Corrected expectation: ~2-2.5 minutes
+      end-to-end convergence, not ~90s, with the Application-level 4+ minute
+      stall eliminated and the AppProject's own reconcile-latency leg
+      untouched (a separate, deliberate decision if it's ever worth
+      addressing — not folded into this PR). Both YAML files' comments
+      updated to state this explicitly rather than over-claim.
+
+# ============================================================================
+# 2. Residue policy
+# ============================================================================
+residue_2a_github_topic:
+  finding: >
+    `git rm tenants/_claims/<name>.yaml` alone (bypassing the portal's Tenant
+    Teardown page) reclaims the cluster/Harbor/Vault side correctly via the
+    Crossplane cascade, but does NOT strip the `capstone-tenant` GitHub topic
+    from the app repo — only the portal's teardownCore.ts does that. The
+    claim file's own emitted header comment ("De-provision = git rm this
+    file") and tenants/_claims/README.md both documented this as if it were
+    the complete, self-sufficient procedure, which is misleading: the repo
+    stays catalog-discoverable ("ghost tenant") until someone manually strips
+    the topic.
+
+  fix:
+    - "Corrected the claim-header comment (emitTenantClaim.ts) and tenants/_claims/README.md to explicitly document the gap and recommend the portal Tenant Teardown page as the default path for single-tenant teardown, with a manual gh api topic-strip fallback documented for bulk cohort-GC git rm."
+    - "Did NOT wire topic-stripping into an automatic git-path CI hook — see decision below."
+
+  automation_considered_and_rejected: >
+    Investigated whether a push-triggered GitHub Actions workflow (on
+    tenants/_claims/** deletions) could call the GitHub API to strip the
+    topic automatically, closing the gap for the git-rm path too. Rejected:
+    the ONLY existing platform-infra CI credential with cross-repo GitHub App
+    access (APP_ID/APP_PRIVATE_KEY, used by bump-portal) is explicitly
+    documented as "a DEDICATED least-privilege CI App: contents: write on
+    platform-infra ONLY" — it does NOT have Administration permission on
+    tenant app repos. Topic-stripping needs the broader ua-mis-backstage App
+    (per teardownCore.ts's own comment: "PUT /repos/{owner}/{repo}/topics
+    needs the GitHub App's Administration repository permission"). Granting
+    THAT App's credentials to a CI trigger fired by any merge to
+    platform-infra's protected main — which is a coarser trust boundary
+    (repo-write access) than teardownCore.ts's ADMIN-group-only check
+    (requireAdmin(), belt-and-suspenders group re-derivation) — would be a
+    real widening of the trust surface for a convenience win, and is exactly
+    the kind of architecture/security trade-off this task's own instructions
+    say to escalate rather than decide unilaterally. Documented the trade-off
+    explicitly in tenants/_claims/README.md; flagged as a possible follow-up
+    (a NEW admin-gated bulk-teardown action in teardownCore.ts, reusing its
+    existing requireAdmin() spine, rather than an unauthenticated CI hook) —
+    not implemented here.
+
+  files_changed:
+    - platform-services/backstage/app/plugins/scaffolder-backend-module-capstone/src/actions/emitTenantClaim.ts
+    - tenants/_claims/README.md
+
+  verification: >
+    No test coupling to the exact comment text found (emitTenantClaim.test.ts
+    grep clean). Both docs edits are comment/documentation-only — no runtime
+    behavior change, so no test to run; reviewed for accuracy against
+    teardownCore.ts's actual behavior (read in full).
+
+residue_2b_vault_kv:
+  finding: >
+    Every tenant PushSecret writes Harbor robot credentials and per-env
+    database passwords to Vault at tenants/<team>/**. VERIFY-2 suspected (but
+    could not confirm — its provider-vault token lacks list on secret/tenants)
+    that this data persists after teardown, since PushSecrets default to NOT
+    deleting the remote value unless deletionPolicy: Delete is set.
+
+  confirmed_by_source_and_docs: >
+    Both halves of this confirmed WITHOUT needing live cluster access:
+    (1) none of the 6 tenant PushSecret resources in composition.yaml set
+    deletionPolicy at all; ESO's own docs (Context7 /websites/external-secrets_io,
+    "Push Secrets" guide) state the default leaves the remote secret in place —
+    "By default, secrets created in the provider remain there even after the
+    PushSecret resource is deleted." So yes, the data persists.
+    (2) the writer identity these PushSecrets authenticate as
+    (crossplane-push, platform-services/external-secrets/vault-policies/
+    crossplane-push-role.sh) has a Vault policy DELIBERATELY scoped to
+    create/read/update only — the script's own comment calls out "NO delete,
+    NO other paths" as an explicit least-privilege choice, reviewed and
+    committed (not an oversight). So a bare `deletionPolicy: Delete` flip
+    would not even work — ESO would 403 trying to delete.
+
+  decision: "D-082 (artifacts/context/decision-log.md) — KEEP-BY-DESIGN."
+  decision_summary: >
+    Do not set deletionPolicy: Delete; do not widen the crossplane-push
+    writer's grant to include delete. Reasoning: the retained data is
+    functionally INERT the instant teardown completes — VERIFY-2's own
+    teardown table shows the underlying MySQL databases/users/grants and the
+    Harbor project+robots ARE deleted by the Crossplane cascade, so there is
+    nothing left for the retained Vault credential to authenticate to. This
+    rules out the task brief's speculated "grade-recovery" rationale
+    (nothing to recover access to) — but it also means the only
+    implementation path for cleanup (granting crossplane-push `delete` on
+    secret/{data,metadata}/tenants/*) would widen a deliberately narrow
+    writer's blast radius (a compromised writer could then DESTROY any
+    tenant's Vault data, not just read/write it) to fix a low-severity,
+    dead-credential residue. Recommended follow-up, NOT implemented here: an
+    out-of-band, separately-credentialed Vault KV garbage-collector that
+    vacuums tenants/<team>/** for teams whose claim no longer exists, keeping
+    the day-to-day writer's grant unchanged.
+
+  coordination: >
+    Requested devops-vault (admin-scope Vault access) to empirically confirm
+    via `vault kv list secret/tenants/<team>/` against a recently-torn-down
+    tenant, per the task's explicit instruction to coordinate before
+    deciding. Response PENDING as of this evidence bundle — the decision
+    above already rests on source+docs proof that does not depend on that
+    confirmation (it corroborates, it is not a precondition), but will be
+    appended here when it lands.
+
+  files_changed:
+    - tenants/_claims/README.md (documents the decision + D-082 pointer)
+    - artifacts/context/decision-log.md (D-082, orchestrator repo)
+
+  no_code_change: >
+    Per the task's explicit instruction ("Do not change deletionPolicy
+    without that decision"), and because the decision reached is
+    keep-by-design, composition.yaml's PushSecret resources are UNCHANGED.
+
+# ============================================================================
+# 3. F-5 — bump-dev pulls the full node:24-trixie image (optional quick win)
+# ============================================================================
+f5_bump_dev_image:
+  finding: >
+    bump-dev's "Initialize containers" step took 4m36s vs 55s for its sibling
+    build-and-push, because it pulls the full node:24-trixie (~1.25GB) while
+    most other jobs use node:24-trixie-slim (~238MB) — confirmed by direct
+    image pull/size comparison in this session (podman pull + docker images).
+
+  investigated_the_naive_fix_and_it_does_not_work: >
+    The task's suggested fix ("pin to -slim if the job's needs allow") does
+    NOT hold as stated. Verified empirically: `docker run --rm
+    node:24-trixie-slim sh -c 'which git curl'` finds NEITHER — matching the
+    job's own pre-existing comment ("-slim ships neither git nor curl") and
+    bump-dev's actual requirements (actions/checkout needs git for a real
+    .git + persist-credentials; the job also `git push`es and curls yq).
+    Confirmed this is why: bump-image.sh commits + this job pushes to main.
+
+  investigated_the_bootstrap_alternative: >
+    A -slim + apt-get bootstrap for git/curl WOULD work, using the platform's
+    own already-documented, already-used pattern for this exact constraint
+    (see any fragment Dockerfile's "ADDING apt PACKAGES" footer, SEC-014):
+    the ARC runner egress NetworkPolicy is :443-only, Debian's default apt
+    sources are http:// (would be blocked), and slim bases ship no
+    ca-certificates bundle (chicken-and-egg for the first HTTPS fetch) — the
+    proven fix is to sed-rewrite sources.list to https, bootstrap
+    ca-certificates with peer-verify OFF for that one fetch, then apt-get
+    normally. Verified locally: confirmed node:24-trixie-slim's
+    sources.list is http://deb.debian.org (would need the rewrite), and that
+    `apt-get update && apt-get install -y git curl` completes in ~8s in this
+    sandbox once bootstrapped.
+
+  decision: >
+    Did NOT switch to -slim+bootstrap in this PR, despite verifying it would
+    work. This job is the ONLY one in the tenant pipeline that pushes to
+    `main` (every tenant's dev deploy depends on it), and its live behavior
+    on the actual self-hosted ARC runners (with the Cilium-enforced netpol,
+    real mirror latency, real apt bootstrap timing) could not be verified in
+    this session (no cluster access). For an item the task explicitly scoped
+    as optional, the risk of a subtle break to the ONE write path every
+    tenant's CI depends on outweighs the speed win. Instead:
+
+    Digest-pinned the existing node:24-trixie tag (image:
+    node@sha256:05c60dce78787e477fd7c0d61d9efcd5b7ae3f21a8b18787c7ef3daf9c9a2ad3
+    # 24-trixie, resolved 2026-08-15) — zero behavior change, addresses the
+    SEPARATE, independently-real concern the finding also raised ("re-opens
+    the Node 24.17 keepAlive regression previously broke portal login"), and
+    matches the existing digest-pin convention already used for the `checks`
+    job's node:24-trixie-slim image in the same file.
+
+    Documented the verified -slim+bootstrap approach in full (exact
+    reasoning + the working pattern) as an inline comment on the job, so a
+    follow-up with live-runner access can implement it with a head start and
+    without re-deriving the netpol/bootstrap constraint from scratch.
+
+  files_changed:
+    - .github/workflows/tenant-build.yaml
+
+  scope_note: >
+    prepare and bump-staging carry the IDENTICAL floating node:24-trixie tag
+    and the identical -slim-lacks-git/curl constraint. Left untouched — the
+    task named bump-dev specifically. Flagged here as a natural follow-up
+    for the same digest-pin treatment (bump-staging is a copy of bump-dev's
+    job shape; prepare is a different job but same base-image reasoning).
+
+  verification:
+    structural: "tenant-build.yaml re-parses cleanly as YAML after the edit (python3 yaml.safe_load); bump-dev's container.image field confirmed to read the new digest-pinned value."
+    live_execution: "NOT RUN — no behavior change (same image, just pinned to its resolved digest), so no CI re-run was deemed necessary before merge. Will resolve to the same bytes as the floating tag did at pin time."
+
+open_items:
+  - "F-7: requesting devops-e2e re-run a teardown with a deliberately in-flight/unhealthy sync on this branch and confirm clean, fast convergence (the task's own execution-based verification bar)."
+  - "Residue 2b: devops-vault's live `vault kv list` confirmation is requested and pending; will be appended to D-082 and this file when it lands, but does not block the decision already made."
+  - "F-5: -slim+bootstrap for bump-dev (and the same digest-pin for prepare/bump-staging) is a well-evidenced follow-up, intentionally not implemented here — see f5_bump_dev_image.decision."
