@@ -1,0 +1,178 @@
+# FIX-12 — static/react-static boots under readOnlyRootFilesystem
+# Task #38 · PR UA-MIS/platform-infra#440 · gate: replay
+# Found by VERIFY-4 (#12, fragment test matrix). Author: devops-fragments.
+
+task: FIX-12
+pr: https://github.com/UA-MIS/platform-infra/pull/440
+branch: fix/react-static-readonly-fs
+commit: f4f7ea4
+base: ef1c51b            # origin/main at time of branch
+date: 2026-08-15
+
+defect:
+  fragment: static/react-static
+  symptom: CrashLoopBackOff on every deploy — nginx master aborts at startup
+  error: |
+    [emerg] 1#1: mkdir() "/var/cache/nginx/client_temp" failed (30: Read-only file system)
+    nginx: [emerg] mkdir() "/var/cache/nginx/client_temp" failed (30: Read-only file system)
+  root_cause: >-
+    The chart sets readOnlyRootFilesystem:true and mounts exactly ONE writable volume, an
+    emptyDir at /tmp (_contract/.devops/chart/base/deployments.yaml lines 162-177). The
+    config placed its pid at /var/run/nginx.pid and left every *_temp_path at nginx's
+    compiled-in defaults under /var/cache/nginx. Both are on the read-only rootfs. nginx
+    creates its temp directories eagerly at startup and aborts the master if it cannot.
+  class: copy-not-reference divergence
+  sibling_reference: >-
+    static/bare-html already solved this (pid + all five *_temp_path under /dev/shm) and
+    passes. The treatment was never back-ported to react-static.
+  why_review_missed_it: >-
+    The header comment claimed the Deployment mounts "/var/run, /var/cache/nginx, /tmp" as
+    writable emptyDir volumes. Only /tmp is mounted, and the other two never were. The
+    config read as correct because the comment vouched for a contract that does not exist.
+    The comment is corrected in this PR — that is the part that prevents reintroduction.
+
+change:
+  files:
+    - path: platform-services/backstage/templates/_fragments/static/react-static/skeleton/nginx.conf
+      edits:
+        - pid /var/run/nginx.pid -> /dev/shm/nginx.pid
+        - added client_body_temp_path /dev/shm/client_temp
+        - added proxy_temp_path       /dev/shm/proxy_temp
+        - added fastcgi_temp_path     /dev/shm/fastcgi_temp
+        - added uwsgi_temp_path       /dev/shm/uwsgi_temp
+        - added scgi_temp_path        /dev/shm/scgi_temp
+        - header comment corrected to describe the real mount contract (/tmp emptyDir +
+          runtime-provided /dev/shm only), and to state that the *_temp_path overrides are
+          required for boot rather than cosmetic
+  diffstat: 1 file changed, 20 insertions(+), 6 deletions(-)
+  behavior_change_outside_react_static: none
+
+# ---------------------------------------------------------------------------------------
+# The review challenge: /dev/shm is provided by the container runtime, NOT by the chart.
+# Podman semantics do not automatically carry to kubelet, so this was verified on-cluster
+# rather than assumed.
+# ---------------------------------------------------------------------------------------
+dev_shm_verification:
+  method: probe Pod on the live cluster with the chart's exact securityContext
+  pod_spec:
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      runAsUser: 65532
+      runAsNonRoot: true
+      capabilities: {drop: [ALL]}
+    volumes: [{name: tmp, emptyDir: {}, mountPath: /tmp}]
+  observed:
+    dev_shm_mount: "shm /dev/shm tmpfs rw,relatime,size=65536k,inode64 0 0"
+    dev_shm_size: 64 MiB
+    dev_shm_write_test: WRITABLE          # mkdir /dev/shm/client_temp + write nginx.pid as uid 65532
+    rootfs_write_test: ROOT-READONLY      # control — proves the securityContext was in effect
+    pod_phase: Succeeded
+  conclusion: >-
+    /dev/shm is a 64 MiB rw tmpfs writable by uid 65532 with all capabilities dropped under
+    readOnlyRootFilesystem:true. The fix is sound in the real pod context.
+  size_headroom_note: >-
+    64 MiB is ample for this fragment — a static SPA serving GETs, where client_body_temp
+    only buffers request bodies. Recorded as a known ceiling for any future fragment that
+    accepts large uploads.
+  cleanup: probe pod deleted
+
+verification:
+  harness: >-
+    podman run --read-only --tmpfs /tmp --tmpfs /dev/shm:size=64m — mirrors the chart
+    (readOnlyRootFilesystem + emptyDir at /tmp + runtime-provided 64 MiB /dev/shm).
+    Both images composed via dry-render.py, which drives the same compose_lib as the live
+    capstone:compose-project action.
+  cases:
+    - name: control (unpatched, built from origin/main)
+      image: f12-ctrl:test
+      result: FAIL
+      state: Exited (1)
+      error: 'mkdir() "/var/cache/nginx/client_temp" failed (30: Read-only file system)'
+    - name: patched (this branch)
+      image: f12-fixed:test
+      result: PASS
+      state: Up
+      probes:
+        /healthz: 200
+        /: 200
+        /some/deep/route: 200        # SPA history fallback intact
+  mechanical_confirmation:
+    description: >-
+      Asserted from inside the running patched container that the fix does what it claims,
+      rather than inferring it from a 200 response.
+    dev_shm_contents:
+      - "drwx------ 65532 65532 client_temp"
+      - "drwx------ 65532 65532 fastcgi_temp"
+      - "drwx------ 65532 65532 proxy_temp"
+      - "drwx------ 65532 65532 scgi_temp"
+      - "drwx------ 65532 65532 uwsgi_temp"
+      - "-rw-r--r-- 65532 65532 nginx.pid"
+  regression_proof: >-
+    The only difference between the failing and passing runs is nginx.conf. Same base image,
+    same Dockerfile, same runtime flags, same compose path.
+
+# ---------------------------------------------------------------------------------------
+# Sweep — task requirement 2
+# ---------------------------------------------------------------------------------------
+sweep:
+  static_grep:
+    scope: all fragment configs, Dockerfiles, and manifests
+    pattern: '/var/run | /var/cache | /run/'
+    result: >-
+      react-static is the ONLY hit. No other fragment references a writable path outside
+      what the chart mounts.
+  runtime_reprobe:
+    rationale: >-
+      IMPORTANT GAP THIS CLOSES. The VERIFY-4 runtime smoke (fragment-matrix-2026-08-15.md
+      §3.5) ran with a WRITABLE rootfs, so it structurally could not detect this class of
+      bug. 17 fragments "passing" there said nothing about whether they boot under
+      readOnlyRootFilesystem. Every deployable fragment was therefore re-run under the real
+      constraints.
+    harness: same --read-only --tmpfs /tmp --tmpfs /dev/shm:size=64m as above
+    scope: all 19 single-slot deployable fragments, composed from origin/main (unpatched)
+    tally: 17 PASS / 2 FAIL
+    pass:
+      - backend/django
+      - backend/dotnet-aspnet
+      - backend/express
+      - backend/flask
+      - backend/go
+      - backend/laravel          # notable: PHP/Laravel typically wants writable storage/cache
+      - backend/nestjs
+      - backend/node-bare
+      - backend/rails
+      - backend/rust-axum
+      - backend/spring-boot      # notable: JVM temp dirs satisfied by the /tmp emptyDir
+      - blank/bring-your-own
+      - fullstack/nextjs
+      - fullstack/nuxt
+      - fullstack/sveltekit
+      - frontend/angular
+      - static/bare-html         # the reference implementation for this fix
+    fail:
+      - fragment: static/react-static
+        cause: THIS DEFECT — fixed by this PR
+        error: 'mkdir() "/var/cache/nginx/client_temp" failed (30: Read-only file system)'
+      - fragment: backend/fastapi
+        cause: >-
+          UNRELATED and already owned — the bare-mysql:// DSN bug (FIX-8 #26, PR #434).
+          Fails at import on ModuleNotFoundError: No module named 'MySQLdb', not on any
+          filesystem permission. Independently re-verified: the FIX-8 branch image runs
+          clean under these SAME read-only flags (healthz 200, POST /api/items 201), so
+          fastapi has no read-only-fs defect.
+    conclusion: >-
+      No fragment other than react-static exhibits the read-only-filesystem class. The PR
+      scope stays at one file. The 17 passes are now genuinely verified against the chart's
+      pod constraints rather than against a writable rootfs.
+  gate_recommendation: >-
+    GATE-1 (#33) must run its boot-and-probe stage under --read-only with only /tmp and
+    /dev/shm writable. A boot probe on a writable rootfs reproduces exactly the blind spot
+    that let this defect reach main.
+
+provenance:
+  found_by: VERIFY-4 (#12) runtime smoke — static/react-static was 1 of 2 failures in 19
+  related:
+    - FIX-8 (#26) — the other VERIFY-4 runtime failure (fastapi bare-mysql:// DSN); unrelated cause
+    - GATE-1 (#33) — boot-and-probe CI stage; this defect is its motivating case
+  review_gate: FIX-12-REVIEW (#39)
