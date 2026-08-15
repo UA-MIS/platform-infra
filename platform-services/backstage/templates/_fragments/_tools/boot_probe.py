@@ -117,19 +117,40 @@ class MariaDBFixture:
         return fixture
 
     def _wait_ready(self):
+        # A real AUTHENTICATED query (not `mariadb-admin ping`) — the official mariadb
+        # image's entrypoint runs a TEMPORARY, not-yet-final server to apply init SQL
+        # (including setting MYSQL_ROOT_PASSWORD) before restarting into the real listening
+        # instance. `mariadb-admin ping` can return success against that temporary instance
+        # (or in the brief handover window during the restart), which is not the same signal
+        # as "the real instance will accept root's actual credentials" — this raced in CI
+        # (GitHub-hosted Docker Engine; not reproduced locally under podman): ping succeeded,
+        # then the very next `mariadb -uroot -p... -e ...` in make_database() got
+        # "Access denied for user 'root'@'localhost'". Polling the SAME kind of call
+        # make_database() actually needs closes most of that gap — but a SINGLE success could
+        # still land exactly in the handover window (temp instance about to be torn down), so
+        # this requires TWO consecutive successes, 2s apart, before declaring ready. A false
+        # "ready" here fails the entire sweep's first make_database() call, so the extra
+        # confirmation is cheap insurance against a stage that blocks every merge.
         attempts = MARIADB_READY_TIMEOUT_SECONDS // 2
+        last_err = "no attempts made"
+        consecutive_ok = 0
         for _ in range(attempts):
             r = subprocess.run(
-                [DOCKER_CMD, "exec", self.container, "mariadb-admin", "ping",
-                 "-uroot", f"-p{self.root_password}", "--silent"],
+                [DOCKER_CMD, "exec", self.container, "mariadb",
+                 "-uroot", f"-p{self.root_password}", "-e", "SELECT 1;"],
                 capture_output=True, text=True, timeout=10,
             )
             if r.returncode == 0:
-                return
+                consecutive_ok += 1
+                if consecutive_ok >= 2:
+                    return
+            else:
+                consecutive_ok = 0
+                last_err = r.stderr.strip()[:300]
             time.sleep(2)
         raise BootProbeError(
             f"MariaDB fixture {self.container} did not become ready within "
-            f"{MARIADB_READY_TIMEOUT_SECONDS}s"
+            f"{MARIADB_READY_TIMEOUT_SECONDS}s — last error: {last_err}"
         )
 
     def make_database(self, dbname, user, password):
