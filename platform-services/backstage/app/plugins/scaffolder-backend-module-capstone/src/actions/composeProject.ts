@@ -217,6 +217,11 @@ export function createComposeProjectAction(deps: ComposeProjectDeps) {
           z.string({ description: 'category/id of the backend fragment (FE+BE or mobile).' }).optional(),
         mobileFragment: z =>
           z.string({ description: 'category/id of the mobile fragment (projectType mobile).' }).optional(),
+        // D-054/FIX-1: the new-project wizard no longer offers host-postgres in any branch
+        // (every needsDB fragment today is MySQL-only) — kept accepted here so this action's
+        // contract stays a superset of the wizard (no image rebuild forced by the enum shrink,
+        // and any future Postgres-capable fragment can re-expose it as a catalog-refresh-only
+        // change on the template side).
         database: z =>
           z.enum(['host-mysql', 'host-postgres', 'bring-your-own', 'none']),
         // NOTE: progressive delivery is now an ENV-BASED chart default (prod overlay renders a

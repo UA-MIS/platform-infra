@@ -16,9 +16,18 @@
 # container; folding it into the compose engine adds risk with no benefit (ADR-034 §VM).
 #
 # DATABASE: when the chosen stack reads a DB (fragment.yaml needsDB:true), the wizard offers
-# host-mysql or host-postgres (both auto-provisioned per-env per ADR-033/#146), bring-your-own
-# (you set DATABASE_URL via the Secrets tab), or none. The compose engine sets the tenant
-# `database` flag + wires the DATABASE_URL ExternalSecret accordingly.
+# host-mysql (auto-provisioned per-env per ADR-033/#146), bring-your-own (you set DATABASE_URL
+# via the Secrets tab), or none. The compose engine sets the tenant `database` flag + wires the
+# DATABASE_URL ExternalSecret accordingly.
+#
+# host-postgres is INTENTIONALLY NOT offered here (D-054, FIX-1): every needsDB fragment in
+# the library (all backend/* and fullstack/*) is MySQL-only today — zero Postgres drivers —
+# so exposing the option produced green CI + a healthy pod + every DB route broken at runtime.
+# The Crossplane/provider-sql Postgres tier, the XRD `database: postgres` enum member, and
+# composePlan.mjs's host-postgres -> postgres mapping are left intact (cheap catalog-refresh
+# guard, not a platform rollback) — restore the wizard option once a Postgres-capable fragment
+# ships. See composePlan.mjs and composeProject.ts for the still-supported (but now
+# wizard-unreachable) host-postgres branch.
 #
 # DOWNSTREAM: compose assembles the repo, publish/register ship it, then the ZERO-TOUCH seam
 # (capstone:emit-tenant-claim -> capstone:commit-to-main, straight onto platform-infra main,
@@ -253,13 +262,14 @@ spec:
                                   title: Database
                                   type: string
                                   description: >-
-                                    host-mysql and host-postgres each auto-provision a per-environment
-                                    database for you. Pick bring-your-own to set DATABASE_URL yourself via
-                                    the Secrets tab, or none for a DB-less stack (e.g. the static site).
-                                  enum: [host-mysql, host-postgres, bring-your-own, none]
+                                    host-mysql auto-provisions a per-environment database for you.
+                                    Pick bring-your-own to set DATABASE_URL yourself via the Secrets
+                                    tab, or none for a DB-less stack (e.g. the static site). (D-054:
+                                    Auto PostgreSQL is not offered here — every needsDB fragment in
+                                    this branch is MySQL-only.)
+                                  enum: [host-mysql, bring-your-own, none]
                                   enumNames:
                                     - 'Auto MySQL (host-mysql) — provisioned for you'
-                                    - 'Auto PostgreSQL (host-postgres) — provisioned for you'
                                     - 'Bring your own (set DATABASE_URL in the Secrets tab)'
                                     - 'None'
                                   default: host-mysql
@@ -324,13 +334,14 @@ spec:
                             - 'Rust / Axum API (sqlx + MySQL)'
                             - 'Java / Spring Boot API (Spring Web + JDBC + MySQL)'
                           default: backend/express
+                        # D-054: Auto PostgreSQL is not offered here — every backend fragment
+                        # in this slot is MySQL-only.
                         database:
                           title: Database
                           type: string
-                          enum: [host-mysql, host-postgres, bring-your-own, none]
+                          enum: [host-mysql, bring-your-own, none]
                           enumNames:
                             - 'Auto MySQL (host-mysql) — provisioned for you'
-                            - 'Auto PostgreSQL (host-postgres) — provisioned for you'
                             - 'Bring your own (set DATABASE_URL in the Secrets tab)'
                             - 'None'
                           default: host-mysql
@@ -389,13 +400,14 @@ spec:
                     - 'Rust / Axum API (sqlx + MySQL)'
                     - 'Java / Spring Boot API (Spring Web + JDBC + MySQL)'
                   default: backend/express
+                # D-054: Auto PostgreSQL is not offered here — every backend fragment in this
+                # slot is MySQL-only.
                 database:
                   title: Database (for the backend)
                   type: string
-                  enum: [host-mysql, host-postgres, bring-your-own, none]
+                  enum: [host-mysql, bring-your-own, none]
                   enumNames:
                     - 'Auto MySQL (host-mysql) — provisioned for you'
-                    - 'Auto PostgreSQL (host-postgres) — provisioned for you'
                     - 'Bring your own (set DATABASE_URL in the Secrets tab)'
                     - 'None'
                   default: host-mysql
@@ -486,9 +498,11 @@ spec:
 
     # 5) EMIT THE TENANT CLAIM — ONE CapstoneTenant XR carrying the wizard's RESOLVED
     #    database choice. THIS IS THE §C SEAM: capstone:compose-project already collapsed the
-    #    4-way wizard `database` (host-mysql | host-postgres | bring-your-own | none) into the
-    #    XRD's `none|mysql|postgres` enum — `mysql` for host-mysql, `postgres` for host-postgres
-    #    (each only with a DB-using component), else `none`
+    #    wizard `database` choice (host-mysql | bring-your-own | none — host-postgres is
+    #    accepted by compose-project/the XRD but no longer offered by the wizard, D-054/FIX-1)
+    #    into the XRD's `none|mysql|postgres` enum — `mysql` for host-mysql, `postgres` for the
+    #    still-supported-but-wizard-unreachable host-postgres (each only with a DB-using
+    #    component), else `none`
     #    (ADR-035 §D3) — and exposed it as steps.compose.output.database. Feeding that resolved
     #    value into spec.database is what carries the DB choice through to the CapstoneTenant XR
     #    (and thus ADR-033's auto-MySQL). Writes tenants/_claims/<team>-<app>.yaml under ./claim.
