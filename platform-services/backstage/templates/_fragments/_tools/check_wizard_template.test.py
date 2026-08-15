@@ -49,14 +49,35 @@ class RealTemplateTest(unittest.TestCase):
                 if mysql_only_frags:
                     self.assertFalse(has_pg, f"{frags} includes MySQL-only fragment(s) but host-postgres offered")
 
+    def test_real_flask_into_dbless_group_mutation_is_caught(self):
+        # FIX-17/FIX5-REV-1's exact reproduction, against the REAL template.yaml and REAL
+        # fragment library (not the minimal fixture): move backend/flask (needsDB: true)
+        # from the MySQL-only group into the DB-less group. The partition itself stays
+        # exact, which is precisely why this hazard survived undetected before this fix --
+        # confirmed here with the real file, not just the synthetic fixture in
+        # HazardMutationTest.
+        doc = cwt.load_template()
+        groups = cwt.single_groups(doc)
+        dbless_group = next(g for g in groups if not cwt._group_database_enum(g))
+        mysql_group = next(g for g in groups if "backend/flask" in cwt._group_fragments(g, "singleFragment"))
+        mysql_group["properties"]["singleFragment"]["enum"].remove("backend/flask")
+        dbless_group["properties"]["singleFragment"]["enum"].append("backend/flask")
+        errors = cwt.run(doc=doc)
+        self.assertFalse(any("exact-partition" in e for e in errors), errors)
+        self.assertTrue(
+            any("needsDB fragment(s) placed in a group with no database question" in e and "backend/flask" in e
+                for e in errors),
+            errors,
+        )
+
 
 # ---- minimal fixture for hazard mutations (small, so each break is obvious) --------
 
 FRAGMENTS_FIXTURE = [
-    {"_path": "backend/fastapi", "slots": ["single", "backend"]},
-    {"_path": "backend/flask", "slots": ["single", "backend"]},
-    {"_path": "blank/bring-your-own", "slots": ["single"]},
-    {"_path": "frontend/angular", "slots": ["single", "frontend"]},
+    {"_path": "backend/fastapi", "slots": ["single", "backend"], "needsDB": True},
+    {"_path": "backend/flask", "slots": ["single", "backend"], "needsDB": True},
+    {"_path": "blank/bring-your-own", "slots": ["single"], "needsDB": True},
+    {"_path": "frontend/angular", "slots": ["single", "frontend"], "needsDB": False},
 ]
 
 
@@ -280,6 +301,26 @@ class HazardMutationTest(unittest.TestCase):
         fragments = FRAGMENTS_FIXTURE + [{"_path": "backend/undeclared", "slots": ["single"]}]
         errors = cwt.run(doc=doc, fragments=fragments)
         self.assertTrue(any("does not match gen-wizard-enums.py" in e for e in errors), errors)
+
+    def test_hazard_needsdb_fragment_moved_into_dbless_group_is_caught(self):
+        # FIX-17/FIX5-REV-1 (review-fix5-land.md): the hazard check_exact_partition alone
+        # CANNOT catch -- backend/flask (needsDB: True in the fixture) moved from the
+        # MySQL-only group into the DB-less group. The partition stays EXACT (flask is
+        # still in exactly one group), so check_exact_partition sees nothing wrong; only
+        # the needsDB-placement check catches that flask's Database question vanished.
+        doc = copy.deepcopy(_minimal_doc())
+        groups = cwt.single_groups(doc)
+        groups[1]["properties"]["singleFragment"]["enum"].remove("backend/flask")
+        groups[0]["properties"]["singleFragment"]["enum"].append("backend/flask")
+        errors = cwt.run(doc=doc, fragments=FRAGMENTS_FIXTURE)
+        # The partition itself must still be reported exact -- proves this specific
+        # mutation is invisible to check_exact_partition, exactly as the review found.
+        self.assertFalse(any("exact-partition" in e for e in errors), errors)
+        self.assertTrue(
+            any("needsDB fragment(s) placed in a group with no database question" in e and "backend/flask" in e
+                for e in errors),
+            errors,
+        )
 
 
 class MobileQuarantineConsistencyTests(unittest.TestCase):

@@ -26,6 +26,18 @@ with the gate still green, silently, unless the QUARANTINE entries are ALSO remo
 This is this script's natural home for that assertion (same "partition/consistency
 audit of template.yaml" job), not green-check.py itself.
 
+FIX-17/FIX5-REV-1 (review-fix5-land.md): PR #432's original check_wizard_template()
+(the one FIX-5-LAND superseded with this file) had a FOURTH assertion this file never
+carried forward: every needsDB fragment must land in a group whose schema actually
+offers a `database` property -- catching a fragment correctly placed in exactly one
+group (so check_exact_partition sees nothing wrong) but placed in the WRONG group, one
+that never asks the Database question at all. Proven missing by mutation: moving
+backend/flask (needsDB: true) into the DB-less group keeps the partition exact and
+produced ZERO errors before this fix. check_needsdb_fragments_offer_database() below
+closes that gap, applied across all three branches (single/frontend-backend/mobile) the
+way every other check here already is -- a strict superset of PR #432's single-branch
+original.
+
 Usage:  python3 check_wizard_template.py
 Exits 0 and prints OK on success; exits 1 and prints every violation on failure.
 """
@@ -209,6 +221,38 @@ def check_postgres_offered_correctly(groups, field, label, errors):
             )
 
 
+def check_needsdb_fragments_offer_database(top_enum, groups, field, fragments_by_path, label, errors):
+    """FIX-17/FIX5-REV-1: every needsDB fragment must land in a group that offers a
+    `database` property. check_exact_partition alone does not catch this -- a fragment
+    can be placed in exactly one group (partition stays exact) while that group is the
+    DB-less one, silently dropping its Database question. Proven by mutation
+    (review-fix5-land.md): move backend/flask (needsDB: true) into the DB-less group and
+    the exact-partition check alone sees nothing wrong.
+
+    A fragment absent from `membership` (not in any group at all) is already reported by
+    check_exact_partition as a gap -- not re-reported here, to keep each failure mode's
+    message attributable to the check that actually diagnoses it.
+    """
+    membership = {}
+    for gi, g in enumerate(groups):
+        for frag in _group_fragments(g, field):
+            membership[frag] = gi
+    dropped = []
+    for frag in top_enum:
+        meta = fragments_by_path.get(frag)
+        if meta is None or not meta.get("needsDB"):
+            continue
+        gi = membership.get(frag)
+        if gi is None:
+            continue
+        if not _group_database_enum(groups[gi]):
+            dropped.append(frag)
+    if dropped:
+        errors.append(
+            f"{label}: needsDB fragment(s) placed in a group with no database question: {sorted(dropped)}"
+        )
+
+
 def check_mobile_quarantine_consistency(pt_enum, quarantine, errors):
     """MOB-002: if 'mobile' is reachable (present in the top projectType enum), no mobile/*
     fragment may remain in green-check.py's QUARANTINE. Restoring mobile without clearing
@@ -233,6 +277,7 @@ def run(doc=None, fragments=None, quarantine=None):
     doc = doc if doc is not None else load_template()
     fragments = fragments if fragments is not None else load_fragments()
     quarantine = quarantine if quarantine is not None else load_quarantine()
+    fragments_by_path = {d["_path"]: d for d in fragments}
     single_expected = [d["_path"] for d in fragments if "single" in (d.get("slots") or [])]
     backend_expected = [d["_path"] for d in fragments if "backend" in (d.get("slots") or [])]
 
@@ -242,16 +287,19 @@ def run(doc=None, fragments=None, quarantine=None):
     check_matches_fragment_library(s_top, single_expected, "singleFragment", errors)
     check_exact_partition(s_top, s_groups, "singleFragment", "singleFragment", errors)
     check_postgres_offered_correctly(s_groups, "singleFragment", "singleFragment", errors)
+    check_needsdb_fragments_offer_database(s_top, s_groups, "singleFragment", fragments_by_path, "singleFragment", errors)
 
     fb_top, fb_grps = fb_top_enum(doc), fb_groups(doc)
     check_matches_fragment_library(fb_top, backend_expected, "frontend-backend backendFragment", errors)
     check_exact_partition(fb_top, fb_grps, "backendFragment", "frontend-backend backendFragment", errors)
     check_postgres_offered_correctly(fb_grps, "backendFragment", "frontend-backend backendFragment", errors)
+    check_needsdb_fragments_offer_database(fb_top, fb_grps, "backendFragment", fragments_by_path, "frontend-backend backendFragment", errors)
 
     m_top, m_grps = mobile_top_enum(doc), mobile_groups(doc)
     check_matches_fragment_library(m_top, backend_expected, "mobile backendFragment", errors)
     check_exact_partition(m_top, m_grps, "backendFragment", "mobile backendFragment", errors)
     check_postgres_offered_correctly(m_grps, "backendFragment", "mobile backendFragment", errors)
+    check_needsdb_fragments_offer_database(m_top, m_grps, "backendFragment", fragments_by_path, "mobile backendFragment", errors)
 
     check_mobile_quarantine_consistency(project_type_enum(doc), quarantine, errors)
 
