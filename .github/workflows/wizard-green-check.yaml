@@ -93,18 +93,30 @@ jobs:
         # Digest-pinned (SEC, matches tenant-build.yaml): sha = actions/checkout v4.3.1.
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
-      - name: Tooling versions (node ships in the container image; kubectl/kustomize + venv installed below)
+      - name: Tooling versions (node + curl + a stripped-down venv module ship in the image)
+        # NO apt-get here: ARC's runner egress NetworkPolicy is :443-ONLY (SEC-014,
+        # capstone-runner-netpol-443-only) and node:24-trixie's default apt sources are
+        # plain http://deb.debian.org:80 -- confirmed broken here (first attempt: "Network
+        # is unreachable" on :80). kubectl is a static binary over HTTPS, so a plain curl
+        # works fine and needs nothing from apt.
         run: |
           node --version
-          apt-get update -qq && apt-get install -y -qq --no-install-recommends python3-venv curl ca-certificates >/dev/null
           curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/$(curl -fsSL -L https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
           chmod +x /usr/local/bin/kubectl
           kubectl version --client
 
       - name: Python render deps (pyyaml + jinja2) in an isolated venv
-        # A venv sidesteps PEP-668 (externally-managed system python) with no extra action.
+        # This image's python3 -m venv normally bootstraps pip via the stdlib `ensurepip`
+        # module -- ABSENT here (Debian splits it into the python3.13-venv apt package,
+        # which the apt-get above can't reach). Two HTTPS-only steps route around it instead
+        # of installing anything system-wide (PEP-668's externally-managed guard blocks
+        # that anyway): create the venv with --without-pip, then bootstrap pip INSIDE it via
+        # PyPA's official get-pip.py bootstrap script -- a venv's own site-packages is
+        # exempt from PEP-668, so this succeeds where a system-wide install would not.
         run: |
-          python3 -m venv "$RUNNER_TEMP/venv"
+          python3 -m venv --without-pip "$RUNNER_TEMP/venv"
+          curl -fsSL https://bootstrap.pypa.io/get-pip.py -o "$RUNNER_TEMP/get-pip.py"
+          "$RUNNER_TEMP/venv/bin/python3" "$RUNNER_TEMP/get-pip.py" --quiet
           "$RUNNER_TEMP/venv/bin/pip" install --quiet pyyaml jinja2
 
       - name: Harness self-tests (prove the gate itself catches a red scaffold)
