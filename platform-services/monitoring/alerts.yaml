@@ -110,23 +110,63 @@ spec:
         # means no fresh snapshot → data loss past the last good snapshot is
         # unrecoverable. This alert exists because the job failed silently for >29h
         # (missing `snapshot` k8s-auth role) with nothing watching it (retro #3).
+        # ── REWRITTEN (FIX-7, ADV-3 — handed over by devops-health/FIX-6) ─────
+        # The previous expression was
+        #   kube_job_status_failed{namespace="vault", job_name=~"vault-raft-snapshot-.*"} > 0
+        # which fired on the mere EXISTENCE of a Failed Job object, with no time
+        # bound. Combined with the CronJob's `failedJobsHistoryLimit: 3`, three
+        # Jobs that failed on 2026-07-06/07/08 stayed retained for 26-28 days —
+        # and because those three history slots are only evicted by NEWER
+        # failures, once failures STOP the last three never age out. So the alert
+        # pinned itself ON permanently: it said "is failing" (present tense) but
+        # actually meant "has ever failed and the object still exists". It was a
+        # standing critical false alarm (x6) claiming Vault DR was unrecoverable
+        # while the last three snapshot runs had in fact all succeeded.
+        #
+        # Now keyed on SNAPSHOT FRESHNESS — the thing the annotation always
+        # claimed to measure. 129600s = 36h = one missed daily run plus grace.
+        # Cannot be pinned on by stale objects, and cannot be silently cleared by
+        # them either.
+        #
+        # The `or absent(...)` arm matters: without it, deleting/renaming the
+        # CronJob (or it never having succeeded even once) makes the series vanish
+        # and the alert go quiet forever — the exact silent-DR-failure mode this
+        # rule exists to prevent. Same absent() idiom as the Ceph job-missing
+        # alerts.
+        #
+        # ⚠ ORDERING DEPENDENCY with devops-health's FIX-6 PR, which adds
+        # `ttlSecondsAfterFinished: 172800` to the snapshot CronJob so Job objects
+        # self-reap after 48h. That TTL is only SAFE once this rule is
+        # freshness-based: under the OLD expression, a genuine unfixed failure
+        # would silently self-clear when its Job got reaped at 48h — strictly
+        # worse than the false alarm. This rule must land BEFORE, or together
+        # with, that TTL. Verified live before merging:
+        # kube_cronjob_status_last_successful_time IS exposed by this
+        # kube-state-metrics build (1 series, vault-raft-snapshot).
         - alert: VaultRaftSnapshotFailing
-          expr: kube_job_status_failed{namespace="vault", job_name=~"vault-raft-snapshot-.*"} > 0
+          expr: >-
+            (time() - kube_cronjob_status_last_successful_time{namespace="vault", cronjob="vault-raft-snapshot"} > 129600)
+            or
+            absent(kube_cronjob_status_last_successful_time{namespace="vault", cronjob="vault-raft-snapshot"})
           for: 15m
           labels:
             severity: critical
           annotations:
-            summary: "Vault raft-snapshot DR backup is failing"
+            summary: "No fresh Vault raft snapshot in over 36h"
             description: >-
-              A vault-raft-snapshot job has FAILED — no fresh Vault DR snapshot is being
-              written to the vault-snapshots PVC. A Vault data loss right now would be
-              unrecoverable past the last good snapshot. Common causes: (1) the
-              transit auto-unseal backend is SEALED — error 'unable to read
-              SHA256SUMS.sealed file' — see the VaultUnsealerSealed alert and unseal
-              vault-unsealer-0 (runbook); (2) the `snapshot` k8s-auth role is missing
-              (`invalid role name "snapshot"` at login) — re-run
+              The vault-raft-snapshot CronJob has not completed successfully in over
+              36 hours (or its metric has disappeared entirely) — there is no fresh
+              Vault DR snapshot on the vault-snapshots PVC, and a Vault data loss
+              right now would be unrecoverable past the last good snapshot. Common
+              causes: (1) the transit auto-unseal backend is SEALED — error 'unable
+              to read SHA256SUMS.sealed file' — see the VaultUnsealerSealed alert and
+              unseal vault-unsealer-0 (runbook); (2) the `snapshot` k8s-auth role is
+              missing (`invalid role name "snapshot"` at login) — re-run
               platform-services/external-secrets/vault-policies/snapshot-role.sh
-              (runbook §D). Inspect `kubectl -n vault logs job/<failed-job>`.
+              (runbook §D). Check `kubectl -n vault get cronjob,jobs` and the logs of
+              the most recent run. NOTE: unlike the old version of this alert, a
+              stale FAILED Job object left lying around does NOT trigger this — only
+              genuine snapshot staleness does.
 
     # ── (b) External Secrets Operator: store not Ready / sync error ────────────
     - name: external-secrets
@@ -165,13 +205,98 @@ spec:
               Namespaced SecretStore {{ $labels.namespace }}/{{ $labels.name }} has
               been Ready=False for 10m. ExternalSecrets in that namespace are blocked.
 
+        # ── (b2) THE "HEALTHY-LOOKING TENANT WITH NO SECRETS" BLIND SPOT ───────
+        # (FIX-7 scope addition; pairs with FIX-4's provider-layer MR alert —
+        #  that one catches Crossplane failing to WRITE the secret to Vault, this
+        #  one catches ESO failing to DELIVER it into the namespace.)
+        #
+        # WHY THE THREE RULES ABOVE DO NOT COVER THIS. ESO reports the
+        # ExternalSecret **Ready=True** for a target Secret it has DELETED — the
+        # distinction lives only in the condition's `reason` (SecretSynced vs
+        # SecretDeleted). Verified live: 3 ExternalSecrets currently sit at
+        # Ready=True/SecretDeleted with their target Secret genuinely absent, and
+        # every Ready=False rule above correctly ignores them. So a deleted secret
+        # is INVISIBLE to condition-status alerting.
+        #
+        # ⚠ AND `reason` IS NOT QUERYABLE. Checked against the live metric rather
+        # than assumed: `externalsecret_status_condition` carries only
+        # {condition, status, name, exported_namespace, ...} — there is NO `reason`
+        # label on this ESO build. (The `condition="Deleted"` series that do exist
+        # are stale leftovers from the torn-down e2efall26 tenant, not a usable
+        # signal.) So this rule cannot be written off ESO's own metrics at all.
+        # Instead it JOINS against kube-state-metrics: "an ExternalSecret exists,
+        # but the Secret it targets does not".
+        #
+        # ⚠ WHY IT IS SCOPED TO `.+-db` AND MUST STAY THAT WAY. Tenant app-secrets
+        # (`<team>-secret`) sit in exactly this deleted state BY DESIGN — M4
+        # zero-config onboarding means students set app secrets later via the
+        # portal, and `deletionPolicy: Delete` + no key in Vault yet is the normal,
+        # expected resting state for a brand-new tenant (INV-1). Alerting on those
+        # would page for every single new tenant on day one and rebuild exactly the
+        # alert-fatigue problem the rest of FIX-7 exists to remove.
+        # A tenant DB secret (`<team>-db`) is the opposite: it is provisioned
+        # automatically and its absence is never normal. Fleet-wide disappearance
+        # of these is the precise fingerprint of the F-2 outage — a Vault/provider
+        # failure plus `deletionPolicy: Delete` wipes them, and because the pods'
+        # secret refs are `optional: true` the apps come up Ready and serving 200s
+        # with an EMPTY DATABASE_URL. Nothing else on the platform notices.
+        #
+        # VERIFIED LIVE with a positive control before shipping (FIX-7 evidence):
+        #   this expression, as written        -> 0 series (all 3 molly-demo-db exist)
+        #   same expression with `.+-secret`   -> exactly 3 series, the known
+        #                                         zero-config app-secrets
+        # i.e. the join genuinely detects missing target Secrets, and the `-db`
+        # scope is what keeps the by-design ones out.
+        #
+        # 20m (not 10m): tenant provisioning legitimately has a window where the
+        # ExternalSecret exists before Vault has been seeded and the Secret
+        # materialises. 20m clears normal onboarding without hiding a real outage.
+        - alert: TenantDatabaseSecretMissing
+          expr: >-
+            max by (exported_namespace, name) (
+              externalsecret_status_condition{condition="Ready", status="True", name=~".+-db"} == 1
+            )
+            unless on (exported_namespace, name) (
+              label_replace(
+                label_replace(
+                  max by (namespace, secret) (kube_secret_info),
+                  "exported_namespace", "$1", "namespace", "(.+)"
+                ),
+                "name", "$1", "secret", "(.+)"
+              )
+            )
+          for: 20m
+          labels:
+            severity: critical
+            impact: student-facing
+          annotations:
+            summary: "Tenant DB secret {{ $labels.exported_namespace }}/{{ $labels.name }} has vanished"
+            description: >-
+              The ExternalSecret {{ $labels.exported_namespace }}/{{ $labels.name }}
+              reports healthy, but the Kubernetes Secret it targets DOES NOT EXIST —
+              ESO deleted it (deletionPolicy: Delete) and still reports Ready=True.
+              The tenant's app will keep running and serving HTTP 200 with an EMPTY
+              DATABASE_URL, because its secret refs are optional:true — so this will
+              NOT show up as a Degraded app or a CrashLoop. Almost always means Vault
+              or the Crossplane provider credential broke and the DB secret was wiped
+              fleet-wide. Check Vault is unsealed and reachable, check the
+              ClusterSecretStore, then confirm the tenant's Vault path
+              `tenants/<team>/<env>/db` still holds its keys. Expect this to fire for
+              MANY tenants at once — that is the signature, not a coincidence.
+
     # ── (c) ArgoCD app Degraded or stuck OutOfSync ────────────────────────────
     # Excludes platform-netpol-controlplane: it is INTENTIONALLY OutOfSync (SEC-011
     # manual security gate), the one known-permanent drift.
     - name: argocd
       rules:
+        # SCOPED TO PLATFORM APPS (FIX-7): tenant + lab apps are handled by
+        # TenantAppDegraded in the `tenant-delivery` group at the bottom of this
+        # file, which pages with student-facing wording and a longer window. The
+        # two selectors are EXACT COMPLEMENTS, verified live against Prometheus —
+        # every Degraded app matches exactly one of the two rules, never both
+        # (no duplicate page) and never neither (no coverage hole).
         - alert: ArgoCDAppDegraded
-          expr: argocd_app_info{health_status="Degraded"} == 1
+          expr: argocd_app_info{health_status="Degraded", project=~"platform|default", dest_namespace!~"lab-.*"} == 1
           for: 10m
           labels:
             severity: warning
@@ -195,8 +320,21 @@ spec:
     # ── (d) Pod CrashLoopBackOff / ImagePullBackOff ───────────────────────────
     - name: workloads
       rules:
+        # SCOPED TO PLATFORM NAMESPACES (FIX-7) — tenant/lab namespaces are
+        # covered by TenantAppWorkloadStuck below. Exact complement of that rule's
+        # selector: the two `namespace` matchers are negations of each other and the
+        # reason lists are identical, so every waiting container matches exactly one
+        # of the two rules (verified live at 3 reasons: 1 platform + 7 tenant = 8
+        # total; re-verified after CreateContainerConfigError was added as a 4th).
+        # ⚠ THE REASON LISTS MUST BE KEPT IDENTICAL between this rule and
+        # TenantAppWorkloadStuck — adding a reason to only one silently opens a
+        # coverage hole on the other side of the namespace split. That is exactly how
+        # CreateContainerConfigError went unmonitored (MON-003). The namespace pattern is the
+        # tenancy naming convention: `lab-<course>` for the lab tenants and
+        # `<team>-<env>` for scaffolded app tenants; no platform namespace ends in
+        # -dev/-staging/-prod (verified live).
         - alert: PodCrashLoopOrImagePullBackOff
-          expr: kube_pod_container_status_waiting_reason{reason=~"CrashLoopBackOff|ImagePullBackOff|ErrImagePull"} == 1
+          expr: kube_pod_container_status_waiting_reason{reason=~"CrashLoopBackOff|ImagePullBackOff|ErrImagePull|CreateContainerConfigError", namespace!~"lab-.*|.*-(dev|staging|prod)"} == 1
           for: 10m
           labels:
             severity: warning
@@ -235,3 +373,92 @@ spec:
             description: >-
               Node {{ $labels.node }} has been NotReady for 10m. Pods on it may be
               evicted/unschedulable. Check `kubectl describe node {{ $labels.node }}`.
+
+    # ── (g) TENANT / LAB DELIVERY PATH (FIX-7, BLOCK-1 durable half) ──────────
+    # WHY THIS GROUP EXISTS. Two student lab tenants sat completely broken for
+    # NINE DAYS and nobody found out. Their images were never published (the
+    # single `build` run in each repo died in a transient GitHub Actions incident
+    # on 2026-08-06 and was never retried), so their pods sat in ImagePullBackOff,
+    # their ArgoCD apps sat Degraded, and their public URLs served 503 — for the
+    # entire time, with no retry and no notification.
+    #
+    # The failure was NOT that nothing fired. Generic rules DID fire the whole
+    # time. The failure was that (a) alert delivery was broken (BLOCK-2: ntfy was
+    # rejecting ~62% of notifications with a message-size 400) and (b) what did
+    # get through was indistinguishable from ~79 alerts of mostly structural
+    # noise. So this group is not "another alert" — it SPLITS the student-facing
+    # delivery path out of the generic platform rules above into alerts that name
+    # the affected tenant and say what to actually do about it. The generic rules
+    # were narrowed to the exact complement of these selectors, so total alert
+    # volume does not increase and nothing is covered twice.
+    #
+    # WHY 30m AND NOT 10m: a student's app is legitimately broken-then-fixed many
+    # times an hour while they are working on it — that is the point of the
+    # platform, not an incident. 30m is long enough that normal iteration never
+    # pages, and short enough that a genuinely stuck tenant surfaces within the
+    # hour instead of in nine days.
+    #
+    # HOW TENANT/LAB WORKLOADS ARE IDENTIFIED (verified live, 2026-08-15) — by
+    # NAMING CONVENTION, deliberately not by namespace label:
+    # `kube_namespace_labels` is NOT emitted by kube-state-metrics in this install
+    # (the only series carrying `label_platform_capstone_team` come from opencost,
+    # and they cover just the three molly-demo namespaces — the lab namespaces are
+    # absent entirely). A label-join would therefore have silently MISSED the exact
+    # tenants this group exists to catch.
+    #   namespaces : `lab-<course>` (lab tenants) and `<team>-<env>` where env is
+    #                dev|staging|prod (scaffolded app tenants). No platform
+    #                namespace matches either shape.
+    #   argocd apps: lab apps live in the `platform` project but deploy into a
+    #                `lab-*` namespace, so they are matched on dest_namespace;
+    #                app tenants get their own AppProject, so they are matched as
+    #                "any project that is not platform/default".
+    - name: tenant-delivery
+      rules:
+        - alert: TenantAppDegraded
+          expr: >-
+            argocd_app_info{health_status="Degraded", project!~"platform|default"} == 1
+            or
+            argocd_app_info{health_status="Degraded", dest_namespace=~"lab-.*"} == 1
+          for: 30m
+          labels:
+            severity: warning
+            impact: student-facing
+          annotations:
+            summary: "Tenant app {{ $labels.name }} has been broken for 30m"
+            description: >-
+              The tenant/lab ArgoCD Application {{ $labels.name }} (namespace
+              {{ $labels.dest_namespace }}) has been Degraded for 30 minutes — a
+              student's app is down and they are probably stuck. THIS IS THE ALERT
+              THAT WOULD HAVE CAUGHT THE 9-DAY-DEAD LAB TENANTS. Most common cause
+              by far: their image was never published, because the `build` workflow
+              in their repo failed and was never retried — check the Actions tab of
+              {{ $labels.repo }} first and re-run the failed run. Then
+              `argocd app get {{ $labels.name }}` and
+              `kubectl -n {{ $labels.dest_namespace }} get pods`.
+
+        - alert: TenantAppWorkloadStuck
+          expr: kube_pod_container_status_waiting_reason{reason=~"CrashLoopBackOff|ImagePullBackOff|ErrImagePull|CreateContainerConfigError", namespace=~"lab-.*|.*-(dev|staging|prod)"} == 1
+          for: 30m
+          labels:
+            severity: warning
+            impact: student-facing
+          annotations:
+            summary: "Tenant pod {{ $labels.namespace }}/{{ $labels.pod }} stuck ({{ $labels.reason }}) 30m"
+            description: >-
+              Container {{ $labels.container }} in tenant/lab pod
+              {{ $labels.namespace }}/{{ $labels.pod }} has been stuck in
+              {{ $labels.reason }} for 30 minutes. ImagePullBackOff/ErrImagePull
+              almost always means the tenant's image was never pushed — their build
+              failed and nothing retried it; re-run the failed `build` workflow in
+              their repo. CrashLoopBackOff means the image exists but the app dies
+              on boot — check `kubectl -n {{ $labels.namespace }} logs
+              {{ $labels.pod }} --previous` (a bad DB connection string or a missing
+              secret are the usual causes on this platform).
+              CreateContainerConfigError means the pod cannot even START because a
+              Secret or ConfigMap it references is ABSENT — on this platform that is
+              the ESO/Vault missing-secret signature (F-2/INV-1): the kubelet is
+              refusing to build the container because an envFrom/secretKeyRef target
+              does not exist. Check the tenant's ExternalSecrets and the
+              ClusterSecretStore before looking at the app itself; pair this with
+              TenantDatabaseSecretMissing above, which catches the same outage from
+              the ESO side.

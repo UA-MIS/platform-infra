@@ -104,6 +104,60 @@ spec:
         # retro) live in platform-services/monitoring/alerts.yaml.
         defaultRules:
           create: true
+          # ── ADV-5: rules that are STRUCTURALLY FALSE on Talos + Cilium ──────
+          # These three upstream mixin groups alert on control-plane components
+          # that either do not exist on this cluster or are not reachable on the
+          # endpoints the mixin assumes. They fired CONTINUOUSLY — and an alert
+          # that is always firing carries zero information, while actively
+          # training people to ignore the channel that the rest of FIX-7 works to
+          # make trustworthy. Verified live before disabling (see each note).
+          rules:
+            # `KubeProxyDown` = absent(up{job="kube-proxy"}). There are NO
+            # kube-proxy pods on this cluster and never will be — Cilium replaces
+            # kube-proxy entirely (kubeProxyReplacement, clusters/real-talos/).
+            # The rule is unsatisfiable by construction, not "currently broken".
+            kubeProxy: false
+            # `KubeSchedulerInstanceUnreachable` / `KubeControllerManagerInstance
+            # Unreachable` (+ their TargetDown entries). Verified live from the
+            # Prometheus targets API: all 3 control-plane endpoints return
+            #   dial tcp 10.237.171.{5,6,8}:{10259,10257}: connect: connection refused
+            # i.e. Talos binds these components to localhost, so they are not
+            # scrapeable from the pod network on their default ports.
+            #
+            # ⚠ TRADE-OFF, STATED PLAINLY: this DOES give up direct alerting on the
+            # scheduler and controller-manager. That is a real reduction in
+            # coverage, accepted here because the alerts carried no signal (always
+            # firing) and because failure of either component still surfaces
+            # indirectly and quickly — pods stop being scheduled/replaced, which
+            # trips KubePodNotReady / KubeDeploymentReplicasMismatch / NodeNotReady.
+            # ⚠ HOW TO GET THE COVERAGE BACK PROPERLY (follow-up, NOT a values
+            # change): set `--bind-address=0.0.0.0` for kube-scheduler and
+            # kube-controller-manager in the Talos machine config
+            # (cluster.scheduler.extraArgs / cluster.controllerManager.extraArgs),
+            # roll the control-plane nodes, then flip these back to `true` and
+            # re-enable the two component blocks below. That is a node-rolling
+            # change and was deliberately NOT bundled into a pre-semester PR.
+            kubeSchedulerAlerting: false
+            kubeControllerManager: false
+
+        # ── ADV-5 (cont.): stop DECLARING scrape targets that cannot be scraped ──
+        # Disabling the rules above silences the *-InstanceUnreachable alerts, but
+        # `TargetDown` (general.rules, computed straight off `up`) would keep firing
+        # for as long as these ServiceMonitors exist and keep failing — it is a
+        # generic rule and cannot be disabled per-job without dropping TargetDown for
+        # everything. Turning the components off removes the Service + ServiceMonitor,
+        # so the `up` series disappear and TargetDown has nothing to evaluate.
+        # This is what clears the kube-scheduler / kube-controller-manager TargetDown
+        # pair; it is the same one decision as the `defaultRules.rules` flags above
+        # and must be reverted together with them (see the Talos bind-address note).
+        # kubeProxy is included for the same reason and is unconditionally correct —
+        # there is no kube-proxy to scrape.
+        kubeProxy:
+          enabled: false
+        kubeScheduler:
+          enabled: false
+        kubeControllerManager:
+          enabled: false
 
         prometheusOperator:
           # Resource-reclaim (VPA-driven, task follow-up): live VPA target is the
@@ -366,6 +420,42 @@ spec:
                   # lands at /etc/alertmanager/secrets/<secretName>/<key>.
                   - url_file: /etc/alertmanager/secrets/alertmanager-webhook/url
                     send_resolved: true
+                    # ── SECOND delivery failure mode, distinct from the 400 (FIX-7) ──
+                    # ntfy rejects any request whose BODY exceeds ~128 KiB with
+                    # HTTP 413, and — exactly like the 400 that caused this task —
+                    # Alertmanager does not retry 4xx, so the notification is dropped
+                    # silently. This one is NOT fixed by the compact ntfy template:
+                    # the body is rejected BEFORE the template ever runs, so how small
+                    # the message renders is irrelevant.
+                    #
+                    # Measured against the real ntfy v2.25.0 by binary search:
+                    #   114 alerts / 130610 B body -> HTTP 200
+                    #   115 alerts / 131739 B body -> HTTP 413
+                    # i.e. the cap is 128 KiB of request body, ~114 alerts at the
+                    # ~1.1 KB/alert of a realistic Crossplane MR alert. Fatter alerts
+                    # (longer labels/annotations) hit it sooner.
+                    #
+                    # This is reachable in practice, not theoretical: Alertmanager
+                    # groups by ['namespace','alertname'], so ONE provider outage that
+                    # trips a per-resource rule fans the whole fleet into a SINGLE
+                    # webhook POST. FIX-4's CrossplaneManagedResourceNotSynced fires
+                    # per managed resource against ~148 live MRs — one bad credential
+                    # and that group alone is ~170 KB, over the cap. The alert that
+                    # tells you the platform is broken would be the one that cannot be
+                    # delivered.
+                    #
+                    # max_alerts truncates the alerts array at the SOURCE and reports
+                    # the dropped count in the payload's `truncatedAlerts` field, which
+                    # the ntfy template reads so the "×N" and "… and N more" counts stay
+                    # HONEST (they report the true total, not the truncated one).
+                    # 25 is chosen for headroom, not to fit exactly: at a fat ~3 KB per
+                    # alert that is ~75 KB, comfortably under the 128 KiB cap, while
+                    # still far more than the 5 the template itemises.
+                    #
+                    # ⚠ Fixing this at the ntfy end instead would mean raising
+                    # message-size-limit, which is exactly the trade this task already
+                    # rejected — >4K breaks FCM/APNS phone delivery silently.
+                    max_alerts: 25
 
         grafana:
           # Admin creds come from the grafana-admin SealedSecret (shipped by

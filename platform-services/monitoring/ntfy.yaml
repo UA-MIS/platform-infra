@@ -54,6 +54,143 @@ data:
     attachment-cache-dir: "/var/lib/ntfy/attachments"
     auth-file: "/var/lib/ntfy/auth.db"
     auth-default-access: "deny-all"   # private server — nothing anonymous
+    # Named message templates (the `ntfy-templates` ConfigMap below). NOT ntfy's
+    # default (/etc/ntfy/templates) — a sibling path, because /etc/ntfy is itself
+    # a ConfigMap mount and nesting a volume inside a read-only tmpfs is fragile.
+    # See the Deployment's `templates` volumeMount for the full reasoning. If this
+    # path and that mountPath ever disagree, ntfy finds an empty template-dir and
+    # SILENTLY falls back to its oversized built-in template — i.e. the 400s come
+    # straight back. Keep them in sync.
+    template-dir: "/etc/ntfy-templates"
+    # ── Alert-storm headroom (FIX-7) ──────────────────────────────────
+    # ntfy rate-limits per VISITOR at burst 60, replenishing 1 per 5s. Alertmanager
+    # is ONE visitor (a single pod IP), so a storm — a node failing and firing
+    # dozens of groups at once — can exhaust the burst and start collecting HTTP
+    # 429s. Alertmanager DOES retry 429 (unlike the 400 that caused this task), so
+    # this was never silent loss, but a storm is exactly when notifications must
+    # not be delayed. Observed directly while validating the template fix: replaying
+    # all 43 live alert groups back-to-back produced 26 × 429 once the burst ran out.
+    # ⚠ SECURITY: this exempts from RATE LIMITING ONLY. It grants no access —
+    # `auth-default-access: deny-all` above still applies, so publishing to
+    # `platform-alerts` continues to require the platform-oncall credential.
+    # Scoped to the in-cluster pod CIDR (Talos/Cilium 10.244.0.0/16, the same
+    # constant used by platform-services/db-tier/netpol.yaml), NOT 0.0.0.0/0.
+    visitor-request-limit-exempt-hosts: "10.244.0.0/16"
+    # ── SQLite write contention (FIX-7 / BLOCK-2, secondary) ────────────────
+    # ntfy defaults to SYNCHRONOUS cache writes (`cache-batch-size: 0`), which
+    # under this platform's publish rate produced a recurring
+    #   WARN Error sending delayed messages (error=database is locked, tag=publish)
+    # roughly every 15s (the delayed-sender goroutine contending with the
+    # message-cache writer). Values are upstream's own "Tuning for scale →
+    # Message cache" recommendation (docs.ntfy.sh/config): batch the cache
+    # writes and put SQLite in WAL mode so readers don't block the writer.
+    #   busy_timeout 15000 — wait up to 15s for a lock instead of erroring out
+    #                        immediately, which is what surfaced as "locked".
+    # NOTE: this was NOT the cause of the 62% Alertmanager delivery failure —
+    # that was the message-size 400 fixed by the template override below. This
+    # block fixes the (separate, real) log-noise/contention issue.
+    cache-batch-size: 25
+    cache-batch-timeout: "1s"
+    cache-startup-queries: |
+      pragma journal_mode = WAL;
+      pragma synchronous = normal;
+      pragma temp_store = memory;
+      pragma busy_timeout = 15000;
+---
+# ── THE alert-delivery fix (FIX-7 / BLOCK-2 root cause) ──────────────────────
+# A named template file that OVERRIDES ntfy's BUILT-IN `alertmanager` template.
+#
+# WHAT WAS ACTUALLY BROKEN (this is NOT what the health audit guessed):
+# Alertmanager's `platform-oncall` webhook was failing ~62% of notifications
+# with an UNRECOVERABLE error — Alertmanager does not retry 4xx:
+#   HTTP 400 {"code":40041,"error":"invalid request: message or title is too
+#             large after replacing template"}
+# ntfy's built-in `alertmanager` template renders EVERY alert in the group,
+# including each one's full multi-sentence `description` annotation. Our
+# Alertmanager groups by ['namespace','alertname'], so one webhook POST can
+# carry 6-7 alerts; the rendered output then exceeds ntfy's 4096-byte
+# message-size-limit and the whole notification is dropped. The audit's
+# "SQLite database is locked" finding is a REAL but SEPARATE issue (fixed by
+# the cache-batch/WAL settings above) — it is not on this failure path.
+#
+# WHY NOT JUST RAISE message-size-limit: ntfy's docs are explicit that sizes
+# over 4K are "not recommended and remain largely untested", and that keeping
+# 4K is CRITICAL when FCM/APNS are involved because those services impose
+# similar limits and silently fail to deliver larger messages. The entire point
+# of this channel is push-to-phone (which is FCM), so raising the limit would
+# trade a visible 400 for an invisible non-delivery. Fix the payload instead.
+#
+# HOW THE OVERRIDE STAYS SMALL — three bounded reductions:
+#   1. The summary is printed ONCE from `.commonAnnotations` (it is identical
+#      across a group by construction), not once per alert.
+#   2. At most 5 alerts are itemised, each as just its DISTINGUISHING labels
+#      (`omit` drops the ones that are constant or pure plumbing), every value
+#      truncated to 32 chars; the rest collapse to "… and N more".
+#   3. `description` is printed once, truncated to 350 chars.
+#
+# ⚠ WHAT IS *NOT* BOUNDED (be honest about the residual, MON-002): within each
+# of those ≤5 itemised alerts, only the label VALUES are truncated. The NUMBER
+# of distinguishing labels is not capped, and label KEYS are not truncated at
+# all — so per-alert length is O(number of differing labels), not a constant.
+# A metric carrying an unusually large or long-keyed label set can therefore
+# render longer than the arithmetic above suggests. This is bounded in practice,
+# not by construction: the widest real group measured (ArgoCD, 7 alerts) renders
+# 854 B of 4096, and the fan-out stress case stays ~29 KB of body / <1 KB
+# rendered even at 10,000 alerts. The genuine hard stop on payload size is
+# `max_alerts` on the Alertmanager receiver (see kube-prometheus-stack-app.yaml),
+# NOT this template. If a future exporter emits very wide labels, add a cap on
+# the label loop here rather than assuming these three reductions cover it.
+#
+# VERIFIED BY EXECUTION, not by inspection (FIX-7 evidence bundle): ntfy
+# v2.25.0 run locally against the reconstructed webhook payloads for ALL 43
+# alert groups live on the cluster at the time of the fix —
+#   built-in template: 4/43 groups rejected with the exact 40041 error above
+#   this override:     0/43 rejected, max rendered size 1613 B of 4096 (2.5x
+#                      headroom on the worst real group)
+#
+# ⚠ NO SealedSecret RESEAL NEEDED: ntfy resolves a file named `<name>.yml` in
+# template-dir AHEAD of its built-in of the same name, so the existing
+# `?template=alertmanager` query param already baked into the
+# `alertmanager-webhook` SealedSecret URL keeps working untouched.
+#
+# ⚠ Priority mapping is deliberate: critical -> 5 (max/urgent, bypasses phone
+# Do-Not-Disturb), other firing -> 4 (high), resolved -> 2 (low, so the
+# all-clear does not buzz at 3am).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ntfy-templates
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+data:
+  alertmanager.yml: |
+    title: |
+      {{- $t := add (len .alerts) (default 0 .truncatedAlerts) -}}
+      {{- if eq .status "firing" }}🔴{{ else }}✅{{ end }} {{ .groupLabels.alertname | default "alert" }}
+      {{- with .groupLabels.namespace }} [{{ . }}]{{ end }}
+      {{- if gt $t 1 }} ×{{ $t }}{{ end }}
+    message: |
+      {{- $t := add (len .alerts) (default 0 .truncatedAlerts) -}}
+      {{ .status | upper }}{{ if gt $t 1 }} — {{ $t }} alerts{{ end }}
+      {{- with .commonLabels.severity }} · severity: {{ . }}{{ end }}
+
+      {{ with .commonAnnotations.summary }}{{ . | trunc 200 }}{{ else }}{{ with (index .alerts 0).annotations.summary }}{{ . | trunc 200 }}{{ end }}{{ end }}
+      {{- if gt $t 1 }}
+      {{- range $i, $a := .alerts }}{{ if lt $i 5 }}
+      • {{ range $k, $v := omit $a.labels "prometheus" "endpoint" "instance" "container" "service" "uid" "job" "replica" "cluster" "__name__" "exported_namespace" "dest_server" "autosync_enabled" }}
+        {{- if ne (toString (index $.commonLabels $k)) (toString $v) }}{{ $k }}={{ $v | trunc 32 }} {{ end }}
+      {{- end }}
+      {{- end }}{{ end }}
+      {{- if gt $t 5 }}
+      … and {{ sub $t 5 }} more
+      {{- end }}
+      {{- end }}
+      {{ with .commonAnnotations.description }}
+      {{ . | trunc 350 }}
+      {{- end }}
+    priority: |
+      {{ if eq .status "resolved" }}2{{ else if eq (.commonLabels.severity | default "warning") "critical" }}5{{ else }}4{{ end }}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -205,6 +342,17 @@ spec:
             - name: config
               mountPath: /etc/ntfy
               readOnly: true
+            # Named templates (ntfy-templates ConfigMap) — see `template-dir` in
+            # the ntfy-config ConfigMap.
+            # ⚠ MOUNTED AT ITS OWN TOP-LEVEL PATH, deliberately NOT at ntfy's
+            # default /etc/ntfy/templates: /etc/ntfy is already a ConfigMap
+            # volume (read-only tmpfs), and nesting a second volume inside one is
+            # fragile — the kubelet has to create the `templates/` mountpoint
+            # inside a read-only filesystem. A sibling path avoids the question
+            # entirely, and template-dir is configurable precisely so it can.
+            - name: templates
+              mountPath: /etc/ntfy-templates
+              readOnly: true
       volumes:
         - name: data
           persistentVolumeClaim:
@@ -212,6 +360,9 @@ spec:
         - name: config
           configMap:
             name: ntfy-config
+        - name: templates
+          configMap:
+            name: ntfy-templates
 ---
 apiVersion: v1
 kind: Service

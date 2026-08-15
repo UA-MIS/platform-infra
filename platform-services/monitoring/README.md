@@ -508,10 +508,32 @@ http://platform-oncall:<password>@ntfy.monitoring.svc.cluster.local:8080/platfor
   anonymous). ONE user, `platform-oncall`, granted read-write on ONE topic,
   `platform-alerts` — bootstrapped idempotently by an initContainer (the ntfy CLI has
   no create-if-missing flag, so it checks first).
-- `?template=alertmanager` is ntfy's **built-in** Alertmanager webhook template
+- `?template=alertmanager` selects ntfy's Alertmanager webhook template
   (docs.ntfy.sh/publish) — it turns the raw Alertmanager JSON into a readable
   firing/resolved notification with title + severity, no separate bridge/translator
   process needed.
+  - ⚠ **We OVERRIDE that built-in template** with our own
+    `alertmanager.yml`, shipped as the `ntfy-templates` ConfigMap in `ntfy.yaml` and
+    mounted at `/etc/ntfy-templates` (`template-dir`). ntfy resolves a file of that
+    name ahead of its built-in, so the `?template=alertmanager` URL above is
+    unchanged and **no SealedSecret reseal was needed**.
+  - **Why:** the built-in template renders every alert in the group *including each
+    one's full `description`*, and our Alertmanager groups by
+    `['namespace','alertname']` — so one webhook POST carrying 6-7 alerts rendered
+    past ntfy's 4096-byte `message-size-limit`. ntfy answered
+    `400 {"code":40041,"error":"message or title is too large after replacing
+    template"}`, and **Alertmanager does not retry 4xx** — those notifications were
+    silently dropped. That, not the SQLite `database is locked` warnings, was the
+    cause of the ~62% delivery-failure rate.
+  - **Why not just raise `message-size-limit`:** ntfy's docs are explicit that >4K is
+    untested and that staying at 4K is critical for FCM/APNS, which silently fail to
+    deliver larger messages. Raising it would swap a visible 400 for an invisible
+    non-delivery on exactly the phone push path this channel exists for.
+  - The override keeps every notification small by printing the shared summary once,
+    itemising at most 5 alerts by only the labels that DIFFER within the group, and
+    truncating the description. Measured against all 43 alert groups live at the time
+    of the change: built-in = 4 groups rejected, override = 0 rejected, largest
+    render 854 B of 4096.
 - The URL is deliberately the **in-cluster** ClusterIP DNS
   (`ntfy.monitoring.svc.cluster.local:8080`), not the public
   `ntfy.capstone.uamishub.com` host — so alert **delivery** never depends on the
@@ -521,22 +543,95 @@ http://platform-oncall:<password>@ntfy.monitoring.svc.cluster.local:8080/platfor
   SealedSecret) were generated and sealed against the live cluster **in this PR** —
   same posture as the Thanos/MinIO secrets above, nothing to reseal before go-live.
 
-### 📱 Phone subscription
+### 📱 Phone subscription — ⚠ REQUIRED HUMAN ACTION, NOBODY IS SUBSCRIBED
 
-The ntfy Android/iOS apps subscribe to a topic on ANY ntfy server, not just
-ntfy.sh — point it at the self-hosted one:
+**This is the one part of the alerting chain that no amount of config can fix, and
+until a human does it the platform is running unobserved.** The 2026-08-15 health
+audit found ntfy reporting **`subscribers=0` against 16,826 published messages** —
+every alert the platform has ever raised was delivered to nobody. The delivery bugs
+behind that number are fixed (above); the empty subscriber list is not, because
+subscribing is an action on a person's phone.
+
+Takes about two minutes:
 
 1. Install the ntfy app ([Android](https://play.google.com/store/apps/details?id=io.heckel.ntfy) /
    [iOS](https://apps.apple.com/us/app/ntfy/id1625396347)).
-2. Add a server: `https://ntfy.capstone.uamishub.com`.
-3. Subscribe to topic: `platform-alerts`.
-4. When prompted for credentials, use the `platform-oncall` username/password (the
-   same ones sealed into `ntfy-platform-oncall-credentials` — ask whoever ran the
-   reseal, or generate new ones with the rotation runbook below and re-subscribe).
+2. In the app: **Settings → Manage users → Add user**
+   - Service URL: `https://ntfy.capstone.uamishub.com`
+   - Username: `platform-oncall`
+   - Password: read it out of the cluster with
 
-Firing/resolved alerts then push straight to the phone, formatted by the
-`?template=alertmanager` rendering — no polling, no Slack workspace, no third-party
-relay.
+     ```bash
+     kubectl -n monitoring get secret ntfy-platform-oncall-credentials \
+       -o jsonpath='{.data.password}' | base64 -d; echo
+     ```
+
+     (the server is `auth-default-access: deny-all`, so an anonymous subscribe
+     silently receives nothing — the credential is not optional).
+3. **+ (Add subscription)** → Topic: `platform-alerts` → **Use another server** →
+   `https://ntfy.capstone.uamishub.com` → Subscribe.
+4. Verify you are actually subscribed, from a laptop:
+
+   ```bash
+   # publish a test notification; it should arrive on the phone within seconds
+   PASS=$(kubectl -n monitoring get secret ntfy-platform-oncall-credentials \
+            -o jsonpath='{.data.password}' | base64 -d)
+   curl -u "platform-oncall:$PASS" -d "FIX-7 subscription test" \
+     https://ntfy.capstone.uamishub.com/platform-alerts
+
+   # and confirm the server now counts you (subscribers= should be >= 1, not 0)
+   kubectl -n monitoring logs deploy/ntfy -c ntfy --tail=50 | grep "Server stats"
+   ```
+
+   `subscribers=0` in that last line means it did NOT work — recheck steps 2-3.
+
+More than one person should subscribe: a single subscriber is a single point of
+failure, and this is the only channel that reaches a human.
+
+Firing/resolved alerts then push straight to the phone, formatted by the override
+template described above — no polling, no Slack workspace, no third-party relay.
+Priorities are mapped so `critical` arrives as ntfy priority 5 (urgent, bypasses
+Do-Not-Disturb), other firing alerts as 4, and `resolved` as 2 (quiet — the all-clear
+should not wake anyone).
+
+### ⚠ KNOWN UNMONITORED EXPIRY — Vault transit auto-unseal token (2026-09-16)
+
+Recorded here because it is a **monitoring gap**, not just a Vault one: this is a
+dated, cluster-wide outage that **nothing on this platform currently alerts on**.
+
+The Vault transit auto-unseal token (`vault-transit-unseal-token`, injected as a
+static `VAULT_TOKEN` env var via `server.extraSecretEnvironmentVars` in
+`applicationsets/vault-app.yaml`) **expires 2026-09-16T13:00:45Z** — roughly four
+weeks into the Fall 2026 semester.
+
+- Verified by devops-health via direct `vault token lookup`: `ttl` 32.0 days against
+  a **requested** `period` of 1 year. The gap is Vault's 768h token-mount cap —
+  `-period=8760h` does **not** produce a non-expiring token. Same root cause as the
+  provider-vault credential that expired silently and took ~13 days to notice (FIX-3).
+- Verified independently here: **there is no renewer.** No renew CronJob, no Vault
+  Agent, no sidecar anywhere in this repo or in the `vault` / `vault-unsealer`
+  namespaces (`vault-unsealer-0` runs a single container; the only CronJob in `vault`
+  is the raft snapshot).
+
+**Why nothing catches it.** An already-unsealed Vault node never re-checks its seal,
+so every health signal — including `VaultSealedOrDown` and `VaultUnsealerSealed` in
+`alerts.yaml` — stays green right up until the first pod restart *after* expiry. At
+that point Vault cannot auto-unseal and the secret plane goes down cluster-wide. It
+is the exact inverse of the `VaultRaftSnapshotFailing` bug fixed in this same PR:
+that was a loud alert for a healthy system; this is silence for a system with a
+scheduled failure.
+
+**Why there is no alert for it yet.** Detection needs a metric source that does not
+exist on this cluster — verified live: Vault exposes **no** metrics at all (zero
+`vault_*` series, no vault scrape job, because `vault-config` has no `telemetry`
+stanza), and there is no Pushgateway and no node-exporter textfile collector to
+publish a synthetic metric into. Building one is tracked as its own task
+(**VAULT-TELEMETRY**), deliberately sequenced *after* the durable auth fix, since
+replacing the static token changes what detection should even look at.
+
+**Until that lands, the control is this calendar entry.** Someone must either renew
+the token or land the durable fix **before 2026-09-16**. Renewing buys another ~32
+days, not a year — do not assume otherwise.
 
 ### Rotating the ntfy `platform-oncall` credentials (LOCAL shell, **fish**)
 
