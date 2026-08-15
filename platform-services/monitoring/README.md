@@ -594,6 +594,45 @@ Priorities are mapped so `critical` arrives as ntfy priority 5 (urgent, bypasses
 Do-Not-Disturb), other firing alerts as 4, and `resolved` as 2 (quiet — the all-clear
 should not wake anyone).
 
+### ⚠ KNOWN UNMONITORED EXPIRY — Vault transit auto-unseal token (2026-09-16)
+
+Recorded here because it is a **monitoring gap**, not just a Vault one: this is a
+dated, cluster-wide outage that **nothing on this platform currently alerts on**.
+
+The Vault transit auto-unseal token (`vault-transit-unseal-token`, injected as a
+static `VAULT_TOKEN` env var via `server.extraSecretEnvironmentVars` in
+`applicationsets/vault-app.yaml`) **expires 2026-09-16T13:00:45Z** — roughly four
+weeks into the Fall 2026 semester.
+
+- Verified by devops-health via direct `vault token lookup`: `ttl` 32.0 days against
+  a **requested** `period` of 1 year. The gap is Vault's 768h token-mount cap —
+  `-period=8760h` does **not** produce a non-expiring token. Same root cause as the
+  provider-vault credential that expired silently and took ~13 days to notice (FIX-3).
+- Verified independently here: **there is no renewer.** No renew CronJob, no Vault
+  Agent, no sidecar anywhere in this repo or in the `vault` / `vault-unsealer`
+  namespaces (`vault-unsealer-0` runs a single container; the only CronJob in `vault`
+  is the raft snapshot).
+
+**Why nothing catches it.** An already-unsealed Vault node never re-checks its seal,
+so every health signal — including `VaultSealedOrDown` and `VaultUnsealerSealed` in
+`alerts.yaml` — stays green right up until the first pod restart *after* expiry. At
+that point Vault cannot auto-unseal and the secret plane goes down cluster-wide. It
+is the exact inverse of the `VaultRaftSnapshotFailing` bug fixed in this same PR:
+that was a loud alert for a healthy system; this is silence for a system with a
+scheduled failure.
+
+**Why there is no alert for it yet.** Detection needs a metric source that does not
+exist on this cluster — verified live: Vault exposes **no** metrics at all (zero
+`vault_*` series, no vault scrape job, because `vault-config` has no `telemetry`
+stanza), and there is no Pushgateway and no node-exporter textfile collector to
+publish a synthetic metric into. Building one is tracked as its own task
+(**VAULT-TELEMETRY**), deliberately sequenced *after* the durable auth fix, since
+replacing the static token changes what detection should even look at.
+
+**Until that lands, the control is this calendar entry.** Someone must either renew
+the token or land the durable fix **before 2026-09-16**. Renewing buys another ~32
+days, not a year — do not assume otherwise.
+
 ### Rotating the ntfy `platform-oncall` credentials (LOCAL shell, **fish**)
 
 Unlike the Grafana/Alertmanager-URL runbooks below, this one has **three** files to
