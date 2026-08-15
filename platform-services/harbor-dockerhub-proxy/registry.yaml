@@ -1,0 +1,29 @@
+# Docker Hub registry endpoint (B4 backlog item, dodges Docker Hub rate limits).
+# This is the upstream Harbor's proxy-cache project (project.yaml, same dir) pulls
+# THROUGH — it is not itself pullable. Anonymous (no accessId/accessSecretSecretRef):
+# Docker Hub's proxy-cache support works unauthenticated, and the platform has no
+# Docker Hub account/token today. The whole rate-limit win comes from Harbor caching
+# once and serving every subsequent internal pull from its own storage — that holds
+# even at the anonymous rate limit, since N internal pulls collapse to (at most) one
+# upstream pull per tag per cache-revalidation window. Authenticating later (to also
+# raise the upstream per-pull ceiling) is a follow-up, not required for this to work.
+#
+# adapter identifier confirmed LIVE against this cluster's Harbor (v2.15.1):
+#   GET /api/v2.0/replication/adapterinfos -> key "docker-hub" (not "dockerhub",
+#   "DockerHub", etc. — the CRD field has no enum constraint, so a wrong string
+#   would only surface as a Harbor-side apply error, not a schema-validation one).
+apiVersion: registry.harbor.crossplane.io/v1alpha1
+kind: Registry
+metadata:
+  name: dockerhub
+  labels:
+    platform.capstone/component: platform
+spec:
+  forProvider:
+    name: dockerhub
+    description: "Docker Hub upstream for the dockerhub-proxy pull-through cache (B4)."
+    providerName: docker-hub
+    endpointUrl: https://hub.docker.com
+    insecure: false
+  providerConfigRef:
+    name: default
