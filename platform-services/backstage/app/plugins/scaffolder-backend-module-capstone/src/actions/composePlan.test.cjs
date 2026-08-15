@@ -117,6 +117,17 @@ test('blank/BYO single + host-mysql -> db provisioned + wired (wizard DB questio
   assert.equal(p.dbWired, true);
 });
 
+// WIZ-007 (FIX-1-REVIEW): blank/bring-your-own + host-postgres is the ONE wizard-reachable
+// Postgres path after D-056 (template.yaml's web/single group (c)) — every other
+// host-postgres planner case above (fastapi single, FE+BE) is now wizard-unreachable. This
+// pins the exact behavior D-056 depends on: blank/BYO ships no driver, so host-postgres
+// actually provisions and wires cleanly for it, same as host-mysql above.
+test('blank/BYO single + host-postgres -> postgres provisioned + wired (the one wizard-reachable PG path)', () => {
+  const p = planComposition({ projectType: 'web', layout: 'single', fragments: { single: blank }, database: 'host-postgres', port: 8080 });
+  assert.equal(p.database, 'postgres');
+  assert.equal(p.dbWired, true);
+});
+
 test('slot misuse is rejected (react cannot fill single)', () => {
   assert.throws(() => planComposition({ projectType: 'web', layout: 'single', fragments: { single: react }, database: 'none' }), /cannot fill the 'single' slot/);
 });

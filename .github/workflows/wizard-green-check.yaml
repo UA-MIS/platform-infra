@@ -10,9 +10,16 @@
 # buildable exactly as the tenant CI (build-and-push.yaml) would build it:
 #   (a) every deployable component ships its build file — <context>/<Dockerfile> for a
 #       container/static component (Kaniko), or <targetDir>/<buildWorkflow> for a mobile
-#       component; and
+#       component (further checked for GitHub Actions reachability, F-3/D-058); and
 #   (b) `kustomize build` succeeds on all four overlays (dev/staging/prod/preview).
-# A fragment that would scaffold RED fails this check and blocks the merge.
+# A fragment that would scaffold RED fails this check and blocks the merge (unless
+# QUARANTINEd in green-check.py, currently just the F-3/D-058 mobile fragments).
+#
+# It ALSO statically audits new-project/template.yaml itself (WIZ-001, FIX-1-REVIEW): the
+# wizard's rjsf `database`-question `oneOf` groups must exactly partition the fragment
+# library, or a misfiled fragment silently loses its Database question with no CI signal.
+# See green-check.py's check_wizard_template(). This is why template.yaml is in the paths
+# filter below — without it, this gate never ran on the PR that needed it.
 #
 # HERMETIC + SECRETLESS: pure validation (no Harbor push, no cluster, no tokens), so this
 # runs on a GitHub-hosted ubuntu runner (which ships node + kubectl) rather than the
@@ -26,12 +33,14 @@ on:
   pull_request:
     paths:
       - "platform-services/backstage/templates/_fragments/**"
+      - "platform-services/backstage/templates/new-project/template.yaml"
       - "platform-services/backstage/app/plugins/scaffolder-backend-module-capstone/src/actions/composePlan.mjs"
       - ".github/workflows/wizard-green-check.yaml"
   push:
     branches: [main]
     paths:
       - "platform-services/backstage/templates/_fragments/**"
+      - "platform-services/backstage/templates/new-project/template.yaml"
       - "platform-services/backstage/app/plugins/scaffolder-backend-module-capstone/src/actions/composePlan.mjs"
       - ".github/workflows/wizard-green-check.yaml"
 

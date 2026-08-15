@@ -90,14 +90,27 @@ risk with no benefit. (A future `vm` projectType could defer to it; out of scope
 
 ### D6 — Database wiring (integrates ADR-033 / #146)
 
-The wizard offers, when a `needsDB` stack is chosen: `host-mysql` (auto-provisioned),
-`host-postgres` / `bring-your-own` (you set `DATABASE_URL` via the Secrets tab), or `none`.
-The engine resolves `database: mysql` **only** for `host-mysql` AND a DB-using component
-(never provisions an unused DB), writes it to `.devops/app-metadata.yaml`, and conditionally
-wires the `DATABASE_URL` ExternalSecret (`dbWired`) into each overlay. The app reads
-`DATABASE_URL` (mysql URI) and degrades cleanly when unset (zero-config). Provisioning is the
-CapstoneTenant `database` field (ADR-033 enum `none|mysql`); `host-postgres` is offered as
-BYO until the Composition adds Postgres.
+**Updated by D-054/D-056 (2026-08-15) — see FIX-1-REVIEW.** The wizard offers, when a
+`needsDB` stack is chosen: `host-mysql` (auto-provisioned), `bring-your-own` (you set
+`DATABASE_URL` via the Secrets tab), or `none` — for every needsDB fragment that ships real
+app code (all 12 `backend/*` + the 3 needsDB `fullstack/*`), because each hardcodes a MySQL
+driver. `host-postgres` is offered ONLY for `blank/bring-your-own-code`, the sole needsDB
+fragment that ships no driver of its own (D-056; independently confirmed by a per-language
+driver-manifest audit in FIX-1-REVIEW). This is a three-way `oneOf` split in
+`new-project/template.yaml`'s web/single branch — see `template.yaml`'s inline comments and
+`green-check.py`'s `check_wizard_template()` (WIZ-001), which asserts the split stays an
+exact partition of the fragment library so a future misfiled fragment cannot silently drop
+the Database question.
+
+The engine resolves `database: mysql|postgres` for `host-mysql`/`host-postgres` respectively,
+**only** when paired with a DB-using component (never provisions an unused DB), writes it to
+`.devops/app-metadata.yaml`, and conditionally wires the `DATABASE_URL` ExternalSecret
+(`dbWired`) into each overlay. The app reads `DATABASE_URL` (the engine-appropriate URI
+scheme) and degrades cleanly when unset (zero-config). Provisioning is the CapstoneTenant
+`database` field (XRD enum `none|mysql|postgres`, ADR-033 + ADR-036) — the original "BYO
+until the Composition adds Postgres" caveat here is STALE: the CNPG-backed Postgres tier
+(ADR-036, `capstone-tenant-pg`, `provider-sql`) has been live and merged to `main` since
+PR #192, well before this wizard-surface guard.
 
 ## Fragment contract (VERBATIM — this is the fan-out spec)
 

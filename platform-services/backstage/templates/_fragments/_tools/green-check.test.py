@@ -19,6 +19,8 @@ import textwrap
 import unittest
 from pathlib import Path
 
+import yaml
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
@@ -280,6 +282,87 @@ class MobileIntegrationTests(unittest.TestCase):
         # kustomize should still be unaffected — isolates the RED to the workflow path only.
         self.assertTrue(all(c["ok"] for c in r["checks"] if c["name"].startswith("kustomize")),
                         "overlays should still build; only workflow reachability is wrong")
+
+
+class WizardTemplateTests(unittest.TestCase):
+    """WIZ-001 (FIX-1-REVIEW): the assertion that catches rjsf's silent-drop hazard — a
+    fragment matching zero or 2+ of the web/single `oneOf` database-question groups. These
+    run against the REAL template.yaml (positive) and a mutated in-memory copy (negative),
+    using gc.TEMPLATE_PATH monkeypatched to a temp file — never touches the real file."""
+
+    def _run_against(self, doc):
+        """Run check_wizard_template() against a mutated copy of the real template doc,
+        via a temp file (gc.TEMPLATE_PATH is read fresh on every call, not cached)."""
+        tmp = Path(tempfile.mktemp(suffix=".yaml"))
+        tmp.write_text(yaml.dump(doc, sort_keys=False))
+        orig = gc.TEMPLATE_PATH
+        gc.TEMPLATE_PATH = tmp
+        try:
+            return gc.check_wizard_template()
+        finally:
+            gc.TEMPLATE_PATH = orig
+            tmp.unlink(missing_ok=True)
+
+    def _load_real_doc(self):
+        return yaml.safe_load(gc.TEMPLATE_PATH.read_text())
+
+    def _single_oneof(self, doc):
+        return (doc["spec"]["parameters"][1]["dependencies"]["projectType"]["oneOf"][0]
+                   ["dependencies"]["layout"]["oneOf"][0]
+                   ["dependencies"]["singleFragment"]["oneOf"])
+
+    def test_real_template_passes_every_check(self):
+        r = gc.check_wizard_template()
+        self.assertTrue(r["ok"], f"expected the real template.yaml to pass, got: {r['errors']}")
+        names = {c["name"] for c in r["checks"]}
+        self.assertIn("master-enum-matches-slot-truth", names)
+        self.assertIn("exact-partition", names)
+        self.assertIn("needsdb-fragments-offer-database", names)
+
+    def test_fragment_dropped_from_every_group_is_caught(self):
+        # The EXACT hazard the reviewer demonstrated: a needsDB fragment present in the
+        # master singleFragment enum but filed into NO oneOf group -> rjsf silently drops
+        # the whole dependency block, no error, no Database question.
+        doc = self._load_real_doc()
+        groups = self._single_oneof(doc)
+        groups[1]["properties"]["singleFragment"]["enum"].remove("backend/go")
+        r = self._run_against(doc)
+        self.assertFalse(r["ok"])
+        errs = " ".join(r["errors"])
+        self.assertIn("backend/go", errs)
+        self.assertTrue(any(c["name"] == "exact-partition" and not c["ok"] for c in r["checks"]))
+        self.assertTrue(any(c["name"] == "needsdb-fragments-offer-database" and not c["ok"]
+                            for c in r["checks"]))
+
+    def test_fragment_in_two_groups_is_caught(self):
+        # The other rjsf failure mode: matching MORE than one group is equally invalid.
+        doc = self._load_real_doc()
+        groups = self._single_oneof(doc)
+        groups[2]["properties"]["singleFragment"]["enum"].append("backend/go")
+        r = self._run_against(doc)
+        self.assertFalse(r["ok"])
+        partition_check = next(c for c in r["checks"] if c["name"] == "exact-partition")
+        self.assertFalse(partition_check["ok"])
+        self.assertIn("backend/go", partition_check["detail"])
+
+    def test_host_postgres_leaking_into_mysql_only_group_is_caught(self):
+        # D-054's original bug, reintroduced structurally: host-postgres offered alongside a
+        # fragment that ships a hardcoded MySQL driver.
+        doc = self._load_real_doc()
+        groups = self._single_oneof(doc)
+        groups[1]["properties"]["database"]["enum"].append("host-postgres")
+        r = self._run_against(doc)
+        self.assertFalse(r["ok"])
+        self.assertTrue(any("host-postgres-scoped-to-driver-free" in c["name"] and not c["ok"]
+                            for c in r["checks"]))
+
+    def test_host_postgres_on_blank_byo_alone_is_fine(self):
+        # Sanity: the one legitimate host-postgres group (blank/bring-your-own alone) must
+        # NOT be flagged — proves the check isn't just "host-postgres anywhere is bad".
+        r = gc.check_wizard_template()
+        byo_checks = [c for c in r["checks"] if c["name"].startswith("host-postgres-scoped")]
+        self.assertTrue(byo_checks, "expected at least one host-postgres-scope check to run")
+        self.assertTrue(all(c["ok"] for c in byo_checks))
 
 
 if __name__ == "__main__":
