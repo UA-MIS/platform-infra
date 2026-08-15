@@ -322,13 +322,19 @@ spec:
       rules:
         # SCOPED TO PLATFORM NAMESPACES (FIX-7) — tenant/lab namespaces are
         # covered by TenantAppWorkloadStuck below. Exact complement of that rule's
-        # selector (verified live: 1 platform + 7 tenant = 8 total waiting
-        # containers, so the split loses nothing). The namespace pattern is the
+        # selector: the two `namespace` matchers are negations of each other and the
+        # reason lists are identical, so every waiting container matches exactly one
+        # of the two rules (verified live at 3 reasons: 1 platform + 7 tenant = 8
+        # total; re-verified after CreateContainerConfigError was added as a 4th).
+        # ⚠ THE REASON LISTS MUST BE KEPT IDENTICAL between this rule and
+        # TenantAppWorkloadStuck — adding a reason to only one silently opens a
+        # coverage hole on the other side of the namespace split. That is exactly how
+        # CreateContainerConfigError went unmonitored (MON-003). The namespace pattern is the
         # tenancy naming convention: `lab-<course>` for the lab tenants and
         # `<team>-<env>` for scaffolded app tenants; no platform namespace ends in
         # -dev/-staging/-prod (verified live).
         - alert: PodCrashLoopOrImagePullBackOff
-          expr: kube_pod_container_status_waiting_reason{reason=~"CrashLoopBackOff|ImagePullBackOff|ErrImagePull", namespace!~"lab-.*|.*-(dev|staging|prod)"} == 1
+          expr: kube_pod_container_status_waiting_reason{reason=~"CrashLoopBackOff|ImagePullBackOff|ErrImagePull|CreateContainerConfigError", namespace!~"lab-.*|.*-(dev|staging|prod)"} == 1
           for: 10m
           labels:
             severity: warning
@@ -431,7 +437,7 @@ spec:
               `kubectl -n {{ $labels.dest_namespace }} get pods`.
 
         - alert: TenantAppWorkloadStuck
-          expr: kube_pod_container_status_waiting_reason{reason=~"CrashLoopBackOff|ImagePullBackOff|ErrImagePull", namespace=~"lab-.*|.*-(dev|staging|prod)"} == 1
+          expr: kube_pod_container_status_waiting_reason{reason=~"CrashLoopBackOff|ImagePullBackOff|ErrImagePull|CreateContainerConfigError", namespace=~"lab-.*|.*-(dev|staging|prod)"} == 1
           for: 30m
           labels:
             severity: warning
@@ -448,3 +454,11 @@ spec:
               on boot — check `kubectl -n {{ $labels.namespace }} logs
               {{ $labels.pod }} --previous` (a bad DB connection string or a missing
               secret are the usual causes on this platform).
+              CreateContainerConfigError means the pod cannot even START because a
+              Secret or ConfigMap it references is ABSENT — on this platform that is
+              the ESO/Vault missing-secret signature (F-2/INV-1): the kubelet is
+              refusing to build the container because an envFrom/secretKeyRef target
+              does not exist. Check the tenant's ExternalSecrets and the
+              ClusterSecretStore before looking at the app itself; pair this with
+              TenantDatabaseSecretMissing above, which catches the same outage from
+              the ESO side.
