@@ -153,22 +153,24 @@ metadata:
 data:
   alertmanager.yml: |
     title: |
+      {{- $t := add (len .alerts) (default 0 .truncatedAlerts) -}}
       {{- if eq .status "firing" }}🔴{{ else }}✅{{ end }} {{ .groupLabels.alertname | default "alert" }}
       {{- with .groupLabels.namespace }} [{{ . }}]{{ end }}
-      {{- if gt (len .alerts) 1 }} ×{{ len .alerts }}{{ end }}
+      {{- if gt $t 1 }} ×{{ $t }}{{ end }}
     message: |
-      {{ .status | upper }}{{ if gt (len .alerts) 1 }} — {{ len .alerts }} alerts{{ end }}
+      {{- $t := add (len .alerts) (default 0 .truncatedAlerts) -}}
+      {{ .status | upper }}{{ if gt $t 1 }} — {{ $t }} alerts{{ end }}
       {{- with .commonLabels.severity }} · severity: {{ . }}{{ end }}
 
       {{ with .commonAnnotations.summary }}{{ . | trunc 200 }}{{ else }}{{ with (index .alerts 0).annotations.summary }}{{ . | trunc 200 }}{{ end }}{{ end }}
-      {{- if gt (len .alerts) 1 }}
+      {{- if gt $t 1 }}
       {{- range $i, $a := .alerts }}{{ if lt $i 5 }}
       • {{ range $k, $v := omit $a.labels "prometheus" "endpoint" "instance" "container" "service" "uid" "job" "replica" "cluster" "__name__" "exported_namespace" "dest_server" "autosync_enabled" }}
         {{- if ne (toString (index $.commonLabels $k)) (toString $v) }}{{ $k }}={{ $v | trunc 32 }} {{ end }}
       {{- end }}
       {{- end }}{{ end }}
-      {{- if gt (len .alerts) 5 }}
-      … and {{ sub (len .alerts) 5 }} more
+      {{- if gt $t 5 }}
+      … and {{ sub $t 5 }} more
       {{- end }}
       {{- end }}
       {{ with .commonAnnotations.description }}

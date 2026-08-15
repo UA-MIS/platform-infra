@@ -420,6 +420,42 @@ spec:
                   # lands at /etc/alertmanager/secrets/<secretName>/<key>.
                   - url_file: /etc/alertmanager/secrets/alertmanager-webhook/url
                     send_resolved: true
+                    # ── SECOND delivery failure mode, distinct from the 400 (FIX-7) ──
+                    # ntfy rejects any request whose BODY exceeds ~128 KiB with
+                    # HTTP 413, and — exactly like the 400 that caused this task —
+                    # Alertmanager does not retry 4xx, so the notification is dropped
+                    # silently. This one is NOT fixed by the compact ntfy template:
+                    # the body is rejected BEFORE the template ever runs, so how small
+                    # the message renders is irrelevant.
+                    #
+                    # Measured against the real ntfy v2.25.0 by binary search:
+                    #   114 alerts / 130610 B body -> HTTP 200
+                    #   115 alerts / 131739 B body -> HTTP 413
+                    # i.e. the cap is 128 KiB of request body, ~114 alerts at the
+                    # ~1.1 KB/alert of a realistic Crossplane MR alert. Fatter alerts
+                    # (longer labels/annotations) hit it sooner.
+                    #
+                    # This is reachable in practice, not theoretical: Alertmanager
+                    # groups by ['namespace','alertname'], so ONE provider outage that
+                    # trips a per-resource rule fans the whole fleet into a SINGLE
+                    # webhook POST. FIX-4's CrossplaneManagedResourceNotSynced fires
+                    # per managed resource against ~148 live MRs — one bad credential
+                    # and that group alone is ~170 KB, over the cap. The alert that
+                    # tells you the platform is broken would be the one that cannot be
+                    # delivered.
+                    #
+                    # max_alerts truncates the alerts array at the SOURCE and reports
+                    # the dropped count in the payload's `truncatedAlerts` field, which
+                    # the ntfy template reads so the "×N" and "… and N more" counts stay
+                    # HONEST (they report the true total, not the truncated one).
+                    # 25 is chosen for headroom, not to fit exactly: at a fat ~3 KB per
+                    # alert that is ~75 KB, comfortably under the 128 KiB cap, while
+                    # still far more than the 5 the template itemises.
+                    #
+                    # ⚠ Fixing this at the ntfy end instead would mean raising
+                    # message-size-limit, which is exactly the trade this task already
+                    # rejected — >4K breaks FCM/APNS phone delivery silently.
+                    max_alerts: 25
 
         grafana:
           # Admin creds come from the grafana-admin SealedSecret (shipped by
