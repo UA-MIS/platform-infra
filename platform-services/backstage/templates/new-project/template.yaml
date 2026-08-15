@@ -17,17 +17,22 @@
 #
 # DATABASE: when the chosen stack reads a DB (fragment.yaml needsDB:true), the wizard offers
 # host-mysql (auto-provisioned per-env per ADR-033/#146), bring-your-own (you set DATABASE_URL
-# via the Secrets tab), or none. The compose engine sets the tenant `database` flag + wires the
-# DATABASE_URL ExternalSecret accordingly.
+# via the Secrets tab), or none — PLUS host-postgres, but ONLY for blank/bring-your-own-code
+# (see below). The compose engine sets the tenant `database` flag + wires the DATABASE_URL
+# ExternalSecret accordingly.
 #
-# host-postgres is INTENTIONALLY NOT offered here (D-054, FIX-1): every needsDB fragment in
-# the library (all backend/* and fullstack/*) is MySQL-only today — zero Postgres drivers —
-# so exposing the option produced green CI + a healthy pod + every DB route broken at runtime.
+# host-postgres is INTENTIONALLY NOT offered for any concrete-language stack (D-054, FIX-1):
+# every needsDB fragment with real app code (all 12 backend/* + fullstack/nextjs|nuxt|sveltekit)
+# is hardcoded MySQL-only today — zero Postgres drivers — so exposing the option there produced
+# green CI + a healthy pod + every DB route broken at runtime. blank/bring-your-own-code is the
+# ONE exception: it ships no DB driver at all (a throwaway placeholder the student replaces with
+# any language), and its README documents both mysql:// and postgres:// DATABASE_URL forms — so
+# it KEEPS the full 4-way enum (single-app branch only; blank/bring-your-own is not offered in
+# the frontend-backend or mobile branches, so their `database` enums drop host-postgres plainly).
 # The Crossplane/provider-sql Postgres tier, the XRD `database: postgres` enum member, and
-# composePlan.mjs's host-postgres -> postgres mapping are left intact (cheap catalog-refresh
-# guard, not a platform rollback) — restore the wizard option once a Postgres-capable fragment
-# ships. See composePlan.mjs and composeProject.ts for the still-supported (but now
-# wizard-unreachable) host-postgres branch.
+# composePlan.mjs's host-postgres -> postgres mapping are left intact everywhere (cheap
+# catalog-refresh guard, not a platform rollback) — restore the option for other stacks once a
+# Postgres-capable fragment ships. See composePlan.mjs and composeProject.ts.
 #
 # DOWNSTREAM: compose assembles the repo, publish/register ship it, then the ZERO-TOUCH seam
 # (capstone:emit-tenant-claim -> capstone:commit-to-main, straight onto platform-infra main,
@@ -225,19 +230,29 @@ spec:
                       # needsDB:true (all backend/*, all fullstack/*, and blank/bring-your-own).
                       # Frontends (frontend/angular) and static sites (static/*) never read
                       # DATABASE_URL, so the picker is HIDDEN for them. Pure rjsf schema-dependency
-                      # (the `database` property exists ONLY in the needsDB branch) — no custom
+                      # (the `database` property exists ONLY in the needsDB branches) — no custom
                       # field extension, so this stays a catalog-refresh change (no image rebuild).
+                      #
+                      # THREE groups, not two (D-054/FIX-1): the needsDB fragments split further
+                      # because they are NOT uniformly MySQL-only. blank/bring-your-own ships NO
+                      # database code at all (main.go + Dockerfile + README only) — its README
+                      # documents BOTH mysql:// and postgres:// DATABASE_URL forms, and it is the
+                      # one fragment where Auto PostgreSQL actually works end to end. Every other
+                      # needsDB fragment (all 12 backend/* + fullstack/nextjs|nuxt|sveltekit) is
+                      # hardcoded MySQL-only, so host-postgres is dropped for THAT group only.
                       dependencies:
                         singleFragment:
                           oneOf:
-                            # DB-less single-app fragments — no database question offered.
+                            # Group (a): DB-less single-app fragments — no database question offered.
                             - properties:
                                 singleFragment:
                                   enum:
                                     - frontend/angular
                                     - static/bare-html
                                     - static/react-static
-                            # needsDB single-app fragments — offer the database question.
+                            # Group (b): MySQL-only needsDB fragments — host-postgres dropped
+                            # (D-054/FIX-1). All 12 backend/* + the 3 needsDB fullstack frameworks
+                            # hardcode a MySQL driver; none has ever shipped a Postgres one.
                             - required: [database]
                               properties:
                                 singleFragment:
@@ -254,7 +269,6 @@ spec:
                                     - backend/rails
                                     - backend/rust-axum
                                     - backend/spring-boot
-                                    - blank/bring-your-own
                                     - fullstack/nextjs
                                     - fullstack/nuxt
                                     - fullstack/sveltekit
@@ -266,10 +280,35 @@ spec:
                                     Pick bring-your-own to set DATABASE_URL yourself via the Secrets
                                     tab, or none for a DB-less stack (e.g. the static site). (D-054:
                                     Auto PostgreSQL is not offered here — every needsDB fragment in
-                                    this branch is MySQL-only.)
+                                    this group is MySQL-only.)
                                   enum: [host-mysql, bring-your-own, none]
                                   enumNames:
                                     - 'Auto MySQL (host-mysql) — provisioned for you'
+                                    - 'Bring your own (set DATABASE_URL in the Secrets tab)'
+                                    - 'None'
+                                  default: host-mysql
+                            # Group (c): blank/bring-your-own-code — KEEPS the full 4-way enum
+                            # (D-054/FIX-1). This fragment ships no DB driver of its own (the
+                            # student brings any language/framework), so host-postgres is a real,
+                            # working auto-DB choice for it — the only place in the wizard it is.
+                            - required: [database]
+                              properties:
+                                singleFragment:
+                                  enum:
+                                    - blank/bring-your-own
+                                database:
+                                  title: Database
+                                  type: string
+                                  description: >-
+                                    host-mysql and host-postgres each auto-provision a per-environment
+                                    database for you. Pick bring-your-own to set DATABASE_URL yourself
+                                    via the Secrets tab, or none for a DB-less placeholder. Unlike every
+                                    other stack in this wizard, blank/bring-your-own-code ships no DB
+                                    driver of its own, so Auto PostgreSQL genuinely works here.
+                                  enum: [host-mysql, host-postgres, bring-your-own, none]
+                                  enumNames:
+                                    - 'Auto MySQL (host-mysql) — provisioned for you'
+                                    - 'Auto PostgreSQL (host-postgres) — provisioned for you'
                                     - 'Bring your own (set DATABASE_URL in the Secrets tab)'
                                     - 'None'
                                   default: host-mysql
@@ -498,11 +537,10 @@ spec:
 
     # 5) EMIT THE TENANT CLAIM — ONE CapstoneTenant XR carrying the wizard's RESOLVED
     #    database choice. THIS IS THE §C SEAM: capstone:compose-project already collapsed the
-    #    wizard `database` choice (host-mysql | bring-your-own | none — host-postgres is
-    #    accepted by compose-project/the XRD but no longer offered by the wizard, D-054/FIX-1)
-    #    into the XRD's `none|mysql|postgres` enum — `mysql` for host-mysql, `postgres` for the
-    #    still-supported-but-wizard-unreachable host-postgres (each only with a DB-using
-    #    component), else `none`
+    #    wizard `database` choice (host-mysql | bring-your-own | none for every concrete-language
+    #    stack; blank/bring-your-own-code alone also offers host-postgres, D-054/FIX-1 — see the
+    #    file header) into the XRD's `none|mysql|postgres` enum — `mysql` for host-mysql,
+    #    `postgres` for host-postgres (each only with a DB-using component), else `none`
     #    (ADR-035 §D3) — and exposed it as steps.compose.output.database. Feeding that resolved
     #    value into spec.database is what carries the DB choice through to the CapstoneTenant XR
     #    (and thus ADR-033's auto-MySQL). Writes tenants/_claims/<team>-<app>.yaml under ./claim.

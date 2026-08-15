@@ -39,10 +39,12 @@ const CATEGORY_KIND = {
 const VALID_CATEGORIES = Object.keys(CATEGORY_KIND);
 const VALID_BUILDTYPES = ['container', 'static', 'mobile-artifact'];
 // D-054/FIX-1: 'host-postgres' stays a VALID choice here (and still maps to the XRD's
-// `postgres` engine below) even though the new-project wizard template no longer offers it in
-// any branch — every needsDB fragment today is MySQL-only. Kept intact rather than removed so
-// this planner stays a superset of the wizard (no forced Backstage rebuild for the enum
-// shrink) and a future Postgres-capable fragment can restore the option wizard-side only.
+// `postgres` engine below). The new-project wizard template now offers it in exactly ONE
+// place — the blank/bring-your-own-code branch, which ships no DB driver of its own — and
+// drops it everywhere else (every other needsDB fragment is hardcoded MySQL-only). Kept
+// intact and unconditional here rather than special-cased so this planner stays a superset of
+// the wizard (no forced Backstage rebuild) and any future Postgres-capable fragment can be
+// wired to it wizard-side only.
 const VALID_DBCHOICES = ['host-mysql', 'host-postgres', 'bring-your-own', 'none'];
 
 /** Validate one parsed fragment.yaml meta. Throws on a malformed fragment (fail closed). */
