@@ -494,18 +494,8 @@ jobs:
     # pinned+checksum-verified convention as the yq installs elsewhere in this
     # file) AND a real /etc/ssl/certs/ca-certificates.crt bundle to extend with
     # the platform CA (see that action's header). -slim ships none of these.
-    #
-    # B4: pulled through the platform's Harbor pull-through cache (dockerhub-proxy)
-    # instead of Docker Hub directly. This container is what runs EVERY tenant CI
-    # job on EVERY push across every team, so it is the single highest-volume
-    # Docker Hub pull in the whole platform -- exactly the traffic a proxy-cache is
-    # for. Public project, no credentials needed; self-hosted ARC runners already
-    # resolve this hostname in-cluster (the same hostAliases wiring the Kaniko push
-    # step relies on), so this is a same-path pull, not a new dependency. Verified
-    # working end-to-end (cache-hit proof in
-    # artifacts/implementation/b4-harbor-proxy-cache.evidence.yaml).
     container:
-      image: harbor.capstone.uamishub.com/dockerhub-proxy/library/node:24-trixie
+      image: node:24-trixie
     env:
       DOCKER_CONFIG_DIR: /kaniko/.docker
     # RE-DECLARES id-token: write (workflow default is contents:read only) — cosign

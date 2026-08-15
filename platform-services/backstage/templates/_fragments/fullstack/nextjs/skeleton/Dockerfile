@@ -10,12 +10,7 @@
 #   build    prisma generate + next build -> .next/standalone (self-contained server)
 #   runtime  the standalone server.js on a slim, non-root image listening on $PORT
 
-# B4: resolves through the platform's Harbor pull-through cache (dockerhub-proxy)
-# instead of Docker Hub directly -- avoids Docker Hub rate limits across every
-# team's CI, verified working end-to-end (cache-hit proof in
-# artifacts/implementation/b4-harbor-proxy-cache.evidence.yaml). Same image, same
-# tag, different registry host -- purely a pull-path change.
-ARG NODE_IMAGE=harbor.capstone.uamishub.com/dockerhub-proxy/library/node:22-bookworm-slim
+ARG NODE_IMAGE=node:22-bookworm-slim
 
 # ---- deps: install dependencies (cached unless package.json / schema change) ----
 FROM ${NODE_IMAGE} AS deps

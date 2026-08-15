@@ -16,13 +16,7 @@
 # mounts an emptyDir there).
 
 # ---- build stage (compile + package the fat jar) ----
-#
-# B4: base images resolve through the platform's Harbor pull-through cache
-# (dockerhub-proxy) instead of Docker Hub directly -- avoids Docker Hub rate
-# limits across every team's CI, verified working end-to-end (cache-hit proof
-# in artifacts/implementation/b4-harbor-proxy-cache.evidence.yaml). Same image,
-# same tag, different registry host -- purely a pull-path change.
-FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/maven:3.9-eclipse-temurin-21 AS build
+FROM maven:3.9-eclipse-temurin-21 AS build
 WORKDIR /src
 # Resolve dependencies first (cached when only source changes). Best-effort (|| true):
 # go-offline can miss the odd plugin artifact, and the later `package` runs ONLINE and
@@ -33,7 +27,7 @@ COPY src ./src
 RUN mvn -B -q -DskipTests clean package
 
 # ---- runtime stage (slim JRE, non-root) ----
-FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/eclipse-temurin:21-jre AS final
+FROM eclipse-temurin:21-jre AS final
 WORKDIR /app
 COPY --from=build /src/target/app.jar ./app.jar
 

@@ -15,13 +15,7 @@
 # runAsNonRoot (uid 65532) + readOnlyRootFilesystem security context with no writable volume.
 
 # ---- build stage: compile a static, dependency-free binary ----
-#
-# B4: base images resolve through the platform's Harbor pull-through cache
-# (dockerhub-proxy) instead of Docker Hub directly -- avoids Docker Hub rate
-# limits across every team's CI, verified working end-to-end (cache-hit proof
-# in artifacts/implementation/b4-harbor-proxy-cache.evidence.yaml). Same image,
-# same tag, different registry host -- purely a pull-path change.
-FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/golang:1.23-alpine AS build
+FROM golang:1.23-alpine AS build
 WORKDIR /src
 # Only go.mod (no deps) + the single source file — the build pulls NO modules.
 COPY go.mod ./

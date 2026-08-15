@@ -16,13 +16,7 @@
 # the chart securityContext).
 
 # ---- build stage (compile the Nuxt/Nitro server) ----
-#
-# B4: base images resolve through the platform's Harbor pull-through cache
-# (dockerhub-proxy) instead of Docker Hub directly -- avoids Docker Hub rate
-# limits across every team's CI, verified working end-to-end (cache-hit proof
-# in artifacts/implementation/b4-harbor-proxy-cache.evidence.yaml). Same image,
-# same tag, different registry host -- purely a pull-path change.
-FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/node:22-alpine AS build
+FROM node:22-alpine AS build
 WORKDIR /src
 ENV NUXT_TELEMETRY_DISABLED=1
 COPY package.json package-lock.json* ./
@@ -31,7 +25,7 @@ COPY . .
 RUN npm run build
 
 # ---- runtime stage (the self-contained Nitro server) ----
-FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/node:22-alpine
+FROM node:22-alpine
 WORKDIR /app
 ENV NODE_ENV=production \
     NUXT_TELEMETRY_DISABLED=1 \

@@ -15,13 +15,7 @@
 # readOnlyRootFilesystem. nginx.conf keeps nginx's pid, temp paths, and logs off the
 # read-only rootfs (under /dev/shm + stdout/stderr), so it runs clean with no writable volume.
 
-#
-# B4: base images resolve through the platform's Harbor pull-through cache
-# (dockerhub-proxy) instead of Docker Hub directly -- avoids Docker Hub rate
-# limits across every team's CI, verified working end-to-end (cache-hit proof
-# in artifacts/implementation/b4-harbor-proxy-cache.evidence.yaml). Same image,
-# same tag, different registry host -- purely a pull-path change.
-FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/nginx:1.29-alpine
+FROM nginx:1.29-alpine
 
 # Our config: foreground nginx, pid/temp under /dev/shm, listen on the app port, static
 # multi-page serving + /healthz. nginx.conf lives at the skeleton root, OUTSIDE public/, so

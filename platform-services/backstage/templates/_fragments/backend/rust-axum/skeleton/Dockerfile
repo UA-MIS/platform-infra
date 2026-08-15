@@ -16,13 +16,7 @@
 # ships no shell/package manager, and is read-only-root friendly.
 
 # ---- build stage (compile release binary) ----
-#
-# B4: base images resolve through the platform's Harbor pull-through cache
-# (dockerhub-proxy) instead of Docker Hub directly -- avoids Docker Hub rate
-# limits across every team's CI, verified working end-to-end (cache-hit proof
-# in artifacts/implementation/b4-harbor-proxy-cache.evidence.yaml). Same image,
-# same tag, different registry host -- purely a pull-path change.
-FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/rust:1-slim AS build
+FROM rust:1-slim AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src

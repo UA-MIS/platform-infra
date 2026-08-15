@@ -9,13 +9,7 @@
 # skeleton dir (the engine sets context + dockerfile).
 
 # ---- build stage: install gems (Trilogy needs a C toolchain to compile its extension) ----
-#
-# B4: base images resolve through the platform's Harbor pull-through cache
-# (dockerhub-proxy) instead of Docker Hub directly -- avoids Docker Hub rate
-# limits across every team's CI, verified working end-to-end (cache-hit proof
-# in artifacts/implementation/b4-harbor-proxy-cache.evidence.yaml). Same image,
-# same tag, different registry host -- purely a pull-path change.
-FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/ruby:3.3-slim AS build
+FROM ruby:3.3-slim AS build
 ENV BUNDLE_PATH=/usr/local/bundle \
     BUNDLE_WITHOUT="development:test" \
     BUNDLE_DEPLOYMENT=1
@@ -37,7 +31,7 @@ RUN bundle install && \
     rm -rf "${BUNDLE_PATH}"/ruby/*/cache "${BUNDLE_PATH}"/ruby/*/bundler/gems/*/.git
 
 # ---- final stage: slim runtime, non-root, read-only-fs friendly ----
-FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/ruby:3.3-slim AS final
+FROM ruby:3.3-slim AS final
 ENV BUNDLE_PATH=/usr/local/bundle \
     BUNDLE_WITHOUT="development:test" \
     BUNDLE_DEPLOYMENT=1 \
