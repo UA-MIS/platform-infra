@@ -1,0 +1,133 @@
+# Transit auto-unseal token renewer (FIX-4 / D-061) — keeps the token in Secret
+# `vault-transit-unseal-token` alive so the main Vault can always auto-unseal.
+#
+# WHY THIS IS THE HIGHEST-CONSEQUENCE OF THE TWO RENEWERS: this token is how the main
+# Vault authenticates to the unsealer Vault's transit engine on EVERY unseal. If it
+# expires, the next restart of any vault pod comes up sealed and stays sealed — the
+# 2026-07-14 incident, in which the whole secret plane was down ~24h and all tenant
+# ExternalSecrets died with it.
+#
+# ⚠ IT HIDES UNTIL IT BITES. An already-unsealed Vault node keeps its key in memory and
+# never re-checks the seal, so an expired transit token shows NO symptom — `vault
+# status` is happy, ESO is happy, dashboards are green — right up until a reboot,
+# upgrade, OOM or reschedule restarts a pod. That is why this is a CronJob and an alert
+# rather than something we expect to notice.
+#
+# HOW IT WAS FOUND (2026-08-15, FIX-3): while root-causing the provider-vault token
+# expiry, this token was looked up and found to expire 2026-09-02 — 18 days out,
+# mid-semester. It was minted during the 07-14 recovery with `-period=8760h` and
+# recorded as "periodic (non-expiring)". It is not: Vault's token mount is tuned
+# `max_lease_ttl=768h`, so every issuance is capped at 32 days regardless of the
+# requested period, and a periodic token only survives if something RENEWS it. Nothing
+# did. It was renewed by hand at the time (expiry moved to 2026-09-16); this CronJob is
+# what makes that permanent. See D-061 and docs/operator/vault-and-dr.md.
+#
+# SECURITY: `auth/token/renew-self` is in the built-in `default` policy every token
+# carries, so this Job needs NO Vault policy, no RBAC, and no API access. The Secret is
+# mounted from its own namespace; renewal is server-side, so the token string never
+# changes and the Secret is never rewritten.
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: vault-transit-token-renewer
+  namespace: vault
+  labels:
+    platform.capstone/component: platform
+spec:
+  # Daily, offset from the provider renewer (02:20) and the raft snapshot (03:00) so a
+  # failure is attributable to one job.
+  schedule: "40 2 * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 300
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            platform.capstone/component: platform
+            app.kubernetes.io/name: vault-transit-token-renewer
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 100
+            runAsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: renew
+              image: hashicorp/vault:1.21.2
+              imagePullPolicy: IfNotPresent
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              env:
+                # The UNSEALER Vault, not the main one — this token is an identity on
+                # the unsealer's transit engine. Address and CA are exactly what the
+                # main Vault's `seal "transit"` stanza uses (vault-config ConfigMap),
+                # including the short `.svc` form, which IS in the unsealer cert's SANs.
+                - name: VAULT_ADDR
+                  value: "https://vault-unsealer.vault-unsealer.svc:8200"
+                - name: VAULT_CACERT
+                  value: "/vault/tls/ca.crt"
+              command: ["/bin/sh", "-ec"]
+              args:
+                - |
+                  # Plain token file (key `token`), not a JSON blob like the provider
+                  # credential. `tr -d` guards against a trailing newline sneaking in
+                  # if the Secret is ever re-created by hand with `echo`.
+                  TOKEN="$(tr -d '\r\n' < /token/token)"
+                  if [ -z "${TOKEN}" ]; then
+                    echo "[renew] FATAL: vault-transit-unseal-token/token is empty." >&2
+                    exit 1
+                  fi
+                  export VAULT_TOKEN="${TOKEN}"
+
+                  # Preflight. NOTE `vault read auth/token/lookup-self`, NOT `vault
+                  # token lookup` — the latter has no -field flag in 1.21.x and dies
+                  # with "flag provided but not defined: -field" (found by running the
+                  # sibling job for real before merging).
+                  #
+                  # Echo the real error: a 403 means the transit token is genuinely
+                  # dead (latent full outage — Vault is fine NOW and comes up SEALED on
+                  # the next pod restart), whereas x509/connection errors usually mean
+                  # the UNSEALER is down or sealed, which is a different fix.
+                  if ! BEFORE="$(vault read -field=ttl auth/token/lookup-self 2>&1)"; then
+                    echo "[renew] FATAL: token lookup-self failed against the unsealer: ${BEFORE}" >&2
+                    echo "[renew] If 403/permission-denied: the transit token has EXPIRED. Vault" >&2
+                    echo "[renew] still runs, but the NEXT vault pod restart will come up SEALED" >&2
+                    echo "[renew] and STAY sealed (the 2026-07-14 outage). Mint a new autounseal" >&2
+                    echo "[renew] token and patch the Secret per artifacts/design/vault-dr-runbook.md" >&2
+                    echo "[renew] (C-4). If connection/TLS: check the unsealer is up and UNSEALED." >&2
+                    echo "[renew] Either way this is load-bearing — do not ignore it." >&2
+                    exit 1
+                  fi
+
+                  vault write -f auth/token/renew-self > /dev/null
+                  AFTER="$(vault read -field=ttl auth/token/lookup-self)"
+                  echo "[renew] transit unseal token renewed: ttl ${BEFORE}s -> ${AFTER}s"
+                  echo "[renew] (~$((AFTER / 86400))d remaining; mount caps each issuance at 768h/32d)"
+              volumeMounts:
+                - name: token
+                  mountPath: /token
+                  readOnly: true
+                - name: vault-tls
+                  mountPath: /vault/tls
+                  readOnly: true
+          volumes:
+            - name: token
+              secret:
+                secretName: vault-transit-unseal-token
+            # The UNSEALER's CA (seeded by runbook §C-5), not vault-server-tls — this
+            # Job talks to the unsealer, which has its own CA.
+            - name: vault-tls
+              secret:
+                secretName: vault-unsealer-ca

@@ -1,0 +1,153 @@
+# provider-vault token renewer (FIX-4 / D-061) — keeps the `tenant-provisioner` Vault
+# token in Secret `vault-provider-creds` alive so it can never silently expire again.
+#
+# THE FAILURE THIS PREVENTS (F-2, 2026-08-15): the token sealed on 2026-07-01 expired
+# ~08-02 and returned 403 for ~13 days. provider-vault could not reconcile any Vault
+# MR, so every NEW tenant got no Vault policy and no k8s-auth role, ESO's SecretStore
+# stayed InvalidProviderConfig, and DATABASE_URL/APP_SECRET never materialized. Nothing
+# alerted (that gap is closed by monitoring/alerts-crossplane-vault.yaml).
+#
+# ROOT CAUSE — READ BEFORE CHANGING THE SCHEDULE (D-061): Vault's token auth mount is
+# tuned `max_lease_ttl=768h`, so EVERY token it issues is capped at 32 days per
+# issuance no matter what `-period` was requested. `vault token create -period=8760h`
+# stores period=365d but is still granted a 32d TTL. A periodic token may be renewed
+# indefinitely, but each renewal only re-grants min(period, 768h) = 32d — and until
+# this CronJob existed, nothing renewed anything. "Periodic" is NOT "non-expiring" on
+# this cluster; the 07-14 runbook note that implied otherwise is what set the trap.
+#
+# WHY A RENEWER AND NOT KUBERNETES AUTH (the preferred design, ruled out by testing):
+# upbound provider-vault v0.1.0 CANNOT do Vault k8s auth. Proven by execution on
+# 2026-08-15, not by reading docs: (1) the ProviderConfig CRD schema exposes no
+# `auth_login*` field at all — only address/credentials/headers plus TLS knobs; and
+# (2) supplying an `auth_login_kubernetes` block through the credentials JSON fails
+# hard with `cannot unmarshal vault credentials as JSON: json: cannot unmarshal array
+# into Go value of type string` — the credentials blob is parsed into string-valued
+# fields, so no Terraform block can ever be expressed there. Upstream
+# terraform-provider-vault does support auth_login blocks; Upjet v0.1.0 simply does not
+# surface them. Revisit if the provider is ever bumped — and note that the provider's
+# ServiceAccount name is revision-hashed (`provider-vault-<hash>`), so a k8s-auth role
+# bound to it would break on every provider upgrade unless the SA name is first pinned
+# via the DeploymentRuntimeConfig in ../providers/provider-vault.yaml.
+#
+# SECURITY: renewal needs NO privilege. `auth/token/renew-self` is part of the built-in
+# `default` policy that every token carries, so this Job holds no Vault policy of its
+# own, mints nothing, and cannot read any secret value beyond the token it is renewing.
+# Renewal is entirely server-side: the token STRING never changes, so the Secret is
+# never rewritten and there is no drift against the SealedSecret / ArgoCD.
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: provider-vault-token-renewer
+  namespace: crossplane-system
+  labels:
+    platform.capstone/component: platform
+spec:
+  # Daily against a 32-day TTL. Deliberately far more often than necessary: the point
+  # is that ~29 days of failed runs can pile up and be alerted on (VaultTokenRenewerStale
+  # fires after 3d) long before the credential is actually at risk.
+  schedule: "20 2 * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 300
+      # Stops completed Jobs accumulating as stale objects — the same class of noise
+      # that produced the false-alarm VaultRaftSnapshotFailing page (FIX-6/ADV-3).
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            platform.capstone/component: platform
+            app.kubernetes.io/name: provider-vault-token-renewer
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 100          # hashicorp/vault image: uid 100 (vault)
+            runAsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: renew
+              image: hashicorp/vault:1.21.2      # same pinned image as the server
+              imagePullPolicy: IfNotPresent
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              env:
+                # FULL FQDN required: vault-server-tls's SAN list does not include the
+                # shortened `vault.vault.svc` form, so a short VAULT_ADDR fails TLS
+                # verification. (Same trap documented in ../../vault/raft-snapshot.yaml.)
+                - name: VAULT_ADDR
+                  value: "https://vault.vault.svc.cluster.local:8200"
+                - name: VAULT_CACERT
+                  value: "/vault/tls/ca.crt"
+              command: ["/bin/sh", "-ec"]
+              args:
+                - |
+                  # The Secret holds the provider credential as a JSON blob
+                  # {"token":"...","address":"..."}; pull just the token out. No jq in
+                  # this image, so match the key explicitly rather than relying on
+                  # field order.
+                  TOKEN="$(sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /creds/credentials)"
+                  if [ -z "${TOKEN}" ]; then
+                    echo "[renew] FATAL: no \"token\" key in vault-provider-creds/credentials." >&2
+                    echo "[renew] The Secret shape changed, or the SealedSecret failed to decrypt." >&2
+                    exit 1
+                  fi
+                  export VAULT_TOKEN="${TOKEN}"
+
+                  # Preflight. NOTE `vault read auth/token/lookup-self`, NOT `vault
+                  # token lookup` — the latter has no -field flag in 1.21.x and dies
+                  # with "flag provided but not defined: -field" (found by running this
+                  # job for real before merging).
+                  #
+                  # The error text is ECHOED rather than swallowed: a 403 (token truly
+                  # expired — the F-2 condition, needs a human to mint + reseal) and an
+                  # x509/connection failure (Vault unreachable, CA wrong) both fail here
+                  # but call for completely different responses. Printing the real error
+                  # is the difference between a 2-minute fix and a wrong diagnosis.
+                  if ! BEFORE="$(vault read -field=ttl auth/token/lookup-self 2>&1)"; then
+                    echo "[renew] FATAL: token lookup-self failed: ${BEFORE}" >&2
+                    echo "[renew] If that is a 403/permission-denied, the provider-vault token has" >&2
+                    echo "[renew] EXPIRED — renewal cannot recover it. Mint a fresh" >&2
+                    echo "[renew] tenant-provisioner token and reseal vault-provider-creds" >&2
+                    echo "[renew] (platform-services/crossplane/creds/README.md). If it is a TLS or" >&2
+                    echo "[renew] connection error, the token is probably fine — check Vault + the" >&2
+                    echo "[renew] vault-ca ConfigMap instead." >&2
+                    exit 1
+                  fi
+
+                  # Vault emits "period ... exceeded the effective max_ttl of 768h;
+                  # period value is capped accordingly" here — that warning IS D-061,
+                  # straight from the server. Keep it in the logs.
+                  vault write -f auth/token/renew-self > /dev/null
+                  AFTER="$(vault read -field=ttl auth/token/lookup-self)"
+                  echo "[renew] provider-vault token renewed: ttl ${BEFORE}s -> ${AFTER}s"
+                  echo "[renew] (~$((AFTER / 86400))d remaining; mount caps each issuance at 768h/32d)"
+              volumeMounts:
+                - name: creds
+                  mountPath: /creds
+                  readOnly: true
+                - name: vault-tls
+                  mountPath: /vault/tls
+                  readOnly: true
+          volumes:
+            # Same-namespace Secret mount — no RBAC, no API call, no cross-namespace
+            # reach. The credential never leaves crossplane-system.
+            - name: creds
+              secret:
+                secretName: vault-provider-creds
+            # The public platform CA, as a ConfigMap (config/vault-ca-configmap.yaml) —
+            # the SAME source provider-vault itself mounts, so this Job verifies the
+            # Vault server cert exactly as the provider does. NOT optional: fail closed
+            # rather than fall back to an unverified connection.
+            - name: vault-tls
+              configMap:
+                name: vault-ca
