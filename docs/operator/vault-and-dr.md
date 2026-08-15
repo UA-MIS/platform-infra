@@ -146,7 +146,7 @@ kubectl -n vault exec -it vault-0 -- vault operator raft list-peers   # confirm 
 | --- | --- | --- |
 | **Unsealer Shamir shares (5, threshold 3) + unsealer root token** | offline (password manager / sealed medium) **AND** `vault/unsealer-keys.txt` in the private `capstone-ops-secrets` repo (Shamir shares only, NOT the root token — see below) | unseal the unsealer after its rare restarts; rotate the `autounseal` key |
 | **Main Vault recovery keys + root token** | offline | `operator` ops (rekey, generate-root), snapshot-restore login |
-| `autounseal` token | only in the `vault-transit-unseal-token` k8s Secret (periodic, auto-renewed) | the seal — rotate by minting a new token and re-applying the Secret |
+| `autounseal` token | only in the `vault-transit-unseal-token` k8s Secret (periodic; renewed nightly by the CronJob below — **it is not self-renewing**) | the seal — rotate by minting a new token and re-applying the Secret |
 
 **Never commit any of the above to git — with ONE deliberate, scoped exception:**
 the unsealer's 5 Shamir shares (only — never its root token, never the main
@@ -162,12 +162,65 @@ in the handoff vault (`docs/OPERATIONS-AND-HANDOFF.md` §5).
 
 ---
 
+## Token lifetimes — the 768h cap (D-061)
+
+**`-period` does not mean "never expires" on this cluster.** Vault's token auth
+mount is tuned `max_lease_ttl=768h`, so **every token it issues is capped at 32
+days per issuance**, whatever period you ask for. `vault token create
+-period=8760h` records `period=365d` on the token but still grants a 32-day TTL —
+Vault says so out loud if you read the warning it returns:
+
+```
+* period of "8760h" exceeded the effective max_ttl of "768h"; period value is capped accordingly
+```
+
+A periodic token *can* be renewed forever, but each renewal only re-grants
+`min(period, 768h)` = 32 days, **and something has to actually renew it**. Nothing
+did, until FIX-4. That single misunderstanding caused two incidents:
+
+| Token | Secret | Renewed by | What its expiry breaks |
+| --- | --- | --- | --- |
+| `tenant-provisioner` | `vault-provider-creds` (crossplane-system) | `provider-vault-token-renewer` CronJob, daily 02:20 | provider-vault stops reconciling → **new tenants silently get no Vault policy/role**, so their app secrets never materialize (finding F-2, ~13 days undetected) |
+| `autounseal` | `vault-transit-unseal-token` (vault) | `vault-transit-token-renewer` CronJob, daily 02:40 | Vault **cannot auto-unseal** → the next pod restart comes up sealed and stays sealed (the 2026-07-14 outage) |
+
+Both renewers call `auth/token/renew-self`, which is in the built-in `default`
+policy — they hold **no** Vault policy, mint nothing, and cannot read secret
+values. Renewal is server-side, so the token string never changes and the Secrets
+are never rewritten (no SealedSecret / ArgoCD drift).
+
+> ⚠ **The transit-token failure hides until it bites.** An already-unsealed Vault
+> node keeps its key in memory and never re-checks the seal, so an expired
+> `autounseal` token shows no symptom at all — `vault status` is green, ESO is
+> green — right up until a reboot, upgrade, OOM or reschedule restarts a pod.
+> Never infer "the seal path is healthy" from "Vault is up". Check the renewer.
+
+**If a renewer alerts** (`VaultTokenRenewerStale` / `VaultTokenRenewerFailing`),
+read the Job log — it prints Vault's actual error. A 403 means the token is
+already dead and renewal cannot recover it: mint a fresh one and reseal
+(`platform-services/crossplane/creds/README.md` for the provisioner token, §C-4
+of the runbook for the autounseal token). A TLS/connection error usually means the
+token is fine and Vault or the unsealer is unreachable. There is ~29 days of
+margin between the first failed run and an actual outage — but it is finite, and
+the alert is the only warning you get.
+
+**Why not Kubernetes auth for provider-vault** (which would remove the static
+token entirely, and was the preferred design): upbound provider-vault v0.1.0
+cannot do it. Proven by execution — the ProviderConfig CRD exposes no `auth_login*`
+field, and passing an `auth_login_kubernetes` block through the credentials JSON
+fails with `cannot unmarshal array into Go value of type string` (the credentials
+blob is parsed into string-valued fields, so no Terraform block fits). Revisit on
+a provider bump; note the provider's ServiceAccount name is revision-hashed, so
+pin it via the DeploymentRuntimeConfig first or the role breaks on every upgrade.
+
+---
+
 ## Failure cheatsheet (runbook §F)
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
 | `vault-0` CrashLoop, `VAULT_TOKEN`/seal init error | `vault-transit-unseal-token` missing or unsealer down | seed the Secret (runbook §C-5) / unseal the unsealer (§C-2) |
-| `vault-0` sealed forever after restart | unsealer unreachable or `autounseal` token expired | check unsealer Ready + netpol; re-mint the token (§C-4) |
+| `vault-0` sealed forever after restart | unsealer unreachable or `autounseal` token expired | check unsealer Ready + netpol; re-mint the token (§C-4). If the token expired, the renewer had been failing — check `VaultTokenRenewerStale` and the CronJob logs |
+| `VaultTokenRenewerStale` / `VaultTokenRenewerFailing` firing | a Vault token renewer CronJob is failing or has stopped running | fix it NOW — see "Token lifetimes" below. Not yet an outage; you have weeks of margin, and it is the only warning you get |
 | TLS verify error in main Vault logs | `vault-unsealer-ca` wrong/missing | re-create from the unsealer's CA (§C-5) |
 | snapshot CronJob `permission denied` | `snapshot` policy/role not created | run [Runbooks → (A)](runbooks.md) |
 | snapshot CronJob TLS error | `vault-server-tls` missing `ca.crt` | re-issue the cert with `ca.crt` (cert-manager CA issuer) |

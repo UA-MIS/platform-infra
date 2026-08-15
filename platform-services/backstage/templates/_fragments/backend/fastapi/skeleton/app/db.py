@@ -27,14 +27,25 @@ from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 
-def _normalize_mysql_url(url: str) -> str:
-    """Normalize the contract's canonical `mysql://` URI to the pymysql driver
-    SQLAlchemy expects. A URL that already names a driver (mysql+pymysql://,
-    sqlite+pysqlite://, ...) is left untouched.
+def _normalize_url(url: str) -> str:
+    """Normalize the contract's canonical bare `mysql://` or `postgres(ql)://` URI to
+    the driver-qualified DSN SQLAlchemy expects. A URL that already names a driver
+    (mysql+pymysql://, postgresql+psycopg://, sqlite+pysqlite://, ...) is left
+    untouched, as is any other scheme (e.g. a bring-your-own DSN this fragment does
+    not special-case).
     """
     if url.startswith("mysql://"):
         return "mysql+pymysql://" + url[len("mysql://"):]
+    if url.startswith("postgres://"):
+        return "postgresql+psycopg://" + url[len("postgres://"):]
+    if url.startswith("postgresql://"):
+        return "postgresql+psycopg://" + url[len("postgresql://"):]
     return url
+
+
+# Back-compat alias: the pre-FIX-16 name, kept so any external reference (or a
+# not-yet-rebased branch) importing the MySQL-only symbol still resolves.
+_normalize_mysql_url = _normalize_url
 
 
 def _resolve_database_url(raw: str | None) -> str:
@@ -52,16 +63,17 @@ def _resolve_database_url(raw: str | None) -> str:
     value = (raw or "").strip()
     if not value:
         return "sqlite+pysqlite:///:memory:"
-    return _normalize_mysql_url(value)
+    return _normalize_url(value)
 
 
-# Zero-config default = in-memory SQLite. Wire MySQL by setting DATABASE_URL via the
-# Secrets tab (see README "Database wiring"). NEVER hardcode credentials here.
+# Zero-config default = in-memory SQLite. Wire a real database by setting DATABASE_URL
+# via the Secrets tab (see README "Database wiring") — MySQL or PostgreSQL, both
+# supported (FIX-16/D-092). NEVER hardcode credentials here.
 DATABASE_URL = _resolve_database_url(os.getenv("DATABASE_URL"))
 
 # SQLite needs two extra kwargs to behave under FastAPI's threadpool + share a single
-# in-memory database across connections. MySQL (and every other backend) wants neither,
-# so apply them only for the sqlite fallback.
+# in-memory database across connections. MySQL, PostgreSQL (and every other backend)
+# want neither, so apply them only for the sqlite fallback.
 _is_sqlite = DATABASE_URL.startswith("sqlite")
 _engine_kwargs: dict = {"pool_pre_ping": True, "future": True}
 if _is_sqlite:

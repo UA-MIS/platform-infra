@@ -14,6 +14,17 @@
 #   (b) `kustomize build` succeeds on all four overlays (dev/staging/prod/preview).
 # A fragment that would scaffold RED fails this check and blocks the merge.
 #
+# Also asserts (check_wizard_template.py, FIX-16/D-092, recommended by
+# review-fix1-wizard-postgres-guard.md WIZ-002/D-067): new-project/template.yaml's
+# hand-maintained rjsf `oneOf` database-enum groups EXACTLY partition the fragment
+# library's single/backend slots, and host-postgres is offered if and only if every
+# fragment in a group actually ships a Postgres driver (or none at all). Without this,
+# a maintainer adding a fragment to the wizard's enum but forgetting to file it into a
+# oneOf group silently drops the Database question — green-check.py alone would never
+# catch it, since it never reads template.yaml. These steps run INSIDE the green-check
+# job (below) — pure Python/YAML, no node needed, so they reuse that job's existing venv
+# rather than paying for a second job's worth of setup.
+#
 # TWO ADDITIONAL JOBS close GATE-1 (#33, D-067/D-071):
 #   - boot-and-probe: the RUNTIME half the static checks above cannot cover — actually
 #     BUILD and RUN each single-slot fragment's image under the chart's real
@@ -31,11 +42,12 @@
 # RUNNER CHOICE, per job (this repo is a PRIVATE GitHub repo on the org's Free plan —
 # 2,000 GitHub-hosted minutes/month, SHARED across every repo; see D-058, which hid mobile
 # CI over the same billing exposure):
-#   - green-check + secret-scan are HERMETIC + SECRETLESS and need no docker daemon, so
-#     they run on the self-hosted ARC fleet (runs-on: ua-mis-kaniko) at ZERO GitHub-hosted
-#     minute cost — the same containerMode:kubernetes shape tenant-build.yaml /
-#     backstage-process-build-push.yaml already use (every job needs its own `container:`
-#     image; see those files' header comments).
+#   - green-check (incl. the wizard template partition check) + secret-scan are HERMETIC
+#     + SECRETLESS and need no docker daemon, so they run on the self-hosted ARC fleet
+#     (runs-on: ua-mis-kaniko) at ZERO GitHub-hosted minute cost — the same
+#     containerMode:kubernetes shape tenant-build.yaml / backstage-process-build-push.yaml
+#     already use (every job needs its own `container:` image; see those files' header
+#     comments).
 #   - boot-and-probe is the one job that GENUINELY cannot move to ARC: it needs a working
 #     docker/podman daemon to build+run real containers, and ARC's containerMode:kubernetes
 #     + Kaniko-rootless design has no docker socket, full stop (see boot_probe.py's module
@@ -54,12 +66,14 @@ on:
   pull_request:
     paths:
       - "platform-services/backstage/templates/_fragments/**"
+      - "platform-services/backstage/templates/new-project/template.yaml"
       - "platform-services/backstage/app/plugins/scaffolder-backend-module-capstone/src/actions/composePlan.mjs"
       - ".github/workflows/wizard-green-check.yaml"
   push:
     branches: [main]
     paths:
       - "platform-services/backstage/templates/_fragments/**"
+      - "platform-services/backstage/templates/new-project/template.yaml"
       - "platform-services/backstage/app/plugins/scaffolder-backend-module-capstone/src/actions/composePlan.mjs"
       - ".github/workflows/wizard-green-check.yaml"
   workflow_dispatch: {}
@@ -126,6 +140,14 @@ jobs:
       - name: Green-out-of-box check — every fragment must scaffold GREEN
         working-directory: ${{ env.TOOLS_DIR }}
         run: "$RUNNER_TEMP/venv/bin/python green-check.py"
+
+      - name: Wizard template partition self-tests (hazard mutations must still bite)
+        working-directory: ${{ env.TOOLS_DIR }}
+        run: "$RUNNER_TEMP/venv/bin/python check_wizard_template.test.py"
+
+      - name: Wizard template enum/database partition check
+        working-directory: ${{ env.TOOLS_DIR }}
+        run: "$RUNNER_TEMP/venv/bin/python check_wizard_template.py"
 
   boot-and-probe:
     # GATE-1 (#33, D-067/D-071): the RUNTIME half — build + run each single-slot fragment's

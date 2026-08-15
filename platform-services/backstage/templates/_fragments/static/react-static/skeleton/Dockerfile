@@ -9,7 +9,13 @@
 # ---- build stage ----
 # Pinned Node LTS on Alpine. Vite + Tailwind v4 build here; nothing from this stage
 # reaches the runtime image except the compiled ./dist.
-FROM node:22-alpine AS build
+#
+# B4: base images resolve through the platform's Harbor pull-through cache
+# (dockerhub-proxy) instead of Docker Hub directly -- avoids Docker Hub rate
+# limits across every team's CI, verified working end-to-end (cache-hit proof
+# in artifacts/implementation/b4-harbor-proxy-cache.evidence.yaml). Same image,
+# same tag, different registry host -- purely a pull-path change.
+FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/node:22-alpine AS build
 WORKDIR /app
 
 # Install deps first (better layer caching). Use `npm ci` when a lockfile is present
@@ -25,7 +31,7 @@ RUN npm run build
 # ---- runtime stage ----
 # Pinned nginx on Alpine. We replace the default config with app/nginx.conf (SPA
 # fallback + /healthz + non-root, read-only-fs friendly) and copy in the built assets.
-FROM nginx:1.27-alpine AS runtime
+FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/nginx:1.27-alpine AS runtime
 
 # Our config: foreground nginx, pid/temp under writable mounts, listen on the app port.
 COPY nginx.conf /etc/nginx/nginx.conf

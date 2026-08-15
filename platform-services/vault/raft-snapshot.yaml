@@ -70,6 +70,21 @@ spec:
     spec:
       backoffLimit: 2
       activeDeadlineSeconds: 600
+      # Job objects self-delete 48h after they finish. Without this, a *failed*
+      # Job is retained indefinitely: failedJobsHistoryLimit only caps the count
+      # at 3, and those slots are evicted by NEWER failures — so if failures stop
+      # happening, the last 3 never age out. Three Failed Jobs from 2026-07-06/07/08
+      # survived 26-28 days that way and pinned VaultRaftSnapshotFailing critical
+      # ON continuously while every actual run succeeded (health audit 2026-08-15,
+      # ADV-3). A standing false critical is worse than no alert — it trains
+      # responders to ignore the channel.
+      #
+      # ⚠ PAIRED CHANGE: this TTL is only safe once VaultRaftSnapshotFailing stops
+      # keying off `kube_job_status_failed > 0` (the existence of a Failed Job) and
+      # keys off snapshot FRESHNESS instead — otherwise a genuine, unfixed failure
+      # would self-clear when its Job is reaped at 48h. See platform-services/
+      # monitoring/alerts.yaml.
+      ttlSecondsAfterFinished: 172800
       template:
         metadata:
           labels:

@@ -17,22 +17,27 @@
 #
 # DATABASE: when the chosen stack reads a DB (fragment.yaml needsDB:true), the wizard offers
 # host-mysql (auto-provisioned per-env per ADR-033/#146), bring-your-own (you set DATABASE_URL
-# via the Secrets tab), or none — PLUS host-postgres, but ONLY for blank/bring-your-own-code
+# via the Secrets tab), or none — PLUS host-postgres, for the stacks that actually speak it
 # (see below). The compose engine sets the tenant `database` flag + wires the DATABASE_URL
 # ExternalSecret accordingly.
 #
-# host-postgres is INTENTIONALLY NOT offered for any concrete-language stack (D-054, FIX-1):
-# every needsDB fragment with real app code (all 12 backend/* + fullstack/nextjs|nuxt|sveltekit)
-# is hardcoded MySQL-only today — zero Postgres drivers — so exposing the option there produced
-# green CI + a healthy pod + every DB route broken at runtime. blank/bring-your-own-code is the
-# ONE exception: it ships no DB driver at all (a throwaway placeholder the student replaces with
-# any language), and its README documents both mysql:// and postgres:// DATABASE_URL forms — so
-# it KEEPS the full 4-way enum (single-app branch only; blank/bring-your-own is not offered in
-# the frontend-backend or mobile branches, so their `database` enums drop host-postgres plainly).
+# host-postgres is offered ONLY where a fragment can actually use it (D-054, FIX-1, FIX-16/
+# D-092). Two ways a fragment earns the option:
+#   (a) it ships NO database code of its own — blank/bring-your-own-code, the one fragment
+#       whose README documents both mysql:// and postgres:// DATABASE_URL forms; or
+#   (b) it ships a REAL Postgres driver alongside its MySQL one and branches on the
+#       DATABASE_URL scheme at its DSN entry point — backend/django, backend/express,
+#       backend/fastapi, backend/go (FIX-16). The other 8 backend/* + all 3 needsDB
+#       fullstack/* fragments remain MySQL-only (zero Postgres driver), so host-postgres
+#       stays dropped for that group — exposing it there would produce green CI + a healthy
+#       pod + every DB route broken at runtime, same failure mode D-054 first documented.
+# This applies uniformly across all three branches that can carry a backend (single,
+# frontend-backend, mobile) — a fragment's engine support does not depend on layout position.
 # The Crossplane/provider-sql Postgres tier, the XRD `database: postgres` enum member, and
-# composePlan.mjs's host-postgres -> postgres mapping are left intact everywhere (cheap
-# catalog-refresh guard, not a platform rollback) — restore the option for other stacks once a
-# Postgres-capable fragment ships. See composePlan.mjs and composeProject.ts.
+# composePlan.mjs's host-postgres -> postgres mapping needed no change (D-092: already a
+# superset of the wizard, proven by composePlan.test.cjs's host-postgres cases) — restore the
+# option for the remaining 8 MySQL-only backend/* + 3 fullstack/* once they ship a Postgres
+# driver too (post-launch follow-up, same pattern). See composePlan.mjs and composeProject.ts.
 #
 # DOWNSTREAM: compose assembles the repo, publish/register ship it, then the ZERO-TOUCH seam
 # (capstone:emit-tenant-claim -> capstone:commit-to-main, straight onto platform-infra main,
@@ -206,12 +211,12 @@ spec:
                             - static/bare-html
                             - static/react-static
                           enumNames:
-                            - 'Python / Django + DRF API (MySQL)'
+                            - 'Python / Django + DRF API (MySQL or PostgreSQL)'
                             - '.NET / ASP.NET Core API (EF Core + MySQL)'
-                            - 'Node / Express API (TypeScript + MySQL)'
-                            - 'Python / FastAPI API (SQLAlchemy + MySQL)'
+                            - 'Node / Express API (TypeScript + MySQL or PostgreSQL)'
+                            - 'Python / FastAPI API (SQLAlchemy + MySQL or PostgreSQL)'
                             - 'Python / Flask API (SQLAlchemy + MySQL)'
-                            - 'Go API (Gin + MySQL)'
+                            - 'Go API (Gin + MySQL or PostgreSQL)'
                             - 'PHP / Laravel API (MySQL)'
                             - 'NestJS API (TypeScript + MySQL)'
                             - 'Node.js (bare http, no framework + MySQL)'
@@ -233,13 +238,16 @@ spec:
                       # (the `database` property exists ONLY in the needsDB branches) — no custom
                       # field extension, so this stays a catalog-refresh change (no image rebuild).
                       #
-                      # THREE groups, not two (D-054/FIX-1): the needsDB fragments split further
-                      # because they are NOT uniformly MySQL-only. blank/bring-your-own ships NO
-                      # database code at all (main.go + Dockerfile + README only) — its README
-                      # documents BOTH mysql:// and postgres:// DATABASE_URL forms, and it is the
-                      # one fragment where Auto PostgreSQL actually works end to end. Every other
-                      # needsDB fragment (all 12 backend/* + fullstack/nextjs|nuxt|sveltekit) is
-                      # hardcoded MySQL-only, so host-postgres is dropped for THAT group only.
+                      # FOUR groups, not two (D-054/FIX-1, FIX-16/D-092): the needsDB fragments
+                      # split further because they are NOT uniformly MySQL-only.
+                      #   - blank/bring-your-own ships NO database code at all (main.go +
+                      #     Dockerfile + README only) — its README documents BOTH mysql:// and
+                      #     postgres:// DATABASE_URL forms.
+                      #   - django/express/fastapi/go ship a REAL Postgres driver alongside their
+                      #     MySQL one (psycopg / pg / pgx, DSN-scheme-branched — FIX-16) — proven
+                      #     under both engines with a live MariaDB and a live PostgreSQL.
+                      #   - The remaining 8 backend/* + 3 fullstack/* fragments are still hardcoded
+                      #     MySQL-only, so host-postgres stays dropped for that group only.
                       dependencies:
                         singleFragment:
                           oneOf:
@@ -251,18 +259,14 @@ spec:
                                     - static/bare-html
                                     - static/react-static
                             # Group (b): MySQL-only needsDB fragments — host-postgres dropped
-                            # (D-054/FIX-1). All 12 backend/* + the 3 needsDB fullstack frameworks
-                            # hardcode a MySQL driver; none has ever shipped a Postgres one.
+                            # (D-054/FIX-1). These 11 hardcode a MySQL driver only; none has ever
+                            # shipped a Postgres one.
                             - required: [database]
                               properties:
                                 singleFragment:
                                   enum:
-                                    - backend/django
                                     - backend/dotnet-aspnet
-                                    - backend/express
-                                    - backend/fastapi
                                     - backend/flask
-                                    - backend/go
                                     - backend/laravel
                                     - backend/nestjs
                                     - backend/node-bare
@@ -287,10 +291,39 @@ spec:
                                     - 'Bring your own (set DATABASE_URL in the Secrets tab)'
                                     - 'None'
                                   default: host-mysql
+                            # Group (d) [FIX-16/D-092]: Postgres-capable needsDB fragments —
+                            # host-postgres RESTORED. These four ship a real psycopg/pg/pgx driver
+                            # and branch on the DATABASE_URL scheme at their DSN entry point, proven
+                            # against a live PostgreSQL 17 (dual-engine runtime harness), so Auto
+                            # PostgreSQL is a genuine, working choice for them.
+                            - required: [database]
+                              properties:
+                                singleFragment:
+                                  enum:
+                                    - backend/django
+                                    - backend/express
+                                    - backend/fastapi
+                                    - backend/go
+                                database:
+                                  title: Database
+                                  type: string
+                                  description: >-
+                                    host-mysql and host-postgres each auto-provision a per-environment
+                                    database for you. Pick bring-your-own to set DATABASE_URL yourself
+                                    via the Secrets tab, or none for a DB-less stack. This stack ships
+                                    both a MySQL and a PostgreSQL driver (FIX-16), so Auto PostgreSQL
+                                    genuinely works here.
+                                  enum: [host-mysql, host-postgres, bring-your-own, none]
+                                  enumNames:
+                                    - 'Auto MySQL (host-mysql) — provisioned for you'
+                                    - 'Auto PostgreSQL (host-postgres) — provisioned for you'
+                                    - 'Bring your own (set DATABASE_URL in the Secrets tab)'
+                                    - 'None'
+                                  default: host-mysql
                             # Group (c): blank/bring-your-own-code — KEEPS the full 4-way enum
                             # (D-054/FIX-1). This fragment ships no DB driver of its own (the
                             # student brings any language/framework), so host-postgres is a real,
-                            # working auto-DB choice for it — the only place in the wizard it is.
+                            # working auto-DB choice for it too.
                             - required: [database]
                               properties:
                                 singleFragment:
@@ -302,8 +335,8 @@ spec:
                                   description: >-
                                     host-mysql and host-postgres each auto-provision a per-environment
                                     database for you. Pick bring-your-own to set DATABASE_URL yourself
-                                    via the Secrets tab, or none for a DB-less placeholder. Unlike every
-                                    other stack in this wizard, blank/bring-your-own-code ships no DB
+                                    via the Secrets tab, or none for a DB-less placeholder. Unlike most
+                                    other stacks in this wizard, blank/bring-your-own-code ships no DB
                                     driver of its own, so Auto PostgreSQL genuinely works here.
                                   enum: [host-mysql, host-postgres, bring-your-own, none]
                                   enumNames:
@@ -313,7 +346,7 @@ spec:
                                     - 'None'
                                   default: host-mysql
                     # ---- web / frontend + backend ----
-                    - required: [frontendFragment, backendFragment, database]
+                    - required: [frontendFragment, backendFragment]
                       properties:
                         layout:
                           enum: [frontend-backend]
@@ -360,12 +393,12 @@ spec:
                             - backend/rust-axum
                             - backend/spring-boot
                           enumNames:
-                            - 'Python / Django + DRF API (MySQL)'
+                            - 'Python / Django + DRF API (MySQL or PostgreSQL)'
                             - '.NET / ASP.NET Core API (EF Core + MySQL)'
-                            - 'Node / Express API (TypeScript + MySQL)'
-                            - 'Python / FastAPI API (SQLAlchemy + MySQL)'
+                            - 'Node / Express API (TypeScript + MySQL or PostgreSQL)'
+                            - 'Python / FastAPI API (SQLAlchemy + MySQL or PostgreSQL)'
                             - 'Python / Flask API (SQLAlchemy + MySQL)'
-                            - 'Go API (Gin + MySQL)'
+                            - 'Go API (Gin + MySQL or PostgreSQL)'
                             - 'PHP / Laravel API (MySQL)'
                             - 'NestJS API (TypeScript + MySQL)'
                             - 'Node.js (bare http, no framework + MySQL)'
@@ -373,19 +406,55 @@ spec:
                             - 'Rust / Axum API (sqlx + MySQL)'
                             - 'Java / Spring Boot API (Spring Web + JDBC + MySQL)'
                           default: backend/express
-                        # D-054: Auto PostgreSQL is not offered here — every backend fragment
-                        # in this slot is MySQL-only.
-                        database:
-                          title: Database
-                          type: string
-                          enum: [host-mysql, bring-your-own, none]
-                          enumNames:
-                            - 'Auto MySQL (host-mysql) — provisioned for you'
-                            - 'Bring your own (set DATABASE_URL in the Secrets tab)'
-                            - 'None'
-                          default: host-mysql
+                      # FIX-16/D-092: the database enum is split by backendFragment, same two-way
+                      # split as the single-app branch — the four Postgres-capable backends
+                      # (django/express/fastapi/go) get host-postgres restored; the other 8
+                      # MySQL-only backends do not (D-054). A fragment's engine support does not
+                      # depend on layout position, so this mirrors the singleFragment split exactly.
+                      dependencies:
+                        backendFragment:
+                          oneOf:
+                            - required: [database]
+                              properties:
+                                backendFragment:
+                                  enum:
+                                    - backend/dotnet-aspnet
+                                    - backend/flask
+                                    - backend/laravel
+                                    - backend/nestjs
+                                    - backend/node-bare
+                                    - backend/rails
+                                    - backend/rust-axum
+                                    - backend/spring-boot
+                                database:
+                                  title: Database
+                                  type: string
+                                  enum: [host-mysql, bring-your-own, none]
+                                  enumNames:
+                                    - 'Auto MySQL (host-mysql) — provisioned for you'
+                                    - 'Bring your own (set DATABASE_URL in the Secrets tab)'
+                                    - 'None'
+                                  default: host-mysql
+                            - required: [database]
+                              properties:
+                                backendFragment:
+                                  enum:
+                                    - backend/django
+                                    - backend/express
+                                    - backend/fastapi
+                                    - backend/go
+                                database:
+                                  title: Database
+                                  type: string
+                                  enum: [host-mysql, host-postgres, bring-your-own, none]
+                                  enumNames:
+                                    - 'Auto MySQL (host-mysql) — provisioned for you'
+                                    - 'Auto PostgreSQL (host-postgres) — provisioned for you'
+                                    - 'Bring your own (set DATABASE_URL in the Secrets tab)'
+                                    - 'None'
+                                  default: host-mysql
             # ===================== MOBILE =====================
-            - required: [mobileFragment, backendFragment, database]
+            - required: [mobileFragment, backendFragment]
               properties:
                 projectType:
                   enum: [mobile]
@@ -426,12 +495,12 @@ spec:
                     - backend/rust-axum
                     - backend/spring-boot
                   enumNames:
-                    - 'Python / Django + DRF API (MySQL)'
+                    - 'Python / Django + DRF API (MySQL or PostgreSQL)'
                     - '.NET / ASP.NET Core API (EF Core + MySQL)'
-                    - 'Node / Express API (TypeScript + MySQL)'
-                    - 'Python / FastAPI API (SQLAlchemy + MySQL)'
+                    - 'Node / Express API (TypeScript + MySQL or PostgreSQL)'
+                    - 'Python / FastAPI API (SQLAlchemy + MySQL or PostgreSQL)'
                     - 'Python / Flask API (SQLAlchemy + MySQL)'
-                    - 'Go API (Gin + MySQL)'
+                    - 'Go API (Gin + MySQL or PostgreSQL)'
                     - 'PHP / Laravel API (MySQL)'
                     - 'NestJS API (TypeScript + MySQL)'
                     - 'Node.js (bare http, no framework + MySQL)'
@@ -439,17 +508,51 @@ spec:
                     - 'Rust / Axum API (sqlx + MySQL)'
                     - 'Java / Spring Boot API (Spring Web + JDBC + MySQL)'
                   default: backend/express
-                # D-054: Auto PostgreSQL is not offered here — every backend fragment in this
-                # slot is MySQL-only.
-                database:
-                  title: Database (for the backend)
-                  type: string
-                  enum: [host-mysql, bring-your-own, none]
-                  enumNames:
-                    - 'Auto MySQL (host-mysql) — provisioned for you'
-                    - 'Bring your own (set DATABASE_URL in the Secrets tab)'
-                    - 'None'
-                  default: host-mysql
+              # FIX-16/D-092: the database enum is split by backendFragment, same split as the
+              # other two branches — the four Postgres-capable backends (django/express/fastapi/
+              # go) get host-postgres restored; the other 8 MySQL-only backends do not (D-054).
+              dependencies:
+                backendFragment:
+                  oneOf:
+                    - required: [database]
+                      properties:
+                        backendFragment:
+                          enum:
+                            - backend/dotnet-aspnet
+                            - backend/flask
+                            - backend/laravel
+                            - backend/nestjs
+                            - backend/node-bare
+                            - backend/rails
+                            - backend/rust-axum
+                            - backend/spring-boot
+                        database:
+                          title: Database (for the backend)
+                          type: string
+                          enum: [host-mysql, bring-your-own, none]
+                          enumNames:
+                            - 'Auto MySQL (host-mysql) — provisioned for you'
+                            - 'Bring your own (set DATABASE_URL in the Secrets tab)'
+                            - 'None'
+                          default: host-mysql
+                    - required: [database]
+                      properties:
+                        backendFragment:
+                          enum:
+                            - backend/django
+                            - backend/express
+                            - backend/fastapi
+                            - backend/go
+                        database:
+                          title: Database (for the backend)
+                          type: string
+                          enum: [host-mysql, host-postgres, bring-your-own, none]
+                          enumNames:
+                            - 'Auto MySQL (host-mysql) — provisioned for you'
+                            - 'Auto PostgreSQL (host-postgres) — provisioned for you'
+                            - 'Bring your own (set DATABASE_URL in the Secrets tab)'
+                            - 'None'
+                          default: host-mysql
 
   steps:
     # 1) PREFLIGHT — fail fast + clean if `appName` collides with an existing GitHub repo,

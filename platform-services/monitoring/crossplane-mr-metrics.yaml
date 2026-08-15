@@ -1,0 +1,275 @@
+# Crossplane managed-resource (MR) state metrics — a DEDICATED kube-state-metrics
+# instance that exports the `Synced` / `Ready` conditions of every Crossplane MR the
+# tenant Composition creates, so alerts-crossplane-vault.yaml can fire when one gets
+# stuck. (FIX-4 / D-061, follow-up to the F-2 provider-vault credential outage.)
+#
+# WHY THIS EXISTS: the 2026-07-01 provider-vault token expired silently on ~08-02 and
+# nobody noticed for ~13 days. Every new tenant's Vault `Policy` + `AuthBackendRole` MR
+# sat `Synced=False` that whole time. There was NO signal: verified live on 2026-08-15,
+# the cluster had ZERO `crossplane`/`customresource` series in Prometheus and NO
+# ServiceMonitor for Crossplane anywhere. The MR condition IS the earliest honest
+# signal that onboarding is broken — earlier than the tenant's app failing, and (per
+# D-055/RDY-001) earlier and more truthful than XR `Ready`, which reports "provisioned"
+# rather than "healthy".
+#
+# WHY A SEPARATE kube-state-metrics INSTEAD OF THE STACK'S OWN:
+# The obvious move is to switch on `customResourceState` in the kube-prometheus-stack
+# values. Deliberately NOT done. That values block is a shared, high-blast-radius file:
+# a malformed CustomResourceState config crash-loops the MAIN kube-state-metrics, which
+# is the metric source behind most of alerts.yaml (VaultSealedOrDown included) — i.e. a
+# typo here would silently blind the whole platform days before classes start. It is
+# also being edited concurrently for FIX-7. This dedicated instance is additive: if it
+# dies, the platform loses exactly these MR metrics and nothing else. Consolidating it
+# into the stack chart is a fine post-semester cleanup.
+#
+# VERIFIED BY EXECUTION (2026-08-15) before commit: this exact config + RBAC was run as
+# a throwaway pod against the live cluster and scraped — 148 `status_condition` series
+# and 69 `created` series across all 8 live MR kinds, `type="Synced"` valued 1 for True.
+# ⚠ The CRD rule below is NOT optional and is the non-obvious part: without
+# `list/watch` on `customresourcedefinitions`, kube-state-metrics starts cleanly, logs
+# "Custom resource state added metrics", and then exports ZERO series — a silent dead
+# alert. That failure was hit and fixed during the pre-commit test.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: crossplane-mr-metrics
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+---
+# Read-only, and ONLY over the API groups the tenant Composition actually creates
+# (enumerated from platform-services/crossplane/apis/composition.yaml, each verified to
+# exist as an installed CRD). Deliberately NOT `apiGroups: ["*"]` — this identity can
+# read every object in these groups, so the group list is the blast radius.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: crossplane-mr-metrics
+  labels:
+    platform.capstone/component: platform
+rules:
+  - apiGroups:
+      - vault.vault.upbound.io            # Policy            (tenant Vault policy)
+      - kubernetes.vault.upbound.io       # AuthBackendRole   (tenant k8s-auth role)
+      - kubernetes.crossplane.io          # Object            (ns, AppProject, ESO wiring)
+      - project.harbor.crossplane.io      # Project           (tenant Harbor project)
+      - robotaccount.harbor.crossplane.io # RobotAccount      (CI push/pull robots)
+      - mysql.sql.crossplane.io           # Database/Grant/User
+      - postgresql.sql.crossplane.io      # Database/Grant/Role
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  # REQUIRED — see the header warning. kube-state-metrics resolves each configured
+  # GroupVersionKind through the CRD API at startup; denied here it emits nothing.
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: crossplane-mr-metrics
+  labels:
+    platform.capstone/component: platform
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: crossplane-mr-metrics
+subjects:
+  - kind: ServiceAccount
+    name: crossplane-mr-metrics
+    namespace: monitoring
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: crossplane-mr-metrics
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+data:
+  # One entry per MR kind. The `&mrcond` YAML anchor keeps the two metric definitions
+  # written once — add a new kind by copying a 3-line stanza, not the metric bodies.
+  #
+  # `status_condition` carries the condition `type` (Synced/Ready) and `reason` as
+  # labels, valued 1 for "True" and 0 for "False" (kube-state-metrics coerces the
+  # condition's string status). `created` is the MR's creationTimestamp as a unix
+  # gauge — it exists ONLY to let the alert catch an MR that has NO conditions at all
+  # (a never-reconciled MR emits no condition series, so a bare `== 0` rule would have
+  # a hole exactly where a totally-dead provider puts us).
+  config.yaml: |
+    kind: CustomResourceStateMetrics
+    spec:
+      resources:
+        - groupVersionKind: { group: vault.vault.upbound.io, version: v1alpha1, kind: Policy }
+          labelsFromPath: { name: [metadata, name] }
+          metrics: &mrcond
+            - name: status_condition
+              help: "Crossplane managed resource status condition (1=True, 0=False)"
+              each:
+                type: Gauge
+                gauge:
+                  path: [status, conditions]
+                  labelsFromPath:
+                    type: ["type"]
+                    reason: ["reason"]
+                  valueFrom: ["status"]
+            - name: created
+              help: "Unix creation timestamp of the Crossplane managed resource"
+              each:
+                type: Gauge
+                gauge:
+                  path: [metadata]
+                  valueFrom: ["creationTimestamp"]
+        - groupVersionKind: { group: kubernetes.vault.upbound.io, version: v1alpha1, kind: AuthBackendRole }
+          labelsFromPath: { name: [metadata, name] }
+          metrics: *mrcond
+        # ⚠ v1alpha1 is deprecated upstream in favour of v1alpha2 (the provider logs a
+        # warning on every list). Pinned to v1alpha1 because that is the version the
+        # Composition still creates; bump BOTH together or the metric goes silent.
+        - groupVersionKind: { group: kubernetes.crossplane.io, version: v1alpha1, kind: Object }
+          labelsFromPath: { name: [metadata, name] }
+          metrics: *mrcond
+        - groupVersionKind: { group: project.harbor.crossplane.io, version: v1alpha1, kind: Project }
+          labelsFromPath: { name: [metadata, name] }
+          metrics: *mrcond
+        - groupVersionKind: { group: robotaccount.harbor.crossplane.io, version: v1alpha1, kind: RobotAccount }
+          labelsFromPath: { name: [metadata, name] }
+          metrics: *mrcond
+        - groupVersionKind: { group: mysql.sql.crossplane.io, version: v1alpha1, kind: Database }
+          labelsFromPath: { name: [metadata, name] }
+          metrics: *mrcond
+        - groupVersionKind: { group: mysql.sql.crossplane.io, version: v1alpha1, kind: Grant }
+          labelsFromPath: { name: [metadata, name] }
+          metrics: *mrcond
+        - groupVersionKind: { group: mysql.sql.crossplane.io, version: v1alpha1, kind: User }
+          labelsFromPath: { name: [metadata, name] }
+          metrics: *mrcond
+        - groupVersionKind: { group: postgresql.sql.crossplane.io, version: v1alpha1, kind: Database }
+          labelsFromPath: { name: [metadata, name] }
+          metrics: *mrcond
+        - groupVersionKind: { group: postgresql.sql.crossplane.io, version: v1alpha1, kind: Grant }
+          labelsFromPath: { name: [metadata, name] }
+          metrics: *mrcond
+        - groupVersionKind: { group: postgresql.sql.crossplane.io, version: v1alpha1, kind: Role }
+          labelsFromPath: { name: [metadata, name] }
+          metrics: *mrcond
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: crossplane-mr-metrics
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: crossplane-mr-metrics
+spec:
+  replicas: 1                      # metrics only; a gap during a rollout is acceptable
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: crossplane-mr-metrics
+  template:
+    metadata:
+      labels:
+        platform.capstone/component: platform
+        app.kubernetes.io/name: crossplane-mr-metrics
+    spec:
+      serviceAccountName: crossplane-mr-metrics
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: kube-state-metrics
+          # Pinned to the SAME version the kube-prometheus-stack sub-chart runs, so
+          # both instances behave identically and upgrade together.
+          image: registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.19.1
+          args:
+            - --custom-resource-state-config-file=/etc/crs/config.yaml
+            # ONLY custom-resource metrics. Without this flag this instance would also
+            # duplicate every built-in Pod/Deployment/Node series the stack's own
+            # kube-state-metrics already exports — doubling cardinality for nothing.
+            - --custom-resource-state-only
+            - --port=8080
+            - --telemetry-port=8081
+          ports:
+            - name: http-metrics
+              containerPort: 8080
+            - name: telemetry
+              containerPort: 8081
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          # ⚠ MEASURED, NOT GUESSED (HIGH-1, FIX-4 review). The first version of this
+          # file carried 48Mi/128Mi — eyeballed from the main kube-state-metrics, whose
+          # request is 96Mi. That OOMKilled deterministically: exit 137 about one second
+          # after start, CrashLoopBackOff forever, zero scrapes served. Steady-state was
+          # measured live at ~235Mi, because this instance holds informer caches for 11
+          # custom-resource types and the Object cache dominates.
+          #
+          # The pre-commit test that "proved" this config passed ran a bare Pod with NO
+          # resources block, so the single untested delta between what was validated and
+          # what was committed was the exact thing that broke. If you change the GVK list
+          # above, re-measure — memory scales with the number and size of watched objects.
+          resources:
+            requests: { cpu: 10m, memory: 256Mi }
+            limits: { memory: 512Mi }
+          livenessProbe:
+            httpGet: { path: /livez, port: 8080 }
+            initialDelaySeconds: 5
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8081 }
+            initialDelaySeconds: 5
+            timeoutSeconds: 5
+          volumeMounts:
+            - name: config
+              mountPath: /etc/crs
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: crossplane-mr-metrics
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: crossplane-mr-metrics
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: crossplane-mr-metrics
+spec:
+  selector:
+    app.kubernetes.io/name: crossplane-mr-metrics
+  ports:
+    - name: http-metrics
+      port: 8080
+      targetPort: http-metrics
+---
+# Prometheus discovers this because kube-prometheus-stack sets
+# serviceMonitorSelectorNilUsesHelmValues:false (match-all, all namespaces); the
+# `release` label matches the convention in servicemonitors.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: crossplane-mr-metrics
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    release: kube-prometheus-stack
+  annotations:
+    # Same rationale as alerts.yaml: ServiceMonitor is a CRD owned by the stack, which
+    # may not exist yet on a cold bootstrap.
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: crossplane-mr-metrics
+  endpoints:
+    - port: http-metrics
+      interval: 60s      # MR conditions change slowly; the alert waits 15m anyway

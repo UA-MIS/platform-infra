@@ -2,6 +2,13 @@
 // pattern to copy for your own resources. Every data route checks for a configured DB
 // first and returns a clear 503 when DATABASE_URL is unset, so a freshly scaffolded app
 // (no DB wired yet) degrades cleanly instead of panicking.
+//
+// Every query is written against MySQL's `?` placeholder syntax and passed through
+// rebind() (db.go), which rewrites it to Postgres's `$1, $2, ...` form when driver ==
+// DriverPostgres — the one exception is INSERT, where the two engines have no shared
+// insert-id mechanism at all: MySQL returns it via LastInsertId() on the Exec result;
+// Postgres has no such wire-protocol feature, so the Postgres branch uses `RETURNING
+// id` with QueryRow instead (FIX-16/D-092).
 package main
 
 import (
@@ -23,7 +30,7 @@ type itemInput struct {
 	Description *string `json:"description"`
 }
 
-func registerItemRoutes(r *gin.Engine, db *sql.DB) {
+func registerItemRoutes(r *gin.Engine, db *sql.DB, driver Driver) {
 	// requireDB writes a 503 and returns false when no database is configured.
 	requireDB := func(c *gin.Context) bool {
 		if db == nil {
@@ -41,7 +48,7 @@ func registerItemRoutes(r *gin.Engine, db *sql.DB) {
 		if !requireDB(c) {
 			return
 		}
-		rows, err := db.Query("SELECT id, name, description FROM items ORDER BY id")
+		rows, err := db.Query(rebind(driver, "SELECT id, name, description FROM items ORDER BY id"))
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 			return
@@ -64,7 +71,7 @@ func registerItemRoutes(r *gin.Engine, db *sql.DB) {
 			return
 		}
 		var it Item
-		err := db.QueryRow("SELECT id, name, description FROM items WHERE id = ?", c.Param("id")).
+		err := db.QueryRow(rebind(driver, "SELECT id, name, description FROM items WHERE id = ?"), c.Param("id")).
 			Scan(&it.ID, &it.Name, &it.Description)
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
@@ -86,6 +93,21 @@ func registerItemRoutes(r *gin.Engine, db *sql.DB) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
 			return
 		}
+		if driver == DriverPostgres {
+			// No LastInsertId() equivalent on the wire — RETURNING is the idiomatic
+			// (and only reliable) way to get the generated id back in one round trip.
+			var id int64
+			err := db.QueryRow(
+				"INSERT INTO items (name, description) VALUES ($1, $2) RETURNING id",
+				in.Name, in.Description,
+			).Scan(&id)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "insert failed"})
+				return
+			}
+			c.JSON(http.StatusCreated, Item{ID: id, Name: in.Name, Description: in.Description})
+			return
+		}
 		res, err := db.Exec("INSERT INTO items (name, description) VALUES (?, ?)", in.Name, in.Description)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "insert failed"})
@@ -104,7 +126,10 @@ func registerItemRoutes(r *gin.Engine, db *sql.DB) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
 			return
 		}
-		res, err := db.Exec("UPDATE items SET name = ?, description = ? WHERE id = ?", in.Name, in.Description, c.Param("id"))
+		res, err := db.Exec(
+			rebind(driver, "UPDATE items SET name = ?, description = ? WHERE id = ?"),
+			in.Name, in.Description, c.Param("id"),
+		)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "update failed"})
 			return
@@ -120,7 +145,7 @@ func registerItemRoutes(r *gin.Engine, db *sql.DB) {
 		if !requireDB(c) {
 			return
 		}
-		res, err := db.Exec("DELETE FROM items WHERE id = ?", c.Param("id"))
+		res, err := db.Exec(rebind(driver, "DELETE FROM items WHERE id = ?"), c.Param("id"))
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
 			return

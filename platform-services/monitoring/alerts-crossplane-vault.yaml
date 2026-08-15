@@ -1,0 +1,155 @@
+# Crossplane + Vault-credential failure-mode alerts (FIX-4 / D-061).
+#
+# THE ALERT THAT WAS MISSING. The 2026-07-01 provider-vault token expired ~08-02 and
+# ran undetected for ~13 days (finding F-2). Throughout, every new tenant's Vault
+# `Policy` and `AuthBackendRole` MR sat `Synced=False` — a loud, correct, machine-
+# readable signal that nothing was watching. These rules watch it.
+#
+# SEPARATE FILE, NOT A NEW GROUP IN alerts.yaml — deliberate. alerts.yaml is being
+# edited concurrently (FIX-7), and two branches appending groups to the same YAML list
+# is a guaranteed merge conflict for zero benefit. Prometheus discovers ALL
+# PrometheusRule objects cluster-wide (the stack sets
+# ruleSelectorNilUsesHelmValues:false), so a second object is equivalent at runtime.
+# Rule NAMING follows the <Subject><Condition> convention already used in alerts.yaml
+# (VaultSealedOrDown, ArgoCDAppDegraded), agreed with dev-observability who owns the
+# adjacent FIX-7 rules.
+#
+# METRIC SOURCE: platform-services/monitoring/crossplane-mr-metrics.yaml (a dedicated
+# kube-state-metrics running a CustomResourceState config). Those metrics did NOT exist
+# before FIX-4 — verified live 2026-08-15, the cluster had zero `customresource` series
+# and no Crossplane ServiceMonitor. If that Deployment is removed, these rules go
+# silent, so the two files ship and are reviewed together.
+#
+# ANNOTATION LENGTH: descriptions are kept short on purpose. The ntfy receiver renders
+# through a template that truncates each description to ~350 chars and caps instances
+# per notification (see FIX-7) — long text is not just wasteful, it is cut off on the
+# phone.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: platform-crossplane-vault
+  namespace: monitoring
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    platform.capstone/component: platform
+    release: kube-prometheus-stack
+spec:
+  groups:
+    # ── Crossplane managed resources ──────────────────────────────────────────
+    - name: crossplane
+      rules:
+        # The primary FIX-4 deliverable. Fires on ANY MR kind the tenant Composition
+        # creates, so it covers a dead Vault token, a dead Harbor robot, a dead DB
+        # credential, or a provider that is simply down — one rule, every provider.
+        - alert: CrossplaneManagedResourceNotSynced
+          expr: kube_customresource_status_condition{type="Synced"} == 0
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Crossplane MR {{ $labels.customresource_kind }}/{{ $labels.name }} not Synced"
+            description: >-
+              {{ $labels.customresource_kind }} {{ $labels.name }} has Synced=False
+              ({{ $labels.reason }}) for 15m — the provider cannot reach or write its
+              backend, so new-tenant onboarding is silently incomplete. Check the
+              provider's credential first: `kubectl -n crossplane-system get pods` then
+              `kubectl describe` the MR.
+
+        # Companion to the rule above, and NOT redundant: an MR that has never
+        # reconciled once has NO conditions at all, so it emits no `status_condition`
+        # series and `== 0` cannot match it. That is precisely the shape of a totally
+        # dead provider. `unless` finds MRs older than 15m that still have no Synced
+        # condition of any value.
+        - alert: CrossplaneManagedResourceNeverReconciled
+          expr: >-
+            (time() - kube_customresource_created > 900)
+            unless on (customresource_kind, name) kube_customresource_status_condition{type="Synced"}
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Crossplane MR {{ $labels.customresource_kind }}/{{ $labels.name }} never reconciled"
+            description: >-
+              {{ $labels.customresource_kind }} {{ $labels.name }} has existed >15m with
+              no Synced condition at all — its provider has likely never processed it
+              (provider down, crash-looping, or missing ProviderConfig).
+
+        # Safety net for the metric source itself: if this scrape target disappears,
+        # both rules above go silent and we are blind again in exactly the way F-2 was.
+        # `== 0` alone only fires while the target still EXISTS but is failing. Delete the
+        # Service or ServiceMonitor and the series vanishes entirely, so the watchdog goes
+        # quiet at exactly the moment it is most needed. `absent()` covers that (MED-2).
+        - alert: CrossplaneMRMetricsDown
+          expr: up{job="crossplane-mr-metrics"} == 0 or absent(up{job="crossplane-mr-metrics"})
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Crossplane MR metrics exporter is down"
+            description: >-
+              The crossplane-mr-metrics exporter (monitoring ns) is not being scraped,
+              so CrossplaneManagedResourceNotSynced cannot fire. Restore it before
+              trusting a green board.
+
+    # ── Vault credential lifetime ─────────────────────────────────────────────
+    # Both long-lived Vault tokens on this platform are renewed by CronJobs
+    # (platform-services/crossplane/config/provider-vault-token-renewer.yaml and
+    # platform-services/vault/transit-token-renewer.yaml). Renewal is the ONLY thing
+    # standing between us and a repeat of F-2 / the 07-14 unseal outage, because the
+    # token mount caps every issuance at 768h (32d) — see D-061. So the renewer failing
+    # is itself a critical, page-worthy condition, with weeks of margin to act.
+    - name: vault-credentials
+      rules:
+        - alert: VaultTokenRenewerFailing
+          expr: kube_job_status_failed{job_name=~"(provider-vault|vault-transit)-token-renew.*"} > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Vault token renewer job failed ({{ $labels.namespace }})"
+            description: >-
+              A Vault token renewal Job failed. The token still has up to 32d left, so
+              this is not yet an outage — but if renewal stays broken the credential
+              expires and tenant onboarding (or Vault auto-unseal) dies silently. Check
+              the Job logs.
+
+        # The one that actually matters: catches a renewer that FAILS *and* one that
+        # silently stopped running (suspended, pruned, never scheduled) — the failure
+        # mode a job-failure alert alone cannot see. 3d threshold against a daily
+        # schedule and a 32d TTL: ~29 days of headroom before anything breaks.
+        # The silent-expiry class, one level up (MED-1). `kube_cronjob_status_last_successful_time`
+        # emits NO series until a CronJob's first success, and the series vanishes if the
+        # CronJob is deleted, renamed or pruned. So a renewer that never schedules at all
+        # can never trip the Stale rule below — the same "absence reads as health" shape
+        # that let F-2 run for 13 days. `absent()` is the only thing that catches it.
+        # 6h tolerates the gap between merge and the first 02:20/02:40 run.
+        - alert: VaultTokenRenewerMissing
+          expr: >-
+            absent(kube_cronjob_status_last_successful_time{cronjob="provider-vault-token-renewer"})
+            or absent(kube_cronjob_status_last_successful_time{cronjob="vault-transit-token-renewer"})
+          for: 6h
+          labels:
+            severity: warning
+          annotations:
+            summary: "A Vault token renewer CronJob is missing or has never succeeded"
+            description: >-
+              No successful-run metric exists for a renewer, so it was never scheduled,
+              was deleted, or has never once succeeded. Nothing is renewing that Vault
+              token; it expires 32d after its last renewal. Check the CronJob exists in
+              crossplane-system / vault.
+
+        - alert: VaultTokenRenewerStale
+          expr: >-
+            time() - max by (cronjob, namespace) (kube_cronjob_status_last_successful_time{cronjob=~"(provider-vault|vault-transit)-token-renewer"}) > 259200
+          for: 30m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Vault token renewer {{ $labels.cronjob }} has not succeeded in 3d"
+            description: >-
+              No successful run in 3 days. The Vault token it renews expires 32d after
+              its last renewal; when it does, provider-vault stops provisioning tenants
+              (F-2) or Vault cannot auto-unseal. Fix now — there is margin, but it is
+              finite.

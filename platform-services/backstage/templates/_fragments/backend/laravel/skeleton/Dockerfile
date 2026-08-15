@@ -8,7 +8,13 @@
 # skeleton dir (the engine sets context + dockerfile).
 
 # ---- vendor stage: install PHP dependencies (no dev) ----
-FROM composer:2 AS vendor
+#
+# B4: base images resolve through the platform's Harbor pull-through cache
+# (dockerhub-proxy) instead of Docker Hub directly -- avoids Docker Hub rate
+# limits across every team's CI, verified working end-to-end (cache-hit proof
+# in artifacts/implementation/b4-harbor-proxy-cache.evidence.yaml). Same image,
+# same tag, different registry host -- purely a pull-path change.
+FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/composer:2 AS vendor
 WORKDIR /app
 COPY composer.json composer.lock ./
 # Install without running scripts first (app code isn't copied yet), then bring the app
@@ -18,7 +24,7 @@ COPY . .
 RUN composer dump-autoload --optimize --no-dev
 
 # ---- final stage: slim PHP runtime, non-root, read-only-fs friendly ----
-FROM php:8.4-cli AS final
+FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/php:8.4-cli AS final
 ENV PORT=${{ values.port }} \
     APP_ENV=production \
     APP_DEBUG=false \

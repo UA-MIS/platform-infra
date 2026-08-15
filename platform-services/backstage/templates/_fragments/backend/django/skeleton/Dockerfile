@@ -8,11 +8,18 @@
 # runners. Build context = this skeleton dir (the engine sets context + dockerfile).
 #
 # NO apt is needed: the MySQL driver is pure-Python PyMySQL (installed as MySQLdb in
-# project/__init__.py) and gunicorn/Django install as wheels, so there is no
+# project/__init__.py), the Postgres driver psycopg[binary] vendors its own libpq
+# build as a wheel, and gunicorn/Django install as wheels too — so there is no
 # compiler/system-lib step (and no :443 apt gotcha — see the note at the bottom).
 
 # ---- build stage: resolve deps into an isolated venv ----
-FROM python:3.12-slim AS build
+#
+# B4: base images resolve through the platform's Harbor pull-through cache
+# (dockerhub-proxy) instead of Docker Hub directly -- avoids Docker Hub rate
+# limits across every team's CI, verified working end-to-end (cache-hit proof
+# in artifacts/implementation/b4-harbor-proxy-cache.evidence.yaml). Same image,
+# same tag, different registry host -- purely a pull-path change.
+FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/python:3.12-slim AS build
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
@@ -23,7 +30,7 @@ RUN python -m venv /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
 
 # ---- final stage: slim runtime, non-root, read-only-fs friendly ----
-FROM python:3.12-slim AS final
+FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/python:3.12-slim AS final
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/opt/venv/bin:$PATH" \
