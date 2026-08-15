@@ -1,0 +1,27 @@
+# Harbor Docker Hub pull-through cache (B4 backlog item — dodge Docker Hub rate
+# limits). Two Crossplane provider-harbor managed resources: a Registry endpoint
+# pointed at Docker Hub, and a Project with proxy_cache enabled against it
+# (dockerhub-proxy). Picked up by the platform-services directory-generator
+# ApplicationSet (applicationsets/platform-services-appset.yaml) as
+# `platform-svc-harbor-dockerhub-proxy` — no new Application file needed; no new
+# Helm chart source, so no AppProject sourceRepos change needed either (both MRs
+# are provider-harbor CRDs already installed, group harbor.crossplane.io, applied
+# from THIS git repo like every other Crossplane MR in this repo).
+#
+# Depends on: provider-harbor + its ProviderConfig `default` (already live,
+# platform-services/crossplane/{providers,config}/) — no explicit ordering
+# needed here since those predate this addition and Crossplane's own controller
+# retries independently of ArgoCD sync-wave (same non-wave pattern as
+# harbor-oidc-config/, the closest existing precedent for a one-off Harbor
+# config resource in its own directory).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - registry.yaml
+  - project.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false

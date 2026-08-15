@@ -65,6 +65,67 @@ data:
     hs.message = "Waiting for Ingress rules"
     return hs
 
+  # B4 (Harbor dockerhub-proxy pull-through cache): provider-harbor v0.1.1 never
+  # populates status.atProvider (and so never flips Ready=True) for Registry or
+  # Project managed resources specifically — verified live 2026-08-15
+  # (platform-services/harbor-dockerhub-proxy/, evidence bundle
+  # artifacts/implementation/b4-harbor-proxy-cache.evidence.yaml): the Create
+  # succeeds (Synced=True, ReconcileSuccess), the resource IS live and correct in
+  # Harbor (confirmed via GET .../registries/1 and .../projects?name=dockerhub-proxy,
+  # and the pull-through cache itself proven working end-to-end), but Ready sits
+  # False/Creating forever regardless. Without this override, ArgoCD's generic CRD
+  # health check reads that stuck Ready=False as Degraded/Progressing, and FIX-7's
+  # ArgoCDAppDegraded alert (10m sustained Degraded) would eventually page on a
+  # feature that is actually working — false-positive noise, not a real incident.
+  # Scoped to EXACTLY these two kinds (not e.g. RobotAccount, which reaches
+  # Ready=True normally via the tenant Composition path and should keep using
+  # ArgoCD's default health assessment): Synced=True is ground truth here, same
+  # binary-outcome shape as the Ingress override above. A genuine Synced=False
+  # (an actual Harbor API error, not this provider quirk) still surfaces as
+  # Degraded — this does not mask real failures, only the known false-Ready gap.
+  resource.customizations.health.registry.harbor.crossplane.io_Registry: |
+    hs = {}
+    if obj.status ~= nil and obj.status.conditions ~= nil then
+      for i, condition in ipairs(obj.status.conditions) do
+        if condition.type == "Synced" and condition.status == "False" then
+          hs.status = "Degraded"
+          hs.message = condition.message or condition.reason or "Synced=False"
+          return hs
+        end
+      end
+      for i, condition in ipairs(obj.status.conditions) do
+        if condition.type == "Synced" and condition.status == "True" then
+          hs.status = "Healthy"
+          hs.message = "Synced (provider-harbor known gap: Ready never populates for this kind — see B4 evidence bundle)"
+          return hs
+        end
+      end
+    end
+    hs.status = "Progressing"
+    hs.message = "Waiting for Synced"
+    return hs
+  resource.customizations.health.project.harbor.crossplane.io_Project: |
+    hs = {}
+    if obj.status ~= nil and obj.status.conditions ~= nil then
+      for i, condition in ipairs(obj.status.conditions) do
+        if condition.type == "Synced" and condition.status == "False" then
+          hs.status = "Degraded"
+          hs.message = condition.message or condition.reason or "Synced=False"
+          return hs
+        end
+      end
+      for i, condition in ipairs(obj.status.conditions) do
+        if condition.type == "Synced" and condition.status == "True" then
+          hs.status = "Healthy"
+          hs.message = "Synced (provider-harbor known gap: Ready never populates for this kind — see B4 evidence bundle)"
+          return hs
+        end
+      end
+    end
+    hs.status = "Progressing"
+    hs.message = "Waiting for Synced"
+    return hs
+
   url: https://argocd.capstone.uamishub.com
 
   # ArgoCD-server fetches the issuer's discovery doc SERVER-SIDE over the in-cluster

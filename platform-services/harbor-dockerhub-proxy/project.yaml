@@ -1,0 +1,53 @@
+# dockerhub-proxy: the pull-through cache project (B4). registryIdRef resolves the
+# numeric registry_id from registry.yaml's Registry MR (same dir) — standard
+# Crossplane cross-resource reference, avoids hardcoding an ID that only exists
+# after the Registry is created.
+#
+# public: true — deliberately, so every existing pull path (tenant CI runners,
+# Kaniko build-step containers, any future kubelet image pull) can use this
+# unauthenticated, with ZERO new credential plumbing. This is a cache of images
+# that are ALREADY public on Docker Hub; making the cache itself public adds no
+# new exposure. (A private proxy-cache project would need every consumer to carry
+# a pull secret scoped to it — unnecessary complexity for public upstream content.)
+#
+# forceDestroy: true — mirrors the tenant Project MR in apis/composition.yaml
+# (same reasoning: without it, a non-empty project — and a cache WILL be
+# non-empty after any use — refuses to delete, "please set force_destroy to
+# TRUE"). This project holds no source-of-truth content (everything in it is a
+# reconstructible cache of a public upstream), so force-destroy has no data-loss
+# implication, unlike a tenant's own project.
+#
+# registryId (hardcoded 1), NOT registryIdRef — deliberate, and NOT the
+# architecturally-preferred choice. Verified live (2026-08-15) against this
+# cluster's provider-harbor v0.1.1: the Registry MR (registry.yaml) creates the
+# registry successfully in Harbor (confirmed via GET /api/v2.0/registries/1 as
+# BOTH harbor-admin and robot$provisioner — 200 OK, id=1 — so this is NOT a
+# permissions gap) but the provider never populates the MR's
+# status.atProvider back (stays `{}` indefinitely; Ready stays False/Creating
+# forever), which is exactly what registryIdRef needs to resolve
+# ("referenced field was empty"). This looks like an Observe-path defect in
+# provider-harbor specific to the Registry kind — Project/RobotAccount MRs
+# elsewhere in this repo (apis/composition.yaml) reach Ready=True normally, so
+# it isn't a systemic provider outage. Matches the provider's own documented
+# maturity risk (providers/provider-harbor.yaml: "community provider, v0.1.1.
+# Pin and watch"). registry_id 1 is Harbor's own assigned, stable identifier
+# for the ONE dockerhub Registry this repo creates (id only changes if that
+# Registry is deleted and recreated) — if a future provider version fixes the
+# Observe gap, switch back to `registryIdRef: {name: dockerhub}` (the CRD
+# supports both; this is a pragmatic substitution of one valid field for
+# another, not a workaround of a missing feature).
+apiVersion: project.harbor.crossplane.io/v1alpha1
+kind: Project
+metadata:
+  name: dockerhub-proxy
+  labels:
+    platform.capstone/component: platform
+spec:
+  forProvider:
+    name: dockerhub-proxy
+    public: true
+    registryId: 1
+    vulnerabilityScanning: false   # proxy-cached upstream content, not platform-built; scanning it is not actionable here
+    forceDestroy: true
+  providerConfigRef:
+    name: default
