@@ -646,9 +646,32 @@ jobs:
     runs-on: ${{ inputs.runner }}
     # FULL node image (NOT -slim): bump-image.sh git-commits the overlay and this
     # job `git push`es it to main; actions/checkout needs git for a real .git +
-    # persist-credentials. -slim ships neither git nor curl.
+    # persist-credentials. -slim ships neither git nor curl (verified: `docker run
+    # --rm node:24-trixie-slim sh -c 'which git curl'` finds neither).
+    #
+    # DIGEST-PINNED (F-5, FIX-10, VERIFY-2 2026-08-15): was a floating `node:24-trixie`
+    # tag, which (a) contradicts the platform's own pin-all-versions rule and (b)
+    # can silently re-pull a Node minor that re-opens the Node 24.17 keepAlive
+    # regression previously fixed by pinning the portal to 24.16. Pinned here to
+    # the digest resolved at fix time; bump deliberately (same convention as the
+    # `checks` job's node:24-trixie-slim digest pin above).
+    #
+    # -slim WAS CONSIDERED for the ~5x pull-size win (1.25GB full vs 238MB slim,
+    # matching the observed 4m36s vs 55s "Initialize containers" gap) using the
+    # platform's own proven apt-over-https bootstrap (see any fragment Dockerfile's
+    # "ADDING apt PACKAGES" footer for the exact block: rewrite sources.list to
+    # https, apt-get with Acquire::https::Verify-Peer=false for the ONE
+    # ca-certificates bootstrap fetch, then a normal apt-get install for git+curl —
+    # required because the ARC runner egress NetworkPolicy is :443-only and slim
+    # Debian bases ship no CA bundle). Verified locally that this bootstrap works
+    # and IS git/curl afterward. NOT switched in this PR: this job also does the
+    # ONLY `git push` to `main` in the tenant pipeline (every tenant's dev deploy
+    # depends on it), and this fix's live-runner verification was not available —
+    # the risk of a subtle apt/network difference breaking dev deploys for every
+    # tenant outweighs the speed win for what the task scoped as an optional item.
+    # Left as a well-evidenced follow-up, not attempted blind against production CI.
     container:
-      image: node:24-trixie
+      image: node@sha256:05c60dce78787e477fd7c0d61d9efcd5b7ae3f21a8b18787c7ef3daf9c9a2ad3 # 24-trixie
     permissions:
       contents: write
     steps:

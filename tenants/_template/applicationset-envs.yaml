@@ -66,6 +66,30 @@ spec:
               revision: HEAD
               files:
                 - path: .devops/promotion.yaml
+  # Non-cascading prune (F-7, FIX-10): by DEFAULT (preserveResourcesOnDeletion:
+  # false), the ApplicationSet controller adds the ArgoCD resources-finalizer to
+  # every generated Application, so pruning one (ApplicationSet deleted, or an env
+  # element drops out of the matrix) makes ArgoCD individually delete its deployed
+  # resources first -- and if a namespace vanishes mid-sync (Crossplane's cascade
+  # deletes the tenant namespace independently and roughly concurrently during
+  # teardown), ArgoCD won't run that finalizer while the sync operation is still
+  # retrying, wedging the whole delete chain (Application -> AppProject -> the
+  # Crossplane Object -> XR -> claim) until the retry budget exhausts. Setting
+  # preserveResourcesOnDeletion: true makes Application pruning NON-cascading (no
+  # finalizer added, so no wait): ArgoCD just removes its own Application CR, and
+  # the ACTUAL cleanup of the deployed resources is Crossplane's job anyway --
+  # deleting the tenant namespace already reclaims everything in it. This is the
+  # SAME pattern already used for the identical class of problem in
+  # applicationsets/platform-services-appset.yaml ("non-cascading prune of
+  # generator-removed Applications"). Trade-off (accepted, same as that
+  # precedent): an env Application pruned WITHOUT its namespace also going away
+  # (e.g. a malformed promotion.yaml drops an element from the matrix) would leave
+  # its live workload resources running until the namespace itself is cleaned up
+  # -- for a tenant env this is a non-issue in the actual teardown path (the
+  # namespace goes with it), and is a lesser risk than a tenant wedged
+  # Terminating indefinitely.
+  syncPolicy:
+    preserveResourcesOnDeletion: true
   template:
     metadata:
       name: '__TEAM__-{{.env}}'
