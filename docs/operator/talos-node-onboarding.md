@@ -33,7 +33,7 @@ deeper [`docs/phase-4-runbook.md`](../phase-4-runbook.md); for the **CNI** see
 | Node LAN IPs | n1 `10.237.171.5`, n2 `10.237.171.6`, n3 `10.237.171.8` |
 | Node Tailscale IPs | n1 `100.120.67.119`, n2 `100.89.87.126`, n3 `100.117.55.70` |
 | Storage | Rook-Ceph replica-3 on each node's dedicated **SATA SSD** (`sda`); OS on `nvme0n1` |
-| Config | talhelper — [`clusters/real-talos/talconfig.yaml`](../../clusters/real-talos/talconfig.yaml) + `patches/` |
+| Config | talhelper — [`clusters/real-talos/talconfig.yaml`](https://github.com/UA-MIS/platform-infra/blob/main/clusters/real-talos/talconfig.yaml) + `patches/` |
 
 Re-verify: `kubectl --context admin@capstone get nodes -o wide`.
 
@@ -57,7 +57,7 @@ config; you edit `talconfig.yaml` + `patches/` and re-run `talhelper genconfig`.
   - `talenv.sops.yaml` — env for `envsubst`, notably `TS_AUTHKEY` (the Tailscale
     node auth key) used by the `tailscale` extension patch.
   - Both decrypt with the **age private key** at `~/.config/sops/age/keys.txt`. The
-    committed [`.sops.yaml`](../../.sops.yaml) holds only the **public** recipient
+    committed [`.sops.yaml`](https://github.com/UA-MIS/platform-infra/blob/main/.sops.yaml) holds only the **public** recipient
     (`age1ad2tla3wd2fzz8v6…`).
 
 > ### ⚠️ CONTINUANCE-CRITICAL: `talsecret.sops.yaml` and `talenv.sops.yaml` are NOT in git
@@ -113,7 +113,7 @@ curl -L -o talos-v1.13.4-metal-amd64.iso \
 
 ### Step 2 — declare the node in talconfig, then genconfig
 
-Edit [`clusters/real-talos/talconfig.yaml`](../../clusters/real-talos/talconfig.yaml)
+Edit [`clusters/real-talos/talconfig.yaml`](https://github.com/UA-MIS/platform-infra/blob/main/clusters/real-talos/talconfig.yaml)
 `nodes:` — add a new entry (copy an existing one). Keep the **node-level**
 `talosImageURL` (⚠ a **top-level** `schematic:` is silently ignored by talhelper →
 empty schematic → no tailscale). Set `controlPlane: true/false`:

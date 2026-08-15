@@ -50,12 +50,13 @@
 # platform-services/monitoring/README.md "Grafana SSO (Dex)" and "Team-scoped
 # dashboards".
 #
-# ⚠ Grafana admin password: rotated OFF the chart default — creds come from the
+# Grafana admin password: rotated OFF the chart default — creds come from the
 # grafana-admin SealedSecret via grafana.admin.existingSecret (below). Grafana IS
-# internet-reachable via the Cloudflare tunnel, so this must be a REAL seal before
-# go-live; the shipped placeholder does not decrypt (Grafana pod stays
-# CreateContainerConfigError until resealed). Reseal runbook + the Alertmanager webhook
-# destination (also a SealedSecret) are in platform-services/monitoring/README.md.
+# internet-reachable via the Cloudflare tunnel, so this must be a REAL seal — it
+# is (verified live 2026-08-15: login with the stored credential returns HTTP
+# 200, isGrafanaAdmin: true). Reseal runbook (for future rotation, not initial
+# seeding) + the Alertmanager webhook destination (also a SealedSecret) are in
+# platform-services/monitoring/README.md.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

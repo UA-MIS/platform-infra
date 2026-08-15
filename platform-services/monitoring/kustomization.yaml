@@ -36,10 +36,10 @@ resources:
   # Application) — they live here because this app owns the `monitoring` ns and its
   # non-chart CRs. alertmanager-webhook → the notification destination (now a REAL
   # seal pointed at ntfy.yaml below, no longer a placeholder — see README);
-  # grafana-admin → the rotated Grafana admin creds (still ships as a PLACEHOLDER,
-  # MUST be resealed before go-live, see README); grafana-oauth → the Dex
-  # `grafana` staticClient secret (Observability SSO) — a REAL seal, no reseal
-  # needed before go-live (see README "Grafana SSO (Dex)").
+  # grafana-admin → the rotated Grafana admin creds — a REAL seal, verified
+  # live 2026-08-15 (see README "Access"); grafana-oauth → the Dex
+  # `grafana` staticClient secret (Observability SSO) — also a REAL seal, no
+  # reseal needed before go-live (see README "Grafana SSO (Dex)").
   - sealedsecret-alertmanager-webhook.yaml
   - sealedsecret-grafana-admin.yaml
   - sealedsecret-grafana-oauth.yaml

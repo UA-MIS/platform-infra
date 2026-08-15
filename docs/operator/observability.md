@@ -44,14 +44,15 @@ Loki 10Gi, Tempo 5Gi, Thanos Store Gateway 5Gi (cache), Thanos Compactor 10Gi
   see "Notification channel" below). MinIO + Thanos Query/Store Gateway/Compactor
   stay ClusterIP-only.
 
-### ⚠ Rotate the default Grafana admin password (do this at/just after go-live)
+### Grafana admin password
 
-Grafana ships with the chart default `admin` / `prom-operator` **and is
-internet-reachable via the Cloudflare tunnel**. Rotate it before anyone relies on
-it: put a strong password in a SealedSecret and point the chart at it via
-`grafana.admin.existingSecret` (or `grafana.adminPassword` from a sealed value) in
-`applicationsets/kube-prometheus-stack-app.yaml`, then merge + sync. Never inline
-the password in the values.
+Already rotated off the chart default (`admin` / `prom-operator`) and wired to a
+SealedSecret via `grafana.admin.existingSecret` in
+`applicationsets/kube-prometheus-stack-app.yaml` — verified live 2026-08-15 (login
+with the stored credential returns HTTP 200, `isGrafanaAdmin: true`). Grafana **is**
+internet-reachable via the Cloudflare tunnel, so this matters: never inline a
+password in the values. To rotate again later, see the reseal runbook in
+`platform-services/monitoring/README.md` ("Rotating the Grafana admin password").
 
 ---
 
