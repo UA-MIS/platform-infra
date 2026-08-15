@@ -24,6 +24,14 @@ resources:
   - namespace.yaml
   - alerts.yaml
   - servicemonitors.yaml
+  # FIX-4: Crossplane MR-stuck alerting. Own PrometheusRule file (not folded into
+  # alerts.yaml) to avoid a merge conflict with FIX-7, which owns that file.
+  - alerts-crossplane-vault.yaml
+  # FIX-4: dedicated kube-state-metrics (CustomResourceState) exporting series for
+  # the 11 Crossplane MR kinds the Composition creates — the metrics source
+  # alerts-crossplane-vault.yaml's CrossplaneManagedResourceNotSynced/
+  # CrossplaneMRMetricsDown rules depend on.
+  - crossplane-mr-metrics.yaml
   # SealedSecrets consumed by the kube-prometheus-stack Helm app (separate
   # Application) — they live here because this app owns the `monitoring` ns and its
   # non-chart CRs. alertmanager-webhook → the notification destination (now a REAL
