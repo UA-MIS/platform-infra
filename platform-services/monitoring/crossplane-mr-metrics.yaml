@@ -203,9 +203,20 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+          # ⚠ MEASURED, NOT GUESSED (HIGH-1, FIX-4 review). The first version of this
+          # file carried 48Mi/128Mi — eyeballed from the main kube-state-metrics, whose
+          # request is 96Mi. That OOMKilled deterministically: exit 137 about one second
+          # after start, CrashLoopBackOff forever, zero scrapes served. Steady-state was
+          # measured live at ~235Mi, because this instance holds informer caches for 11
+          # custom-resource types and the Object cache dominates.
+          #
+          # The pre-commit test that "proved" this config passed ran a bare Pod with NO
+          # resources block, so the single untested delta between what was validated and
+          # what was committed was the exact thing that broke. If you change the GVK list
+          # above, re-measure — memory scales with the number and size of watched objects.
           resources:
-            requests: { cpu: 10m, memory: 48Mi }
-            limits: { memory: 128Mi }
+            requests: { cpu: 10m, memory: 256Mi }
+            limits: { memory: 512Mi }
           livenessProbe:
             httpGet: { path: /livez, port: 8080 }
             initialDelaySeconds: 5

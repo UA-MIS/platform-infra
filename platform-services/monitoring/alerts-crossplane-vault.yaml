@@ -78,8 +78,11 @@ spec:
 
         # Safety net for the metric source itself: if this scrape target disappears,
         # both rules above go silent and we are blind again in exactly the way F-2 was.
+        # `== 0` alone only fires while the target still EXISTS but is failing. Delete the
+        # Service or ServiceMonitor and the series vanishes entirely, so the watchdog goes
+        # quiet at exactly the moment it is most needed. `absent()` covers that (MED-2).
         - alert: CrossplaneMRMetricsDown
-          expr: up{job="crossplane-mr-metrics"} == 0
+          expr: up{job="crossplane-mr-metrics"} == 0 or absent(up{job="crossplane-mr-metrics"})
           for: 15m
           labels:
             severity: warning
@@ -116,6 +119,27 @@ spec:
         # silently stopped running (suspended, pruned, never scheduled) — the failure
         # mode a job-failure alert alone cannot see. 3d threshold against a daily
         # schedule and a 32d TTL: ~29 days of headroom before anything breaks.
+        # The silent-expiry class, one level up (MED-1). `kube_cronjob_status_last_successful_time`
+        # emits NO series until a CronJob's first success, and the series vanishes if the
+        # CronJob is deleted, renamed or pruned. So a renewer that never schedules at all
+        # can never trip the Stale rule below — the same "absence reads as health" shape
+        # that let F-2 run for 13 days. `absent()` is the only thing that catches it.
+        # 6h tolerates the gap between merge and the first 02:20/02:40 run.
+        - alert: VaultTokenRenewerMissing
+          expr: >-
+            absent(kube_cronjob_status_last_successful_time{cronjob="provider-vault-token-renewer"})
+            or absent(kube_cronjob_status_last_successful_time{cronjob="vault-transit-token-renewer"})
+          for: 6h
+          labels:
+            severity: warning
+          annotations:
+            summary: "A Vault token renewer CronJob is missing or has never succeeded"
+            description: >-
+              No successful-run metric exists for a renewer, so it was never scheduled,
+              was deleted, or has never once succeeded. Nothing is renewing that Vault
+              token; it expires 32d after its last renewal. Check the CronJob exists in
+              crossplane-system / vault.
+
         - alert: VaultTokenRenewerStale
           expr: >-
             time() - max by (cronjob, namespace) (kube_cronjob_status_last_successful_time{cronjob=~"(provider-vault|vault-transit)-token-renewer"}) > 259200
