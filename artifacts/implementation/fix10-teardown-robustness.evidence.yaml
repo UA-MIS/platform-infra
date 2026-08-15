@@ -50,17 +50,83 @@ scope_additions_status:
       `analysis`/automated-abort step configured (rollout.yaml), so nothing
       would ever un-stick it or roll it back automatically.
 
-      Working hypothesis, NOT yet confirmed: this may not be an ArgoCD prune
-      gap at all — it could be a Rollout stuck mid-canary on a permanently-
-      unhealthy image, which is a different (if related) problem: the
-      canary strategy has no failure-abort path, so a broken image just
-      burns double resources forever instead of the deploy failing loudly.
-      Requested devops-e2e pull the live Rollout status, each ReplicaSet's
-      ownerReferences (do they point at the live Rollout, or are they
-      genuinely orphaned/ownerless), and the ArgoCD Application's tracked
-      resources (does it even list these RS) to distinguish "stuck canary"
-      from "true prune gap" before committing to a contract fix.
-    status: "PENDING — diagnostic request sent to devops-e2e, read-only, specimen preserved."
+    confirmed_by_devops_e2e: >
+      CONFIRMED on every point, via live read-only diagnostics (Rollout
+      status, ReplicaSet ownerReferences, ArgoCD Application resource
+      tracking) — this is a stuck canary, NOT an ArgoCD prune gap.
+
+      Rollout `molly-demo-app` (15d old): phase=Degraded, message=
+      "ProgressDeadlineExceeded: ReplicaSet molly-demo-app-754964c949 has
+      timed out progressing", currentStepIndex=0 (NEVER ADVANCED past the
+      first canary step), replicas=4, readyReplicas=None,
+      availableReplicas=None. Both ReplicaSets are controller-owned by this
+      SAME live Rollout (owners=[(Rollout, molly-demo-app,
+      controller=True)]) — not orphans, nothing ownerless for ArgoCD to
+      target. ArgoCD's Application molly-demo-prod is sync=Synced,
+      health=Degraded, and its `.status.resources` lists the Rollout itself
+      but correctly does NOT list the child ReplicaSets (they're
+      controller-owned children of a resource ArgoCD DOES track, not
+      git-declared resources of their own) — ArgoCD has nothing to prune
+      here; it is fully in sync with what git describes.
+
+      THE SHARPER ROOT CAUSE (devops-e2e's finding, corrects my original
+      framing): the STABLE revision (ReplicaSet
+      molly-demo-app-5667b7c966, revision 1) is pinned at image
+      `molly-demo/molly-demo-app:v0.0.0` — the ApplicationSet's FIRST-DEPLOY
+      PLACEHOLDER SENTINEL (rollout.yaml / kustomization.yaml's
+      `newTag: v0.0.0` comment) — which has NEVER existed in Harbor. So
+      there has never been a genuinely healthy stable revision to fall back
+      to. The canary revision (754964c949, revision 2, real image
+      `ff1d5ba`) crash-loops on the pre-66d5660 DSN bug (4450 restarts).
+      Neither revision is healthy, so `currentStepIndex` never advances past
+      0 and BOTH ReplicaSets sit with live pods indefinitely (4 pods, 15
+      days, zero ready replicas). `progressDeadlineSeconds`,
+      `progressDeadlineAbort`, and `strategy.canary.analysis` are all UNSET
+      on the Rollout — ProgressDeadlineExceeded is reported in status but
+      nothing acts on it.
+
+      This means my original "add automated abort/rollback" framing was
+      INSUFFICIENT on its own: an abort would just roll back to the equally-
+      dead v0.0.0 placeholder. devops-e2e's sharper framing splits this into
+      two real findings, neither of which is a teardown/prune bug:
+        (a) no automated abort on a failed canary (real, but insufficient
+            alone — there's nothing good to abort TO here);
+        (b) prod can be seeded with an unpullable placeholder (v0.0.0) as
+            its "stable" revision if the first-deploy seed
+            (bump-dev/seed-initial-envs.sh) never successfully runs for a
+            tenant — so that tenant's first REAL release has no safety net
+            by construction, because the revision Argo Rollouts would roll
+            back to was never viable either.
+      Also surfaced: argocd-cm.yaml has
+      `resource.customizations.ignoreResourceUpdates.argoproj.io_Rollout`
+      but no `resource.customizations.health.argoproj.io_Rollout` — Rollout
+      health is invisible to ArgoCD's own health rollup (shows health=None
+      in the Application's resource list), which is a live concern for
+      FIX-7's Degraded-app alert: if that alert keys on ArgoCD Application
+      health and Rollout health doesn't roll up correctly, it may not fire
+      for Rollout-based prod workloads — which is EVERY single-component
+      tenant's prod overlay, not an edge case.
+
+    decision: >
+      NOT fixed in this PR. The original task ask ("root-cause whether
+      prune is misconfigured ... fix in the contract/appset if so") is
+      answered: prune is NOT misconfigured; there is nothing to fix in
+      ArgoCD's prune scope. The REAL findings devops-e2e surfaced (no
+      canary abort/rollback safety net; a placeholder stable revision with
+      no viable fallback; Rollout health invisible to ArgoCD) are genuine
+      and worth fixing, but are NOT teardown-robustness issues — they are
+      an ongoing, live tenant's deploy-health and progressive-delivery
+      design gap, orthogonal to this task's actual scope (de-provisioning).
+      Fixing them well requires decisions this task shouldn't make
+      unilaterally: whether/how to configure Rollout `analysis`/
+      `progressDeadlineAbort` (an ADR-037 progressive-delivery-policy call),
+      why the first-deploy seed didn't complete for this tenant (a separate
+      CI investigation), and coordination with whoever owns FIX-7's
+      Degraded-app alert (the Rollout-health-visibility gap directly
+      affects that alert's correctness). Recommending this be spun out as
+      its own task rather than folded into FIX-10 — reported to team-lead
+      for a scoping call.
+    status: "RESOLVED (investigation complete, confirmed by devops-e2e's live diagnostics). No code change in this PR — see decision above."
 
 # ============================================================================
 # 1. F-7 — ArgoCD sync race during teardown
