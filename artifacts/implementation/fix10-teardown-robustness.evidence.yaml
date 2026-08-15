@@ -160,14 +160,43 @@ f7_argocd_sync_race:
       Template string block (function-go-templating) not independently
       parseable without the Crossplane function pipeline.
     live_execution: >
-      NOT YET RUN. The task's own verification bar is "run a teardown WITH a
-      deliberately in-flight sync and show clean convergence" — this requires
-      cluster access this session does not have (classifier-gated, no
-      kubectl). Requesting devops-e2e (who ran the original VERIFY-2 teardown
-      that surfaced F-7) to re-run a teardown against a tenant with a
-      deliberately-unhealthy env (so ArgoCD is still retrying a sync when the
-      claim is removed) on this branch, and confirm convergence completes in
-      the normal ~90s window rather than the observed 4+ minute stall.
+      NOT YET RUN pre-merge (correctly so — see sequencing note below). The
+      task's own verification bar is "run a teardown WITH a deliberately
+      in-flight sync and show clean convergence"; devops-e2e (who ran the
+      original VERIFY-2 teardown that surfaced F-7) reviewed this PR and will
+      execute it POST-merge, per team-lead's sequencing call, against a
+      throwaway tenant that is ALSO the broken-tenant teardown specimen (task
+      brief item 2) — one specimen serving both tests.
+
+    sequencing_note: >
+      Running this pre-merge would also have hit a real blocker devops-e2e
+      correctly escalated rather than deciding unilaterally: this fix lives in
+      the Composition, which the cluster picks up via ArgoCD app
+      platform-crossplane-apis (automated.selfHeal: true, targetRevision
+      HEAD) — testing pre-merge would require either repointing that shared
+      app's targetRevision to this branch or suspending its auto-sync, both
+      writes to shared platform GitOps state with several agents mid-flight.
+      Running the test POST-merge sidesteps this entirely: main will already
+      carry the fix once #443 merges, so the live cluster picks it up through
+      its normal sync — no repoint, no suspend, no shared-state risk.
+
+    convergence_estimate_corrected: >
+      Originally estimated "clean convergence in the normal ~90s window".
+      devops-e2e caught that this over-claims: the fix only eliminates the
+      Application-level race (the 4+ minute stall). It does NOT touch the
+      AppProject's own resources-finalizer (composition.yaml,
+      xp-<team>-appproject), which is a DIFFERENT mechanism per ArgoCD's own
+      docs ("AppProjects use finalizers to ensure a project is not deleted
+      while it is still referenced by any application") — a safety check, not
+      a cascade-delete, and not something to disable casually. devops-e2e's
+      own VERIFY-2 timings show the AppProject leg alone took ~70s (13:14:05
+      Applications finalized -> 13:15:18 AppProject cleared) even AFTER the
+      Applications were already gone. Corrected expectation: ~2-2.5 minutes
+      end-to-end convergence, not ~90s, with the Application-level 4+ minute
+      stall eliminated and the AppProject's own reconcile-latency leg
+      untouched (a separate, deliberate decision if it's ever worth
+      addressing — not folded into this PR). Both YAML files' comments
+      updated to state this explicitly rather than over-claim.
 
 # ============================================================================
 # 2. Residue policy
