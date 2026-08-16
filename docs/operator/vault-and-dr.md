@@ -119,6 +119,12 @@ kubectl -n vault logs job/snap-test           # expect a /snapshots/vault-raft-<
 
 ### Restore (runbook §E)
 
+> **In an incident, use [vault-restore-drill.md](vault-restore-drill.md)** — the
+> break-glass procedure. It leads with the seal-path precondition check (a restore
+> cannot succeed if the transit token is dead, and that failure looks like a data
+> problem), covers the unsealer-down variant, and records what has and has not been
+> verified by execution. The commands below remain the short form.
+
 A snapshot restores into a **running, unsealed** Vault and **replaces all data**
 cluster-wide (the leader replicates the restored state to both followers over
 raft — you do not restore into each pod separately). Run it against whichever pod
