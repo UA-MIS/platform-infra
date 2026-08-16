@@ -160,6 +160,20 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' \
     apt-get -o Acquire::https::Verify-Peer=false install -y --no-install-recommends ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
+# CVE-2026-59873 (tar, via npm's OWN vendored copy — not the app's yarn-managed tree): the
+# node:*-slim base ships a global npm install at /usr/local/lib/node_modules/npm, which
+# bundles its own node_modules/tar (and node-gyp's, transitively) independent of this repo's
+# yarn.lock. The `tar` resolutions pin above (package.json) only reaches dependencies yarn
+# installs — it can't touch npm's vendored copy, so that copy kept re-triggering this CVE on
+# rescan. Fix: remove npm's global install entirely rather than allowlist it — the runtime
+# CMD below only ever execs `node`, never `npm`/`npx` (verified: no runtime code path in
+# packages/backend/src, the plugins, instrumentation.js, or app-config*.yaml shells out to
+# npm; package.json's npm-era scripts are dev/build-time only, never invoked in this image).
+# corepack is a separate global from npm and is untouched here — this image never installs
+# or references it.
+RUN rm -rf /usr/local/lib/node_modules/npm && \
+    rm -f /usr/local/bin/npm /usr/local/bin/npx
+
 # M3: the version-pinned, checksum-verified kubeseal binary (from the isolated kubeseal
 # stage). root-owned 0755 so the least-privileged `node` user can execute but not modify it;
 # the `capstone:seal-secret` action invokes it via execFile (plan §2.1). Static Go binary,

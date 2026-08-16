@@ -50,7 +50,8 @@
   },
   "resolutions": {
     "@types/react": "^18",
-    "@types/react-dom": "^18"
+    "@types/react-dom": "^18",
+    "tar": "npm:^7.5.19"
   },
   "prettier": "@backstage/cli/config/prettier",
   "lint-staged": {
