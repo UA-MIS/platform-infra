@@ -191,6 +191,29 @@ spec:
             forwardedHeaders:
               trustedIPs:
                 - 10.244.0.0/16   # cluster pod CIDR — cloudflared's source range
+            # DEPLOY-1 follow-up (2026-08-16): Traefik v3's entryPoint default
+            # transport.respondingTimeouts.readTimeout is 60s (a CVE-2024-28869
+            # hardening change, not this chart's default — chart ships `nil`, so
+            # the binary's own 60s applied silently). readTimeout bounds reading
+            # the ENTIRE incoming request including its body, not just headers —
+            # it does not distinguish an idle slow-loris client from an actively
+            # uploading one. Harbor's registry blob-upload path (B4 made it the
+            # CI-critical push path) needs to stream large image layers; measured
+            # live at ~3.5MB/s effective throughput for this cluster's network
+            # path (separate backlog item — see harbor-app.yaml's registry
+            # comment), 60s caps any single blob at ~210MB before Traefik cuts
+            # the connection ("client disconnected during blob PATCH" in the
+            # registry's own logs, confirmed at CPU limits from 100m to 2000m —
+            # this was never a resource problem). Set to 900s (15min), not 0
+            # (unlimited): this entrypoint also serves every OTHER public-facing
+            # route (Backstage, ArgoCD, Grafana, etc.), where CVE-2024-28869's
+            # slow-loris protection still matters — 900s is generous enough for
+            # multi-GB blobs at today's measured throughput while keeping a
+            # bound in place. Revisit downward once the throughput root cause
+            # (separate backlog item) is fixed.
+            transport:
+              respondingTimeouts:
+                readTimeout: 900s
 
         # --- 2 replicas for the 3-node cluster (was 1 on the k3d laptop), spread
         #     across nodes via soft anti-affinity so they don't co-schedule.
