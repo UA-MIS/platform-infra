@@ -171,8 +171,26 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' \
 # npm; package.json's npm-era scripts are dev/build-time only, never invoked in this image).
 # corepack is a separate global from npm and is untouched here — this image never installs
 # or references it.
+#
+# KANIKO GOTCHA (take 2 — the plain `rm -rf` above shipped and STILL scanned positive for
+# tar@7.5.13): this build runs Kaniko with --snapshot-mode=redo --use-new-run (see the Kaniko
+# MEMORY comments on the executor step in backstage-process-build-push.yaml — a deliberate
+# pairing that fixed two real OOM crashes on the memory-pinned runner node; not reverting it).
+# That pairing detects file ADDITIONS/MODIFICATIONS via mtime+size+perm but is known to miss
+# pure DELETIONS of paths that arrive untouched straight from the base FROM layer and are
+# never otherwise modified earlier in the build -- exactly npm's case. Confirmed empirically:
+# the build log shows this RUN executing cleanly with no cache hit, yet pulling the pushed
+# digest showed /usr/local/lib/node_modules/npm and the npm/npx binaries still present,
+# unchanged. A correctly-built local `podman build` of this same Dockerfile (non-Kaniko)
+# removes them fine, isolating this to Kaniko's snapshot diffing, not the deletion command
+# itself. Fix: pair every deletion with an addition in the SAME directory, so the directory's
+# mtime changes and Kaniko is forced to re-materialize its new contents (a case its
+# add/modify-oriented diff handles reliably) rather than depending on a deletion-only
+# whiteout. The marker files are harmless (0 bytes, never referenced by anything).
 RUN rm -rf /usr/local/lib/node_modules/npm && \
-    rm -f /usr/local/bin/npm /usr/local/bin/npx
+    rm -f /usr/local/bin/npm /usr/local/bin/npx && \
+    touch /usr/local/lib/node_modules/.npm-stripped && \
+    touch /usr/local/bin/.npm-stripped
 
 # M3: the version-pinned, checksum-verified kubeseal binary (from the isolated kubeseal
 # stage). root-owned 0755 so the least-privileged `node` user can execute but not modify it;
