@@ -1,0 +1,129 @@
+# DEV-2 — Crossplane RobotAccount async-race alert (Ready-stuck rule on FIX-4's KSM metrics)
+# Task #34 · gate: replay · Author: dev-tuesday.
+
+task: DEV-2
+branch: fix/crossplane-robot-race-alert
+base: 4cd5b250f11e0d7189ece910f8d0ea003162ba2a   # origin/main at time of branch
+date: 2026-08-16
+
+defect:
+  id: PROVIDER-HARBOR-ASYNC-RACE
+  priority: HIGH operational risk for Tuesday (not a release blocker)
+  evidence_source:
+    - artifacts/implementation/final-addendum.evidence.yaml   # findings.PROVIDER-HARBOR-ASYNC-RACE
+  symptom: >-
+    Reproduced 3x live across two freshly scaffolded tenants in the FINAL-ADDENDUM run:
+    1x a logged optimistic-concurrency conflict (recovered on 1st retry), and 2x a SILENT
+    false-positive-success variant — AsyncOperation/LastAsyncOperation both report
+    Success, no error condition anywhere, but the external-name (Harbor robot ID) was
+    never actually written back to the RobotAccount MR. Recovery is known, fast, and
+    tenant-scoped (delete the RobotAccount CR, Crossplane recomposes it; force-sync the
+    PushSecret/ExternalSecret) but nothing detects or alerts on the stuck state today.
+  why_not_caught_by_the_existing_watchdog: >-
+    CrossplaneManagedResourceNotSynced (alerts-crossplane-vault.yaml, FIX-4) keys off
+    `Synced=False`. The false-success race's defining shape is that Synced STAYS True the
+    whole time; only Ready never flips. A Synced-only watchdog is structurally blind to
+    this — that's this task's entire premise, restated in the new rule's own comments.
+
+fix:
+  summary: >-
+    New PrometheusRule, own file (platform-services/monitoring/alerts-crossplane-robot-race.yaml,
+    same "own file" pattern FIX-4 already established for alerts-crossplane-vault.yaml —
+    avoids a second concurrent editor on a shared rules file; Prometheus discovers every
+    PrometheusRule object cluster-wide regardless of which file it lives in).
+  alert: CrossplaneRobotAccountReadyStuck
+  expr: >-
+    kube_customresource_status_condition{customresource_kind="RobotAccount", type="Synced"} == 1
+    unless on (customresource_kind, name)
+    kube_customresource_status_condition{customresource_kind="RobotAccount", type="Ready"} == 1
+  for: 10m
+  severity: warning
+  expr_design_notes:
+    - >-
+      Reuses the `unless on (customresource_kind, name)` idiom
+      CrossplaneManagedResourceNeverReconciled (alerts-crossplane-vault.yaml) already
+      established, for the same reason: it fires whether the Ready condition is
+      explicitly False (0) OR entirely absent — both shapes are possible from a stuck
+      async-create, and a bare `== 0` comparison alone would miss the absent case.
+    - >-
+      Scoped to customresource_kind="RobotAccount" only — the one kind with reproduced
+      evidence of this variant. Deliberately not widened to other Crossplane MR kinds
+      without evidence they share the same failure mode.
+    - >-
+      `for: 10m`, not FIX-4's 15m default — the addendum's own reproductions self-healed
+      on retry within ~1-2 minutes when the race resolved normally; 10m is comfortably
+      past that self-heal window (verified by the self-heal test case below), so a firing
+      alert means genuinely stuck.
+  metric_source_unchanged: >-
+    platform-services/monitoring/crossplane-mr-metrics.yaml (FIX-4's dedicated
+    kube-state-metrics instance) required NO changes — RobotAccount's `status_condition`
+    gauge already carries both the `Synced` and `Ready` condition types via the shared
+    `&mrcond` metric definition already in its ConfigMap.
+  files:
+    - path: platform-services/monitoring/alerts-crossplane-robot-race.yaml
+      change: NEW. One PrometheusRule, one alert, extensively commented (why this exists,
+        why it doesn't overlap with CrossplaneManagedResourceNotSynced, why 10m not 15m).
+
+verification:
+  promtool_check_rules:
+    method: >-
+      No local `promtool` binary; `go install` failed on prometheus's non-standard module
+      versioning (v2.x tag vs go.mod module path), so ran promtool from the pinned
+      quay.io/prometheus/prometheus:v2.55.1 container image via podman instead. The
+      PrometheusRule CRD envelope (apiVersion/kind/metadata/spec) isn't a raw Prometheus
+      rule file, so spec.groups was extracted to a plain `groups:` document first (scratch
+      script, not committed) before running promtool against it — same transform any CI
+      step doing this check would need.
+    result: "SUCCESS: 1 rules found (also re-checked alerts-crossplane-vault.yaml alongside it: SUCCESS: 6 rules found)"
+
+  promtool_unit_tests:
+    method: >-
+      `promtool test rules`, same container, against both this rule and
+      alerts-crossplane-vault.yaml loaded together (rule_files: [robot-race, vault]) so
+      the no-overlap case could be asserted against the REAL sibling rule, not a
+      restatement of it.
+    result: SUCCESS — all 6 test groups pass
+    cases:
+      - "positive control (absent Ready): Synced=1 held 12m, no Ready series ever appears — fires at 11m (the exact false-success shape reproduced live)"
+      - "positive control (explicit Ready=False): Synced=1 + Ready=0 held 12m — fires at 11m (proves the `unless ... == 1` clause catches both the absent AND explicit-False shapes, not just one)"
+      - "negative control: Synced=1 + Ready=1 the whole time — never fires"
+      - "self-heal within window: Ready flips 0->1 at minute 3 (inside the addendum's observed 1-2m self-heal range with margin) — never fires, proving the 10m `for:` doesn't false-positive on a normal in-flight retry"
+      - "no double-page overlap: Synced=0 (the OTHER rule's territory) — CrossplaneRobotAccountReadyStuck never fires (its first term filters on Synced==1, so a Synced=False series is invisible to it), while CrossplaneManagedResourceNotSynced correctly fires — proving the two rules key off disjoint values of the same condition and cannot double-page for one underlying stuck MR"
+      - "kind scoping: a stuck Ready on customresource_kind=\"Project\" (a different MR kind) — does not fire this rule, proving the RobotAccount-only scoping holds"
+    harness_location: >-
+      Scratch (not committed): extract_rules.py (CRD -> plain rule-file transform) +
+      robot-race.test.yaml (the promtool test-rules file with the 6 cases above).
+      Reproducible: `podman run --rm -v <dir>:/rules:ro --entrypoint promtool
+      quay.io/prometheus/prometheus:v2.55.1 test rules /rules/robot-race.test.yaml`.
+
+  live_historical_verification: NOT PERFORMED
+  live_historical_verification_note: >-
+    The task allowed for "synthetic series OR historical range from the addendum-run
+    incidents at ~14:24Z if retention allows" — took the synthetic path only. Dev-role
+    agents have no cluster-query access (per platform policy, "No kubectl for dev" —
+    agents cannot query the live Prometheus/cluster), so a historical-range replay against
+    the addendum's actual ~14:24Z incident window was not available to this task. The
+    synthetic positive controls above reproduce the exact reported shapes (Synced=True +
+    Ready absent, and Synced=True + Ready=False) rather than assuming them. Flagging for
+    team-lead: if live historical confirmation against the real 08-16 incident window is
+    wanted before Tuesday, that requires an operator with cluster/Prometheus query access.
+
+scope_note: >-
+  Single new file, additive only — no changes to crossplane-mr-metrics.yaml,
+  alerts-crossplane-vault.yaml, or any other FIX-4 file. Deploys via the same
+  platform-svc-monitoring ArgoCD Application that already syncs
+  platform-services/monitoring/ (confirmed by directory placement matching the sibling
+  alerts-crossplane-vault.yaml, no new sync-wave or Application needed).
+
+files:
+  - path: platform-services/monitoring/alerts-crossplane-robot-race.yaml
+    change: NEW — CrossplaneRobotAccountReadyStuck alert.
+  - path: artifacts/implementation/dev2-robot-race-alert.evidence.yaml
+    change: NEW — this file.
+
+provenance:
+  requested_by: team-lead (task #34, from FINAL-ADDENDUM's PROVIDER-HARBOR-ASYNC-RACE finding)
+  review_gate: reviewer-close
+  related:
+    - review-fix4-vault-auth.md — source of the "own PrometheusRule file" and severity/annotation-length conventions reused here
+    - final-addendum.evidence.yaml — source of the reproduced incident evidence and the ~1-2m self-heal timing used to justify `for: 10m`
