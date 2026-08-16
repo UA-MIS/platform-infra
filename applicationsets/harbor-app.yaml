@@ -133,24 +133,36 @@ spec:
         # found live 2026-08-16 (DEPLOY-1 follow-up): CFS-throttled 13-78% of
         # periods for the full duration of a real image push, producing
         # intermittent-then-fatal 502 Bad Gateway on the PATCH blob-upload
-        # endpoint (Kaniko's own retry budget exhausted after ~30min of
-        # retries across many blobs — this is what actually broke the FIX-19
-        # image build/push, not the earlier VPA-eviction incident, which was
-        # a separate, already-fixed cause). VPA here is controlledValues:
-        # RequestsOnly (see vpa-policies/harbor-vpa.yaml) — it NEVER touches
-        # the limit, so no VPA recommendation could have caught or fixed
-        # this; the idle-usage-derived 100m ceiling was simply never
-        # validated against actual push-time load. B4 made registry the CI
-        # push/pull path for every tenant, so its steady-state idle profile
-        # (the number every `kubectl top` snapshot shows) is not
-        # representative of the workload that matters. Bumped to 500m/256Mi
-        # (limit) — matches trivy's CPU ceiling above for the same reason,
-        # a genuinely bursty workload, not a steady-state one; memory was
-        # never observed near its 128Mi ceiling during the incident (CPU
-        # throttling was the entire story), so it gets a smaller bump.
+        # endpoint. VPA here is controlledValues: RequestsOnly (see
+        # vpa-policies/harbor-vpa.yaml) — it NEVER touches the limit, so no
+        # VPA recommendation could have caught or fixed this; the
+        # idle-usage-derived 100m ceiling was simply never validated against
+        # actual push-time load. B4 made registry the CI push/pull path for
+        # every tenant, so its steady-state idle profile (the number every
+        # `kubectl top` snapshot shows) is not representative of the
+        # workload that matters.
+        #
+        # First bump (500m, matching trivy's ceiling) was INSUFFICIENT —
+        # confirmed by direct reproduction (crane push of a synthetic 1.4GB
+        # random-content layer through the same in-cluster Traefik path
+        # Kaniko/ARC runners use, bypassing Cloudflare via /etc/hosts, same
+        # as their hostAliases): still throttled 33-65% of periods during
+        # the push, still 502'd. Root cause is Docker Registry's own
+        # streaming digest verification -- it SHA256-hashes the full blob
+        # body while writing it, which is genuinely CPU-bound; raw storage
+        # write to the PVC measured at ~165MB/s (200MB in 1.21s, not the
+        # bottleneck), and Ceph reported HEALTH_OK with 33 active+clean PGs
+        # throughout (not the bottleneck either) -- registry logs confirmed
+        # the large-blob PATCH request was "authorized" but never logged
+        # "response completed" before the client gave up, consistent with
+        # hashing throughput being CPU-starved at 500m. Bumped to 2000m (2
+        # full cores -- node capstone-w1 has 16 allocatable, ample headroom)
+        # /256Mi. Memory untouched: never observed near its ceiling in
+        # either incident, CPU was the entire story both times.
         # registryctl (`controller` below) is untouched: it serves Harbor's
         # own admin/GC API, not the Docker Registry v2 blob-upload path
-        # Kaniko's PATCH requests hit, and showed no throttling.
+        # Kaniko's PATCH requests hit, and showed no throttling in either
+        # incident.
         portal:
           replicas: 1
           resources:
@@ -170,8 +182,8 @@ spec:
           replicas: 1
           registry:
             resources:
-              requests: { cpu: 50m, memory: 64Mi }
-              limits: { cpu: 500m, memory: 256Mi }
+              requests: { cpu: 100m, memory: 64Mi }
+              limits: { cpu: 2000m, memory: 256Mi }
           controller:
             resources:
               requests: { cpu: 20m, memory: 64Mi }
