@@ -23,6 +23,7 @@ import { createEmitTenantClaimAction } from './actions/emitTenantClaim';
 import { createCommitToMainAction } from './actions/commitToMain';
 import { createComposeProjectAction } from './actions/composeProject';
 import { createPreflightAction } from './actions/preflight';
+import { createWaitForRepoContentAction } from './actions/waitForRepoContent';
 
 export const capstoneScaffolderModule = createBackendModule({
   pluginId: 'scaffolder',
@@ -89,6 +90,13 @@ export const capstoneScaffolderModule = createBackendModule({
           // run, so a re-used name never leaves an orphaned repo + rendered code behind
           // (the swamiapp 409-at-register lesson). Read-only.
           createPreflightAction({ config, catalog, auth }),
+          // FIX-19/CATALOG-001 — capstone:wait-for-repo-content: closes the
+          // catalog:register 400 race (publish:github's just-pushed commit not yet
+          // readable via the GitHub API when catalog:register's synchronous first read
+          // runs). Polls the SAME repo/commit with exponential backoff BEFORE register
+          // runs; catalog:register itself is unchanged. Read-only. See the action's own
+          // file header for the full root-cause writeup.
+          createWaitForRepoContentAction({ config }),
         );
       },
     });

@@ -1,0 +1,142 @@
+# FIX-19 — catalog:register 400 race (CATALOG-001)
+# Task #20 · PR UA-MIS/platform-infra#465 · gate: reviewer-close, D-063 merge
+# Found by the FINAL readiness session (3/3 scaffolds hit it, each manually recovered).
+# Author: dev-postgres.
+
+task: FIX-19
+pr: https://github.com/UA-MIS/platform-infra/pull/465
+branch: fix/register-race-fix
+commit: 98d5fbe
+base: fbcc71f            # origin/main at time of branch
+date: 2026-08-15
+
+defect:
+  id: CATALOG-001
+  priority: P1
+  symptom: >-
+    catalog:register 400s immediately after publish:github succeeds, on new-project and
+    vm-app scaffolds alike. Hit 3/3 scaffolds in the FINAL readiness session (defcombo1,
+    finaltest-defcombo1, finalpg-pgcombo1 — see the onboard/finalpg-pgcombo1 and
+    teardown/finaltest-defcombo1 commits on main), each requiring a MANUAL raw-Location
+    retry to land the tenant claim. Unacceptable inside the golden path — ~20 teams would
+    hit this Tuesday with no operator standing by.
+  evidence_source:
+    - artifacts/implementation/final-reverify.evidence.yaml   # 3 occurrences' response bodies
+    - artifacts/delivery/readiness-report-2026-08-19.md        # CATALOG-001 (P1) writeup
+  root_cause: >-
+    new-project/template.yaml's and vm-app/template.yaml's `register` step is Backstage's
+    BUILT-IN catalog:register action, invoked IMMEDIATELY after publish:github returns.
+    catalog:register POSTs to the catalog-backend's /locations endpoint, which performs a
+    SYNCHRONOUS first read of the target catalog-info.yaml (via the GitHub integration
+    reader) before it will accept the Location — a 404 on that read surfaces as the 400
+    seen at the wizard. This is GitHub API read-after-write propagation lag on a just-
+    pushed commit + fresh repo, not a config or catalog-info.yaml defect: the identical
+    Location registers fine as a raw retry MINUTES later (evidence bundle above), and a
+    content or auth defect would fail every time rather than intermittently-then-succeed.
+  ruled_out:
+    - catalog-info.yaml content/schema defect (raw retry succeeds unmodified)
+    - GitHub App auth/permission issue (would fail deterministically, not intermittently)
+    - branch-protection interference (repo is freshly created, no protection race observed
+      in the evidence bundle's response bodies)
+
+fix:
+  summary: >-
+    Insert a new read-only scaffolder step, capstone:wait-for-repo-content, between
+    `publish` and `register` in both templates. It polls the SAME repo/file at the EXACT
+    commit publish:github just created (steps['publish'].output.commitHash — not the
+    branch tip, which could itself still be propagating) with exponential backoff until
+    GitHub's own read path actually serves it. Only then does catalog:register run.
+    catalog:register itself is UNCHANGED — this fixes step ordering/timing, not the
+    built-in action, so its output.entityRef (used by both templates' output links) is
+    unaffected.
+  why_not_a_workaround: >-
+    Not a documented manual retry — the retry is now IN the golden path, runs
+    automatically on every scaffold, and fails loudly with a named repo/path/ref/attempt-
+    count error if the retry budget (8 attempts, 500ms initial / 8s cap, ~31.5s total —
+    500+1000+2000+4000+8000+8000+8000ms across the 7 inter-attempt sleeps; corrected here
+    per REV-10, this doc previously overstated it as "~1 min") is ever exhausted, rather
+    than silently landing a broken claim.
+  files:
+    - path: platform-services/backstage/app/plugins/scaffolder-backend-module-capstone/src/actions/waitForRepoContent.ts
+      change: >-
+        NEW. Exports isNotFound (404-shaped-error predicate), waitForContent (the
+        injectable poll-with-backoff core), and createWaitForRepoContentAction (the
+        capstone:wait-for-repo-content scaffolder action factory). 404 is the ONLY
+        retryable signal; any other error is rethrown immediately, never swallowed.
+    - path: platform-services/backstage/app/plugins/scaffolder-backend-module-capstone/src/actions/waitForRepoContent.test.ts
+      change: NEW. Unit tests (12 cases) — see verification below.
+    - path: platform-services/backstage/app/plugins/scaffolder-backend-module-capstone/src/module.ts
+      change: registers capstone:wait-for-repo-content alongside the module's other actions.
+    - path: platform-services/backstage/templates/new-project/template.yaml
+      change: >-
+        adds the `wait-for-content` step between `publish` and `register`
+        (repo: parameters.appName, commitHash: steps['publish'].output.commitHash,
+        catalogInfoPath: '/catalog-info.yaml'); downstream step comments renumbered.
+    - path: platform-services/backstage/templates/vm-app/template.yaml
+      change: >-
+        identical fix — vm-app's `publish` is also immediately followed by `register`,
+        so the same race applies. Inserted as step "3b)" to match the template's existing
+        lettered-substep convention without renumbering the whole sequence.
+  diffstat: 5 files changed, 571 insertions(+), 3 deletions(-)
+  behavior_change_outside_scope: >-
+    none — catalog:register's own behavior, output schema, and downstream consumers
+    (output links referencing steps['register'].output.entityRef) are untouched.
+
+verification:
+  unit_tests:
+    file: platform-services/backstage/app/plugins/scaffolder-backend-module-capstone/src/actions/waitForRepoContent.test.ts
+    harness: >-
+      backstage-cli package test (jest), run via
+      `yarn workspace @internal/backstage-plugin-scaffolder-backend-module-capstone test`.
+      Octokit, GithubCredentialsProvider, and sleep are all injected mocks — no live
+      GitHub App or network access, and no real waiting (backoff timing asserted against
+      a mock sleep's recorded call args, not real elapsed time).
+    cases:
+      - isNotFound: true for 404-shaped error, false for non-404, false for undefined/{}
+      - waitForContent succeeds on the first attempt with zero retries/sleeps
+      - waitForContent retries on 404 with correctly doubling backoff (500 -> 1000 -> 2000ms), then succeeds
+      - waitForContent caps backoff at maxDelayMs (500 -> 1000 -> 1500(capped) -> 1500(capped))
+      - waitForContent rethrows a non-404 error immediately, no retry, no sleep
+      - waitForContent exhausts maxAttempts and throws an error naming repo/path/ref/
+        attempt-count and the FIX-19/CATALOG-001 race explicitly
+      - action handler resolves org-scoped App creds, calls the Octokit factory with the
+        integration's apiBaseUrl, calls getContent with the exact owner/repo/path/ref, and
+        outputs `attempts`
+      - action handler defaults catalogInfoPath to catalog-info.yaml and strips a leading
+        slash when the template passes '/catalog-info.yaml'
+      - action handler propagates the exhaustion error end-to-end
+      - action handler throws a clear error when the GitHub App has no credentials for
+        github.com (fail-fast, not a silent no-op)
+    result: 12/12 PASS
+    full_package_result: >-
+      177/177 tests passed across the whole scaffolder-backend-module-capstone package
+      (11 suites) after adding this file — no regressions in preflight, sealSecret,
+      harborOnboard, commitToMain, renderTenant, emitTenantClaim, composeProject, or
+      teardownCore.
+    unrelated_pre_existing_failure: >-
+      src/actions/composePlan.test.cjs fails to run ("must contain at least one test") on
+      this branch's base (fbcc71f) same as on origin/main — introduced in #456
+      (08170ad), predates this branch, not touched by this change, out of FIX-19's scope.
+  type_check: >-
+    Implicit in the jest run above (backstage-cli's ts-jest transform fails the suite on
+    a type error) — the whole package compiled and ran clean, including the new files.
+  execution_verification_status: PENDING — see note below.
+  execution_verification_note: >-
+    The task's acceptance bar is "2 consecutive fresh scaffolds complete with ZERO manual
+    touches" against the LIVE Backstage instance. This platform's deploy is NOT
+    auto-bumped on merge (backstage-process-build-push.yaml: "a human flips the
+    Application's image.tag to the built <short-sha> at go-live" — no Image Updater), so
+    this fix cannot be exercised live until (a) this PR merges, (b) the resulting image is
+    built + pushed, and (c) the Backstage Application's image.tag is bumped to it — none
+    of which are in a dev-role agent's tool scope (no cluster writes). Flagged to
+    team-lead: recommend this live 2x-fresh-scaffold verification run as part of, or
+    immediately ahead of, FINAL-ADDENDUM (#21)'s GO-verdict update, once deployed. The
+    unit-level verification above proves the retry/backoff logic is correct in isolation;
+    it does not by itself satisfy the task's execution bar.
+
+provenance:
+  found_by: FINAL readiness session — 3/3 scaffolds hit CATALOG-001, each manually recovered
+  related:
+    - FIX-18 (#19, P0) — the other P0/P1 fix gating FINAL-ADDENDUM's GO-verdict update
+    - FINAL-ADDENDUM (#21) — depends on this PR merging + deploying + live verification
+  review_gate: FIX-19-REVIEW (reviewer-close)

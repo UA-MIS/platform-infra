@@ -679,7 +679,26 @@ spec:
           - team: labmx
             access: admin
 
-    # 4) Register the new component in the catalog.
+    # 4) WAIT for GitHub to actually serve the just-pushed catalog-info.yaml before the
+    #    next step reads it (FIX-19/CATALOG-001). Root cause: `register` below is
+    #    Backstage's built-in catalog:register action, which performs a SYNCHRONOUS
+    #    first read of catalog-info.yaml the moment it runs -- called immediately after
+    #    `publish` above, this raced GitHub's own read-after-write propagation on a
+    #    freshly created repo + first push + branch-protection setup, 3/3 reproducibly
+    #    in the FINAL e2e report (the identical URL always registered fine on a manual
+    #    retry MINUTES later -- a propagation race, not a config/content defect). This
+    #    step polls the SAME file at the EXACT commit `publish` just created, with
+    #    exponential backoff, so `register` never runs before GitHub can actually serve
+    #    it. See waitForRepoContent.ts for the full root-cause writeup.
+    - id: wait-for-content
+      name: Wait for GitHub to serve catalog-info.yaml
+      action: capstone:wait-for-repo-content
+      input:
+        repo: ${{ parameters.appName }}
+        commitHash: ${{ steps['publish'].output.commitHash }}
+        catalogInfoPath: '/catalog-info.yaml'
+
+    # 5) Register the new component in the catalog.
     - id: register
       name: Register in catalog
       action: catalog:register
@@ -687,7 +706,7 @@ spec:
         repoContentsUrl: ${{ steps['publish'].output.repoContentsUrl }}
         catalogInfoPath: '/catalog-info.yaml'
 
-    # 5) EMIT THE TENANT CLAIM — ONE CapstoneTenant XR carrying the wizard's RESOLVED
+    # 6) EMIT THE TENANT CLAIM — ONE CapstoneTenant XR carrying the wizard's RESOLVED
     #    database choice. THIS IS THE §C SEAM: capstone:compose-project already collapsed the
     #    wizard `database` choice (host-mysql | bring-your-own | none for every concrete-language
     #    stack; blank/bring-your-own-code alone also offers host-postgres, D-054/FIX-1 — see the
@@ -723,7 +742,7 @@ spec:
         # one tenants/_claims/<team>-<app>.yaml file.
         targetPath: ./claim
 
-    # 6) Land the claim DIRECTLY on platform-infra `main` — NO PR, NO human merge (true
+    # 7) Land the claim DIRECTLY on platform-infra `main` — NO PR, NO human merge (true
     #    zero-touch, ADR-031 §7 Option A(b) / ADR-035 §D7). capstone:commit-to-main PUTs the
     #    single XR file straight onto main via the platform GitHub App (on the
     #    tenants/_claims/** branch-protection bypass list). ArgoCD (platform-crossplane-claims)
