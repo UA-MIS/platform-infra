@@ -1,0 +1,142 @@
+# DEV-1 — Wizard app-stack field gets NO default (D-099, human directive)
+# Task #33 · gate: replay · Author: dev-tuesday.
+
+task: DEV-1
+branch: fix/wizard-stack-no-default
+base: 4cd5b250f11e0d7189ece910f8d0ea003162ba2a   # origin/main at time of branch
+date: 2026-08-16
+
+directive:
+  id: D-099
+  summary: >-
+    Human directive: the wizard's app-stack question must have NO pre-selected default —
+    students see a "make a selection" state and must choose explicitly. Scoped to the
+    STACK question only; the database field (host-mysql) explicitly keeps its default.
+
+change:
+  summary: >-
+    Removed `default:` from every stack-selector field in new-project/template.yaml and
+    added a matching `ui:placeholder` (same sibling `ui:*`-key convention already used by
+    appName's `ui:autofocus`/`ui:help`), so the rjsf SelectWidget renders an explicit
+    "Select a …" placeholder instead of leaving the widget silently value-less or
+    auto-picking an option.
+  fields_changed:
+    - path: spec.parameters[1].dependencies.projectType.oneOf[0] (web).dependencies.layout.oneOf[0] (single).properties.singleFragment
+      removed: "default: backend/fastapi"
+      added: "ui:placeholder: 'Select an app stack…'"
+    - path: spec.parameters[1]...oneOf[0] (web).dependencies.layout.oneOf[1] (frontend-backend).properties.frontendFragment
+      removed: "default: frontend/react"
+      added: "ui:placeholder: 'Select a frontend…'"
+    - path: spec.parameters[1]...oneOf[0] (web).dependencies.layout.oneOf[1] (frontend-backend).properties.backendFragment
+      removed: "default: backend/express"
+      added: "ui:placeholder: 'Select a backend…'"
+    - path: spec.parameters[1].dependencies.projectType.oneOf[1] (mobile).properties.mobileFragment
+      removed: "default: mobile/flutter"
+      added: "ui:placeholder: 'Select a mobile app stack…'"
+      note: >-
+        mobile is currently UNREACHABLE (F-3/D-058, hidden not deleted). Fixed here too so
+        the branch does not silently re-default when 'mobile' is restored to the
+        projectType enum — same "hide, don't delete, but keep correct" posture FIX-5's
+        mobile-quarantine-consistency check already applies to this branch.
+    - path: spec.parameters[1].dependencies.projectType.oneOf[1] (mobile).properties.backendFragment
+      removed: "default: backend/express"
+      added: "ui:placeholder: 'Select a backend…'"
+  fields_deliberately_unchanged:
+    - field: database (all 7 oneOf groups across single / frontend-backend / mobile)
+      default: host-mysql
+      reason: "D-099 scopes the directive to the STACK question only, per task instructions."
+    - field: layout (App layout: single | frontend-backend)
+      default: single
+      reason: >-
+        Not a stack selector — it's a structural (component-count) choice, out of D-099's
+        scope as described in the task ("app-stack field(s)").
+    - field: projectType
+      default: web
+      reason: "Single-member enum today (mobile hidden); no real pre-selection to force."
+  required_already_satisfied: >-
+    All five stack fields were already listed under their branch's `required:` (e.g.
+    `required: [singleFragment]`, `required: [frontendFragment, backendFragment]`,
+    `required: [mobileFragment, backendFragment]`) before this change — submission without
+    a choice was already blocked by JSON-schema validation with rjsf's standard
+    "is a required property" message. No `required:` changes needed.
+
+verification:
+  static_checks:
+    - cmd: python3 platform-services/backstage/templates/_fragments/_tools/check_wizard_template.py
+      result: "OK: template.yaml enum partitions are exact and host-postgres is offered correctly."
+    - cmd: python3 platform-services/backstage/templates/_fragments/_tools/check_wizard_template.test.py
+      result: "Ran 16 tests in 0.164s — OK (all hazard mutations still caught; no default-related coupling in this checker)"
+    - cmd: python3 platform-services/backstage/templates/_fragments/_tools/dry-render.py --scenario single-fastapi-mysql --out <tmp>
+      result: "=== DRY-RENDER OK === (kustomize dev/staging/prod/preview all OK)"
+    - cmd: python3 platform-services/backstage/templates/_fragments/_tools/dry-render.py --scenario febe-react-express-mysql --out <tmp>
+      result: "=== DRY-RENDER OK ==="
+    - cmd: python3 platform-services/backstage/templates/_fragments/_tools/dry-render.py --scenario single-static --out <tmp>
+      result: "=== DRY-RENDER OK ==="
+
+  rjsf_renderer_verification:
+    method: >-
+      Execution-based, mirroring review-fix1-wizard-postgres-guard.md's methodology: the
+      REAL @rjsf/utils, @rjsf/validator-ajv8, and @rjsf/material-ui packages pinned at
+      5.24.13 in platform-services/backstage/app/yarn.lock (the exact versions
+      @backstage/plugin-scaffolder-react@2.0.1 uses) were installed in a scratch harness
+      and driven directly against the actual, edited template.yaml — not against a
+      hand-written fixture.
+    key_finding: >-
+      Read @rjsf/material-ui's SelectWidget.tsx source directly (line 62):
+      `const showPlaceholderOption = !multiple && schema.default === undefined;` — the
+      widget renders its placeholder MenuItem ONLY when the schema has no `default`. This
+      confirms two things at once: (1) before this change, `default: backend/fastapi`
+      etc. was SUPPRESSING the placeholder (showPlaceholderOption was false), so the
+      wizard was silently pre-selecting a stack this whole time, and (2) rjsf does NOT
+      auto-populate a required enum with its first entry when `default` is absent —
+      getDefaultFormState(validator, schema, undefined, schema) returns `{}` for a
+      no-default enum property, confirmed against the real resolver, not assumed.
+    harness_checks_per_field: >-
+      For each of the 5 stack-selector fields, extracted directly from the real
+      template.yaml via the same nested-oneOf navigation path check_wizard_template.py
+      uses: (a) schema.default === undefined, (b) getDefaultFormState never populates the
+      field from formData=undefined, (c) showPlaceholderOption (the widget's own formula)
+      evaluates true, (d) a non-empty `ui:placeholder` string is present. Also ran a
+      negative control confirming all 3 `database` schemas visited keep `default:
+      host-mysql` unchanged.
+    result: "8/8 PASS — 5 stack fields + 3 database negative-control checks. See raw output below."
+    raw_output: |
+      PASS singleFragment (web/single): default=undefined showPlaceholderOption=true autoSelected=false ui:placeholder="Select an app stack…"
+      PASS frontendFragment (web/frontend-backend): default=undefined showPlaceholderOption=true autoSelected=false ui:placeholder="Select a frontend…"
+      PASS backendFragment (web/frontend-backend): default=undefined showPlaceholderOption=true autoSelected=false ui:placeholder="Select a backend…"
+      PASS mobileFragment (mobile): default=undefined showPlaceholderOption=true autoSelected=false ui:placeholder="Select a mobile app stack…"
+      PASS backendFragment (mobile): default=undefined showPlaceholderOption=true autoSelected=false ui:placeholder="Select a backend…"
+      PASS database (single, group b): default="host-mysql" (must remain host-mysql)
+      PASS database (single, group d): default="host-mysql" (must remain host-mysql)
+      PASS database (single, group c blank/BYO): default="host-mysql" (must remain host-mysql)
+      === ALL CHECKS PASS ===
+    harness_location: >-
+      Scratch harness (not committed — package.json + verify-template.mjs, npm-installed
+      @rjsf/core, @rjsf/utils, @rjsf/validator-ajv8, @rjsf/material-ui, js-yaml all pinned
+      at 5.24.13). Reproducible: `npm install @rjsf/core@5.24.13 @rjsf/utils@5.24.13
+      @rjsf/validator-ajv8@5.24.13 @rjsf/material-ui@5.24.13 js-yaml@4` then run
+      verify-template.mjs against the template path.
+    known_pre_existing_note: >-
+      Running the harness against template.yaml emits rjsf's own deprecation warning
+      ("The 'enumNames' property in the schema is deprecated ... use 'ui:enumNames'
+      instead") for every enum field — pre-existing across the whole file (not introduced
+      or touched by this change), out of scope for D-099.
+
+scope_note: >-
+  catalog-refresh-only change (ADR-034/ADR-035 contract): the only file touched is
+  platform-services/backstage/templates/new-project/template.yaml. No scaffolder action
+  source changed, so no Backstage image rebuild is required — same property FIX-1 and
+  FIX-16 relied on.
+
+files:
+  - path: platform-services/backstage/templates/new-project/template.yaml
+    change: >-
+      removed `default:` from singleFragment, frontendFragment, backendFragment (x2, web
+      frontend-backend + mobile branches), mobileFragment; added `ui:placeholder` to each.
+
+provenance:
+  requested_by: team-lead (human directive D-099)
+  review_gate: reviewer-close
+  related:
+    - review-fix1-wizard-postgres-guard.md — source of the rjsf-harness execution-based
+      verification pattern reused here

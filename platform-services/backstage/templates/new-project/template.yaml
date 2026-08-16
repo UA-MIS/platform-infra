@@ -250,7 +250,14 @@ spec:
                             - 'SvelteKit fullstack (Svelte + server routes + MySQL)'
                             - 'Static HTML/CSS/JS site (no framework)'
                             - 'React static site (Vite + React Router, no backend)'
-                          default: backend/fastapi
+                          # NO default (D-099, human directive): the app stack must be an
+                          # explicit choice, never a silent pre-selection. Confirmed against
+                          # the pinned @rjsf/material-ui 5.24.13 SelectWidget source
+                          # (showPlaceholderOption = !multiple && schema.default === undefined)
+                          # that omitting `default` here is what makes the widget render the
+                          # ui:placeholder MenuItem below instead of leaving the option
+                          # silently unselected-but-first-in-list.
+                          ui:placeholder: 'Select an app stack…'
                       # The Database question applies ONLY to fragments whose fragment.yaml sets
                       # needsDB:true (all backend/*, all fullstack/*, and blank/bring-your-own).
                       # Frontends (frontend/angular) and static sites (static/*) never read
@@ -391,7 +398,8 @@ spec:
                             - 'SolidJS (Vite + TypeScript + Tailwind) SPA'
                             - 'Vue 3 (Vite + TypeScript + Tailwind) SPA'
                             - 'Static HTML/CSS/JS site (no framework)'
-                          default: frontend/react
+                          # NO default (D-099): see singleFragment above for the rjsf rationale.
+                          ui:placeholder: 'Select a frontend…'
                         backendFragment:
                           title: Backend
                           type: string
@@ -425,7 +433,8 @@ spec:
                             - 'Ruby on Rails API (API-only, MySQL)'
                             - 'Rust / Axum API (sqlx + MySQL)'
                             - 'Java / Spring Boot API (Spring Web + JDBC + MySQL)'
-                          default: backend/express
+                          # NO default (D-099): see singleFragment above for the rjsf rationale.
+                          ui:placeholder: 'Select a backend…'
                       # FIX-16/D-092: the database enum is split by backendFragment, same two-way
                       # split as the single-app branch — the four Postgres-capable backends
                       # (django/express/fastapi/go) get host-postgres restored; the other 8
@@ -511,7 +520,11 @@ spec:
                     - 'Mobile app (Flutter / Dart, cross-platform .apk + .ipa)'
                     - 'iOS app (Swift / SwiftUI, .ipa)'
                     - 'Mobile app (React Native / Expo, cross-platform .apk + .ipa)'
-                  default: mobile/flutter
+                  # NO default (D-099): see singleFragment above for the rjsf rationale. Kept
+                  # consistent here too even though MOBILE is currently unreachable (F-3/D-058)
+                  # — this branch stays structurally valid and this is exactly the property
+                  # that should not silently re-default when 'mobile' is restored.
+                  ui:placeholder: 'Select a mobile app stack…'
                 backendFragment:
                   title: Backend (the API your app calls)
                   type: string
@@ -544,7 +557,8 @@ spec:
                     - 'Ruby on Rails API (API-only, MySQL)'
                     - 'Rust / Axum API (sqlx + MySQL)'
                     - 'Java / Spring Boot API (Spring Web + JDBC + MySQL)'
-                  default: backend/express
+                  # NO default (D-099): see singleFragment above for the rjsf rationale.
+                  ui:placeholder: 'Select a backend…'
               # FIX-16/D-092: the database enum is split by backendFragment, same split as the
               # other two branches — the four Postgres-capable backends (django/express/fastapi/
               # go) get host-postgres restored; the other 8 MySQL-only backends do not (D-054).
