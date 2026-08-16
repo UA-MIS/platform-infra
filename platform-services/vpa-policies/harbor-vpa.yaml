@@ -1,10 +1,26 @@
-# Active right-sizing for the STATELESS Harbor components (ns harbor). These are the
-# ordinary Deployments of the registry front-plane; each self-heals on restart, so a
-# one-time VPA eviction is a brief (~15-30s) blip on registry auth/serving. Sequence
-# these during a quiet window in the supervised apply — an in-flight tenant image
-# push/pull routed through harbor-core mid-eviction will retry.
+# FIX-20/errata: these four were previously updateMode:Auto, on the B5-era judgment
+# that "stateless Deployment, self-heals on restart, one-time eviction is a brief
+# 15-30s blip" made them safe to actively right-size. That judgment DID NOT hold and
+# is corrected here, not just silently reverted:
 #
-# ⚠ EXCLUDED from Auto (stateful → recommend-only Off VPAs from Goldilocks):
+#   - harbor-registry was EvictedByVPA mid-image-push and hit a Multi-Attach RWO-PVC
+#     delay bringing the new pod up — not the assumed 15-30s, a ~3min 502 window on
+#     the CI-critical push path (DEPLOY-1 outage root-cause). The "self-heals fast"
+#     assumption silently depended on the replacement pod's PVC attach being instant,
+#     which is NOT guaranteed for a ReadWriteOnce volume (the node the old pod was on
+#     has to release it first).
+#   - B4 (dockerhub-proxy repoint) made Harbor the CI critical path for every tenant
+#     build, not just an optional cache — an eviction here now blocks EVERY team's
+#     push/pull, not a locally-contained blip. At ~20-team Tuesday load, "one-time
+#     eviction" becomes "some eviction, unpredictably, during peak CI traffic."
+#
+# Recorded here so this doesn't get "helpfully" flipped back to Auto later: RWO PVC +
+# CI-critical-path = NOT eviction-safe, regardless of how stateless the Deployment
+# looks. updateMode: Initial still lets VPA size these on POD CREATION (a fresh pod
+# from a normal rollout/restart picks up the recommendation) — it just never evicts a
+# RUNNING pod to apply a new one.
+#
+# ⚠ EXCLUDED entirely (stateful → recommend-only Off VPAs from Goldilocks):
 #   - harbor-database → embedded PostgreSQL (StatefulSet, data plane).
 #   - harbor-redis    → cache StatefulSet.
 #   - harbor-trivy    → StatefulSet with a local vuln-DB cache PVC; evicting it forces a
@@ -23,7 +39,7 @@ spec:
     kind: Deployment
     name: harbor-core
   updatePolicy:
-    updateMode: "Auto"
+    updateMode: "Initial"
   resourcePolicy:
     containerPolicies:
       - containerName: "*"
@@ -44,7 +60,7 @@ spec:
     kind: Deployment
     name: harbor-registry
   updatePolicy:
-    updateMode: "Auto"
+    updateMode: "Initial"
   resourcePolicy:
     containerPolicies:
       - containerName: "*"           # two containers (registry + registryctl)
@@ -65,7 +81,7 @@ spec:
     kind: Deployment
     name: harbor-jobservice
   updatePolicy:
-    updateMode: "Auto"
+    updateMode: "Initial"
   resourcePolicy:
     containerPolicies:
       - containerName: "*"
@@ -86,7 +102,7 @@ spec:
     kind: Deployment
     name: harbor-portal
   updatePolicy:
-    updateMode: "Auto"
+    updateMode: "Initial"
   resourcePolicy:
     containerPolicies:
       - containerName: "*"
