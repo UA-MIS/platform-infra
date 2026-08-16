@@ -68,8 +68,16 @@ read_overlay() {
 # that every component shares one tag, so the first entry represents the env (mirrors
 # promote.sh's own live-tag read).
 first_newtag() {
+  # Strip the newTag: prefix, trailing comment/whitespace, then any ONE layer of
+  # matching surrounding quotes -- same fix as promote.sh's LIVE_TAG read (FIX-23):
+  # this function shares the identical bare-extraction pattern, so a quoted overlay
+  # value (e.g. an already-promoted env re-checked here) would otherwise come back
+  # with its quotes still attached. Not currently reachable for corruption via THIS
+  # call site (the SENTINEL comparison below only matches the unquoted v0.0.0 seed
+  # value, and a mismatch here just skips rather than writes) -- fixed anyway since
+  # it's the same extraction defect FIX-23 was filed for.
   grep -m1 -E '^[[:space:]]*newTag:' "$1" 2>/dev/null \
-    | sed 's/^[[:space:]]*newTag:[[:space:]]*//; s/[[:space:]]*#.*$//; s/[[:space:]]*$//'
+    | sed -E 's/^[[:space:]]*newTag:[[:space:]]*//; s/[[:space:]]*#.*$//; s/[[:space:]]*$//; s/^"(.*)"$/\1/; s/^'"'"'(.*)'"'"'$/\1/'
 }
 
 seeded_any=0
