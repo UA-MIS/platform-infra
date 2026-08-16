@@ -27,6 +27,14 @@ resources:
   # FIX-4: Crossplane MR-stuck alerting. Own PrometheusRule file (not folded into
   # alerts.yaml) to avoid a merge conflict with FIX-7, which owns that file.
   - alerts-crossplane-vault.yaml
+  # DEV-2 (PR #481): Crossplane RobotAccount async-race alert (Ready-stuck rule,
+  # keys off Synced=True/Ready-absent-or-False — the false-success shape FIX-4's
+  # CrossplaneManagedResourceNotSynced is structurally blind to). Own PrometheusRule
+  # file, same reasoning as alerts-crossplane-vault.yaml above. Registration here was
+  # missed by the original PR (only added the file, not this reference) — this app's
+  # `resources:` list is explicit, not globbed, so the rule never rendered/deployed
+  # despite the PR merging clean; caught during live post-merge verification.
+  - alerts-crossplane-robot-race.yaml
   # FIX-4: dedicated kube-state-metrics (CustomResourceState) exporting series for
   # the 11 Crossplane MR kinds the Composition creates — the metrics source
   # alerts-crossplane-vault.yaml's CrossplaneManagedResourceNotSynced/
