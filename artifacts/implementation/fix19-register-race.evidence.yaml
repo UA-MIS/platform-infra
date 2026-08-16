@@ -52,8 +52,10 @@ fix:
   why_not_a_workaround: >-
     Not a documented manual retry — the retry is now IN the golden path, runs
     automatically on every scaffold, and fails loudly with a named repo/path/ref/attempt-
-    count error if the retry budget (8 attempts, 500ms initial / 8s cap, ~1 min total) is
-    ever exhausted, rather than silently landing a broken claim.
+    count error if the retry budget (8 attempts, 500ms initial / 8s cap, ~31.5s total —
+    500+1000+2000+4000+8000+8000+8000ms across the 7 inter-attempt sleeps; corrected here
+    per REV-10, this doc previously overstated it as "~1 min") is ever exhausted, rather
+    than silently landing a broken claim.
   files:
     - path: platform-services/backstage/app/plugins/scaffolder-backend-module-capstone/src/actions/waitForRepoContent.ts
       change: >-
