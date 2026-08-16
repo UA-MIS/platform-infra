@@ -545,3 +545,86 @@ spec:
               ClusterSecretStore before looking at the app itself; pair this with
               TenantDatabaseSecretMissing above, which catches the same outage from
               the ESO side.
+
+    # ── (g) Harbor unavailable — CI-critical path (FIX-20) ─────────────────────
+    # Harbor has ZERO scrape coverage today (no ServiceMonitor, up{namespace="harbor"}
+    # returns nothing) — a real gap (proper Harbor-native metrics is a post-Tuesday
+    # backlog item), but kube-state-metrics ALREADY covers every namespace's pods for
+    # free, so this uses that instead of waiting on new exporter wiring.
+    #
+    # WHY THIS EXISTS NOW: harbor-registry was EvictedByVPA mid-image-push
+    # (updateMode:Auto) and hit a Multi-Attach RWO-PVC delay bringing the
+    # replacement up — a ~3min 502 window on every tenant's CI push/pull path
+    # (DEPLOY-1 outage). B4 (dockerhub-proxy repoint) made Harbor that critical
+    # path for EVERY team's build, not an optional cache. FIX-20 also flips the
+    # four harbor-* VPAs to updateMode:Initial (platform-services/vpa-policies/
+    # harbor-vpa.yaml) so this class of eviction stops happening — this alert is
+    # the safety net for whatever still causes a replica to drop (node issues,
+    # crashes, a bad rollout), not a substitute for that fix.
+    #
+    # for: 0m, NOT a longer dwell — verified live, not assumed: querying
+    # kube_deployment_status_replicas_unavailable{namespace="harbor",
+    # deployment="harbor-registry"} across the actual 2026-08-16T01:56:31Z eviction
+    # (kube-state-metrics scrapes + this rule both evaluate on a 60s tick) shows
+    # EXACTLY ONE nonzero sample — 0 at 01:56:00, 1 at 01:57:00, 0 again at 01:58:00.
+    # A `for:` of 1m or more requires the condition to hold across a SECOND
+    # consecutive evaluation and would NOT have fired for this exact incident —
+    # confirmed with a promtool unit test reproducing this precise sample pattern
+    # against for:0m/1m/2m/3m variants (only 0m fires). All four harbor-*
+    # Deployments are single-replica (replicas:1), so "one scrape sample of
+    # unavailable" is the SHORTEST detectable outage this metric's 60s granularity
+    # can ever show — there is no shorter real incident to tune for. 0m is not
+    # over-sensitive noise here: with VPA evictions stopped by the Initial-mode fix
+    # above, a genuine replica drop on these singletons should be rare (an ArgoCD
+    # deploy, a crash, a node issue) — each one IS worth knowing about for
+    # CI-critical infrastructure, not "cry wolf" background noise.
+    #
+    # RUNBOOK NOTE (REV-11 advisory): a brief page during a DELIBERATE Harbor
+    # version bump or a planned node drain is EXPECTED — acknowledge it, don't
+    # treat it as a fresh incident. The alert has no way to distinguish "planned
+    # maintenance touched a single-replica Deployment" from "something broke";
+    # that's what the on-call human is for. If you're about to bump Harbor's
+    # chart/image or drain a node running harbor-*, expect this to fire and
+    # that's fine — confirm the replacement pod comes Ready promptly and move on.
+    - name: harbor-availability
+      rules:
+        - alert: HarborCriticalPathUnavailable
+          expr: >-
+            kube_deployment_status_replicas_unavailable{namespace="harbor", deployment=~"harbor-registry|harbor-core"} > 0
+          for: 0m
+          labels:
+            severity: critical
+            impact: student-facing
+          annotations:
+            summary: "Harbor {{ $labels.deployment }} has an unavailable replica — CI push/pull path"
+            description: >-
+              {{ $labels.deployment }} (namespace harbor) has {{ $value }}
+              unavailable replica(s) — this is the exact signature of the
+              DEPLOY-1 outage (a VPA eviction + slow RWO-PVC re-attach produced a
+              ~3min 502 window on every tenant's image push/pull). Both
+              harbor-registry and harbor-core are single-replica, so ANY drop
+              means the whole CI critical path is down for every team right now,
+              not degraded. Check `kubectl -n harbor get pods -l app=harbor,component={{ $labels.deployment }}`
+              and `kubectl -n harbor describe pod <pod>` for the cause (VPA
+              eviction, crash, node issue, PVC attach delay). If it's a VPA
+              eviction, `kubectl -n harbor get vpa {{ $labels.deployment }} -o
+              jsonpath='{.spec.updatePolicy.updateMode}'` should read `Initial`
+              (FIX-20) — if it reads `Auto`, that is itself the bug: file it,
+              do not just fix the symptom again.
+        - alert: HarborSupportPathUnavailable
+          expr: >-
+            kube_deployment_status_replicas_unavailable{namespace="harbor", deployment=~"harbor-jobservice|harbor-portal"} > 0
+          for: 0m
+          labels:
+            severity: warning
+            impact: student-facing
+          annotations:
+            summary: "Harbor {{ $labels.deployment }} has an unavailable replica"
+            description: >-
+              {{ $labels.deployment }} (namespace harbor) has {{ $value }}
+              unavailable replica(s). jobservice handles async jobs (GC,
+              replication, retention) — a brief drop delays those, it does not
+              block a live push/pull. portal is the web UI only — the registry
+              API (what CI actually talks to) is unaffected. warning, not
+              critical, for exactly that reason; see HarborCriticalPathUnavailable
+              for the CI-blocking pair (registry/core).

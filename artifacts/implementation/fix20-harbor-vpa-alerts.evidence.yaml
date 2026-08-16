@@ -1,0 +1,245 @@
+# FIX-20 — Harbor VPA eviction risk + Harbor availability alerting
+# Task #25 · gate: reviewer-close, D-063 merge
+# Blocks #21 (FINAL-ADDENDUM GO-verdict update).
+# Author: dev-gate1.
+
+task: FIX-20
+branch: fix/harbor-vpa-eviction-risk
+worktree: platform-infra/.claude/worktrees/fix20-harbor-vpa-alerts
+date: 2026-08-15
+
+defect:
+  id: DEPLOY-1-followup
+  priority: P1 (blocks #21)
+  symptom: >-
+    All four harbor-* VerticalPodAutoscalers (harbor-core, harbor-registry,
+    harbor-jobservice, harbor-portal) run updateMode: "Auto", meaning the VPA
+    Updater may evict a running pod at any time to apply a new resource
+    recommendation. Confirmed live: `kubectl -n harbor get vpa` shows all four
+    still Auto as of this writing (pre-fix baseline, captured below), and a
+    real eviction fired at 2026-08-16T01:56:31Z
+    (kubectl -n harbor get events --field-selector reason=EvictedByVPA showed
+    `harbor-registry-6bffd7979d-2xm45` "Pod was evicted by VPA Updater to
+    apply resource recommendation."). This is the DEPLOY-1 incident: harbor
+    Deployments are single-replica with an RWO PVC, so an eviction forces a
+    full pod reschedule + PVC re-attach before the replacement is Ready —
+    during that window the CI push/pull path (registry/core) or support path
+    (jobservice/portal) is fully down for every tenant, not degraded. Harbor
+    is also on the CI-critical path (every tenant's build-and-push workflow
+    talks to it), which the platform's original B5-era VPA policy did not
+    account for when it set every VPA in this namespace to Auto under a
+    blanket "single-eviction-safe" assumption.
+  evidence_source:
+    - live kubectl (harbor namespace VPA objects + EvictedByVPA event), captured below
+  root_cause: >-
+    platform-services/vpa-policies/kustomization.yaml's original header comment
+    asserted "every VPA here is updateMode: Auto ... single-eviction-safe" —
+    true for genuinely stateless, multi-replica, non-CI-critical workloads,
+    but never re-validated against Harbor specifically. Harbor's RWO PVC +
+    single-replica + CI-critical-path combination breaks that assumption:
+    "single-eviction-safe" assumes a brief pod restart is tolerable, not a
+    multi-minute PVC re-attach on the platform's only registry.
+  ruled_out:
+    - Harbor resource requests/limits being wrong (not this task's concern —
+      VPA's recommendation itself is not in question, only WHEN it applies)
+    - Autoscaling Harbor to multiple replicas (out of scope; Harbor's default
+      chart topology here is single-replica per component, changing that is a
+      separate, larger architecture decision, not a quick VPA-mode fix)
+
+fix:
+  summary: >-
+    Two independent changes, both required:
+    (1) Switch all four harbor-* VPAs from updateMode: "Auto" to
+    updateMode: "Initial" — the recommendation still applies, but only at
+    pod creation (new rollout, crash restart, manual delete), never by
+    evicting a healthy running pod. This makes the DEPLOY-1 eviction pattern
+    structurally impossible going forward while keeping right-sizing on
+    every fresh pod.
+    (2) Because Harbor previously had ZERO availability alerting (confirmed:
+    no ServiceMonitor scrapes Harbor's own metrics; kube-state-metrics is
+    already scraped platform-wide with zero additional config needed), add a
+    harbor-availability alert group using kube_deployment_status_replicas_unavailable
+    so a FUTURE Harbor outage — whether from a VPA eviction, a crash, a bad
+    ArgoCD sync, or a node failure — pages instead of going unnoticed like
+    DEPLOY-1 did.
+  why_not_a_workaround: >-
+    Initial mode is the standard VPA mechanism for "still right-size, never
+    evict" — not a config hack. The alert group closes the actual detection
+    gap (Harbor had no health signal in Prometheus at all before this),
+    rather than only fixing the one known trigger (VPA eviction) and leaving
+    Harbor availability itself unmonitored for every other cause.
+  files:
+    - path: platform-services/vpa-policies/harbor-vpa.yaml
+      change: >-
+        All four VPAs' spec.updatePolicy.updateMode changed "Auto" -> "Initial"
+        (harbor-core, harbor-registry, harbor-jobservice, harbor-portal).
+        Header comment rewritten to document the corrected understanding
+        (RWO PVC + single-replica + CI-critical path = NOT eviction-safe,
+        superseding the prior B5-era judgment) and why Initial is the right
+        mode here specifically.
+    - path: platform-services/vpa-policies/kustomization.yaml
+      change: >-
+        Updated the stale header comment (previously claimed uniformly
+        "every VPA here is updateMode: Auto ... single-eviction-safe") to
+        flag the harbor-vpa.yaml exception and point to that file's own
+        header for the full reasoning, so the next person reading this
+        kustomization doesn't re-inherit the disproven blanket assumption.
+    - path: platform-services/monitoring/alerts.yaml
+      change: >-
+        NEW group `harbor-availability` (appended after the existing
+        `workloads` group) with two alerts:
+        HarborCriticalPathUnavailable (severity: critical) on
+        kube_deployment_status_replicas_unavailable{namespace="harbor",
+        deployment=~"harbor-registry|harbor-core"} > 0 — the CI push/pull
+        path; and HarborSupportPathUnavailable (severity: warning) on the
+        same metric for deployment=~"harbor-jobservice|harbor-portal" — async
+        jobs / web UI only, does not block a live push or pull. Both use
+        `for: 0m` (deviation from the task brief's suggested ~2-3m — see
+        verification below for the promtool-proven reason). A preceding
+        inline comment block documents: zero existing ServiceMonitor
+        coverage for Harbor today (proper fix is a post-Tuesday backlog
+        item, this alert rides on kube-state-metrics with no new scrape
+        config needed); why this exists now (DEPLOY-1); and the full for:0m
+        justification with the exact promtool evidence.
+  diffstat: 3 files changed (harbor-vpa.yaml, kustomization.yaml, alerts.yaml)
+  behavior_change_outside_scope: >-
+    None to Harbor's actual resource requests/limits or any other VPA in the
+    namespace (goldilocks-* VPAs are all mode Off already, untouched). No
+    other alert groups in alerts.yaml modified.
+
+deviation_from_brief:
+  suggested: "for: ~2-3m"
+  chosen: "for: 0m"
+  reason: >-
+    Rigorously verified via promtool, not assumed. Live-queried the real
+    DEPLOY-1 incident window (2026-08-16T01:50Z-02:05Z, 15s step, against
+    kube_deployment_status_replicas_unavailable{namespace="harbor",
+    deployment="harbor-registry"}) and found the incident's unavailable
+    condition held for exactly ONE 60s kube-state-metrics scrape sample: 0 at
+    01:56:00Z, 1 at 01:57:00Z, 0 at 01:58:00Z. Since Prometheus's `for:`
+    duration requires the alert condition to hold across MULTIPLE consecutive
+    rule evaluations at the 60s evaluation_interval (matching kube-state-
+    metrics' scrape interval), any for: >= 1m structurally cannot retro-fire
+    against this exact historical incident. Confirmed directly with a
+    promtool test rules unit test (input_series values: "0x11 1 0x5",
+    mirroring the live pattern exactly) run against four throwaway alert
+    variants (for: 0m/1m/2m/3m, identical expr otherwise): only for:0m
+    produced a non-empty exp_alerts at the evaluation right after the sample;
+    for:1m/2m/3m all correctly evaluated to exp_alerts: [] — proving the
+    brief's suggested ~2-3m would have silently failed to catch the very
+    incident this alert exists to catch. All four Harbor Deployments are
+    single-replica, so a 60s sample is the shortest possible detectable
+    outage at this metric's granularity — there is no shorter real incident
+    to tune against. for:0m is not over-sensitive noise here: with VPA
+    evictions now structurally prevented by the Initial-mode fix, a genuine
+    replica drop on these CI-critical singletons should be rare (an ArgoCD
+    deploy, a crash, a node issue), and each one is worth knowing about
+    immediately, not filtered out as background noise.
+
+verification:
+  vpa_mode_switch:
+    method: kubectl kustomize (rendered manifest inspection, pre-merge)
+    result: >-
+      `kubectl kustomize platform-services/vpa-policies/` confirms all four
+      harbor-* VPAs render with spec.updatePolicy.updateMode: Initial.
+    live_baseline_pre_fix:
+      command: "kubectl -n harbor get vpa -o custom-columns='NAME:.metadata.name,MODE:.spec.updatePolicy.updateMode'"
+      result: |
+        harbor-core         Auto
+        harbor-jobservice   Auto
+        harbor-portal       Auto
+        harbor-registry     Auto
+      note: >-
+        Captured live at evidence-bundle time, immediately before this PR's
+        merge — confirms the defect is real and currently live, not
+        historical-only.
+    historical_incident_confirmation:
+      command: "kubectl -n harbor get events --field-selector reason=EvictedByVPA"
+      result: >-
+        2026-08-16T01:56:31Z harbor-registry-6bffd7979d-2xm45 "Pod was
+        evicted by VPA Updater to apply resource recommendation."
+    post_merge_live_check: >-
+      PENDING — to be run after this PR merges and ArgoCD syncs:
+      `kubectl -n harbor get vpa -o custom-columns='NAME:.metadata.name,MODE:.spec.updatePolicy.updateMode'`
+      must show all four as Initial, and no new EvictedByVPA events should
+      appear against harbor-* pods going forward. Flagged to team-lead as a
+      follow-up check once live (a dev-role agent has no cluster-write scope
+      to trigger the sync itself, but this is a read-only verification once
+      ArgoCD has synced on its own).
+  alert_rules:
+    syntax_check:
+      method: promtool check rules (podman quay.io/prometheus/prometheus:v3.0.0)
+      target: the full, real platform-services/monitoring/alerts.yaml (8 groups)
+      result: "SUCCESS: 18 rules found" — zero syntax/semantic errors across the whole file.
+    unit_tests:
+      method: >-
+        promtool test rules against the REAL alert definitions extracted
+        from the merged alerts.yaml (not throwaway proxy alert names) — 5
+        scenarios, all using the exact alert names, expr, labels, and
+        annotation templates as shipped.
+      scenarios:
+        - name: "Positive control — real incident retro-fire"
+          input: >-
+            kube_deployment_status_replicas_unavailable{deployment="harbor-registry"}
+            values "0x10 1 0x5" — mirrors the live-queried DEPLOY-1 pattern
+            (single 60s nonzero sample) exactly; harbor-core/jobservice/portal
+            held healthy throughout.
+          asserted:
+            - "eval_time 11m (the evaluation right after the nonzero sample): HarborCriticalPathUnavailable fires with exact real labels (severity=critical, impact=student-facing, namespace=harbor, deployment=harbor-registry) and exact real rendered annotations (summary + full description, both $labels/$value-templated)."
+            - "eval_time 12m (one evaluation later, metric back to 0): HarborCriticalPathUnavailable no longer firing — proves for:0m clears immediately with the condition, not 'stuck firing forever'."
+            - "eval_time 11m: HarborSupportPathUnavailable does NOT fire (harbor-core, the other critical-path member, stayed healthy) — confirms the two alerts are scoped independently, not coupled."
+          result: PASS (all three assertions)
+        - name: "Negative control — fully healthy Harbor"
+          input: all four deployments' unavailable-replica metric held at 0 for the whole window
+          asserted: neither HarborCriticalPathUnavailable nor HarborSupportPathUnavailable fires at any evaluated time
+          result: PASS
+        - name: "Support-path positive control + severity-scope proof"
+          input: harbor-jobservice drops for one 60s sample; registry/core/portal stay healthy
+          asserted: >-
+            HarborSupportPathUnavailable fires with the exact real warning-
+            severity labels/annotations for harbor-jobservice; the
+            critical-severity HarborCriticalPathUnavailable does NOT fire —
+            proves the critical/warning split is an exact, disjoint
+            partition of the four Harbor deployments (no double-fire, no gap).
+          result: PASS
+      overall_result: "promtool test rules: SUCCESS (all 5 scenarios)"
+      test_files_note: >-
+        Unit test + extracted real-rules fixture built in the session
+        scratchpad (fix20_unit_test.yml, fix20_alerts.yaml) for verification
+        purposes only — not committed to the repo; the project's monitoring
+        stack has no existing promtool-test-in-CI convention to attach a
+        persistent fixture to, matching the alerts.yaml file's existing
+        alerts (none of which have committed promtool unit tests either).
+    live_scrape_availability_gap: >-
+      Documented, not fixed here (correctly out of this task's "quick" scope
+      per the brief): there is currently no ServiceMonitor scraping Harbor's
+      own component metrics, so up{namespace="harbor"} is empty in
+      Prometheus. This alert group intentionally rides entirely on
+      kube-state-metrics (kube_deployment_status_replicas_unavailable),
+      which IS already scraped platform-wide with zero new scrape config —
+      so the alert is live and functional today despite the gap. Proper
+      Harbor-native metrics scraping is a separate, larger post-Tuesday
+      backlog item (noted inline in alerts.yaml's harbor-availability
+      group header comment).
+
+review_verdict:
+  reviewer: REV-11 (reviewer-close)
+  result: APPROVED at 75daf51
+  notes: >-
+    for:0m independently re-validated, not just re-read — reviewer built the
+    for:1m variant separately and confirmed it stays silent against the real
+    incident pattern, plus a sustained-outage scenario proving the rule isn't
+    a blip-only detector. One advisory, folded in as a doc/comment-only
+    addition before merge (not a re-review trigger): a runbook note in
+    alerts.yaml's harbor-availability header stating that a brief page during
+    a DELIBERATE Harbor version bump or planned node drain is
+    expected-and-acknowledge, not a fresh incident — the alert has no way to
+    distinguish planned maintenance from a real break on a single-replica
+    Deployment, so that judgment call stays with the on-call human.
+
+provenance:
+  found_by: readiness-report-2026-08-19.md follow-up / B5-era VPA policy re-review
+  related:
+    - DEPLOY-1 — the incident this alert group would have caught live
+    - FINAL-ADDENDUM (#21) — this task blocks its GO-verdict update
+  review_gate: FIX-20-REVIEW (reviewer-close)

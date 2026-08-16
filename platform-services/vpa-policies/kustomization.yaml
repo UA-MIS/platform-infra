@@ -2,10 +2,18 @@
 # VerticalPodAutoscaler objects (see applicationsets/vpa-platform-policies-app.yaml).
 # Directory-source ArgoCD app; each object carries its own namespace.
 #
-# Every VPA here is updateMode: Auto + controlledValues: RequestsOnly on a STATELESS,
-# single-eviction-safe workload. Stateful / quorum / request-path workloads are
-# excluded (they keep recommend-only Off VPAs from Goldilocks) — see the header of each
-# file and docs/operator/resource-governance.md for the full exclusion rationale.
+# Every VPA here is controlledValues: RequestsOnly, mostly updateMode: Auto on a
+# STATELESS, single-eviction-safe workload. Stateful / quorum / request-path workloads
+# are excluded entirely (they keep recommend-only Off VPAs from Goldilocks) — see the
+# header of each file and docs/operator/resource-governance.md for the full exclusion
+# rationale.
+#
+# EXCEPTION (FIX-20, errata to the "single-eviction-safe" claim above): the four
+# harbor-* VPAs (harbor-vpa.yaml) are updateMode: Initial, not Auto — a live eviction
+# (harbor-registry, mid-image-push) combined with an RWO-PVC Multi-Attach delay
+# produced a ~3min 502 window on the CI-critical push path, not the assumed brief
+# blip, and B4 made Harbor that critical path for every tenant. See harbor-vpa.yaml's
+# own header for the full corrected reasoning.
 #
 # NOTE: Auto only actively evicts single-replica workloads because the vpa-updater is
 # run with --min-replicas=1 (set in applicationsets/vpa-app.yaml). Without that flag the
