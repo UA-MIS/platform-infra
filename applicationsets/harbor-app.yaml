@@ -157,12 +157,28 @@ spec:
         # "response completed" before the client gave up, consistent with
         # hashing throughput being CPU-starved at 500m. Bumped to 2000m (2
         # full cores -- node capstone-w1 has 16 allocatable, ample headroom)
-        # /256Mi. Memory untouched: never observed near its ceiling in
-        # either incident, CPU was the entire story both times.
+        # /256Mi. Memory untouched at the time: never observed near its
+        # ceiling in either CPU-throttling incident.
+        #
+        # That "memory untouched" call turned out to be premature, not wrong
+        # in isolation -- a THIRD incident the same night. Once the actual
+        # root cause (Traefik's websecure entrypoint readTimeout, default
+        # 60s, see traefik-app.yaml) was fixed, requests could finally run
+        # to completion instead of being cut off by Traefik at ~60-70s. That
+        # unmasked a real memory ceiling: harbor-registry OOMKilled (exitCode
+        # 137, kubectl containerStatuses.lastState.terminated.reason)
+        # partway through a full-length large-blob push, confirmed live
+        # 2026-08-16T07:05:13Z -- the OOM timestamp lines up exactly with
+        # the push's failure. The 60s timeout had been an ACCIDENTAL safety
+        # net: it always killed the connection before the registry got far
+        # enough into a large blob for memory to matter, so the ceiling was
+        # invisible until the timeout itself was fixed. Bumped limit
+        # 256Mi -> 1Gi. CPU (2000m) is untouched -- this incident is memory-
+        # shaped (OOMKilled), not CPU-shaped (no throttling signature).
         # registryctl (`controller` below) is untouched: it serves Harbor's
         # own admin/GC API, not the Docker Registry v2 blob-upload path
-        # Kaniko's PATCH requests hit, and showed no throttling in either
-        # incident.
+        # Kaniko's PATCH requests hit, and showed no throttling or memory
+        # pressure in any of the three incidents.
         portal:
           replicas: 1
           resources:
@@ -182,8 +198,8 @@ spec:
           replicas: 1
           registry:
             resources:
-              requests: { cpu: 100m, memory: 64Mi }
-              limits: { cpu: 2000m, memory: 256Mi }
+              requests: { cpu: 100m, memory: 128Mi }
+              limits: { cpu: 2000m, memory: 1Gi }
           controller:
             resources:
               requests: { cpu: 20m, memory: 64Mi }
