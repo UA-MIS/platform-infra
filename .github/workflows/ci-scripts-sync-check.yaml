@@ -1,0 +1,84 @@
+# ============================================================================
+# ci-scripts-sync-check.yaml — FIX-24 (P0/P1, PL-B5-1 class): a CI-enforced guard
+# against the canonical/scaffold copy-drift class that let bump-image.sh silently
+# reintroduce two previously-fixed bugs (the #341 numeric-tag YAML-int crash and the
+# FIX-18 `[skip ci]` tag-blackhole) into every real tenant's CI pipeline.
+#
+# WHY TWO COPIES EXIST AT ALL: .github/actions/tenant-ci-scripts/scripts/*.sh is the
+# CANONICAL copy the tenant-ci-scripts composite action installs into every tenant's
+# workspace at CI runtime (see that action's header), overriding whatever the tenant
+# repo committed. platform-services/backstage/templates/_fragments/_contract/.devops/
+# ci/*.sh is the SAME set of scripts, shipped into a freshly-scaffolded tenant repo so
+# it has a working local/manual copy from day one (and so the promote.sh/bump-image.sh/
+# seed-initial-envs.sh unit test suites under that directory have something to test).
+# Both copies are meant to be IDENTICAL in behavior; nothing enforced that before this
+# check, and "comments-as-a-guard" (documenting the intent) was insufficient — the same
+# root cause named in PL-B5-1 (project-brain.md: "interim CI check for composition<->
+# blueprint sync is now URGENT-adjacent... comments-as-guard is how both happened").
+#
+# WHAT THIS CHECKS:
+#   1. Byte-for-byte diff of the three shared scripts (resolve-image.sh,
+#      resolve-components.sh, bump-image.sh) between the canonical and scaffold
+#      locations. A PR that changes one without the other fails loudly, at review
+#      time, instead of silently shipping a drifted canonical copy to every tenant.
+#   2. Runs the scaffold's own promote.sh / bump-image.sh / seed-initial-envs.sh unit
+#      test suites (previously developer-run-only, never wired into CI at all — a
+#      second, independent gap this closes: FIX-23's regression tests for the
+#      promote.sh quote bug would NOT have been enforced by CI before this).
+# ============================================================================
+name: ci-scripts-sync-check
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/actions/tenant-ci-scripts/scripts/**"
+      - "platform-services/backstage/templates/_fragments/_contract/.devops/ci/**"
+      - ".github/workflows/ci-scripts-sync-check.yaml"
+  pull_request:
+    paths:
+      - ".github/actions/tenant-ci-scripts/scripts/**"
+      - "platform-services/backstage/templates/_fragments/_contract/.devops/ci/**"
+      - ".github/workflows/ci-scripts-sync-check.yaml"
+
+permissions:
+  contents: read
+
+jobs:
+  sync-check:
+    runs-on: ua-mis-kaniko
+    container:
+      image: node:24-trixie-slim
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 1
+
+      - name: Diff canonical vs scaffold copies (must be byte-identical)
+        run: |
+          set -eu
+          CANON=".github/actions/tenant-ci-scripts/scripts"
+          SCAFFOLD="platform-services/backstage/templates/_fragments/_contract/.devops/ci"
+          fail=0
+          for s in resolve-image.sh resolve-components.sh bump-image.sh; do
+            if ! diff -u "${CANON}/${s}" "${SCAFFOLD}/${s}"; then
+              echo "::error::${s} has DRIFTED between the canonical copy (${CANON}/${s}, installed into every tenant's CI at runtime) and the scaffold copy (${SCAFFOLD}/${s}, what a fresh tenant repo actually commits). These must stay byte-identical -- see this workflow's header for why. Sync them before merging (FIX-24)."
+              fail=1
+            fi
+          done
+          [ "${fail}" -eq 0 ] || exit 1
+          echo "canonical and scaffold CI scripts are in sync."
+
+      - name: Run promote.sh / bump-image.sh / seed-initial-envs.sh unit tests
+        run: |
+          set -eu
+          cd platform-services/backstage/templates/_fragments/_contract/.devops/ci
+          # git is needed by all three suites (they git-init throwaway fixture repos).
+          if ! command -v git >/dev/null 2>&1; then
+            apt-get update -qq && apt-get install -y -qq --no-install-recommends git >/dev/null
+          fi
+          for t in promote.test.sh bump-image.test.sh seed-initial-envs.test.sh; do
+            echo "==> running ${t}"
+            bash "${t}"
+          done
