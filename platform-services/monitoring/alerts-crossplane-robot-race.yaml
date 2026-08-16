@@ -1,0 +1,81 @@
+# Crossplane RobotAccount async-race alert (FIX-4 follow-up, D-063 merge).
+#
+# THE GAP THIS CLOSES. FINAL-ADDENDUM (task #21,
+# artifacts/implementation/final-addendum.evidence.yaml, finding
+# PROVIDER-HARBOR-ASYNC-RACE) reproduced the provider-harbor RobotAccount async-creation
+# race 3x live across two freshly scaffolded tenants: 1x a logged optimistic-concurrency
+# conflict (recovered on 1st retry), and 2x a SILENT false-positive-success variant —
+# AsyncOperation/LastAsyncOperation both report Success, no error condition anywhere, but
+# the external-name (the Harbor robot ID) was never actually written back to the MR.
+# Recovery is known, fast, and tenant-scoped, but nothing detected or alerted on the
+# stuck state. This is the "at minimum a targeted alert" the addendum recommended,
+# mirroring FIX-20's pattern of a dedicated alert file per fix.
+#
+# WHY THIS IS NOT REDUNDANT WITH CrossplaneManagedResourceNotSynced
+# (alerts-crossplane-vault.yaml): that rule keys off `Synced=False`. The false-success
+# race's entire defining shape is that Synced STAYS True the whole time — the provider
+# genuinely believes the async create succeeded — while Ready never flips. A Synced-only
+# watchdog is structurally blind to this variant; that is the whole reason this second
+# rule exists, not a duplicate of the first. Because the two rules key off DISJOINT
+# values of the same `Synced` condition (this one requires Synced==1, the other requires
+# Synced==0), they cannot both fire for the same underlying condition state at once — no
+# double-page overlap between the two rules for a single stuck MR.
+#
+# METRIC SOURCE: platform-services/monitoring/crossplane-mr-metrics.yaml, the SAME
+# dedicated kube-state-metrics instance FIX-4 shipped (no changes needed here —
+# RobotAccount's `status_condition` gauge already carries both the `Synced` and `Ready`
+# condition types via the shared `&mrcond` metric definition; see that file's ConfigMap).
+#
+# EXPRESSION PATTERN: reuses the same `unless on (customresource_kind, name)` idiom
+# alerts-crossplane-vault.yaml's CrossplaneManagedResourceNeverReconciled already
+# established, for the same reason — it is what makes the rule fire whether the Ready
+# condition is explicitly False OR entirely absent (a stuck async-create can produce
+# either shape; a bare `== 0` comparison alone would miss the "absent" case).
+#
+# `for: 10m` — not 15m like the sibling Synced watchdog. The addendum's own reproductions
+# self-healed on retry within ~1-2 minutes when the race resolved normally; 10m sustained
+# is comfortably past that self-heal window, so a firing alert means genuinely stuck, not
+# a normal in-flight retry.
+#
+# SEPARATE FILE, same rationale as alerts-crossplane-vault.yaml's own header: avoids
+# adding another concurrent editor to a shared rules file, and Prometheus discovers every
+# PrometheusRule object cluster-wide regardless of which file it lives in.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: platform-crossplane-robot-race
+  namespace: monitoring
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    platform.capstone/component: platform
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: crossplane-robot-race
+      rules:
+        - alert: CrossplaneRobotAccountReadyStuck
+          expr: >-
+            kube_customresource_status_condition{customresource_kind="RobotAccount", type="Synced"} == 1
+            unless on (customresource_kind, name)
+            kube_customresource_status_condition{customresource_kind="RobotAccount", type="Ready"} == 1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Harbor RobotAccount {{ $labels.name }} Synced but stuck not-Ready"
+            description: >-
+              RobotAccount {{ $labels.name }} has reported Synced=True for 10m+ while
+              Ready has never flipped True — the provider-harbor async-creation callback
+              race (PROVIDER-HARBOR-ASYNC-RACE,
+              artifacts/implementation/final-addendum.evidence.yaml): the async operation
+              reports Success with no error condition, but the external-name was never
+              actually written back, so CrossplaneManagedResourceNotSynced (which keys
+              off Synced=False) cannot see this — catching that false-success variant is
+              this rule's entire point. The race normally self-heals in 1-2m; 10m
+              sustained means genuinely stuck. Recovery: `kubectl delete
+              robotaccount.robotaccount.harbor.crossplane.io {{ $labels.name }}` (the
+              CapstoneTenant XR's Composition recomposes it fresh), then force-sync the
+              tenant's PushSecret/ExternalSecret so the refreshed connection secret
+              reaches Vault and arc-runners.
