@@ -65,9 +65,21 @@ if command -v yq >/dev/null 2>&1; then
   LIVE_TAG="$(yq -r '.images[0].newTag' "${FROM_KUSTOMIZATION}")"
   MISMATCHED="$(LIVE_TAG="${LIVE_TAG}" yq -r '[.images[].newTag] | map(select(. != strenv(LIVE_TAG))) | length' "${FROM_KUSTOMIZATION}")"
 else
-  LIVE_TAG="$(grep -m1 -E '^[[:space:]]*newTag:' "${FROM_KUSTOMIZATION}" | sed 's/^[[:space:]]*newTag:[[:space:]]*//; s/[[:space:]]*#.*$//')"
+  # Strip the newTag: prefix, any trailing comment, then any ONE layer of matching
+  # surrounding quotes (bump-image.sh's sed fallback always double-quotes its writes;
+  # single-quote handling is defensive). Without this, a quoted staging value like
+  # `newTag: "1.0.0"` extracts LIVE_TAG=`"1.0.0"` (quotes included) -- bump-image.sh's
+  # sed fallback then re-quotes that verbatim into prod as `newTag: ""1.0.0""`, invalid
+  # YAML that leaves prod's Application ComparisonError/unsyncable (FIX-23, source-
+  # confirmed against a live promote run). MATCHING_COUNT below must compare against
+  # the SAME bare value kustomization.yaml actually stores (quoted), so it re-wraps
+  # LIVE_TAG in double quotes for the grep -- see the comment there.
+  LIVE_TAG="$(grep -m1 -E '^[[:space:]]*newTag:' "${FROM_KUSTOMIZATION}" | sed -E 's/^[[:space:]]*newTag:[[:space:]]*//; s/[[:space:]]*#.*$//; s/[[:space:]]*$//; s/^"(.*)"$/\1/; s/^'"'"'(.*)'"'"'$/\1/')"
   TOTAL_COUNT="$(grep -cE '^[[:space:]]*newTag:' "${FROM_KUSTOMIZATION}")"
-  MATCHING_COUNT="$(grep -cE "^[[:space:]]*newTag:[[:space:]]*${LIVE_TAG}\$" "${FROM_KUSTOMIZATION}")"
+  # LIVE_TAG is now bare (quotes stripped above); match it against the overlay's stored
+  # form, which may be bare (e.g. `v1.2.3`) or double-quoted (e.g. an all-numeric sha,
+  # meow-dev #341) -- so check for either rendering, not just the bare one.
+  MATCHING_COUNT="$(grep -cE "^[[:space:]]*newTag:[[:space:]]*\"?${LIVE_TAG}\"?\$" "${FROM_KUSTOMIZATION}")"
   MISMATCHED=$(( TOTAL_COUNT - MATCHING_COUNT ))
 fi
 
