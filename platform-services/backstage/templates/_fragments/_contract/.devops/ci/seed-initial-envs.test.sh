@@ -88,7 +88,15 @@ for b in bash sh sed cut head dirname awk printf cat env grep git; do
   src="$(command -v "$b" 2>/dev/null)" && [ -n "$src" ] && ln -sf "$src" "${NOYQ_DIR}/$b"
 done
 
-count_tag() { local n; n="$(grep -c "newTag: $1" "$2" 2>/dev/null)" || n=0; printf '%s' "${n}"; }
+# Quote-tolerant (same fix as bump-image.test.sh's own count_tag, FIX-24): bump-image.sh
+# ALWAYS quotes on the sed fallback (unconditionally -- it can't do YAML-aware
+# conditional quoting the way yq's strenv can) but only conditionally on the yq path
+# (strenv leaves an unambiguous non-numeric-looking string like "abc1234" or "7.7.7"
+# bare). A bare `newTag: $1` grep silently never matched the sed-fallback cases (4) here
+# -- a pre-existing test bug, not a script bug: seed-initial-envs.sh + bump-image.sh
+# wrote the correct value with exit 0 every time, confirmed by hand-tracing this exact
+# scenario with `bash -x`; only this assertion helper was stale.
+count_tag() { local n; n="$(grep -Ec "newTag: \"?$1\"?" "$2" 2>/dev/null)" || n=0; printf '%s' "${n}"; }
 assert_eq() { if [ "$2" = "$3" ]; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); echo "FAIL [$1]: got '$2' want '$3'"; fi; }
 
 echo "== seed-initial-envs.sh tests =="

@@ -119,6 +119,24 @@ jobs:
   # tag/env/push decision is computed in exactly one place (no drift).
   # ---------------------------------------------------------------------------
   prepare:
+    # FIX-24: identity-based loop-prevention guard (the FIX-18/D-030 mechanism), added
+    # HERE because it was previously missing from the centralized reusable-workflow path
+    # entirely -- this job had no guard of its own, and the canonical bump-image.sh
+    # (installed below) carried `[skip ci]` as the ONLY loop-prevention, which is exactly
+    # the mechanism FIX-18 replaced elsewhere for blackholing future tag pushes on the
+    # same commit (see bump-image.sh's header comment, and the skeleton's single-
+    # component build-and-push.yaml's `resolve` job for the identical pattern this
+    # mirrors). Skips this ENTIRE reusable-workflow run -- and by `needs:`/output-gating
+    # cascade, every downstream job -- ONLY for a branch push whose head commit was
+    # authored by the platform's own bump/promote identity (ci@capstone.uamishub.com).
+    # A TAG push is NEVER skipped here, even one pointing at a bump/promote commit --
+    # that is exactly the case the old `[skip ci]` marker broke. `github.event` reflects
+    # the CALLER's triggering event for a reusable workflow (workflow_call shares the
+    # caller's context; see this file's own header comment), so this check is accurate
+    # regardless of which tenant's thin caller invoked this workflow.
+    if: >-
+      !(github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') &&
+        github.event.head_commit.author.email == 'ci@capstone.uamishub.com')
     runs-on: ${{ inputs.runner }}
     # node:24-trixie (NOT -slim): resolve-image.sh's git-describe needs git, and we
     # curl yq. -slim ships neither git nor curl.
