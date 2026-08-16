@@ -222,6 +222,21 @@ verification:
       backlog item (noted inline in alerts.yaml's harbor-availability
       group header comment).
 
+review_verdict:
+  reviewer: REV-11 (reviewer-close)
+  result: APPROVED at 75daf51
+  notes: >-
+    for:0m independently re-validated, not just re-read — reviewer built the
+    for:1m variant separately and confirmed it stays silent against the real
+    incident pattern, plus a sustained-outage scenario proving the rule isn't
+    a blip-only detector. One advisory, folded in as a doc/comment-only
+    addition before merge (not a re-review trigger): a runbook note in
+    alerts.yaml's harbor-availability header stating that a brief page during
+    a DELIBERATE Harbor version bump or planned node drain is
+    expected-and-acknowledge, not a fresh incident — the alert has no way to
+    distinguish planned maintenance from a real break on a single-replica
+    Deployment, so that judgment call stays with the on-call human.
+
 provenance:
   found_by: readiness-report-2026-08-19.md follow-up / B5-era VPA policy re-review
   related:

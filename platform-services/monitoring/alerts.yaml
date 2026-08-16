@@ -578,6 +578,14 @@ spec:
     # above, a genuine replica drop on these singletons should be rare (an ArgoCD
     # deploy, a crash, a node issue) — each one IS worth knowing about for
     # CI-critical infrastructure, not "cry wolf" background noise.
+    #
+    # RUNBOOK NOTE (REV-11 advisory): a brief page during a DELIBERATE Harbor
+    # version bump or a planned node drain is EXPECTED — acknowledge it, don't
+    # treat it as a fresh incident. The alert has no way to distinguish "planned
+    # maintenance touched a single-replica Deployment" from "something broke";
+    # that's what the on-call human is for. If you're about to bump Harbor's
+    # chart/image or drain a node running harbor-*, expect this to fire and
+    # that's fine — confirm the replacement pod comes Ready promptly and move on.
     - name: harbor-availability
       rules:
         - alert: HarborCriticalPathUnavailable
