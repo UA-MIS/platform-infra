@@ -127,6 +127,30 @@ spec:
         # history), this instead uses observed `kubectl top` actual usage + ~15%
         # headroom, which is the more trustworthy signal for these low-traffic
         # components.
+        #
+        # ⚠ registry (the `registry` sub-container specifically) is the ONE
+        # exception to "low-traffic" above, and its 100m CPU limit was WRONG —
+        # found live 2026-08-16 (DEPLOY-1 follow-up): CFS-throttled 13-78% of
+        # periods for the full duration of a real image push, producing
+        # intermittent-then-fatal 502 Bad Gateway on the PATCH blob-upload
+        # endpoint (Kaniko's own retry budget exhausted after ~30min of
+        # retries across many blobs — this is what actually broke the FIX-19
+        # image build/push, not the earlier VPA-eviction incident, which was
+        # a separate, already-fixed cause). VPA here is controlledValues:
+        # RequestsOnly (see vpa-policies/harbor-vpa.yaml) — it NEVER touches
+        # the limit, so no VPA recommendation could have caught or fixed
+        # this; the idle-usage-derived 100m ceiling was simply never
+        # validated against actual push-time load. B4 made registry the CI
+        # push/pull path for every tenant, so its steady-state idle profile
+        # (the number every `kubectl top` snapshot shows) is not
+        # representative of the workload that matters. Bumped to 500m/256Mi
+        # (limit) — matches trivy's CPU ceiling above for the same reason,
+        # a genuinely bursty workload, not a steady-state one; memory was
+        # never observed near its 128Mi ceiling during the incident (CPU
+        # throttling was the entire story), so it gets a smaller bump.
+        # registryctl (`controller` below) is untouched: it serves Harbor's
+        # own admin/GC API, not the Docker Registry v2 blob-upload path
+        # Kaniko's PATCH requests hit, and showed no throttling.
         portal:
           replicas: 1
           resources:
@@ -146,8 +170,8 @@ spec:
           replicas: 1
           registry:
             resources:
-              requests: { cpu: 20m, memory: 64Mi }
-              limits: { cpu: 100m, memory: 128Mi }
+              requests: { cpu: 50m, memory: 64Mi }
+              limits: { cpu: 500m, memory: 256Mi }
           controller:
             resources:
               requests: { cpu: 20m, memory: 64Mi }
