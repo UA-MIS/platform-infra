@@ -28,6 +28,12 @@
 #                  already have the fault-id -> repo mapping from this
 #                  script's own stderr log; nothing team-visible needs to
 #                  repeat it).
+#   BRANCH         chore/config-sync-<UTC timestamp>-<pid> — same rule as
+#                  COMMIT_BODY: must never name the fault id. A fault-named
+#                  branch leaks just as hard as a fault-named commit/PR body
+#                  (visible in the branch list pre-merge, and PERMANENTLY
+#                  embedded in git log via GitHub's default merge-commit
+#                  message even after --delete-branch removes the ref).
 #   DRY_RUN        0
 #
 # What it does:
@@ -35,7 +41,8 @@
 #   2. git apply --check faults/<fault-id>/fault.patch (refuses to proceed on
 #      a patch that doesn't apply cleanly — the repo may have drifted from the
 #      base template).
-#   3. Applies the patch on a new branch fault/<fault-id>, pushes it.
+#   3. Applies the patch on a new, generically-named branch (never names the
+#      fault — see BRANCH above), pushes it.
 #   4. Opens a PR (gh pr create).
 #   5. If AUTO_MERGE=1 (default), merges it with --admin (521's repo-admin
 #      bypass of its own CODEOWNERS requirement, Sec2.4) so the fault lands
@@ -85,18 +92,23 @@ if ! git -C "$CLONE_DIR" apply --check "$PATCH_FILE"; then
   exit 1
 fi
 
-BRANCH="fault/${FAULT_ID}"
-# Cover-story-safe commit + PR text (design Sec2.4's whole point of using a
-# PR instead of a silent push is a REAL audit trail for course staff, not a
-# hidden one — but the creating team has `maintain` and can read every
-# commit message and PR body in their own repo, so neither may name the
-# fault id, call out "fault"/"injected"/"automated", or point at
-# SYMPTOM.md/ANSWER-KEY.md. Course staff already have this run's fault-id ->
-# repo mapping from this script's own stderr log; nothing team-visible needs
-# to repeat it. Keep this generic even if PR_TITLE/COMMIT_BODY are
-# customized by a caller — don't reintroduce the leak via a fault-specific
-# default.
+# Cover-story-safe branch name, commit text, and PR text (design Sec2.4's
+# whole point of using a PR instead of a silent push is a REAL audit trail
+# for course staff, not a hidden one — but the creating team has `maintain`
+# and can read every commit message, PR body, AND branch name in their own
+# repo, so none of them may name the fault id, say "fault"/"injected"/
+# "automated", or point at SYMPTOM.md/ANSWER-KEY.md. A fault-named branch is
+# just as much of a leak as a fault-named commit message: it shows in the
+# repo's branch list until deletion, and GitHub's default merge-commit
+# message ("Merge pull request #N from ORG/fault/01-strip-autodeploy")
+# embeds it PERMANENTLY in git log even after `--delete-branch` removes the
+# ref itself. Course staff already have this run's fault-id -> repo mapping
+# from this script's own stderr log; nothing team-visible needs to repeat
+# it, ever, in any of these three places. Keep all of this generic even if
+# PR_TITLE/COMMIT_BODY/BRANCH are customized by a caller — don't reintroduce
+# the leak via a fault-specific default.
 COMMIT_BODY="${COMMIT_BODY:-Routine config sync.}"
+BRANCH="${BRANCH:-chore/config-sync-$(date -u +%Y%m%dt%H%M%Sz)-$$}"
 
 git -C "$CLONE_DIR" checkout -q -b "$BRANCH"
 git -C "$CLONE_DIR" apply "$PATCH_FILE"
