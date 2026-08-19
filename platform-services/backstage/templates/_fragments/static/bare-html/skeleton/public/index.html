@@ -19,7 +19,9 @@
 
     <main class="container">
       <h1>Welcome 👋</h1>
-      <p class="lead">${{ values.description }}</p>
+      <!-- escape-filtered (task #11, D-112): HTML-entity-escaping (not dump/JSON-quoting,
+           the wrong grammar here) so '<', '>', '&' can't break out of this text node. -->
+      <p class="lead">${{ values.description | escape }}</p>
       <p>
         A plain HTML / CSS / JavaScript static site — no framework, no build step — served by
         nginx. Edit the files under this repo and redeploy via the platform golden path.
