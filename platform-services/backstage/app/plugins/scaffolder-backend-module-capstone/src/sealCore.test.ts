@@ -39,6 +39,7 @@ const octokitCalls = {
     data: { object: { sha: 'basesha' } },
   })),
   createRef: jest.fn<Promise<any>, any[]>(async () => ({})),
+  updateRef: jest.fn<Promise<any>, any[]>(async () => ({})),
   getContent: jest.fn<Promise<any>, any[]>(async () => {
     const e = new Error('Not Found') as Error & { status: number };
     e.status = 404;
@@ -48,6 +49,7 @@ const octokitCalls = {
   listCommits: jest.fn<Promise<any>, any[]>(async () => ({
     data: [{ commit: { committer: { date: '2026-06-24T00:00:00Z' } } }],
   })),
+  pullsList: jest.fn<Promise<any>, any[]>(async () => ({ data: [] })),
   pullsCreate: jest.fn<Promise<any>, any[]>(async (opts: { head: string }) => ({
     data: { html_url: `https://github.com/UA-MIS/my-app/pull/${opts.head}` },
   })),
@@ -60,8 +62,12 @@ jest.mock('@octokit/rest', () => ({
       createOrUpdateFileContents: octokitCalls.createOrUpdateFileContents,
       listCommits: octokitCalls.listCommits,
     },
-    git: { getRef: octokitCalls.getRef, createRef: octokitCalls.createRef },
-    pulls: { create: octokitCalls.pullsCreate },
+    git: {
+      getRef: octokitCalls.getRef,
+      createRef: octokitCalls.createRef,
+      updateRef: octokitCalls.updateRef,
+    },
+    pulls: { create: octokitCalls.pullsCreate, list: octokitCalls.pullsList },
   })),
 }));
 
@@ -203,6 +209,7 @@ beforeEach(() => {
   octokitCalls.listCommits.mockImplementation(async () => ({
     data: [{ commit: { committer: { date: '2026-06-24T00:00:00Z' } } }],
   }));
+  octokitCalls.pullsList.mockImplementation(async () => ({ data: [] }));
   octokitCalls.pullsCreate.mockImplementation(async (opts: { head: string }) => ({
     data: { html_url: `https://github.com/UA-MIS/my-app/pull/${opts.head}` },
   }));
@@ -290,6 +297,100 @@ describe('deleteSecret', () => {
     ).rejects.toThrow(NotAllowedError);
     expect(vaultDeleteCalls).toHaveLength(0);
     expect(octokitCalls.pullsCreate).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Stateful GH branch/PR simulator for the rolling-PR tests (D-118): tracks which refs exist and
+ * which PR (if any) is currently OPEN for the rolling branch, so ensurePendingBranch's
+ * create-vs-reset-vs-reuse logic exercises the REAL branch lifecycle instead of a static
+ * happy-path mock that would hide the create/reuse/reset distinction.
+ */
+function mockRollingPrLifecycle() {
+  const refs = new Set<string>(['heads/main']);
+  let openPr: { html_url: string; number: number } | undefined;
+  let prCounter = 0;
+
+  octokitCalls.getRef.mockImplementation(async (opts: any) => {
+    if (refs.has(opts.ref)) {
+      return { data: { object: { sha: `sha-${opts.ref}` } } };
+    }
+    const e = new Error('Not Found') as Error & { status: number };
+    e.status = 404;
+    throw e;
+  });
+  octokitCalls.createRef.mockImplementation(async (opts: any) => {
+    refs.add(opts.ref.replace(/^refs\//, ''));
+    return {};
+  });
+  octokitCalls.updateRef.mockImplementation(async (opts: any) => {
+    refs.add(opts.ref);
+    return {};
+  });
+  octokitCalls.pullsList.mockImplementation(async () => ({
+    data: openPr ? [openPr] : [],
+  }));
+  octokitCalls.pullsCreate.mockImplementation(async (_opts: { head: string }) => {
+    prCounter += 1;
+    openPr = {
+      html_url: `https://github.com/UA-MIS/my-app/pull/${prCounter}`,
+      number: prCounter,
+    };
+    return { data: openPr };
+  });
+  return {
+    /** Simulate the pending PR merging (or closing) — no longer OPEN, branch goes stale. */
+    mergePr: () => {
+      openPr = undefined;
+    },
+  };
+}
+
+describe('deleteSecret rolling PR (D-118)', () => {
+  it('reuses the SAME rolling PR across multiple deleted keys — one rolling PR, no new PR', async () => {
+    serveEs({ dev: ['DATABASE_URL', 'API_KEY'] });
+    mockRollingPrLifecycle();
+
+    const res1 = await deleteSecret(makeDeps([OWNER_GROUP]), {
+      credentials: CREDS,
+      entityRef: TARGET_REF,
+      key: 'DATABASE_URL',
+    });
+    const res2 = await deleteSecret(makeDeps([OWNER_GROUP]), {
+      credentials: CREDS,
+      entityRef: TARGET_REF,
+      key: 'API_KEY',
+    });
+
+    expect(res1.pullRequestUrl).toBe(res2.pullRequestUrl);
+    expect(octokitCalls.pullsCreate).toHaveBeenCalledTimes(1);
+    expect(octokitCalls.createRef).toHaveBeenCalledTimes(1);
+    expect(octokitCalls.createRef.mock.calls[0][0]).toMatchObject({
+      ref: 'refs/heads/secrets/pending',
+    });
+  });
+
+  it('opens a NEW PR after the previous one merged (stale branch reset, fresh PR)', async () => {
+    serveEs({ dev: ['DATABASE_URL', 'API_KEY'] });
+    const lifecycle = mockRollingPrLifecycle();
+
+    const res1 = await deleteSecret(makeDeps([OWNER_GROUP]), {
+      credentials: CREDS,
+      entityRef: TARGET_REF,
+      key: 'DATABASE_URL',
+    });
+    lifecycle.mergePr(); // the PR merged — branch is now stale (no open PR references it)
+
+    const res2 = await deleteSecret(makeDeps([OWNER_GROUP]), {
+      credentials: CREDS,
+      entityRef: TARGET_REF,
+      key: 'API_KEY',
+    });
+
+    expect(res2.pullRequestUrl).not.toBe(res1.pullRequestUrl);
+    expect(octokitCalls.pullsCreate).toHaveBeenCalledTimes(2); // a FRESH PR was opened
+    expect(octokitCalls.createRef).toHaveBeenCalledTimes(1); // branch created ONCE, reused
+    expect(octokitCalls.updateRef).toHaveBeenCalledTimes(1); // reset-to-base before the new PR
   });
 });
 

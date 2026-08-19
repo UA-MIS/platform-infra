@@ -48,12 +48,14 @@ const octokitCalls = {
     data: { object: { sha: 'basesha' } },
   })),
   createRef: jest.fn<Promise<any>, any[]>(async () => ({})),
+  updateRef: jest.fn<Promise<any>, any[]>(async () => ({})),
   getContent: jest.fn<Promise<any>, any[]>(async () => {
     const e = new Error('Not Found') as Error & { status: number };
     e.status = 404;
     throw e;
   }),
   createOrUpdateFileContents: jest.fn<Promise<any>, any[]>(async () => ({})),
+  pullsList: jest.fn<Promise<any>, any[]>(async () => ({ data: [] })),
   pullsCreate: jest.fn<Promise<any>, any[]>(async (opts: { head: string }) => ({
     data: { html_url: `https://github.com/UA-MIS/my-app/pull/${opts.head}` },
   })),
@@ -65,8 +67,12 @@ jest.mock('@octokit/rest', () => ({
       getContent: octokitCalls.getContent,
       createOrUpdateFileContents: octokitCalls.createOrUpdateFileContents,
     },
-    git: { getRef: octokitCalls.getRef, createRef: octokitCalls.createRef },
-    pulls: { create: octokitCalls.pullsCreate },
+    git: {
+      getRef: octokitCalls.getRef,
+      createRef: octokitCalls.createRef,
+      updateRef: octokitCalls.updateRef,
+    },
+    pulls: { create: octokitCalls.pullsCreate, list: octokitCalls.pullsList },
   })),
 }));
 
@@ -267,6 +273,7 @@ beforeEach(() => {
     e.status = 404;
     throw e;
   });
+  octokitCalls.pullsList.mockImplementation(async () => ({ data: [] }));
   octokitCalls.pullsCreate.mockImplementation(async (opts: { head: string }) => ({
     data: { html_url: `https://github.com/UA-MIS/my-app/pull/${opts.head}` },
   }));
@@ -294,7 +301,7 @@ describe('capstone:seal-secret action shape', () => {
 });
 
 describe('capstone:seal-secret write + publish (owner)', () => {
-  it('writes the value to Vault per env and opens one PR per env', async () => {
+  it('writes the value to Vault per env and opens ONE rolling PR covering ALL envs', async () => {
     const { deps } = makeDeps({ actorGroups: [OWNER_GROUP] });
     serveShippedEs(['dev', 'prod']);
     const action = createSealSecretAction(deps);
@@ -322,8 +329,14 @@ describe('capstone:seal-secret write + publish (owner)', () => {
       },
     ]);
 
-    // One PR per env, each upserting the overlay ES (NOT a new file, NOT a kustomization edit).
-    expect(octokitCalls.pullsCreate).toHaveBeenCalledTimes(2);
+    // ONE PR covers BOTH envs (D-118 rolling PR — no more one-PR-per-env), each upserting its
+    // own overlay ES (NOT a new file, NOT a kustomization edit) as separate commits on the
+    // SAME branch.
+    expect(octokitCalls.pullsCreate).toHaveBeenCalledTimes(1);
+    expect(octokitCalls.pullsCreate.mock.calls[0][0]).toMatchObject({
+      head: 'secrets/pending',
+      title: expect.stringMatching(/pending secret changes/i),
+    });
     const files = writtenFiles();
     expect(files[overlayEs('dev')]).toBeDefined();
     expect(files[overlayEs('prod')]).toBeDefined();
@@ -331,10 +344,14 @@ describe('capstone:seal-secret write + publish (owner)', () => {
     for (const p of Object.keys(files)) {
       expect(p).toMatch(/overlays\/(dev|prod)\/app-secret\.externalsecret\.yaml$/);
     }
+    // Every write onto the rolling branch, not a per-env timestamped branch.
+    for (const c of octokitCalls.createOrUpdateFileContents.mock.calls as any[]) {
+      expect(c[0].branch).toBe('secrets/pending');
+    }
 
     expect(ctx.output).toHaveBeenCalledWith(
       'pullRequestUrls',
-      expect.arrayContaining([expect.stringContaining('/pull/')]),
+      [expect.stringContaining('/pull/')],
     );
   });
 
@@ -402,6 +419,112 @@ describe('capstone:seal-secret write + publish (owner)', () => {
     }
     // The key IS logged (operational visibility), proving logging happened at all.
     expect(loggerCalls.join('\n')).toMatch(/TOKEN/);
+  });
+
+  /**
+   * Stateful GH branch/PR simulator for the rolling-PR tests (D-118): tracks which refs exist
+   * and which PR (if any) is currently OPEN for the rolling branch, so ensurePendingBranch's
+   * create-vs-reset-vs-reuse logic exercises the REAL branch lifecycle rather than a static
+   * happy-path mock.
+   */
+  function mockRollingPrLifecycle() {
+    const refs = new Set<string>(['heads/main']);
+    let openPr: { html_url: string; number: number } | undefined;
+    let prCounter = 0;
+
+    octokitCalls.getRef.mockImplementation(async (opts: any) => {
+      if (refs.has(opts.ref)) {
+        return { data: { object: { sha: `sha-${opts.ref}` } } };
+      }
+      const e = new Error('Not Found') as Error & { status: number };
+      e.status = 404;
+      throw e;
+    });
+    octokitCalls.createRef.mockImplementation(async (opts: any) => {
+      refs.add(opts.ref.replace(/^refs\//, ''));
+      return {};
+    });
+    octokitCalls.updateRef.mockImplementation(async (opts: any) => {
+      refs.add(opts.ref);
+      return {};
+    });
+    octokitCalls.pullsList.mockImplementation(async () => ({
+      data: openPr ? [openPr] : [],
+    }));
+    octokitCalls.pullsCreate.mockImplementation(async (_opts: { head: string }) => {
+      prCounter += 1;
+      openPr = {
+        html_url: `https://github.com/UA-MIS/my-app/pull/${prCounter}`,
+        number: prCounter,
+      };
+      return { data: openPr };
+    });
+    return {
+      /** Simulate the pending PR merging (or closing) — no longer OPEN, branch goes stale. */
+      mergePr: () => {
+        openPr = undefined;
+      },
+    };
+  }
+
+  it('reuses the SAME rolling PR across two separate seal calls (different keys/envs)', async () => {
+    const { deps } = makeDeps({ actorGroups: [OWNER_GROUP] });
+    serveShippedEs(['dev', 'prod']);
+    mockRollingPrLifecycle();
+    const action = createSealSecretAction(deps);
+
+    const ctx1 = ctxFor({
+      entityRef: TARGET_REF,
+      key: 'DATABASE_URL',
+      value: SECRET_VALUE,
+      envs: ['dev'],
+    });
+    await action.handler(ctx1);
+    const ctx2 = ctxFor({
+      entityRef: TARGET_REF,
+      key: 'API_KEY',
+      value: 'other-value',
+      envs: ['dev', 'prod'],
+    });
+    await action.handler(ctx2);
+
+    // Both calls' output points at the SAME PR — no new PR for the second call.
+    const url1 = (ctx1.output as jest.Mock).mock.calls[0][1][0];
+    const url2 = (ctx2.output as jest.Mock).mock.calls[0][1][0];
+    expect(url2).toBe(url1);
+    expect(octokitCalls.pullsCreate).toHaveBeenCalledTimes(1);
+    expect(octokitCalls.createRef).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens a NEW PR after the previous rolling PR merged (stale branch reset, fresh PR)', async () => {
+    const { deps } = makeDeps({ actorGroups: [OWNER_GROUP] });
+    serveShippedEs(['dev', 'prod']);
+    const lifecycle = mockRollingPrLifecycle();
+    const action = createSealSecretAction(deps);
+
+    const ctx1 = ctxFor({
+      entityRef: TARGET_REF,
+      key: 'DATABASE_URL',
+      value: SECRET_VALUE,
+      envs: ['dev'],
+    });
+    await action.handler(ctx1);
+    lifecycle.mergePr(); // the PR merged — the branch is now stale
+
+    const ctx2 = ctxFor({
+      entityRef: TARGET_REF,
+      key: 'API_KEY',
+      value: 'other-value',
+      envs: ['dev'],
+    });
+    await action.handler(ctx2);
+
+    const url1 = (ctx1.output as jest.Mock).mock.calls[0][1][0];
+    const url2 = (ctx2.output as jest.Mock).mock.calls[0][1][0];
+    expect(url2).not.toBe(url1);
+    expect(octokitCalls.pullsCreate).toHaveBeenCalledTimes(2); // a FRESH PR was opened
+    expect(octokitCalls.createRef).toHaveBeenCalledTimes(1); // branch created ONCE, reused
+    expect(octokitCalls.updateRef).toHaveBeenCalledTimes(1); // reset-to-base before the new PR
   });
 
   it('fails CLOSED (no Vault write, no PR) if the overlay ExternalSecret is missing', async () => {
