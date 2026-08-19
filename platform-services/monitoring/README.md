@@ -225,10 +225,12 @@ own scrape-job relabeling collapses `service` to the literal string
 traffic (confirmed against `lab-r26-lab1` with live positive-control traffic). The
 label that actually carries the per-tenant IngressRoute service name
 (`<namespace>-<name>-<port>@kubernetes`) is `exported_service` — see
-`dashboard-tenant-app-observability.yaml`'s header for the full verification. The App
-Golden Signals dashboard's fix (swap `service` → `exported_service` in its three
-Traefik panel queries) is a known, scoped one-line-per-panel follow-up, tracked
-separately rather than bundled into this PR.
+`dashboard-tenant-app-observability.yaml`'s header for the full verification.
+
+**FIXED 2026-08-19:** the App Golden Signals dashboard's 4 Traefik panel queries
+(Requests This Week, Request Rate, 5xx Error Rate %, p95 Latency) now filter/group
+on `exported_service` instead of `service`, verified against live Prometheus data
+for a real tenant. See `dashboard-tenant-golden-signals.yaml`'s header for detail.
 
 **Priming App Observability for a live demo:** the dashboard's Traffic/Status-Code/
 Error-%/Latency row is sourced from Traefik metrics and lights up from ANY real HTTP

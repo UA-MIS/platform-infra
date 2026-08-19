@@ -15,11 +15,19 @@
 # "Platform / Tenants — Per-Tenant Usage vs Quota" (dashboard-tenant-quota.yaml,
 # the full breakdown lives there); these two panels are a compact summary.
 #
-# Traefik service names are `<namespace>-<name>-<port>@kubernetescrd` — the
-# `service=~"$namespace-.*"` regex below is a prefix-match on that convention,
-# not an exact structural match; if a tenant's service name doesn't start with
-# their namespace this filter under-counts (flagged, not silently wrong: the
-# panel titles say "by service name prefix").
+# Traefik service names are `<namespace>-<name>-<port>@kubernetes` — the
+# `exported_service=~"$namespace-.*"` regex below is a prefix-match on that
+# convention, not an exact structural match; if a tenant's service name
+# doesn't start with their namespace this filter under-counts (flagged, not
+# silently wrong: the panel titles say "by service name prefix").
+#
+# FIXED 2026-08-19: these panels previously filtered on the `service` label,
+# which kube-prometheus-stack's ServiceMonitor relabeling always collapses to
+# the literal string "traefik-metrics" (the scraped K8s Service, not the
+# per-route Traefik service) — so the filter matched nothing, ever, for any
+# tenant. The label carrying the real per-route service name is
+# `exported_service`. See dashboard-tenant-app-observability.yaml's header and
+# README.md's "App Golden Signals" follow-up note for the full verification.
 #
 # Auto-provisioned by the Grafana sidecar via the `grafana_dashboard: "1"` label,
 # filed into the "Platform / Tenants" folder via the `grafana_folder` annotation.
@@ -75,14 +83,14 @@ data:
           "gridPos": { "h": 6, "w": 6, "x": 0, "y": 1 },
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
-          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(increase(traefik_service_requests_total{service=~\"$namespace-.*\"}[7d]))", "instant": true, "refId": "A" } ]
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(increase(traefik_service_requests_total{exported_service=~\"$namespace-.*\"}[7d]))", "instant": true, "refId": "A" } ]
         },
         {
           "id": 3, "type": "timeseries", "title": "Request Rate",
           "gridPos": { "h": 6, "w": 18, "x": 6, "y": 1 },
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
-          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (service) (rate(traefik_service_requests_total{service=~\"$namespace-.*\"}[5m]))", "legendFormat": "{{service}}", "refId": "A" } ]
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (exported_service) (rate(traefik_service_requests_total{exported_service=~\"$namespace-.*\"}[5m]))", "legendFormat": "{{exported_service}}", "refId": "A" } ]
         },
         { "id": 4, "type": "row", "title": "Errors", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 7 } },
         {
@@ -99,7 +107,7 @@ data:
           "targets": [
             {
               "datasource": { "type": "prometheus", "uid": "${datasource}" },
-              "expr": "100 * sum(rate(traefik_service_requests_total{service=~\"$namespace-.*\", code=~\"5..\"}[5m])) / sum(rate(traefik_service_requests_total{service=~\"$namespace-.*\"}[5m]))",
+              "expr": "100 * sum(rate(traefik_service_requests_total{exported_service=~\"$namespace-.*\", code=~\"5..\"}[5m])) / sum(rate(traefik_service_requests_total{exported_service=~\"$namespace-.*\"}[5m]))",
               "legendFormat": "5xx %",
               "refId": "A"
             }
@@ -114,7 +122,7 @@ data:
           "targets": [
             {
               "datasource": { "type": "prometheus", "uid": "${datasource}" },
-              "expr": "histogram_quantile(0.95, sum by (le) (rate(traefik_service_request_duration_seconds_bucket{service=~\"$namespace-.*\"}[5m])))",
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(traefik_service_request_duration_seconds_bucket{exported_service=~\"$namespace-.*\"}[5m])))",
               "legendFormat": "p95",
               "refId": "A"
             }
