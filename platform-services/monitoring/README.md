@@ -230,6 +230,31 @@ Golden Signals dashboard's fix (swap `service` → `exported_service` in its thr
 Traefik panel queries) is a known, scoped one-line-per-panel follow-up, tracked
 separately rather than bundled into this PR.
 
+**Priming App Observability for a live demo:** the dashboard's Traffic/Status-Code/
+Error-%/Latency row is sourced from Traefik metrics and lights up from ANY real HTTP
+traffic — right before presenting, curl the tenant's public host a few dozen times,
+including some 404s, e.g.:
+```
+for i in $(seq 1 20); do curl -s -o /dev/null "https://<tenant-host>/"; done
+for i in $(seq 1 10); do curl -s -o /dev/null "https://<tenant-host>/no-such-path-$i"; done
+```
+Run it as a short **sustained** loop (one request per second for ~60-90s), not one fast
+burst — Traefik runs 2 replicas, so a fast burst can split across both pods' independent
+counters and each one needs 2+ Prometheus scrapes (30s interval) before `rate()` shows a
+non-zero value; verified live during DASH-1's build.
+
+The **Errors Only** log panel is a different story: it queries real Loki data with a
+correct LogQL filter, but the current lab tenant apps (`labbase` Next.js/Django
+templates) don't emit ANY application-level log line for ANY HTTP outcome — verified
+live against `lab-r26-lab1-ccsmith33`: a 404, a 405 (wrong method), and a 400
+(malformed request) all produced zero new Loki lines. No amount of curl traffic will
+populate this panel against today's tenant fleet — that's an honest property of the app
+template, not a broken query. Narrate it as-is in a demo ("wired to real Loki data, will
+catch anything your app logs as an error the moment it does") rather than presenting it
+as broken; don't manufacture fake error lines to fill it. It will populate itself
+naturally once a tenant app adds real error/exception logging, or when the demo host
+next redeploys anything backstage-scaffolded.
+
 ## Cilium/Hubble metrics — requires a human step
 
 Unlike every other metrics change in this PR (Traefik/Ceph/CNPG/MariaDB — all
