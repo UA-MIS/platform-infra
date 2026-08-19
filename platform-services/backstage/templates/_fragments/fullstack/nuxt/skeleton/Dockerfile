@@ -25,6 +25,19 @@
 FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/node:22-alpine AS build
 WORKDIR /src
 ENV NUXT_TELEMETRY_DISABLED=1
+# node:22-alpine ships npm 10.9.8, which has a real, deterministic Arborist crash
+# ("Cannot read properties of null (reading 'edgesOut')") on this fragment's exact
+# dependency graph (nuxt 3.21 + drizzle-kit + drizzle-orm + mysql2 + vue-router) --
+# reproduced identically in a real Kaniko build, in a bare `node:22-alpine` container
+# with no other changes, AND via a plain local `npm install`, so it is not registry
+# flakiness, not Kaniko-specific, and not caused by this file's `overrides` block
+# (removing overrides alone does NOT fix it -- verified). npm 11+ does not hit this
+# bug on the identical dependency tree (verified: install succeeds, `npm run build`
+# succeeds, same package count). Pinned exact (project convention: pin all versions)
+# rather than a floating `npm@11` or `npm@latest`, which would silently start
+# pulling npm 12+ (already GA per this build's own upgrade notice) with unverified
+# behavior on this graph.
+RUN npm install -g npm@11.19.0
 COPY package.json package-lock.json* ./
 RUN npm install
 COPY . .
