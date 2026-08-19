@@ -1,0 +1,12 @@
+diff --git a/.github/workflows/build-and-push.yaml b/.github/workflows/build-and-push.yaml
+index 00dae2a..e36e7c4 100644
+--- a/.github/workflows/build-and-push.yaml
++++ b/.github/workflows/build-and-push.yaml
+@@ -42,7 +42,6 @@ name: build-and-push
+ 
+ on:
+   push:
+-    branches: [main]          # -> dev image (mutable sha tag), pushed
+     tags: ["v*.*.*"]          # -> prod/staging image (immutable semver), pushed
+   pull_request:               # -> build-only validation (untrusted code, no push)
+ 

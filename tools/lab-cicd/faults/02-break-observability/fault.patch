@@ -1,0 +1,26 @@
+diff --git a/.devops/chart/base/ingress.yaml b/.devops/chart/base/ingress.yaml
+index 9ffee3e..0450f09 100644
+--- a/.devops/chart/base/ingress.yaml
++++ b/.devops/chart/base/ingress.yaml
+@@ -23,7 +23,7 @@ spec:
+             pathType: Prefix
+             backend:
+               service:
+-                name: sample
++                name: sample-svc
+                 port:
+                   name: http
+   tls:
+diff --git a/.devops/chart/base/service.yaml b/.devops/chart/base/service.yaml
+index b5bd4dd..620888f 100644
+--- a/.devops/chart/base/service.yaml
++++ b/.devops/chart/base/service.yaml
+@@ -2,7 +2,7 @@
+ apiVersion: v1
+ kind: Service
+ metadata:
+-  name: sample
++  name: sample-svc
+   labels:
+     app.kubernetes.io/name: sample
+ spec:
