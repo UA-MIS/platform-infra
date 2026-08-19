@@ -4,7 +4,13 @@ apiVersion: backstage.io/v1alpha1
 kind: Component
 metadata:
   name: ${{ values.appName }}
-  description: ${{ values.description }}
+  # Same D-106 fix as _fragments/_contract/catalog-info.yaml: `dump`-encode the one
+  # free-text field so catalog:register can't die on YAML-special content (colon,
+  # leading #/@/quote, all-digits, ...). This skeleton renders standalone (not via
+  # _fragments/_contract), so it needed its own copy of the fix — deck-reviewer
+  # review of PR #490 caught that vm-app is one of only two live-catalog-registered
+  # templates and carried the identical bug, unreached by the _contract fix.
+  description: ${{ values.description | dump }}
   annotations:
     backstage.io/techdocs-ref: dir:.
     github.com/project-slug: UA-MIS/${{ values.appName }}

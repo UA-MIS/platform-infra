@@ -31,7 +31,12 @@
 ssh_pwauth: false
 disable_root: true
 ssh_authorized_keys:
-  - ${{ values.sshPubKey }}
+  # dump-quoted (D-106 pattern): the key TYPE + BASE64 body are regex-constrained, but
+  # the trailing key COMMENT (` .*`) is unconstrained free text and, unlike
+  # write_files.content above, this line is a flow-style YAML list item, not a `|`
+  # block scalar — a comment containing a colon (e.g. "laptop: personal key") would
+  # otherwise break this file's YAML the same class of way D-106 fixed for description.
+  - ${{ values.sshPubKey | dump }}
 # ssh_import_id:
 #   - gh:your-github-username
 #   - gh:teammate-github-username
