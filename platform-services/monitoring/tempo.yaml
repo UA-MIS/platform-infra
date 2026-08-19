@@ -210,6 +210,23 @@ spec:
         storageClassName: ceph-block   # replica-3 Ceph RBD (survives node loss)
         resources:
           requests:
+            # PVC LIVE-RESIZED 2026-08-19 (KubePersistentVolumeFillingUp alert, firing since
+            # 2026-08-18T04:58Z, "6.018% available, ~4 days to full"): storage-tempo-0 was
+            # patched live from 5Gi -> 20Gi (`kubectl patch pvc storage-tempo-0 -n monitoring`),
+            # then `kubectl rollout restart statefulset/tempo` to complete the node-side
+            # filesystem resize (ceph-block has allowVolumeExpansion:true, confirmed before
+            # attempting). Live result: /var/tempo went from 94% used (293Mi free) to 23% used
+            # (15.0Gi free). This field intentionally stays at the ORIGINAL provisioning size
+            # (5Gi) and is NOT bumped to match: Kubernetes forbids updating a StatefulSet's
+            # `volumeClaimTemplates` after creation (only replicas/ordinals/template/
+            # updateStrategy/persistentVolumeClaimRetentionPolicy/minReadySeconds are mutable) —
+            # ArgoCD applying a git-side bump here would hard-fail every sync, which is worse
+            # than the drift it's meant to fix. PVC resizing is decoupled from this template by
+            # design (K8s never re-reconciles an existing PVC's size against it), so this is
+            # NOT tracked/diffed by ArgoCD (the PVC itself has no standalone manifest) and
+            # introduces zero OutOfSync risk. Any FUTURE replica (or full StatefulSet
+            # recreation) would provision fresh at this 5Gi baseline and need the same manual
+            # bump repeated — flagged here rather than silently relying on tribal knowledge.
             storage: 5Gi
 ---
 apiVersion: v1
