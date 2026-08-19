@@ -65,6 +65,38 @@ data:
     hs.message = "Waiting for Ingress rules"
     return hs
 
+  # --- ExternalSecret ignoreDifferences, org-wide (2026-08-19 fix) -----------
+  # `platform-svc-slidedeck` was continuously flapping OutOfSync via self-heal
+  # (sync history advancing every ~2.5 min, autoHealAttemptsCount in the teens)
+  # on ExternalSecret/slidedeck-env in ns `slides`. Root-caused live:
+  #   1. The existing class-level ignoreDifferences on the platform-services /
+  #      labs-namespace / labs-students ApplicationSet templates only covers
+  #      the OLD ExternalSecret v1beta1 shape (`spec.data[].remoteRef.*`,
+  #      used by backstage/db-admin/db-tier). slidedeck's manifest uses the
+  #      NEWER `spec.dataFrom[].extract` shape; the live object has 4
+  #      API-server-defaulted sub-fields under `extract` that git never sets
+  #      and that the old rule never covers, so every reconcile diffs.
+  #   2. The live object also carries `metadata.annotations.force-sync`, a
+  #      manual force-refresh annotation (same recovery pattern used on stuck
+  #      PushSecrets/RobotAccounts) that was added directly against the
+  #      cluster, never committed to git, and has no matching ignore rule —
+  #      a second permanent diff source.
+  # Fixed at the org-wide `resource.customizations.ignoreDifferences.<group>_
+  # <kind>` layer (not a per-Application/per-ApplicationSet patch) because this
+  # same force-synced-annotation + new-shape-extract combination can recur on
+  # ANY ExternalSecret across any of the 3 templates that carry the stale
+  # data[].remoteRef-only rule, or on a plain (non-appset) Application — a
+  # single argocd-cm key covers all of them. Combines additively with (does
+  # not replace) the existing per-appset-template ignoreDifferences blocks,
+  # which stay in place for the old-shape ExternalSecrets they still cover.
+  resource.customizations.ignoreDifferences.external-secrets.io_ExternalSecret: |
+    jqPathExpressions:
+    - .spec.dataFrom[].extract.conversionStrategy
+    - .spec.dataFrom[].extract.decodingStrategy
+    - .spec.dataFrom[].extract.metadataPolicy
+    - .spec.dataFrom[].extract.nullBytePolicy
+    - .metadata.annotations["force-sync"]
+
   url: https://argocd.capstone.uamishub.com
 
   # ArgoCD-server fetches the issuer's discovery doc SERVER-SIDE over the in-cluster
