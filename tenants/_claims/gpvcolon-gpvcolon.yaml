@@ -1,0 +1,29 @@
+# Emitted by The Process scaffolder (capstone:emit-tenant-claim, ADR-031).
+# ONE CapstoneTenant XR — a reviewed-once Crossplane Composition expands it into
+# the full tenant (repo + Harbor + Vault + the k8s tenancy fence). No onboarding
+# PR, no operator make steps.
+#
+# De-provision: prefer The Process admin "Tenant Teardown" page (it opens this
+# same git-rm PR AND strips the capstone-tenant GitHub topic from the app repo,
+# so catalog discovery stops re-registering it). `git rm` THIS FILE ALONE also
+# fully reclaims the cluster/Harbor/Vault resources (Crossplane cascade, same as
+# the portal path) but leaves the app repo's capstone-tenant topic in place — a
+# "ghost tenant" that keeps reappearing in the catalog until someone strips the
+# topic by hand. See tenants/_claims/README.md "De-provision".
+apiVersion: platform.capstone.uamishub.com/v1alpha1
+kind: CapstoneTenant
+metadata:
+  name: gpvcolon-gpvcolon
+  labels:
+    platform.capstone/team: "gpvcolon"
+    platform.capstone/semester: "2026-fall"
+    platform.capstone/component: tenant
+spec:
+  team: "gpvcolon"
+  appName: "gpvcolon"
+  semester: "2026-fall"
+  githubTeam: "gpvcolon"
+  port: 8080
+  previewEnabled: false
+  domain: "capstone.uamishub.com"
+  database: "mysql"
