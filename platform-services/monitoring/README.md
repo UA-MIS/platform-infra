@@ -207,6 +207,7 @@ chart generates for the built-in datasources.
 | **Tenant CI/CD** | `dashboard-tenant-cicd.yaml` | `arc-runners` pod activity (all teams combined — no per-team breakdown, see Follow-ups), tenant ArgoCD app deploy status | kube-state-metrics + ArgoCD |
 | **App Golden Signals** | `dashboard-tenant-golden-signals.yaml` | Traffic (Traefik + Hubble cross-check), errors (5xx rate), latency (p95), saturation (CPU/mem) — all scoped to ONE tenant namespace via the `namespace` variable; "requests this week" stat | Traefik service metrics (real once this PR's Traefik change syncs) + Hubble (human step) + cAdvisor (real, day-one) |
 | **App Logs** | `dashboard-tenant-logs.yaml` | Live log tail, log volume by pod, error/exception rate — all scoped to ONE tenant namespace | Loki, via Alloy's `namespace`/`pod`/`container` stream labels — real, day-one |
+| **App Observability** | `dashboard-tenant-app-observability.yaml` | The capstone-team-facing "my app broke, where do I look" dashboard (DASH-1) — Traefik request rate, status-code split, 4xx/5xx error %, p50/p95/p99 latency, live log stream, errors-only log panel, pod-ready/restart health, shared-backend-DB up + connections — all scoped to ONE tenant namespace via `namespace`, defaulted to a real tenant with live traffic | Traefik `exported_service` label (NOT `service` — see the ⚠ below), Loki via Alloy, kube-state-metrics, mysqld-exporter (db-tier, cluster-wide) — every panel verified against live data before merge |
 
 **⚠ Verify the Traefik service-name regex live before trusting the App Golden
 Signals traffic/error/latency panels**: they filter on
@@ -216,6 +217,18 @@ Confirm against a real tenant's traffic in Prometheus's own query browser
 (`{service=~".*"}`, look at the actual label values) once the Traefik metrics
 change (above) is live, and adjust the regex if the naming differs — flagged
 in-panel via a `description` field too.
+
+**Update (DASH-1, verified live):** this assumption is confirmed WRONG. Prometheus's
+own scrape-job relabeling collapses `service` to the literal string
+`"traefik-metrics"` for every `traefik_service_requests_total` sample — so the
+`service=~"$namespace-.*"` filter above matches nothing, ever, regardless of real
+traffic (confirmed against `lab-r26-lab1` with live positive-control traffic). The
+label that actually carries the per-tenant IngressRoute service name
+(`<namespace>-<name>-<port>@kubernetes`) is `exported_service` — see
+`dashboard-tenant-app-observability.yaml`'s header for the full verification. The App
+Golden Signals dashboard's fix (swap `service` → `exported_service` in its three
+Traefik panel queries) is a known, scoped one-line-per-panel follow-up, tracked
+separately rather than bundled into this PR.
 
 ## Cilium/Hubble metrics — requires a human step
 

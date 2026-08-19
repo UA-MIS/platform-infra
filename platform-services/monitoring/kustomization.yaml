@@ -96,6 +96,12 @@ resources:
   - dashboard-tenant-cicd.yaml
   - dashboard-tenant-golden-signals.yaml
   - dashboard-tenant-logs.yaml
+  # "Tenant / App Observability" (DASH-1) — the capstone-team-facing "my app
+  # broke, where do I look" dashboard: Traefik RED metrics (exported_service
+  # label, NOT the always-"traefik-metrics" service label the Golden Signals
+  # dashboard above uses), live + errors-only Loki logs, pod health, and
+  # shared-backend-DB health, all scoped by the $namespace picker.
+  - dashboard-tenant-app-observability.yaml
 
 labels:
   - pairs:
