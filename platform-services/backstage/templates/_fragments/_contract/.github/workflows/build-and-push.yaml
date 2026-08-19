@@ -91,7 +91,7 @@ jobs:
         github.event.head_commit.author.email == 'ci@capstone.uamishub.com')
     runs-on: ${{ vars.RUNNER_SCALE_SET || 'ua-mis-kaniko' }}
     container:
-      image: node:24-trixie-slim
+      image: harbor.capstone.uamishub.com/dockerhub-proxy/library/node:24-trixie-slim
     # actions:read + pull-requests:write are for the BEST-EFFORT queue-status step below
     # (read this run's queue timing; post the sticky "you were in a queue" PR comment). It
     # fails open, so if these aren't granted it just degrades to a generic note.
@@ -179,7 +179,7 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.resolve.outputs.matrix) }}
     container:
-      image: node:24-trixie-slim
+      image: harbor.capstone.uamishub.com/dockerhub-proxy/library/node:24-trixie-slim
     steps:
       - name: Checkout (source to check for ${{ matrix.name }})
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -360,7 +360,7 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.resolve.outputs.matrix) }}
     container:
-      image: node:24-trixie-slim
+      image: harbor.capstone.uamishub.com/dockerhub-proxy/library/node:24-trixie-slim
     env:
       # Where the Harbor push cred lands inside the Kaniko step pod (Kaniko's default
       # DOCKER_CONFIG dir). The platform runner's container-hook injects secret
@@ -471,7 +471,7 @@ jobs:
     # Parity with tenant-build.yaml's bump-dev job, which uses the same full image
     # for the same reason.
     container:
-      image: node:24-trixie
+      image: harbor.capstone.uamishub.com/dockerhub-proxy/library/node:24-trixie
     permissions:
       contents: write
     steps:

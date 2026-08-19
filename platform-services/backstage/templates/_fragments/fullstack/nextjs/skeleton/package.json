@@ -2,7 +2,7 @@
   "name": "${{ values.appName }}",
   "version": "0.1.0",
   "private": true,
-  "description": "${{ values.description }}",
+  "description": ${{ values.description | dump }},
   "scripts": {
     "dev": "next dev -p ${{ values.port }}",
     "build": "prisma generate && next build",

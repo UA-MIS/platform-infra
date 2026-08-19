@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "${{ values.description }}",
+  "description": ${{ values.description | dump }},
   "scripts": {
     "dev": "nuxt dev --port ${{ values.port }}",
     "build": "nuxt build",

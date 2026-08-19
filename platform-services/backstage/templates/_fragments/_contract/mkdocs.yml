@@ -1,7 +1,11 @@
 # TechDocs config — The Process builds these docs from this repo (techdocs-ref: dir:.)
 # and serves them in the catalog's Docs tab.
+# site_description uses the D-106 `dump` filter, not hand-quoting: a single-quoted
+# YAML scalar breaks the instant the free-text description itself contains an
+# apostrophe (e.g. "Team's capstone project" — ordinary English), which the old
+# '${{ values.description }}' form did not escape.
 site_name: '${{ values.appName }}'
-site_description: '${{ values.description }}'
+site_description: ${{ values.description | dump }}
 
 nav:
   - Home: index.md

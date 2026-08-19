@@ -51,6 +51,13 @@ JENV = Environment(
     undefined=StrictUndefined, keep_trailing_newline=True,
     trim_blocks=False, lstrip_blocks=False,
 )
+# Mirrors nunjucks' built-in `dump` filter (JSON.stringify) used by makeNunjucks() in
+# composeProject.ts. Plain jinja2.Environment ships no `dump`/`tojson` filter by default
+# (that's a Flask addition), so without this registration any fragment file using
+# `| dump` (e.g. _contract/catalog-info.yaml's `description` field, D-106) would raise
+# "No filter named 'dump'" here even though the live nunjucks action renders it fine --
+# exactly the two-engines-drift bug this module's docstring warns against.
+JENV.filters["dump"] = json.dumps
 
 # Slots a fragment may declare, in the order the planner keys them.
 SLOTS = ("single", "frontend", "backend", "mobile")

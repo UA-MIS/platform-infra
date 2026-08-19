@@ -5,7 +5,18 @@ apiVersion: backstage.io/v1alpha1
 kind: Component
 metadata:
   name: ${{ values.appName }}
-  description: ${{ values.description }}
+  # Rendered via the `dump` filter (JSON-encode -> a valid YAML double-quoted scalar) --
+  # `description` is the one truly free-text, student-typed field in this file (appName/
+  # team/semester are all regex-constrained slugs or platform-controlled enums, so they
+  # cannot carry YAML-special characters). An unquoted substitution here broke
+  # catalog:register outright on ANY description containing a colon+space (e.g. "My app:
+  # does X") -- YAML parsed the key correctly but choked on the value, `catalog:register`
+  # 400'd, and the whole scaffold died with a stranded, un-registered GitHub repo and NO
+  # tenant claim ever emitted (confirmed live, task #10, 2026-08-19). `dump` handles every
+  # YAML-special case (colons, leading quotes/`#`/`@`, brackets, all-digit strings, etc.),
+  # not just the colon. See _tools/compose_lib.py's JENV.filters['dump'] mirror below --
+  # the two render engines share this contract and must not drift.
+  description: ${{ values.description | dump }}
   annotations:
     # TechDocs built from the in-repo mkdocs.yml (techdocs-ref: dir = this repo).
     backstage.io/techdocs-ref: dir:.

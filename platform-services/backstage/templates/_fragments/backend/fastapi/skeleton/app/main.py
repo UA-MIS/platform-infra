@@ -33,7 +33,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="${{ values.appName }}",
-    description="${{ values.description }}",
+    description=${{ values.description | dump }},
     version="0.0.0",
     lifespan=lifespan,
 )
