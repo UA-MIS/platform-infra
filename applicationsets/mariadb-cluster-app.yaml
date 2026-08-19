@@ -89,15 +89,44 @@ spec:
           # CIDR-scoped like the off-box role): this login is reached only via the
           # in-cluster `capstone-mariadb` Service, not a public/tailnet interface —
           # the equivalent boundary here is a NetworkPolicy scoping which
-          # namespaces may reach db-tier, not a MySQL host string. NOT yet wired
-          # into Crossplane (config/providerconfig-sql.yaml still points at
-          # ua-mis-db-1) — see the runbook §4 for the repoint + the netpol
-          # follow-up this tradeoff calls for.
+          # namespaces may reach db-tier, not a MySQL host string. Wired into
+          # Crossplane via config/providerconfig-sql.yaml (repointed in-cluster at
+          # the docs/operator/in-cluster-db-tier-runbook.md §4c cutover).
+          #
+          # maxUserConnections (D-112): the mariadb-operator User CRD/chart DEFAULTS
+          # this to 10 when omitted — that is what this login had. A fresh
+          # golden-path verification run (task #10, 2026-08-19) hit
+          # `Error 1226: ... 'crossplane-provisioner' has exceeded the
+          # 'max_user_connections' resource (current value: 10)` from just TWO
+          # tenants' Database/User/Grant MRs reconciling concurrently (each tenant
+          # fans out to 3 envs x 3 MR kinds = up to 9 concurrent connections per
+          # tenant against provider-sql v0.15.0). With ~20 teams x 3 env DBs
+          # onboarding near-simultaneously at launch, 10 is dangerously low and
+          # would stall DB provisioning platform-wide.
+          #
+          # Root-caused live (2026-08-19, task #12): NOT a provider-sql connection
+          # leak. 18 MRs (2 simulated teams x 3 envs x Database/User/Grant) were
+          # applied concurrently against this same provisioner login; all 18
+          # reconciled to Ready within ~12s, Threads_connected drained back to
+          # baseline (0 crossplane-provisioner connections) immediately after, and
+          # no connection errors appeared in provider-sql logs. Connections are
+          # transient (held only for the duration of a reconcile, then released) —
+          # this is a genuinely too-low cap under legitimate concurrent-onboarding
+          # burst, not resource exhaustion from unreleased connections.
+          #
+          # Raised to 100 (server max_connections=151, live-verified headroom for
+          # root/system/mariadb-sys/metrics users) — comfortable margin for ~20
+          # teams x 3 DBs at launch. Live `ALTER USER ... WITH MAX_USER_CONNECTIONS`
+          # was also applied directly to unblock this morning ahead of this PR
+          # merging; this git change is what makes it durable against the next
+          # mariadb-operator/ArgoCD reconcile (selfHeal:true would otherwise revert
+          # a live-only change back to the chart default of 10).
           - name: crossplane-provisioner
             passwordSecretKeyRef:
               name: mariadb-crossplane-provisioner-credentials
               key: password
             host: "%"
+            maxUserConnections: 100
             cleanupPolicy: Skip
 
         grants:
