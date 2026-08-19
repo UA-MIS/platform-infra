@@ -64,7 +64,12 @@ spec:
           #       url: ${{ values.baseImage }}
           #       secretRef: harbor-pull   # minted at onboarding (see the onboarding PR)
           registry:
-            url: ${{ values.baseImage }}
+            # dump-quoted (D-108 sweep, deck-reviewer finding): this is the LOAD-BEARING
+            # copy -- the actual DataVolume source CDI imports from. baseImage is
+            # unconstrained free text (a docker://host/repo:tag ref); unquoted, a
+            # colon+space or a trailing comment breaks this field's YAML the same way
+            # description broke catalog-info.yaml.
+            url: ${{ values.baseImage | dump }}
 
   template:
     metadata:

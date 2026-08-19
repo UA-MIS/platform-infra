@@ -12,7 +12,12 @@ app-name: ${{ values.appName }}
 
 # Base disk image CDI imports (containerDisk registry ref, or switch the DataVolume
 # source to http in virtualmachine.yaml). Point this at your OWN image.
-base-image: ${{ values.baseImage }}
+# dump-quoted (D-108 sweep, deck-reviewer finding): baseImage is unconstrained free
+# text documented as a docker://host/repo:tag ref -- a colon+space, an http(s) URL
+# with a space after the scheme colon, or a trailing "# note" comment each break the
+# unquoted flow scalar (the live default dodges it by coincidence: neither colon in
+# docker://quay.io/containerdisks/fedora:40 is followed by a space).
+base-image: ${{ values.baseImage | dump }}
 
 # Sizing — reserved for the VM's whole lifetime (no overcommit; the VM-tier quota caps it).
 cpu-cores: ${{ values.cpuCores }}
