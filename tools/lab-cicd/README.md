@@ -3,6 +3,9 @@
 Design: `artifacts/design/lab-cicd-exercise-design.md`.
 Decision record: `artifacts/context/decision-log.md` (D-062 onward — grep
 `D-062` through the highest entry for the full build/prove trail).
+Both live in the orchestration workspace this tooling was built from, not
+in this repo — see `artifacts/design/lab-live-deploy-fastfollow.md`
+(committed alongside this directory) for the same cross-repo note in full.
 
 This directory holds the automation for the lab exercise described in that
 design: students in GitHub Teams each get a repo instantiated from
