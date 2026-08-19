@@ -12,10 +12,13 @@ commit landed. But:
   stays deployed, even though `main` has moved on.
 - `.devops/chart/overlays/dev/kustomization.yaml`'s `images[].newTag` value
   does not get bumped by CI the way it did before (or the way it's documented
-  to).
-- If you check ArgoCD, the `dev` Application looks **Synced** — but synced to
-  the *old* manifest state, because nothing ever asked it to sync to a newer
-  one. It is not "broken" in an obvious red way; it's just quietly stale.
+  to) — no follow-up commit from `ua-mis-ci` shows up in `git log`.
+- If the repo is wired to a live ArgoCD Application, it looks **Synced** —
+  but synced to the *old* manifest state, because nothing ever asked it to
+  sync to a newer one. It is not "broken" in an obvious red way; it's just
+  quietly stale. (Not checkable for lab repos today — see
+  `artifacts/design/lab-live-deploy-fastfollow.md` — the git-log absence
+  above is the reliable signal.)
 
 The symptom is an absence, not an error — which is what makes it harder to
 spot than a failing build.

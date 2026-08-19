@@ -45,7 +45,7 @@ hard failure; the permission grants are naturally idempotent PUTs).
 ```sh
 ./inject-fault.sh lab-cicd-<team-slug> 01-strip-autodeploy
 # review the diff first, without merging:
-AUTO_MERGE=0 ./inject-fault.sh lab-cicd-<team-slug> 02-break-observability
+AUTO_MERGE=0 ./inject-fault.sh lab-cicd-<team-slug> 03-rewire-environment
 ```
 
 Recommend staggering which fault goes to which team (don't inject the same
@@ -53,24 +53,36 @@ fault into every team at the same time) so teams can't just compare diffs.
 
 ## The fault catalog
 
+**Initial roster: faults 01 and 03.** Both are fully git/CI-observable today
+and verified end-to-end in Phase 2
+(`artifacts/implementation/lab-cicd-proof.evidence.yaml`).
+
 1. **`01-strip-autodeploy`** — removes the `push: branches: [main]` trigger
    from the CI workflow. Merges to `main` silently stop deploying; teaches
    cross-referencing `promotion.yaml`'s declared contract against the
    workflow file that's supposed to implement it.
-2. **`02-break-observability`** — renames the k8s `Service` object (keeping
-   the Ingress backend reference and pod selector in sync, so the app keeps
-   serving 200s) so the Traefik-derived metrics identifier no longer matches
-   the Golden Signals dashboard's assumed naming. Teaches log-vs-metrics
-   triage: the app is fine, the dashboard just stopped agreeing with it.
-3. **`03-rewire-environment`** — swaps the `staging`/`prod` `overlay:` paths
+2. **`03-rewire-environment`** — swaps the `staging`/`prod` `overlay:` paths
    in `.devops/promotion.yaml`. Both environments stay green in ArgoCD, but
    each is running the other's manifests. Teaches that a promotion pipeline
    can be structurally valid YAML while being semantically wrong, and that a
    manual approval gate only catches what the approver actually checks.
 
-All three are pure in-repo git patches against files that live entirely
-inside a `lab-cicd-base`-derived repo — no platform-infra or cluster changes
-are needed to inject or answer any of them (design doc Sec2.5's own framing).
+**Held (not in the initial roster): `02-break-observability`.** Renames the
+k8s `Service` object (keeping the Ingress backend reference and pod selector
+in sync, so the app keeps serving 200s) so the Traefik-derived metrics
+identifier no longer matches the Golden Signals dashboard's assumed naming.
+This fault's whole symptom is live (a dashboard going quiet while the app
+stays healthy) — it produces **no observable signal at all** without a real
+deployed app and a real dashboard watching it, which lab repos don't have
+today (see `artifacts/design/lab-live-deploy-fastfollow.md`). The patch,
+`SYMPTOM.md`, and `ANSWER-KEY.md` are complete and correct; do not inject it
+until that fastfollow lands — see `faults/02-break-observability/SYMPTOM.md`
+for the full "why held" writeup.
+
+Both shipped faults are pure in-repo git patches against files that live
+entirely inside a `lab-cicd-base`-derived repo — no platform-infra or
+cluster changes are needed to inject or answer either of them (design doc
+Sec2.5's own framing).
 
 ## Authoring a new fault
 

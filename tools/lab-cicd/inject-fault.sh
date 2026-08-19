@@ -19,6 +19,15 @@
 #   WORKDIR        mktemp -d   (scratch clone location)
 #   AUTO_MERGE     1   (0 = open the PR and stop, don't merge — lets an
 #                  instructor review the diff before it lands)
+#   COMMIT_BODY    "Routine config sync." — used as BOTH the commit message
+#                  body and the PR body. Keep it generic: the creating team
+#                  has `maintain` and can read every commit message and PR
+#                  body in their own repo, so this text must never name the
+#                  fault id or say "fault"/"injected"/"automated", and must
+#                  never point at SYMPTOM.md/ANSWER-KEY.md (course staff
+#                  already have the fault-id -> repo mapping from this
+#                  script's own stderr log; nothing team-visible needs to
+#                  repeat it).
 #   DRY_RUN        0
 #
 # What it does:
@@ -77,11 +86,23 @@ if ! git -C "$CLONE_DIR" apply --check "$PATCH_FILE"; then
 fi
 
 BRANCH="fault/${FAULT_ID}"
+# Cover-story-safe commit + PR text (design Sec2.4's whole point of using a
+# PR instead of a silent push is a REAL audit trail for course staff, not a
+# hidden one — but the creating team has `maintain` and can read every
+# commit message and PR body in their own repo, so neither may name the
+# fault id, call out "fault"/"injected"/"automated", or point at
+# SYMPTOM.md/ANSWER-KEY.md. Course staff already have this run's fault-id ->
+# repo mapping from this script's own stderr log; nothing team-visible needs
+# to repeat it. Keep this generic even if PR_TITLE/COMMIT_BODY are
+# customized by a caller — don't reintroduce the leak via a fault-specific
+# default.
+COMMIT_BODY="${COMMIT_BODY:-Routine config sync.}"
+
 git -C "$CLONE_DIR" checkout -q -b "$BRANCH"
 git -C "$CLONE_DIR" apply "$PATCH_FILE"
 git -C "$CLONE_DIR" add -A
 git -C "$CLONE_DIR" -c user.name="ua-mis-521" -c user.email="521@capstone.uamishub.com" \
-  commit -q -m "${PR_TITLE}" -m "Fault ${FAULT_ID} injected by inject-fault.sh (course-staff-authored, delivered as a reviewed PR per lab-cicd-exercise-design.md Sec2.4)."
+  commit -q -m "${PR_TITLE}" -m "${COMMIT_BODY}"
 
 run git -C "$CLONE_DIR" push -u origin "$BRANCH"
 
@@ -92,8 +113,9 @@ fi
 
 pr_url=$(gh pr create --repo "${ORG}/${REPO_NAME}" --base main --head "$BRANCH" \
   --title "$PR_TITLE" \
-  --body "Automated fault delivery (${FAULT_ID}) — see faults/${FAULT_ID}/SYMPTOM.md in platform-infra/tools/lab-cicd for the answer key (course staff only).")
+  --body "${COMMIT_BODY}")
 log "PR opened: ${pr_url}"
+log "fault=${FAULT_ID} delivered to ${ORG}/${REPO_NAME} — course-staff-only mapping, kept out of the PR/commit text on purpose (see script comment above)"
 
 if [ "$AUTO_MERGE" = "1" ]; then
   pr_number="${pr_url##*/}"

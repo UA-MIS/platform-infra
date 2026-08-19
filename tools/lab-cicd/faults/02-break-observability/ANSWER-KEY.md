@@ -1,5 +1,12 @@
 # Fault 02 — answer key (course staff only)
 
+**Status: HELD — not in the initial roster.** See `SYMPTOM.md` for why: this
+fault has no observable signal without a live deploy (no Harbor
+project/ArgoCD Application exists for lab repos today, D-106). The bug/
+concept/fix below are accurate and unchanged; only the "when to use this"
+call has changed. Ship faults 01+03 for now; reactivate this one once
+`artifacts/design/lab-live-deploy-fastfollow.md`'s live deploy path exists.
+
 ## The bug
 
 `fault.patch` renames the Kubernetes `Service` object from `sample` to

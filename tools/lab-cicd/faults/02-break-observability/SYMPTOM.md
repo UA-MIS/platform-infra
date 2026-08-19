@@ -1,46 +1,42 @@
-# Fault 02 — a naming mismatch between Service and Ingress
+# Fault 02 — HELD (not in the initial roster)
 
-## What you'll observe
+**Status: HELD.** Do not inject this fault yet — see below. This is not a
+placeholder for a future fault; the patch, the concept, and the answer key
+are all real and correct — the file exists, it just isn't ready to hand a
+team.
 
-A PR lands on `main` from course staff (title something innocuous, like
-"chore: dependency and config sync"). `git log`/the Actions tab show nothing
-alarming — the workflow's build+test steps still pass (this fault doesn't
-touch anything CI-visible).
+## Why this is held
 
-The actual defect is only visible by reading the changed manifests:
-`.devops/chart/base/service.yaml`'s `metadata.name` and
-`.devops/chart/base/ingress.yaml`'s `spec.rules[].http.paths[].backend.service.name`
-no longer agree with what they did before the merge — one of them changed,
-the other didn't (or vice versa), and it's not obvious from either file in
-isolation that anything's wrong; each file is internally well-formed YAML.
+This fault's whole point (see `ANSWER-KEY.md`) is a *live* symptom: the app
+stays healthy, but a Grafana dashboard goes quiet because the renamed
+Service no longer matches what the dashboard's query expects. That symptom
+only exists once traffic is actually flowing through a real deployed app and
+a real dashboard is actually watching it.
 
-## Where to look
+Lab repos don't have that today (D-106: no Harbor project, no ArgoCD
+Application — see `artifacts/design/lab-live-deploy-fastfollow.md`). Without
+a live deploy, this fault produces **no observable signal at all**:
 
-- `git diff` (or `git log -p`) on the fault-delivery commit/PR: which files
-  changed, and what exactly moved?
-- `.devops/chart/base/service.yaml` — what is `metadata.name`?
-- `.devops/chart/base/ingress.yaml` — what does the Ingress's
-  `backend.service.name` actually reference?
-- Do those two values match? If they don't, anything routing by that name
-  (an Ingress, a NetworkPolicy, a ServiceMonitor, a dashboard query) has a
-  real chance of silently referencing a name that no longer resolves to the
-  Service you'd expect.
+- `fault.patch` renames the Service and updates the Ingress backend to
+  match, so the two stay mutually consistent — there is nothing to spot by
+  comparing them (confirmed by review: diffing the two files post-fault
+  shows them agreeing, not disagreeing).
+- CI (build+test) doesn't touch either file's content in a way that fails.
+- `kubectl kustomize` renders all four overlays clean, exit 0, both before
+  and after the patch — kustomize doesn't cross-validate that an Ingress
+  backend's Service name actually resolves to a live Service, so there's no
+  build-time signal either.
 
-This is a "does everything that references a resource by name still agree on
-that name" exercise — the same class of bug as a renamed database column
-that a downstream report still references by the old name. Nothing has to
-crash for this to be a real bug.
+A team handed this fault today would look for a discrepancy, find none, and
+correctly conclude nothing's wrong — which defeats the exercise. That's a
+real gap in the fault, not a wording problem in this file, which is why it's
+held rather than rescoped like faults 01/03 were.
 
-## About the live version of this fault
+## What ships instead
 
-The original design for this fault (see
-`artifacts/design/lab-cicd-exercise-design.md` Sec2.5) describes a live
-symptom: the app stays up and healthy, but a Grafana Golden Signals dashboard
-goes flat/"No data" because the Traefik-derived metrics identifier no longer
-matches the renamed Service. **That live behavior does not activate for lab
-repos today** — lab repos aren't provisioned with a live deploy path (no
-Harbor project, no ArgoCD Application; see
-`artifacts/design/lab-live-deploy-fastfollow.md`), so there's no running app
-or dashboard to actually observe yet. The git/manifest-level diagnosis above
-is the current, honest scope of this fault. It will activate automatically,
-with zero changes to this fault, once a live per-team deploy path exists.
+The initial roster is **faults 01 and 03 only** — both fully git/CI
+observable today, both verified end-to-end in Phase 2
+(`artifacts/implementation/lab-cicd-proof.evidence.yaml`). This fault
+reactivates automatically, with no changes needed to `fault.patch` or
+`ANSWER-KEY.md`, once a live per-team deploy path exists — see
+`artifacts/design/lab-live-deploy-fastfollow.md`.
