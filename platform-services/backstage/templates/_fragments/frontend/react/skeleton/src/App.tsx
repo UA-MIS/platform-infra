@@ -95,7 +95,11 @@ export default function App() {
       <div className="mx-auto max-w-2xl px-4 py-10">
         <header className="mb-8">
           <h1 className="text-3xl font-bold tracking-tight">${{ values.appName }}</h1>
-          <p className="mt-1 text-slate-600">${{ values.description }}</p>
+          {/* dump-quoted into a JSX expression container (task #11, D-112): raw JSX text
+             content breaks on '<' or '{' (confirmed with @babel/parser); a JS string
+             literal inside {} is immune to both and React still renders it as plain
+             escaped text -- same effect as description's other structural fixes. */}
+          <p className="mt-1 text-slate-600">{${{ values.description | dump }}}</p>
           <p className="mt-1 text-sm text-slate-500">
             React (Vite) frontend &middot; calls the Express API at <code>/api</code>.
           </p>

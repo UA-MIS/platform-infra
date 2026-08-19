@@ -10,7 +10,10 @@ import { RouterLink } from '@angular/router';
   template: `
     <section class="space-y-6">
       <h1 class="text-3xl font-bold tracking-tight">Welcome 👋</h1>
-      <p class="text-slate-600">${{ values.description }}</p>
+      <!-- Bound (task #11, D-112), not raw-templated: Angular's own {{ }} interpolation
+           (already used below for the counter) always HTML-escapes a bound property and
+           never re-parses it as template source -- same reasoning as the Vue fragment. -->
+      <p class="text-slate-600">{{ description }}</p>
       <p class="text-slate-600">
         An Angular single-page app scaffolded by <span class="font-medium">The Process</span> —
         TypeScript + Tailwind, served by nginx. It calls the backend over a relative
@@ -34,4 +37,5 @@ import { RouterLink } from '@angular/router';
 })
 export class HomeComponent {
   readonly count = signal(0);
+  readonly description = ${{ values.description | dump }};
 }

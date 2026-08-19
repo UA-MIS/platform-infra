@@ -7,7 +7,9 @@ export default function HomePage() {
   return (
     <main className="mx-auto max-w-2xl p-8">
       <h1 className="text-3xl font-bold">${{ values.appName }}</h1>
-      <p className="mt-2 text-gray-600">${{ values.description }}</p>
+      {/* dump-quoted into a JSX expression container (task #11, D-112) -- see the React
+         frontend fragment's App.tsx for the same pattern and reasoning. */}
+      <p className="mt-2 text-gray-600">{${{ values.description | dump }}}</p>
 
       <p className="mt-6 text-gray-700">
         A Next.js (App Router, TypeScript) starter wired to MySQL via Prisma and
