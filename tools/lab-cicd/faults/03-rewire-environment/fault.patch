@@ -1,0 +1,19 @@
+diff --git a/.devops/promotion.yaml b/.devops/promotion.yaml
+index 9cbbfb4..b4799c0 100644
+--- a/.devops/promotion.yaml
++++ b/.devops/promotion.yaml
+@@ -42,12 +42,12 @@ environments:
+   staging:
+     trigger: "tag:v*"
+     tagConvention: "semver"
+-    overlay: ".devops/chart/overlays/staging"
++    overlay: ".devops/chart/overlays/prod"
+     gate: auto
+   prod:
+     trigger: "tag:v*"
+     tagConvention: "semver"
+-    overlay: ".devops/chart/overlays/prod"
++    overlay: ".devops/chart/overlays/staging"
+     gate: manual
+   preview:
+     trigger: "pull_request"
