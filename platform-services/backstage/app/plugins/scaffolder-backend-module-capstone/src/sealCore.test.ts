@@ -301,55 +301,116 @@ describe('deleteSecret', () => {
 });
 
 /**
- * Stateful GH branch/PR simulator for the rolling-PR tests (D-118): tracks which refs exist and
- * which PR (if any) is currently OPEN for the rolling branch, so ensurePendingBranch's
- * create-vs-reset-vs-reuse logic exercises the REAL branch lifecycle instead of a static
- * happy-path mock that would hide the create/reuse/reset distinction.
+ * A single cohesive in-memory GitHub repo simulator (D-118 review follow-up, PR #500) backing
+ * ALL the octokit calls the rolling-PR lifecycle touches — branch refs, PR state
+ * (open/closed/merged), and file content+sha — wired together with REAL GitHub semantics: a file
+ * commit really does advance its branch's tip sha, a sha-mismatch on a file write really 409s,
+ * and a duplicate ref/PR create really 422s. This is what makes the CONCURRENCY tests below
+ * meaningful — a static happy-path stub (like serveEs, still used by the simpler non-racing
+ * tests above) cannot exercise a real conflict or a real "no commits yet" 422.
  */
-function mockRollingPrLifecycle() {
-  const refs = new Set<string>(['heads/main']);
-  let openPr: { html_url: string; number: number } | undefined;
+function mockGithubRepo(initialFiles: Record<string, string> = {}) {
+  const refs = new Map<string, string>([['heads/main', 'sha-main']]);
+  const files = new Map<string, { content: string; sha: string }>();
+  let shaCounter = 0;
   let prCounter = 0;
+  let pr:
+    | { html_url: string; number: number; state: 'open' | 'closed'; merged_at: string | null }
+    | undefined;
+
+  for (const [path, content] of Object.entries(initialFiles)) {
+    files.set(path, { content, sha: `sha-${shaCounter++}` });
+  }
 
   octokitCalls.getRef.mockImplementation(async (opts: any) => {
-    if (refs.has(opts.ref)) {
-      return { data: { object: { sha: `sha-${opts.ref}` } } };
+    const sha = refs.get(opts.ref);
+    if (sha === undefined) {
+      const e = new Error('Not Found') as Error & { status: number };
+      e.status = 404;
+      throw e;
     }
-    const e = new Error('Not Found') as Error & { status: number };
-    e.status = 404;
-    throw e;
+    return { data: { object: { sha } } };
   });
   octokitCalls.createRef.mockImplementation(async (opts: any) => {
-    refs.add(opts.ref.replace(/^refs\//, ''));
+    const ref = opts.ref.replace(/^refs\//, '');
+    if (refs.has(ref)) {
+      const e = new Error('Reference already exists') as Error & { status: number };
+      e.status = 422;
+      throw e;
+    }
+    refs.set(ref, opts.sha);
     return {};
   });
   octokitCalls.updateRef.mockImplementation(async (opts: any) => {
-    refs.add(opts.ref);
+    refs.set(opts.ref, opts.sha);
     return {};
   });
-  octokitCalls.pullsList.mockImplementation(async () => ({
-    data: openPr ? [openPr] : [],
-  }));
-  octokitCalls.pullsCreate.mockImplementation(async (_opts: { head: string }) => {
+  octokitCalls.pullsList.mockImplementation(async (opts: any) => {
+    if (!pr) return { data: [] };
+    if (opts.state && opts.state !== 'all' && opts.state !== pr.state) {
+      return { data: [] };
+    }
+    return { data: [pr] };
+  });
+  octokitCalls.pullsCreate.mockImplementation(async () => {
+    if (pr && pr.state === 'open') {
+      const e = new Error('A pull request already exists') as Error & { status: number };
+      e.status = 422;
+      throw e;
+    }
     prCounter += 1;
-    openPr = {
+    pr = {
       html_url: `https://github.com/UA-MIS/my-app/pull/${prCounter}`,
       number: prCounter,
+      state: 'open',
+      merged_at: null,
     };
-    return { data: openPr };
+    return { data: pr };
   });
+  octokitCalls.getContent.mockImplementation(async (opts: any) => {
+    const f = files.get(opts.path);
+    if (!f) {
+      const e = new Error('Not Found') as Error & { status: number };
+      e.status = 404;
+      throw e;
+    }
+    return {
+      data: { sha: f.sha, content: Buffer.from(f.content, 'utf8').toString('base64') },
+    } as any;
+  });
+  octokitCalls.createOrUpdateFileContents.mockImplementation(async (opts: any) => {
+    const existing = files.get(opts.path);
+    if ((existing?.sha ?? undefined) !== opts.sha) {
+      const e = new Error('Conflict: sha mismatch') as Error & { status: number };
+      e.status = 409;
+      throw e;
+    }
+    const newSha = `sha-${shaCounter++}`;
+    files.set(opts.path, {
+      content: Buffer.from(opts.content, 'base64').toString('utf8'),
+      sha: newSha,
+    });
+    // A real commit landed on this branch — advance its tracked tip sha.
+    refs.set(`heads/${opts.branch}`, `sha-commit-${newSha}`);
+    return { data: { content: { sha: newSha } } };
+  });
+
   return {
-    /** Simulate the pending PR merging (or closing) — no longer OPEN, branch goes stale. */
+    files,
+    /** Simulate the pending PR merging — no longer OPEN, branch is safely stale. */
     mergePr: () => {
-      openPr = undefined;
+      if (pr) pr = { ...pr, state: 'closed', merged_at: new Date().toISOString() };
+    },
+    /** Simulate a human closing the pending PR WITHOUT merging it. */
+    closePrWithoutMerging: () => {
+      if (pr) pr = { ...pr, state: 'closed', merged_at: null };
     },
   };
 }
 
 describe('deleteSecret rolling PR (D-118)', () => {
   it('reuses the SAME rolling PR across multiple deleted keys — one rolling PR, no new PR', async () => {
-    serveEs({ dev: ['DATABASE_URL', 'API_KEY'] });
-    mockRollingPrLifecycle();
+    mockGithubRepo({ [overlayEs('dev')]: shippedEs('dev', ['DATABASE_URL', 'API_KEY']) });
 
     const res1 = await deleteSecret(makeDeps([OWNER_GROUP]), {
       credentials: CREDS,
@@ -371,15 +432,16 @@ describe('deleteSecret rolling PR (D-118)', () => {
   });
 
   it('opens a NEW PR after the previous one merged (stale branch reset, fresh PR)', async () => {
-    serveEs({ dev: ['DATABASE_URL', 'API_KEY'] });
-    const lifecycle = mockRollingPrLifecycle();
+    const repo = mockGithubRepo({
+      [overlayEs('dev')]: shippedEs('dev', ['DATABASE_URL', 'API_KEY']),
+    });
 
     const res1 = await deleteSecret(makeDeps([OWNER_GROUP]), {
       credentials: CREDS,
       entityRef: TARGET_REF,
       key: 'DATABASE_URL',
     });
-    lifecycle.mergePr(); // the PR merged — branch is now stale (no open PR references it)
+    repo.mergePr(); // the PR merged — branch is now stale (no open PR references it)
 
     const res2 = await deleteSecret(makeDeps([OWNER_GROUP]), {
       credentials: CREDS,
@@ -391,6 +453,59 @@ describe('deleteSecret rolling PR (D-118)', () => {
     expect(octokitCalls.pullsCreate).toHaveBeenCalledTimes(2); // a FRESH PR was opened
     expect(octokitCalls.createRef).toHaveBeenCalledTimes(1); // branch created ONCE, reused
     expect(octokitCalls.updateRef).toHaveBeenCalledTimes(1); // reset-to-base before the new PR
+  });
+
+  it('WARNS when resetting a rolling branch whose last PR was CLOSED WITHOUT MERGING (D-118 tradeoff)', async () => {
+    const repo = mockGithubRepo({
+      [overlayEs('dev')]: shippedEs('dev', ['DATABASE_URL', 'API_KEY']),
+    });
+    const loggerCalls: string[] = [];
+    const deps = makeDeps([OWNER_GROUP]);
+    deps.logger.warn = (m: string) => loggerCalls.push(m);
+
+    await deleteSecret(deps, {
+      credentials: CREDS,
+      entityRef: TARGET_REF,
+      key: 'DATABASE_URL',
+    });
+    repo.closePrWithoutMerging(); // a human closed it without merging
+
+    await deleteSecret(deps, {
+      credentials: CREDS,
+      entityRef: TARGET_REF,
+      key: 'API_KEY',
+    });
+
+    expect(loggerCalls.join('\n')).toMatch(/CLOSED WITHOUT MERGING/);
+  });
+
+  it('CONCURRENCY: two simultaneous deletes for DIFFERENT keys in the SAME env do not lose either removal (lost-update fix)', async () => {
+    const repo = mockGithubRepo({
+      [overlayEs('dev')]: shippedEs('dev', ['DATABASE_URL', 'API_KEY']),
+    });
+
+    // Real Promise.all — NOT sequential awaits — so the shared overlay file write genuinely
+    // races through casUpdateFile's compare-and-swap retry (PR #500 review point 6).
+    const [res1, res2] = await Promise.all([
+      deleteSecret(makeDeps([OWNER_GROUP]), {
+        credentials: CREDS,
+        entityRef: TARGET_REF,
+        key: 'DATABASE_URL',
+      }),
+      deleteSecret(makeDeps([OWNER_GROUP]), {
+        credentials: CREDS,
+        entityRef: TARGET_REF,
+        key: 'API_KEY',
+      }),
+    ]);
+
+    expect(res1.pullRequestUrl).toBe(res2.pullRequestUrl); // exactly ONE PR, both converged
+
+    // BOTH removals survived — neither writer's change was silently clobbered by the other's.
+    const es = repo.files.get(overlayEs('dev'))!.content;
+    expect(es).not.toContain('secretKey: DATABASE_URL');
+    expect(es).not.toContain('secretKey: API_KEY');
+    expect(es).toContain('secretKey: app-secret'); // the shipped entry survived too
   });
 });
 

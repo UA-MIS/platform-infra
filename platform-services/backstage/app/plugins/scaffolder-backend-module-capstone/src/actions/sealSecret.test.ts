@@ -268,6 +268,14 @@ beforeEach(() => {
   octokitCalls.getRef.mockImplementation(async () => ({
     data: { object: { sha: 'basesha' } },
   }));
+  // Reset to plain no-op-safe stubs: mockClear() above only clears call history, NOT whatever
+  // mockImplementation a PRIOR test's mockGithubRepo/mockRollingPrLifecycle helper installed —
+  // without this, a later test using the simpler static (serveShippedEs) mocks can inherit a
+  // stateful CAS-conflict-checking createOrUpdateFileContents from an earlier concurrency test
+  // and spuriously 409/422 (this bit us once — see git history / PR #500 review round 2).
+  octokitCalls.createRef.mockImplementation(async () => ({}));
+  octokitCalls.updateRef.mockImplementation(async () => ({}));
+  octokitCalls.createOrUpdateFileContents.mockImplementation(async () => ({}));
   octokitCalls.getContent.mockImplementation(async () => {
     const e = new Error('Not Found') as Error & { status: number };
     e.status = 404;
@@ -382,24 +390,27 @@ describe('capstone:seal-secret write + publish (owner)', () => {
     expect(es).not.toContain(SECRET_VALUE);
   });
 
-  it('is idempotent — re-setting an existing key rewrites no git (only Vault)', async () => {
+  it('is idempotent — re-setting an existing key rewrites no git (only Vault), and does NOT attempt a zero-diff PR', async () => {
     const { deps } = makeDeps({ actorGroups: [OWNER_GROUP] });
     // The dev overlay already declares API_KEY.
     serveShippedEs(['dev'], { dev: ['API_KEY'] });
     const action = createSealSecretAction(deps);
-    await action.handler(
-      ctxFor({
-        entityRef: TARGET_REF,
-        key: 'API_KEY',
-        value: 'new-rotated-value',
-        envs: ['dev'],
-      }),
-    );
+    const ctx = ctxFor({
+      entityRef: TARGET_REF,
+      key: 'API_KEY',
+      value: 'new-rotated-value',
+      envs: ['dev'],
+    });
+    await action.handler(ctx);
+
     // Vault is still written (rotation), but no file is committed (the declaration is unchanged).
     expect(vaultSetCalls).toHaveLength(1);
     expect(octokitCalls.createOrUpdateFileContents).not.toHaveBeenCalled();
-    // A PR is still opened (no-op-safe; the value did change in Vault).
-    expect(octokitCalls.pullsCreate).toHaveBeenCalledTimes(1);
+    // NO PR is opened: with no open PR already covering this repo and nothing to commit, calling
+    // pulls.create would hit GitHub's real "No commits between X and Y" 422 (reproduced against a
+    // live repo — PR #500 review Finding A). The rotation is fully live via Vault regardless.
+    expect(octokitCalls.pullsCreate).not.toHaveBeenCalled();
+    expect(ctx.output).toHaveBeenCalledWith('pullRequestUrls', []);
   });
 
   it('NEVER logs the plaintext value', async () => {
@@ -422,55 +433,120 @@ describe('capstone:seal-secret write + publish (owner)', () => {
   });
 
   /**
-   * Stateful GH branch/PR simulator for the rolling-PR tests (D-118): tracks which refs exist
-   * and which PR (if any) is currently OPEN for the rolling branch, so ensurePendingBranch's
-   * create-vs-reset-vs-reuse logic exercises the REAL branch lifecycle rather than a static
-   * happy-path mock.
+   * A single cohesive in-memory GitHub repo simulator (D-118 review follow-up, PR #500) backing
+   * ALL the octokit calls the rolling-PR lifecycle touches — branch refs, PR state
+   * (open/closed/merged), and file content+sha — wired together with REAL GitHub semantics: a
+   * file commit really does advance its branch's tip sha, a sha-mismatch on a file write really
+   * 409s, and a duplicate ref/PR create really 422s. This is what makes the CONCURRENCY tests
+   * below meaningful — a static happy-path stub (like serveShippedEs, still used by the simpler
+   * non-racing tests above) cannot exercise a real conflict or a real "no commits yet" 422.
    */
-  function mockRollingPrLifecycle() {
-    const refs = new Set<string>(['heads/main']);
-    let openPr: { html_url: string; number: number } | undefined;
+  function mockGithubRepo(initialFiles: Record<string, string> = {}) {
+    const refs = new Map<string, string>([['heads/main', 'sha-main']]);
+    const files = new Map<string, { content: string; sha: string }>();
+    let shaCounter = 0;
     let prCounter = 0;
+    let pr:
+      | { html_url: string; number: number; state: 'open' | 'closed'; merged_at: string | null }
+      | undefined;
+
+    for (const [path, content] of Object.entries(initialFiles)) {
+      files.set(path, { content, sha: `sha-${shaCounter++}` });
+    }
 
     octokitCalls.getRef.mockImplementation(async (opts: any) => {
-      if (refs.has(opts.ref)) {
-        return { data: { object: { sha: `sha-${opts.ref}` } } };
+      const sha = refs.get(opts.ref);
+      if (sha === undefined) {
+        const e = new Error('Not Found') as Error & { status: number };
+        e.status = 404;
+        throw e;
       }
-      const e = new Error('Not Found') as Error & { status: number };
-      e.status = 404;
-      throw e;
+      return { data: { object: { sha } } };
     });
     octokitCalls.createRef.mockImplementation(async (opts: any) => {
-      refs.add(opts.ref.replace(/^refs\//, ''));
+      const ref = opts.ref.replace(/^refs\//, '');
+      if (refs.has(ref)) {
+        const e = new Error('Reference already exists') as Error & { status: number };
+        e.status = 422;
+        throw e;
+      }
+      refs.set(ref, opts.sha);
       return {};
     });
     octokitCalls.updateRef.mockImplementation(async (opts: any) => {
-      refs.add(opts.ref);
+      refs.set(opts.ref, opts.sha);
       return {};
     });
-    octokitCalls.pullsList.mockImplementation(async () => ({
-      data: openPr ? [openPr] : [],
-    }));
-    octokitCalls.pullsCreate.mockImplementation(async (_opts: { head: string }) => {
+    octokitCalls.pullsList.mockImplementation(async (opts: any) => {
+      if (!pr) return { data: [] };
+      if (opts.state && opts.state !== 'all' && opts.state !== pr.state) {
+        return { data: [] };
+      }
+      return { data: [pr] };
+    });
+    octokitCalls.pullsCreate.mockImplementation(async () => {
+      if (pr && pr.state === 'open') {
+        const e = new Error('A pull request already exists') as Error & { status: number };
+        e.status = 422;
+        throw e;
+      }
       prCounter += 1;
-      openPr = {
+      pr = {
         html_url: `https://github.com/UA-MIS/my-app/pull/${prCounter}`,
         number: prCounter,
+        state: 'open',
+        merged_at: null,
       };
-      return { data: openPr };
+      return { data: pr };
     });
+    octokitCalls.getContent.mockImplementation(async (opts: any) => {
+      const f = files.get(opts.path);
+      if (!f) {
+        const e = new Error('Not Found') as Error & { status: number };
+        e.status = 404;
+        throw e;
+      }
+      return {
+        data: { sha: f.sha, content: Buffer.from(f.content, 'utf8').toString('base64') },
+      } as any;
+    });
+    octokitCalls.createOrUpdateFileContents.mockImplementation(async (opts: any) => {
+      const existing = files.get(opts.path);
+      if ((existing?.sha ?? undefined) !== opts.sha) {
+        const e = new Error('Conflict: sha mismatch') as Error & { status: number };
+        e.status = 409;
+        throw e;
+      }
+      const newSha = `sha-${shaCounter++}`;
+      files.set(opts.path, {
+        content: Buffer.from(opts.content, 'base64').toString('utf8'),
+        sha: newSha,
+      });
+      // A real commit landed on this branch — advance its tracked tip sha (so a later
+      // ensurePendingBranch call correctly sees this branch as "has commits ahead of base").
+      refs.set(`heads/${opts.branch}`, `sha-commit-${newSha}`);
+      return { data: { content: { sha: newSha } } };
+    });
+
     return {
-      /** Simulate the pending PR merging (or closing) — no longer OPEN, branch goes stale. */
+      files,
+      /** Simulate the pending PR merging — no longer OPEN, branch is safely stale. */
       mergePr: () => {
-        openPr = undefined;
+        if (pr) pr = { ...pr, state: 'closed', merged_at: new Date().toISOString() };
+      },
+      /** Simulate a human closing the pending PR WITHOUT merging it. */
+      closePrWithoutMerging: () => {
+        if (pr) pr = { ...pr, state: 'closed', merged_at: null };
       },
     };
   }
 
   it('reuses the SAME rolling PR across two separate seal calls (different keys/envs)', async () => {
     const { deps } = makeDeps({ actorGroups: [OWNER_GROUP] });
-    serveShippedEs(['dev', 'prod']);
-    mockRollingPrLifecycle();
+    mockGithubRepo({
+      [overlayEs('dev')]: shippedEs('dev'),
+      [overlayEs('prod')]: shippedEs('prod'),
+    });
     const action = createSealSecretAction(deps);
 
     const ctx1 = ctxFor({
@@ -498,8 +574,10 @@ describe('capstone:seal-secret write + publish (owner)', () => {
 
   it('opens a NEW PR after the previous rolling PR merged (stale branch reset, fresh PR)', async () => {
     const { deps } = makeDeps({ actorGroups: [OWNER_GROUP] });
-    serveShippedEs(['dev', 'prod']);
-    const lifecycle = mockRollingPrLifecycle();
+    const repo = mockGithubRepo({
+      [overlayEs('dev')]: shippedEs('dev'),
+      [overlayEs('prod')]: shippedEs('prod'),
+    });
     const action = createSealSecretAction(deps);
 
     const ctx1 = ctxFor({
@@ -509,7 +587,7 @@ describe('capstone:seal-secret write + publish (owner)', () => {
       envs: ['dev'],
     });
     await action.handler(ctx1);
-    lifecycle.mergePr(); // the PR merged — the branch is now stale
+    repo.mergePr(); // the PR merged — the branch is now stale
 
     const ctx2 = ctxFor({
       entityRef: TARGET_REF,
@@ -525,6 +603,93 @@ describe('capstone:seal-secret write + publish (owner)', () => {
     expect(octokitCalls.pullsCreate).toHaveBeenCalledTimes(2); // a FRESH PR was opened
     expect(octokitCalls.createRef).toHaveBeenCalledTimes(1); // branch created ONCE, reused
     expect(octokitCalls.updateRef).toHaveBeenCalledTimes(1); // reset-to-base before the new PR
+  });
+
+  it('WARNS when resetting a rolling branch whose last PR was CLOSED WITHOUT MERGING (D-118 tradeoff)', async () => {
+    const { deps, loggerCalls } = makeDeps({ actorGroups: [OWNER_GROUP] });
+    const repo = mockGithubRepo({ [overlayEs('dev')]: shippedEs('dev') });
+    const action = createSealSecretAction(deps);
+
+    await action.handler(
+      ctxFor({
+        entityRef: TARGET_REF,
+        key: 'DATABASE_URL',
+        value: SECRET_VALUE,
+        envs: ['dev'],
+      }),
+    );
+    repo.closePrWithoutMerging(); // a human closed it without merging — DATABASE_URL's Vault
+    // write is now orphaned (no ExternalSecret entry will ever declare it once reset)
+
+    await action.handler(
+      ctxFor({
+        entityRef: TARGET_REF,
+        key: 'API_KEY',
+        value: 'other-value',
+        envs: ['dev'],
+      }),
+    );
+
+    expect(loggerCalls.join('\n')).toMatch(/CLOSED WITHOUT MERGING/);
+  });
+
+  it('CONCURRENCY: two simultaneous seals for the same repo race through branch/PR creation without either erroring', async () => {
+    const { deps } = makeDeps({ actorGroups: [OWNER_GROUP] });
+    mockGithubRepo({ [overlayEs('dev')]: shippedEs('dev') });
+    const action = createSealSecretAction(deps);
+
+    const ctx1 = ctxFor({
+      entityRef: TARGET_REF,
+      key: 'DATABASE_URL',
+      value: SECRET_VALUE,
+      envs: ['dev'],
+    });
+    const ctx2 = ctxFor({
+      entityRef: TARGET_REF,
+      key: 'API_KEY',
+      value: 'other-value',
+      envs: ['dev'],
+    });
+
+    // Real Promise.all — NOT sequential awaits — so createRef/pulls.create genuinely race through
+    // the 422-then-reread paths (PR #500 review point 4/point 6: this was previously untested).
+    await Promise.all([action.handler(ctx1), action.handler(ctx2)]);
+
+    const url1 = (ctx1.output as jest.Mock).mock.calls[0][1][0];
+    const url2 = (ctx2.output as jest.Mock).mock.calls[0][1][0];
+    // The real invariant: exactly ONE PR exists and BOTH callers converged on it. (NOT asserting
+    // pullsCreate's call COUNT here — both callers legitimately ATTEMPT it when racing, and the
+    // loser's attempt is expected to 422 and get caught; the mock still records that invocation.)
+    expect(url1).toBe(url2);
+    expect(url1).toMatch(/\/pull\/1$/); // only one PR was ever actually created (number 1)
+  });
+
+  it('CONCURRENCY: two simultaneous seals for DIFFERENT keys in the SAME env do not lose either declaration (lost-update fix)', async () => {
+    const { deps } = makeDeps({ actorGroups: [OWNER_GROUP] });
+    const repo = mockGithubRepo({ [overlayEs('dev')]: shippedEs('dev') });
+    const action = createSealSecretAction(deps);
+
+    const ctx1 = ctxFor({
+      entityRef: TARGET_REF,
+      key: 'DATABASE_URL',
+      value: SECRET_VALUE,
+      envs: ['dev'],
+    });
+    const ctx2 = ctxFor({
+      entityRef: TARGET_REF,
+      key: 'API_KEY',
+      value: 'other-value',
+      envs: ['dev'],
+    });
+
+    await Promise.all([action.handler(ctx1), action.handler(ctx2)]);
+
+    // Both keys survived — casUpdateFile's compare-and-swap retry recovers from the 409 instead
+    // of one writer silently clobbering the other's precomputed payload (PR #500 review point 6).
+    const es = repo.files.get(overlayEs('dev'))!.content;
+    expect(es).toContain('secretKey: "DATABASE_URL"');
+    expect(es).toContain('secretKey: "API_KEY"');
+    expect(es).toContain('secretKey: app-secret'); // the shipped entry survived too
   });
 
   it('fails CLOSED (no Vault write, no PR) if the overlay ExternalSecret is missing', async () => {

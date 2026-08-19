@@ -503,13 +503,51 @@ async function findOpenPendingPr(
 }
 
 /**
+ * The most recently updated CLOSED pull request (if any) for the rolling pending-secrets branch,
+ * with enough to tell merged from closed-without-merging. Used only when we're about to reset a
+ * stale branch, to warn if that reset is discarding work that was never shipped (D-118 review
+ * follow-up, PR #500 point 2/3).
+ */
+async function findLastClosedPendingPr(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  branch: string,
+): Promise<{ number: number; merged: boolean } | undefined> {
+  const { data: prs } = await octokit.pulls.list({
+    owner,
+    repo,
+    state: 'closed',
+    head: `${owner}:${branch}`,
+    sort: 'updated',
+    direction: 'desc',
+    per_page: 1,
+  });
+  const pr = prs[0];
+  // The list endpoint returns `merged_at` (nullable), not a `merged` boolean (that's only on the
+  // single-PR get response) — a non-null merge timestamp is exactly "was merged".
+  return pr ? { number: pr.number, merged: pr.merged_at !== null } : undefined;
+}
+
+/**
  * Ensure the repo's ONE rolling pending-secrets branch is ready to receive commits (D-118):
  *  - an OPEN PR already references it -> reuse as-is (new commits stack on top of it),
- *  - the branch exists but has NO open PR (its previous PR merged/was closed -> stale) -> force-
- *    reset it to the current base tip so the next PR is a clean diff,
+ *  - the branch exists and is already AT the base tip -> nothing to reset, no-op (there is
+ *    nothing on it that a reset could discard),
+ *  - the branch exists with commits ahead of base and has NO open PR -> re-check for an open PR
+ *    ONE more time (shrinks the window where a concurrent writer just committed + is about to
+ *    open its PR) before concluding it's genuinely stale; if it's stale, WARN when the branch's
+ *    most recent PR was closed WITHOUT merging (that reset silently drops whatever secret keys
+ *    rode on it — see the review) before force-resetting to the base tip,
  *  - the branch doesn't exist yet -> create it fresh from the current base tip.
- * A 422 on the create/reset calls is treated as a concurrent request having just done the same
- * thing (race-safe): we don't fail, we just proceed — the branch exists either way.
+ * A 422 on the create call is treated as a concurrent request having just done the same thing
+ * (race-safe): re-check for the PR it's likely about to open rather than failing.
+ *
+ * NOTE: the GitHub refs API has no true compare-and-swap for `updateRef` (no "only if current sha
+ * is still X"), so the re-check above narrows the race window but cannot fully close it — a
+ * writer whose commit lands in the instant between our re-check and the `updateRef` call can
+ * still be discarded. See PR #500 review point 2/3 sub-question; a full fix needs either GitHub
+ * adding ref CAS or this moving to a lock (out of scope here).
  */
 async function ensurePendingBranch(
   octokit: Octokit,
@@ -517,35 +555,25 @@ async function ensurePendingBranch(
   repo: string,
   baseSha: string,
   branch: string,
+  logger: LoggerService,
 ): Promise<{ existingPrUrl?: string }> {
   const existingPrUrl = await findOpenPendingPr(octokit, owner, repo, branch);
   if (existingPrUrl) {
     return { existingPrUrl };
   }
 
-  let branchExists = true;
+  let currentSha: string | undefined;
   try {
-    await octokit.git.getRef({ owner, repo, ref: `heads/${branch}` });
+    const { data } = await octokit.git.getRef({ owner, repo, ref: `heads/${branch}` });
+    currentSha = data.object.sha;
   } catch (e) {
-    if ((e as { status?: number }).status === 404) {
-      branchExists = false;
-    } else {
+    if ((e as { status?: number }).status !== 404) {
       throw e;
     }
   }
 
-  if (branchExists) {
-    // No open PR references it -> stale from a previously merged/closed PR. Reset to the base
-    // tip so the next PR opened on it is a clean diff (not a re-merge of old, already-shipped
-    // changes).
-    await octokit.git.updateRef({
-      owner,
-      repo,
-      ref: `heads/${branch}`,
-      sha: baseSha,
-      force: true,
-    });
-  } else {
+  if (currentSha === undefined) {
+    // Branch doesn't exist yet -> create fresh from the base tip.
     try {
       await octokit.git.createRef({
         owner,
@@ -554,11 +582,42 @@ async function ensurePendingBranch(
         sha: baseSha,
       });
     } catch (e) {
-      // Race: a concurrent request created it between our getRef 404 and this createRef.
+      // Race: a concurrent request created it between our getRef 404 and this createRef. It's
+      // most likely about to (or already did) open a PR on it too — reuse that if so.
       if ((e as { status?: number }).status !== 422) {
         throw e;
       }
+      const raced = await findOpenPendingPr(octokit, owner, repo, branch);
+      if (raced) {
+        return { existingPrUrl: raced };
+      }
     }
+  } else if (currentSha === baseSha) {
+    // Already at the base tip — nothing on it, nothing to reset, nothing anyone could lose.
+  } else {
+    // Has commits ahead of base but no open PR. Re-check once more (shrinks — doesn't eliminate —
+    // the race where a concurrent writer just committed and hasn't opened its PR yet).
+    const raced = await findOpenPendingPr(octokit, owner, repo, branch);
+    if (raced) {
+      return { existingPrUrl: raced };
+    }
+    const lastClosed = await findLastClosedPendingPr(octokit, owner, repo, branch);
+    if (lastClosed && !lastClosed.merged) {
+      logger.warn(
+        `capstone secrets: resetting the rolling branch "${branch}" for ${owner}/${repo}, but ` +
+          `its most recent PR (#${lastClosed.number}) was CLOSED WITHOUT MERGING. Any secret ` +
+          `key(s) sealed as part of that PR remain live in Vault but now have NO ExternalSecret ` +
+          `declaring them in git — they will not be applied to the cluster unless re-sealed. ` +
+          `(D-118 known tradeoff — see PR #500 review point 2/3.)`,
+      );
+    }
+    await octokit.git.updateRef({
+      owner,
+      repo,
+      ref: `heads/${branch}`,
+      sha: baseSha,
+      force: true,
+    });
   }
   return {};
 }
@@ -675,32 +734,42 @@ export async function sealAndPublish(
     repo,
     baseSha,
     branch,
+    deps.logger,
   );
 
-  // 4) Upsert the data[] entry per env directly on the rolling branch. Re-read each file's
-  //    CURRENT content right before writing it (concurrent-safe: another pending change may
-  //    already be stacked on the branch) — putFile itself re-fetches the file's CURRENT sha
-  //    immediately before the write, so this is safe against interleaving too.
+  // 4) Upsert the data[] entry per env directly on the rolling branch via a compare-and-swap
+  //    write (casUpdateFile, D-118 review follow-up): each write re-reads the file's CURRENT
+  //    content + sha and re-applies the upsert fresh, retrying on a 409 conflict — never
+  //    overwrites a concurrent writer's change with a payload computed from a stale read.
+  let anyWrite = false;
   for (const env of envs) {
     const esPath = overlayEsPath(cfg, env);
-    const current =
-      (await getFileContent(octokit, owner, repo, branch, esPath)) ??
-      baseContentByEnv[env];
-    const updated = upsertEsDataEntry(current, key, vaultKeyByEnv[env]);
-    if (updated !== current) {
-      await putFile(
-        octokit,
-        owner,
-        repo,
-        branch,
-        esPath,
-        updated,
-        `chore(secrets): declare ${key} for ${env}`,
-      );
-    }
+    const wrote = await casUpdateFile(
+      octokit,
+      owner,
+      repo,
+      branch,
+      esPath,
+      baseContentByEnv[env],
+      content => upsertEsDataEntry(content, key, vaultKeyByEnv[env]),
+      `chore(secrets): declare ${key} for ${env}`,
+    );
+    anyWrite = anyWrite || wrote;
   }
 
-  // 5) Open the rolling PR if none is open yet; otherwise reuse the one already open.
+  // 5) Only open/reuse a PR if there's something to publish. A pure Vault rotation (the
+  //    declaration is already correct — nothing changed on the branch) must NOT attempt to open
+  //    a PR when none is open yet: GitHub rejects a PR with zero commits between head and base
+  //    ("No commits between X and Y" — reproduced against a real repo, see PR #500 review Finding
+  //    A). The Vault write above already landed either way.
+  if (!existingPrUrl && !anyWrite) {
+    deps.logger.info(
+      `capstone set-secret rotated key="${key}" envs=[${envs.join(',')}] target=${entityRef} ` +
+        `(Vault only — no pending git change, no PR opened)`,
+    );
+    return { pullRequestUrls: [] };
+  }
+
   const prUrl = await openOrReusePendingPr(
     octokit,
     owner,
@@ -771,17 +840,17 @@ export async function listSecrets(
 }
 
 /**
- * Read a file's UTF-8 content from a branch (or the default branch when `branch` is undefined).
- * Returns undefined for a 404 (file absent). Used to merge into an existing ExternalSecret and
- * to read its declared key names for List.
+ * Read a file's UTF-8 content + git blob sha from a branch (or the default branch when `branch`
+ * is undefined). Returns undefined for a 404 (file absent). The sha is what callers must supply
+ * back to createOrUpdateFileContents to avoid clobbering a concurrent write (see casUpdateFile).
  */
-async function getFileContent(
+async function readFileWithSha(
   octokit: Octokit,
   owner: string,
   repo: string,
   branch: string | undefined,
   path: string,
-): Promise<string | undefined> {
+): Promise<{ content: string; sha: string } | undefined> {
   try {
     const { data } = await octokit.repos.getContent({
       owner,
@@ -790,7 +859,10 @@ async function getFileContent(
       ...(branch ? { ref: branch } : {}),
     });
     if (!Array.isArray(data) && 'content' in data && data.content) {
-      return Buffer.from(data.content, 'base64').toString('utf8');
+      return {
+        content: Buffer.from(data.content, 'base64').toString('utf8'),
+        sha: 'sha' in data ? (data.sha as string) : '',
+      };
     }
     return undefined;
   } catch (e) {
@@ -801,41 +873,74 @@ async function getFileContent(
   }
 }
 
-/** Create or update a file on a branch (idempotent overwrite/rotate). */
-async function putFile(
+/**
+ * Read a file's UTF-8 content from a branch (content only — see readFileWithSha for +sha). Used
+ * to merge into an existing ExternalSecret and to read its declared key names for List.
+ */
+async function getFileContent(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  branch: string | undefined,
+  path: string,
+): Promise<string | undefined> {
+  const f = await readFileWithSha(octokit, owner, repo, branch, path);
+  return f?.content;
+}
+
+/**
+ * Compare-and-swap write onto a branch (D-118 review follow-up, PR #500): read the file's
+ * CURRENT content + sha, apply `mutate` to THAT content, and write using that sha. Passing a
+ * payload precomputed from an earlier read (the old approach) can silently clobber a concurrent
+ * writer's change — the sha refetch alone only prevents a 409 *error*, it does not protect the
+ * *content* being written. This always derives the write from what is actually on the branch
+ * right now. On a 409 (someone else wrote first since our read), re-read + re-apply `mutate` +
+ * retry, bounded by `maxAttempts` — a genuine race storm fails loud (throws) rather than silently
+ * dropping a write. Returns whether a write actually happened (false = `mutate` was a no-op,
+ * nothing to commit — callers use this to avoid opening a PR with zero diff).
+ */
+async function casUpdateFile(
   octokit: Octokit,
   owner: string,
   repo: string,
   branch: string,
   path: string,
-  content: string,
+  fallbackContent: string,
+  mutate: (content: string) => string,
   message: string,
-): Promise<void> {
-  let sha: string | undefined;
-  try {
-    const { data } = await octokit.repos.getContent({
-      owner,
-      repo,
-      path,
-      ref: branch,
-    });
-    if (!Array.isArray(data) && 'sha' in data) {
-      sha = data.sha;
+  maxAttempts = 5,
+): Promise<boolean> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const current = await readFileWithSha(octokit, owner, repo, branch, path);
+    const content = current?.content ?? fallbackContent;
+    const updated = mutate(content);
+    if (updated === content) {
+      return false; // nothing to write
     }
-  } catch (e) {
-    if ((e as { status?: number }).status !== 404) {
+    try {
+      await octokit.repos.createOrUpdateFileContents({
+        owner,
+        repo,
+        branch,
+        path,
+        message,
+        content: Buffer.from(updated, 'utf8').toString('base64'),
+        sha: current?.sha,
+      });
+      return true;
+    } catch (e) {
+      const status = (e as { status?: number }).status;
+      if (status === 409 && attempt < maxAttempts) {
+        continue; // someone else wrote first — re-read, re-merge, retry with fresh content+sha
+      }
       throw e;
     }
   }
-  await octokit.repos.createOrUpdateFileContents({
-    owner,
-    repo,
-    branch,
-    path,
-    message,
-    content: Buffer.from(content, 'utf8').toString('base64'),
-    sha,
-  });
+  /* istanbul ignore next -- the loop above always returns or throws; keeps TS's control-flow
+   * analysis happy without a non-null assertion. */
+  throw new Error(
+    `capstone secrets: giving up on ${path} after ${maxAttempts} conflicting writes`,
+  );
 }
 
 /**
@@ -960,33 +1065,45 @@ export async function deleteSecret(
     repo,
     baseSha,
     branch,
+    deps.logger,
   );
 
-  // 3) Remove the value from Vault immediately + drop the data[] entry, per matched env. Re-read
-  //    each file's CURRENT content off the rolling branch first (concurrent-safe: another
-  //    pending change may already be stacked there); putFile re-fetches the file's CURRENT sha
-  //    immediately before the write.
+  // 3) Remove the value from Vault immediately (the per-env Vault pointer is the same one the
+  //    shipped app-secret entry uses, so the BASE read from step 1 is sufficient — it doesn't
+  //    depend on what else is pending on the rolling branch) + drop the data[] entry via a
+  //    compare-and-swap write (casUpdateFile, D-118 review follow-up): each write re-reads the
+  //    file's CURRENT content + sha and re-applies the removal fresh, retrying on a 409 conflict
+  //    — never overwrites a concurrent writer's change with a payload computed from a stale read.
+  let anyWrite = false;
   for (const { env, esPath, existing } of envEntries) {
-    const current =
-      (await getFileContent(octokit, owner, repo, branch, esPath)) ?? existing;
-    const vaultKey = esVaultKey(current, teamSlug, env);
+    const vaultKey = esVaultKey(existing, teamSlug, env);
     await vault.deleteKey(vaultKey, key);
 
-    const updated = removeEsDataEntry(current, key);
-    if (updated !== current) {
-      await putFile(
-        octokit,
-        owner,
-        repo,
-        branch,
-        esPath,
-        updated,
-        `chore(secrets): remove ${key} for ${env}`,
-      );
-    }
+    const wrote = await casUpdateFile(
+      octokit,
+      owner,
+      repo,
+      branch,
+      esPath,
+      existing,
+      content => removeEsDataEntry(content, key),
+      `chore(secrets): remove ${key} for ${env}`,
+    );
+    anyWrite = anyWrite || wrote;
   }
 
-  // 4) Open the rolling PR if none is open yet; otherwise reuse the one already open.
+  // 4) Only open/reuse a PR if there's something to publish (mirrors sealAndPublish — see PR #500
+  //    review Finding A). This is normally unreachable for delete (envEntries is non-empty, so a
+  //    fresh/reset branch mirroring base always has a real diff to remove) except when a
+  //    concurrent pending change already removed the same key first.
+  if (!existingPrUrl && !anyWrite) {
+    deps.logger.info(
+      `capstone delete-secret removed key="${key}" target=${entityRef} ` +
+        `(Vault only — no pending git change, no PR opened)`,
+    );
+    return { pullRequestUrl: '' };
+  }
+
   const prUrl = await openOrReusePendingPr(
     octokit,
     owner,
