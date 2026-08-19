@@ -58,8 +58,15 @@ Either:
 ## Verifying recovery
 
 1. `git revert` the fault commit (or hand-apply the inverse of `fault.patch`).
-2. Confirm the app is still reachable (`curl .../healthz` — should already
-   have been green throughout; this fault never took the app down).
-3. Generate a small burst of real traffic against the live URL.
-4. Confirm the dashboard's Request Rate / Error Rate / Latency panels start
-   showing non-zero data again within one or two Prometheus scrape intervals.
+2. Confirm `.devops/chart/base/service.yaml`'s `metadata.name` and
+   `.devops/chart/base/ingress.yaml`'s `backend.service.name` are both back
+   to `sample` and agree with each other again.
+3. Confirm CI (build+test) is still green on the revert commit — this fault
+   never broke a test or a build, so recovery shouldn't change that either.
+
+**Live version (once a lab deploy path exists — see
+`artifacts/design/lab-live-deploy-fastfollow.md`):** additionally confirm
+the app is still reachable (`curl .../healthz`) and that the dashboard's
+Request Rate / Error Rate / Latency panels resume showing non-zero data
+within one or two Prometheus scrape intervals after generating a small burst
+of real traffic. Not checkable at today's git/CI-only fidelity.

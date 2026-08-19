@@ -60,8 +60,17 @@ overlay directory name should match the environment name):
 ## Verifying recovery
 
 1. `git revert` the fault commit (or hand-apply the inverse of `fault.patch`).
-2. Push a new release tag (or force a resync of the existing one).
-3. Confirm `staging`'s ArgoCD Application `spec.source.path` reads
-   `.devops/chart/overlays/staging` and `prod`'s reads `.../overlays/prod`.
-4. Confirm each namespace's actual Ingress host / replica count matches what
-   its own overlay declares (not the other environment's).
+2. Confirm `.devops/promotion.yaml`'s `staging.overlay` reads
+   `.devops/chart/overlays/staging` and `prod.overlay` reads
+   `.../overlays/prod` again (un-swapped), and that `gate:` values are
+   unchanged (`staging: auto`, `prod: manual` — this fault never touched
+   them).
+3. Confirm CI (build+test) is still green on the revert commit.
+
+**Live version (once a lab deploy path exists — see
+`artifacts/design/lab-live-deploy-fastfollow.md`):** additionally push a
+release tag (or force a resync), then confirm `staging`'s ArgoCD Application
+`spec.source.path` actually reads `.../overlays/staging` and `prod`'s reads
+`.../overlays/prod`, and that each namespace's actual Ingress host / replica
+count matches its own overlay (not the other environment's). Not checkable
+at today's git/CI-only fidelity.
