@@ -1,0 +1,229 @@
+# "Tenant / App Observability" (DASH-1) — the dashboard capstone STUDENT TEAMS
+# actually use: "my app broke, where do I look." Distinct from
+# dashboard-tenant-golden-signals.yaml ("Platform / Tenants — App Golden
+# Signals"), which is LabMx-internal tooling (lab-hosting ops view) and is
+# NOT the capstone-team-facing deliverable — see
+# artifacts/exploration/labmx-deck-shots/manifest.md for that dashboard's
+# separate pre-existing label bug (out of scope here).
+#
+# Every panel below was verified against live Prometheus/Loki data before
+# being committed (positive-control traffic generated against a real tenant
+# host, incl. deliberate 404s) — no "No data" panels in a demo dashboard.
+#
+# Traefik label gotcha (found while building this): `traefik_service_requests
+# _total{service=...}` is USELESS for per-tenant filtering — Prometheus's own
+# scrape-job relabeling collapses `service` to the literal string
+# "traefik-metrics" for every sample (that's the root cause of the Golden
+# Signals dashboard's bug). The label that actually carries Traefik's
+# *IngressRoute* service name (`<namespace>-<name>-<port>@kubernetes`) is
+# `exported_service`. This dashboard's Traffic/Errors/Latency panels filter on
+# `exported_service=~"$namespace-.*"`, not `service`.
+#
+# Backend DB row: the tenant DB backend (MariaDB Galera, db-tier namespace,
+# see capstone-go-fragment-mysql-only in project memory — tenant app backends
+# are MySQL/MariaDB-only today) is a SHARED multi-tenant cluster, not a
+# per-tenant instance/exporter. `mysql_up` / `mysql_global_status_threads_
+# connected` are cluster-wide, not scoped by $namespace — panel titles say so
+# honestly rather than implying a per-app DB metric that doesn't exist yet.
+#
+# Auth/sign-in log panel: checked (LogQL, 7d, both live lab tenants) — neither
+# tenant app currently logs auth/sign-in events, so no such panel is included
+# per the "verify content first, don't build panels for signals that don't
+# exist" rule. Add one if/when a tenant app starts emitting those lines.
+#
+# Time range default (found while verifying, not assumed): the current lab
+# tenant apps (Next.js `labbase` template) only write to stdout at container
+# startup — no per-request access-log line — so Loki has no FRESH lines for a
+# quiet pod once it's past its startup burst. A "now-6h" default (what the
+# other tenant dashboards use) would show an empty Live Log Stream against the
+# default tenant outside a startup window. "now-24h" was verified (via a live
+# LogQL query against the default tenant below) to reliably include real
+# startup-log content given this tenant's current pod age. The Traefik
+# RED-metric panels stay populated on any window because their 5m `rate()`
+# windows are independent of the outer dashboard range — walking up to the
+# tenant's public URL during a demo (or re-running the curl positive control)
+# refreshes those live regardless of the picked range.
+#
+# Auto-provisioned by the Grafana sidecar via the `grafana_dashboard: "1"`
+# label, filed into the "Platform / Tenants" folder via the `grafana_folder`
+# annotation — same pattern as the other dashboard-tenant-*.yaml files in this
+# directory.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-tenant-app-observability
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: "Platform / Tenants"
+data:
+  tenant-app-observability.json: |
+    {
+      "uid": "platform-tenant-app-observability",
+      "title": "Tenant / App Observability",
+      "description": "When your app breaks, look here: request rate/errors/latency (Traefik), live logs, errors-only logs, pod health, and shared backend DB health — scoped to your tenant namespace via the picker above.",
+      "tags": ["platform", "tenants", "app-observability"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "time": { "from": "now-24h", "to": "now" },
+      "refresh": "30s",
+      "templating": {
+        "list": [
+          {
+            "name": "datasource",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": {},
+            "hide": 0
+          },
+          {
+            "name": "loki_datasource",
+            "type": "datasource",
+            "query": "loki",
+            "current": {},
+            "hide": 0
+          },
+          {
+            "name": "namespace",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "${datasource}" },
+            "query": { "query": "label_values(kube_pod_info, namespace)", "refId": "namespace" },
+            "refresh": 2,
+            "multi": false,
+            "includeAll": false,
+            "current": { "text": "lab-r26-lab1", "value": "lab-r26-lab1" },
+            "sort": 1
+          }
+        ]
+      },
+      "panels": [
+        { "id": 1, "type": "row", "title": "Traffic (Traefik, this app)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 } },
+        {
+          "id": 2, "type": "stat", "title": "Requests (24h)",
+          "gridPos": { "h": 6, "w": 6, "x": 0, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(increase(traefik_service_requests_total{exported_service=~\"$namespace-.*\"}[24h]))", "instant": true, "refId": "A" } ]
+        },
+        {
+          "id": 3, "type": "timeseries", "title": "Request Rate",
+          "gridPos": { "h": 6, "w": 18, "x": 6, "y": 1 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (exported_service) (rate(traefik_service_requests_total{exported_service=~\"$namespace-.*\"}[5m]))", "legendFormat": "{{exported_service}}", "refId": "A" } ]
+        },
+        { "id": 4, "type": "row", "title": "Errors", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 7 } },
+        {
+          "id": 5, "type": "timeseries", "title": "Requests by Status Code",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+          "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["sum"] } },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (code) (rate(traefik_service_requests_total{exported_service=~\"$namespace-.*\"}[5m]))", "legendFormat": "{{code}}", "refId": "A" } ]
+        },
+        {
+          "id": 6, "type": "timeseries", "title": "4xx / 5xx Error Rate %",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent", "min": 0,
+              "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 1 }, { "color": "red", "value": 5 } ] }
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "100 * sum(rate(traefik_service_requests_total{exported_service=~\"$namespace-.*\", code=~\"4..\"}[5m])) / sum(rate(traefik_service_requests_total{exported_service=~\"$namespace-.*\"}[5m]))",
+              "legendFormat": "4xx %",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "100 * sum(rate(traefik_service_requests_total{exported_service=~\"$namespace-.*\", code=~\"5..\"}[5m])) / sum(rate(traefik_service_requests_total{exported_service=~\"$namespace-.*\"}[5m]))",
+              "legendFormat": "5xx %",
+              "refId": "B"
+            }
+          ]
+        },
+        { "id": 7, "type": "row", "title": "Latency", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 16 } },
+        {
+          "id": 8, "type": "timeseries", "title": "Request Duration (p50 / p95 / p99)",
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 17 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.50, sum by (le) (rate(traefik_service_request_duration_seconds_bucket{exported_service=~\"$namespace-.*\"}[5m])))", "legendFormat": "p50", "refId": "A" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.95, sum by (le) (rate(traefik_service_request_duration_seconds_bucket{exported_service=~\"$namespace-.*\"}[5m])))", "legendFormat": "p95", "refId": "B" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.99, sum by (le) (rate(traefik_service_request_duration_seconds_bucket{exported_service=~\"$namespace-.*\"}[5m])))", "legendFormat": "p99", "refId": "C" }
+          ]
+        },
+        { "id": 9, "type": "row", "title": "Logs", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 25 } },
+        {
+          "id": 10, "type": "logs", "title": "Live Log Stream",
+          "gridPos": { "h": 12, "w": 14, "x": 0, "y": 26 },
+          "datasource": { "type": "loki", "uid": "${loki_datasource}" },
+          "options": { "showTime": true, "sortOrder": "Descending", "wrapLogMessage": true, "enableLogDetails": true },
+          "targets": [ { "datasource": { "type": "loki", "uid": "${loki_datasource}" }, "expr": "{namespace=~\"$namespace\"}", "refId": "A" } ]
+        },
+        {
+          "id": 11, "type": "logs", "title": "Errors Only (error / exception / fatal / panic / traceback)",
+          "gridPos": { "h": 12, "w": 10, "x": 14, "y": 26 },
+          "datasource": { "type": "loki", "uid": "${loki_datasource}" },
+          "options": { "showTime": true, "sortOrder": "Descending", "wrapLogMessage": true, "enableLogDetails": true },
+          "targets": [ { "datasource": { "type": "loki", "uid": "${loki_datasource}" }, "expr": "{namespace=~\"$namespace\"} |~ \"(?i)error|exception|fatal|panic|traceback\"", "refId": "A" } ]
+        },
+        { "id": 12, "type": "row", "title": "App & Backend Health", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 38 } },
+        {
+          "id": 13, "type": "stat", "title": "Pods Ready",
+          "gridPos": { "h": 6, "w": 6, "x": 0, "y": 39 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] }
+            },
+            "overrides": []
+          },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(kube_pod_status_ready{namespace=~\"$namespace\", condition=\"true\"})", "instant": true, "refId": "A" } ]
+        },
+        {
+          "id": 14, "type": "stat", "title": "Container Restarts (24h)",
+          "gridPos": { "h": 6, "w": 6, "x": 6, "y": 39 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 1 }, { "color": "red", "value": 3 } ] }
+            },
+            "overrides": []
+          },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(increase(kube_pod_container_status_restarts_total{namespace=~\"$namespace\"}[24h]))", "instant": true, "refId": "A" } ]
+        },
+        {
+          "id": 15, "type": "stat", "title": "Backend DB Up (shared tenant MariaDB cluster)",
+          "gridPos": { "h": 6, "w": 6, "x": 12, "y": 39 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short", "mappings": [ { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } } ],
+              "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] }
+            },
+            "overrides": []
+          },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "min(mysql_up)", "instant": true, "refId": "A" } ]
+        },
+        {
+          "id": 16, "type": "stat", "title": "Backend DB Active Connections (cluster-wide)",
+          "gridPos": { "h": 6, "w": 6, "x": 18, "y": 39 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "max(mysql_global_status_threads_connected)", "instant": true, "refId": "A" } ]
+        }
+      ]
+    }
