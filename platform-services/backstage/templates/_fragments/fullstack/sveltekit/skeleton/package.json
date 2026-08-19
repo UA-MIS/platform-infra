@@ -3,7 +3,7 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "description": "${{ values.description }}",
+  "description": ${{ values.description | dump }},
   "scripts": {
     "dev": "vite dev --port ${{ values.port }}",
     "build": "vite build",

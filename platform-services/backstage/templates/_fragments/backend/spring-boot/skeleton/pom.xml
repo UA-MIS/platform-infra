@@ -17,7 +17,7 @@
   <version>0.0.0</version>
   <packaging>jar</packaging>
   <name>${{ values.appName }}</name>
-  <description>${{ values.description }}</description>
+  <description>${{ values.description | escape }}</description>
 
   <properties>
     <java.version>21</java.version>
