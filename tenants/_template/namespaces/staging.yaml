@@ -38,7 +38,7 @@ spec:
     limits.cpu: "4"
     limits.memory: 4Gi
     pods: "10"
-    services: "5"
+    services: "15"
     # Storage cap (replica-3 Ceph starvation fence). Generous default; tune per team.
     requests.storage: 5Gi
     persistentvolumeclaims: "4"

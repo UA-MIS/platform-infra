@@ -72,6 +72,12 @@ spec:
       kind: Service
     - group: ''
       kind: ServiceAccount
+    # PersistentVolumeClaim (D-170/D-172) — the compute-quota ResourceQuota already
+    # budgets persistentvolumeclaims + requests.storage per env; this kind was missing
+    # from the whitelist so the quota had no matching allowed kind. Namespaced +
+    # tenancy-safe like Service.
+    - group: ''
+      kind: PersistentVolumeClaim
     - group: apps
       kind: Deployment
     - group: apps

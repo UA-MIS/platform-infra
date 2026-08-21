@@ -39,7 +39,7 @@ spec:
     limits.cpu: "4"
     limits.memory: 4Gi
     pods: "10"
-    services: "5"
+    services: "15"
     # Storage cap — the one starvation vector CPU/MEM quotas don't fence. On the
     # replica-3 Ceph 3-box cluster every 1Gi PVC costs 3Gi raw, so an unbounded PVC
     # loop from one team could exhaust the pool. Generous default; tune per team.
