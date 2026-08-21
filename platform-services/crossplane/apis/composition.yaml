@@ -71,9 +71,14 @@ spec:
                    still said cpu 2/4 + pods 15, so a team's prod ceiling depended on which
                    onboarding path created it. Realigned 2026-08-15 (health audit / B5);
                    the blueprint was moved UP to these values. Change BOTH or neither. */}}
+            {{- /* D-175 — dev/staging CPU doubled to 2x (4/8), matching prod's existing
+                   headroom. A RollingUpdate surge (old + new replica set both live) needs
+                   quota ABOVE steady-state, not level with it; an exact-fit ceiling turns
+                   every rollout into a scheduling failure. Only cpuReq/cpuLim moved —
+                   memory/pods/storage/pvcs are untouched. */}}
             {{- $envs := list
-                  (dict "name" "dev"     "cpuReq" "2" "memReq" "2Gi" "cpuLim" "4" "memLim" "4Gi"  "pods" "10" "storageReq" "5Gi"  "pvcs" "4")
-                  (dict "name" "staging" "cpuReq" "2" "memReq" "2Gi" "cpuLim" "4" "memLim" "4Gi"  "pods" "10" "storageReq" "5Gi"  "pvcs" "4")
+                  (dict "name" "dev"     "cpuReq" "4" "memReq" "2Gi" "cpuLim" "8" "memLim" "4Gi"  "pods" "10" "storageReq" "5Gi"  "pvcs" "4")
+                  (dict "name" "staging" "cpuReq" "4" "memReq" "2Gi" "cpuLim" "8" "memLim" "4Gi"  "pods" "10" "storageReq" "5Gi"  "pvcs" "4")
                   (dict "name" "prod"    "cpuReq" "4" "memReq" "4Gi" "cpuLim" "8" "memLim" "8Gi"  "pods" "20" "storageReq" "20Gi" "pvcs" "6") }}
 
             {{- /* =====================================================================
