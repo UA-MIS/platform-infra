@@ -1,0 +1,44 @@
+# Crimson Copies — the feature-complete REFERENCE application (D-154/D-155).
+#
+# ONE CapstoneTenant XR; the reviewed-once Crossplane Composition
+# (platform-services/crossplane/apis/composition.yaml) expands it into the full
+# tenant: Harbor project + push/pull robots, Vault policy/role, the k8s tenancy
+# fence (3 namespaces + quota/limitrange/netpol/RBAC/PSA), ESO plumbing
+# (SecretStore vault-tenant + SA eso-tenant + vault-ca), the env ApplicationSet,
+# a per-team ARC runner scale set (runs-on: crimson-copies-kaniko), and — because
+# `database: mysql` — a per-env MariaDB schema/user/grant on the in-cluster DB
+# tier with credentials pushed to tenants/crimson-copies/<env>/database.
+#
+# NOTE the Composition creates NO GitHub state (ADR-035 §D2) — the app repo
+# UA-MIS/crimson-copies is owned end-to-end outside this claim. The env
+# ApplicationSet reads .devops/promotion.yaml from that repo at HEAD, so the repo
+# must exist and carry the contract before dev can render.
+#
+# De-provision = `git rm` this file (plus strip the app repo's `capstone-tenant`
+# topic — see tenants/_claims/README.md).
+apiVersion: platform.capstone.uamishub.com/v1alpha1
+kind: CapstoneTenant
+metadata:
+  name: crimson-copies-crimson-copies
+  labels:
+    platform.capstone/team: "crimson-copies"
+    platform.capstone/semester: "2026-fall"
+    platform.capstone/component: tenant
+spec:
+  team: "crimson-copies"
+  appName: "crimson-copies"
+  semester: "2026-fall"
+  githubTeam: "crimson-copies"
+  # Container port of the PUBLIC entrypoint (storefront, Next.js standalone).
+  # The chart sets each component's own port from .devops/components.yaml; this
+  # XRD field is only the default the Composition carries.
+  port: 3000
+  # Preview OFF: preview namespaces (<team>-pr-<n>) get no quota/LimitRange/netpol,
+  # no eso-tenant SA and no harbor-pull from the Composition, and the Vault role
+  # binds the literal `crimson-copies-preview` namespace which the preview
+  # ApplicationSet never creates. Not safe to enable for this tenant.
+  previewEnabled: false
+  domain: "capstone.uamishub.com"
+  # MySQL-compatible (in-cluster MariaDB 11.8). Every backend in this app is
+  # MySQL-only (Drizzle + mysql2), so `postgres` is not an option here.
+  database: "mysql"
