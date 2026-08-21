@@ -329,6 +329,11 @@ spec:
                       - { group: '', kind: ConfigMap }
                       - { group: '', kind: Service }
                       - { group: '', kind: ServiceAccount }
+                      # PersistentVolumeClaim (D-170/D-172) — the compute-quota ResourceQuota
+                      # right above already budgets persistentvolumeclaims + requests.storage
+                      # for tenant PVCs; this kind was missing from the whitelist so the quota
+                      # had no matching allowed kind. Namespaced + tenancy-safe like Service.
+                      - { group: '', kind: PersistentVolumeClaim }
                       - { group: apps, kind: Deployment }
                       - { group: apps, kind: ReplicaSet }
                       - { group: autoscaling, kind: HorizontalPodAutoscaler }
@@ -424,7 +429,7 @@ spec:
                       limits.cpu: {{ $e.cpuLim | quote }}
                       limits.memory: {{ $e.memLim | quote }}
                       pods: {{ $e.pods | quote }}
-                      services: "5"
+                      services: "15"
                       # Storage cap — the starvation vector CPU/MEM quotas don't fence.
                       # On replica-3 Ceph every 1Gi PVC costs 3Gi raw (mirrors _template).
                       requests.storage: {{ $e.storageReq | quote }}
