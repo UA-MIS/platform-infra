@@ -1,0 +1,74 @@
+# ============================================================================
+# Public surface for the VM. Traefik terminates TLS at the edge (the platform's
+# wildcard cert, same as every container tenant) and forwards plain HTTP to the
+# guest, where nginx routes by Host header to the two Next.js apps on
+# 127.0.0.1:3000 / :3001. orders-api (:4000) and notify (:4100) are internal-only
+# and are deliberately NOT exposed here — the app repo's own Caddyfile makes the
+# same call ("orders-api and notify are NOT reverse-proxied here").
+apiVersion: v1
+kind: Service
+metadata:
+  name: crimson-copies-stripped-vm
+  namespace: crimson-copies-stripped-vm-prod
+  labels:
+    app.kubernetes.io/name: crimson-copies-stripped
+    platform.capstone/team: crimson-copies-stripped
+    platform.capstone/env: prod
+    platform.capstone/tier: vm
+spec:
+  type: ClusterIP
+  selector:
+    # Selects the virt-launcher pod KubeVirt creates for this VM.
+    kubevirt.io/domain: crimson-copies-stripped
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+      protocol: TCP
+    # Provisioning-status endpoint (nginx on the guest). Internal-only ON PURPOSE:
+    # it is not referenced by the Ingress below, so it is reachable only from
+    # inside the namespace. The guest has no working sshd (ADR-032 known gap), so
+    # this plus `virtctl console` is how a long first boot is observed at all.
+    - name: provision
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: crimson-copies-stripped
+  namespace: crimson-copies-stripped-vm-prod
+  labels:
+    app.kubernetes.io/name: crimson-copies-stripped
+    platform.capstone/team: crimson-copies-stripped
+    platform.capstone/env: prod
+    platform.capstone/tier: vm
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: crimson-copies-stripped.capstone.uamishub.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: crimson-copies-stripped-vm
+                port:
+                  name: http
+    - host: crimson-copies-stripped-staff.capstone.uamishub.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: crimson-copies-stripped-vm
+                port:
+                  name: http
+  # No secretName — the platform wildcard cert, identical to the container tenants.
+  tls:
+    - hosts:
+        - crimson-copies-stripped.capstone.uamishub.com
+        - crimson-copies-stripped-staff.capstone.uamishub.com
