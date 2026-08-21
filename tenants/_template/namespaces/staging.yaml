@@ -22,6 +22,13 @@ metadata:
     pod-security.kubernetes.io/enforce-version: v1.31
 ---
 # ResourceQuota — non-prod starting values (§3.2). Tunable per team later.
+#
+# D-175 — CPU doubled to 2x (4/8), matching prod's existing headroom. A
+# RollingUpdate surge (old + new replica set both live) needs quota ABOVE
+# steady-state, not level with it; an exact-fit ceiling turns every rollout
+# into a scheduling failure. Only cpuReq/cpuLim moved — memory/pods/storage
+# are untouched. MUST STAY IN SYNC with the staging row of the env list in
+# platform-services/crossplane/apis/composition.yaml.
 apiVersion: v1
 kind: ResourceQuota
 metadata:
@@ -33,9 +40,9 @@ metadata:
     platform.capstone/env: staging
 spec:
   hard:
-    requests.cpu: "2"
+    requests.cpu: "4"
     requests.memory: 2Gi
-    limits.cpu: "4"
+    limits.cpu: "8"
     limits.memory: 4Gi
     pods: "10"
     services: "15"
