@@ -28,9 +28,23 @@ metadata:
     platform.capstone/tier: vm
 spec:
   runStrategy: Always
+  # NOTE the -v2 suffix. Renaming the dataVolumeTemplate is how this VM is given a
+  # genuinely FRESH disk, and it is deliberate rather than cosmetic. cloud-init
+  # runs once per instance and records that in /var/lib/cloud ON THE DISK, so a
+  # guest whose provisioning failed cannot be fixed by restarting it — it boots,
+  # sees the run already happened, and finishes in under a minute having done
+  # nothing. The disk itself has to be replaced.
+  #
+  # Deleting the DataVolume in place does not work either: runStrategy: Always
+  # recreates the VMI immediately, the new virt-launcher re-references the PVC
+  # that is still terminating under kubernetes.io/pvc-protection, and the two
+  # deadlock — kubelet reports "PVC is being deleted" while the PVC waits for the
+  # pod that is waiting for the PVC. Renaming sidesteps that completely: the new
+  # DataVolume imports alongside the old one, and the old PVC is deleted
+  # afterwards, once nothing references it.
   dataVolumeTemplates:
     - metadata:
-        name: crimson-copies-stripped-rootdisk
+        name: crimson-copies-stripped-rootdisk-v2
         labels:
           platform.capstone/team: crimson-copies-stripped
           platform.capstone/tier: vm
@@ -129,7 +143,7 @@ spec:
       volumes:
         - name: rootdisk
           dataVolume:
-            name: crimson-copies-stripped-rootdisk
+            name: crimson-copies-stripped-rootdisk-v2
         - name: cloudinitdisk
           cloudInitNoCloud:
             # Raw Secret (key: userdata) — the only shape cloudInitNoCloud.secretRef
