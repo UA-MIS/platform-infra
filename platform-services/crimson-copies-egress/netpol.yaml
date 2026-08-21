@@ -1,0 +1,130 @@
+# ============================================================================
+# crimson-copies — scoped external HTTPS egress (D-155 #1).
+# ============================================================================
+# WHY THIS EXISTS. The Composition-rendered tenant egress policy
+# (`allow-egress-dns-and-intra-ns`, platform-services/crossplane/apis/composition.yaml)
+# permits exactly three destinations: kube-system:53, in-namespace pods, and
+# db-tier:3306. There is NO internet egress for any tenant namespace, and the
+# CapstoneTenant XRD exposes no knob for one.
+#
+# The crimson-copies reference app authenticates with Clerk. `clerkMiddleware()`
+# runs app-wide on BOTH Next.js frontends and Clerk's server SDK verifies every
+# session server-side — which requires an outbound HTTPS call to Clerk's API and
+# a JWKS fetch. With the default fence that call is dropped, so EVERY
+# authenticated request fails: the app is not degraded, it is entirely
+# non-functional. This policy is the minimum that makes the reference app work.
+#
+# NetworkPolicy allow-rules are a UNION, so this file is purely ADDITIVE — it
+# does not weaken, replace, or race the Composition-owned policy (different
+# object name, same namespaces). Crossplane keeps owning `default-deny-all`,
+# `allow-ingress-traefik-and-intra-ns` and `allow-egress-dns-and-intra-ns`; this
+# adds a fourth, egress-only, port-443-only rule.
+#
+# SCOPED ON PURPOSE (D-155 #1): three namespaces, this tenant only. The
+# tenant-wide equivalent (moving this into the Composition so every tenant gets
+# it) is a deliberate FOLLOW-UP gated on security review, not this change.
+#
+# Shape is lifted from the proven precedent, hardening/netpol-runners/runner-netpol.yaml
+# (ARC runners get external :443 only) — same ipBlock/except construction, same
+# port scope.
+#
+# ⚠ SECURITY REVIEW — READ BEFORE APPROVING. Two of the four `except:` blocks
+# below are INERT under this cluster's current Cilium configuration, exactly as
+# runner-netpol.yaml documents for its own copy: "CIDR-based selectors do not
+# match in-cluster entities", so an ipBlock except does NOT subtract node / host
+# / apiserver IDENTITIES. Concretely:
+#   - 10.244.0.0/16 (pods) and 10.96.0.0/12 (services) DO enforce — Cilium
+#     matches those by managed-endpoint identity.
+#   - 10.237.168.0/22 (node LAN) and 100.64.0.0/10 (tailnet) DO NOT enforce
+#     today. They become real with Cilium `policyCIDRMatchMode: nodes`
+#     (other-node paths) plus Host Firewall (own-node host).
+# So this grants slightly MORE reach than the YAML reads: a crimson-copies pod
+# can reach node-LAN and tailnet addresses on :443. The tailnet exposure is the
+# one worth weighing — it is the Talos overlay. Accepted for this tenant as the
+# same residual risk already carried by the ARC runner pool (SEC-019), and
+# closable by the same two Cilium settings, not by editing this file.
+#
+# NOT granted: any port other than 443. No SMTP (25/465/587), no plaintext :80,
+# no DNS-over-anything-else. Mailpit and MinIO are in-namespace workloads reached
+# over the existing intra-namespace allow, so no additional hole is needed for
+# either.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-external-https
+  namespace: crimson-copies-dev
+  labels:
+    platform.capstone/team: crimson-copies
+    platform.capstone/semester: "2026-fall"
+    platform.capstone/env: dev
+    platform.capstone/component: tenant
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.244.0.0/16    # pods — ENFORCED (endpoint identity)
+              - 10.96.0.0/12     # services — ENFORCED
+              - 10.237.168.0/22  # node LAN — INERT today (see header)
+              - 100.64.0.0/10    # tailnet — INERT today (see header)
+      ports:
+        - protocol: TCP
+          port: 443
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-external-https
+  namespace: crimson-copies-staging
+  labels:
+    platform.capstone/team: crimson-copies
+    platform.capstone/semester: "2026-fall"
+    platform.capstone/env: staging
+    platform.capstone/component: tenant
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.244.0.0/16
+              - 10.96.0.0/12
+              - 10.237.168.0/22
+              - 100.64.0.0/10
+      ports:
+        - protocol: TCP
+          port: 443
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-external-https
+  namespace: crimson-copies-prod
+  labels:
+    platform.capstone/team: crimson-copies
+    platform.capstone/semester: "2026-fall"
+    platform.capstone/env: prod
+    platform.capstone/component: tenant
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.244.0.0/16
+              - 10.96.0.0/12
+              - 10.237.168.0/22
+              - 100.64.0.0/10
+      ports:
+        - protocol: TCP
+          port: 443
