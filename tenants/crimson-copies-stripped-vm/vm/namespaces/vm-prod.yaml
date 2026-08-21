@@ -397,31 +397,28 @@ spec:
   policyTypes:
     - Egress
   egress:
-    # --- cluster DNS, addressed by ClusterIP ---------------------------------
-    # This looks redundant against 4/5 (allow-egress-dns-and-intra-ns, which
-    # already permits :53 to the kube-system namespace) and is NOT. That rule
-    # selects CoreDNS by POD identity, and it does not cover a VM.
+    # --- DNS, to PUBLIC resolvers -------------------------------------------
+    # Not the kube-dns ClusterIP. A VM cannot use a ClusterIP: Cilium translates
+    # those in its SOCKET load balancer, and guest traffic never passes through a
+    # host socket — it is forwarded out through the masquerade interface, so the
+    # packet hits the host stack still addressed to 10.96.0.10 and nothing
+    # answers. Verified on the wire: policy verdict `action allow`, flow
+    # `-> stack`, then silence. The tier's 4/5 DNS rule (which selects CoreDNS by
+    # namespace, i.e. by POD identity) is likewise inert for VMs, since a
+    # forwarded flow is judged against a CIDR identity instead.
     #
-    # A normal pod's DNS query is translated from the kube-dns ClusterIP to a
-    # CoreDNS pod IP by Cilium's socket-level load balancer BEFORE policy is
-    # evaluated, so the flow is judged against CoreDNS's pod identity and 4/5
-    # matches. A VM's traffic never passes through a socket on the host: it is
-    # FORWARDED out of the guest through the masquerade interface, so socket-LB
-    # does not apply, and Cilium evaluates the flow against the ClusterIP's CIDR
-    # identity instead. 4/5 has no CIDR selector, so it does not match, and the
-    # query is dropped:
-    #
-    #   xx drop (Policy denied) ... identity 2214->16777217:
-    #        10.244.8.29:40339 -> 10.96.0.10:53 udp
-    #
-    # (16777217 is a local CIDR identity, not a pod identity.) The symptom is a
-    # guest that cannot resolve anything while every pod in the same namespace
-    # resolves fine — including the CDI importer that populated this VM's disk.
-    # Without this rule the blueprint's DNS policy is silently inert for the one
-    # workload type this tier exists to run.
+    # So the guest is pointed at public resolvers in the VirtualMachine's
+    # dnsConfig, and this rule lets those queries out. Same `except` list as the
+    # HTTPS rule below: the guest may resolve on the public internet and reach
+    # nothing internal.
     - to:
         - ipBlock:
-            cidr: 10.96.0.10/32    # kube-dns ClusterIP (kube-system/kube-dns)
+            cidr: 0.0.0.0/0
+            except:
+              - 10.244.0.0/16      # pods (cross-tenant + lateral) — Cilium-enforced
+              - 10.96.0.0/12       # services
+              - 10.237.168.0/22    # node LAN incl. apiserver :6443 — intent (see caveat)
+              - 100.64.0.0/10      # tailnet overlay — intent (see caveat)
       ports:
         - protocol: UDP
           port: 53
