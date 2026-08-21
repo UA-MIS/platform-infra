@@ -44,7 +44,7 @@ spec:
   # afterwards, once nothing references it.
   dataVolumeTemplates:
     - metadata:
-        name: crimson-copies-stripped-rootdisk-v2
+        name: crimson-copies-stripped-rootdisk-v3
         labels:
           platform.capstone/team: crimson-copies-stripped
           platform.capstone/tier: vm
@@ -143,7 +143,7 @@ spec:
       volumes:
         - name: rootdisk
           dataVolume:
-            name: crimson-copies-stripped-rootdisk-v2
+            name: crimson-copies-stripped-rootdisk-v3
         - name: cloudinitdisk
           cloudInitNoCloud:
             # Raw Secret (key: userdata) — the only shape cloudInitNoCloud.secretRef
