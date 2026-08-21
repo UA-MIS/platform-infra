@@ -103,6 +103,25 @@ spec:
           rng: {}                     # entropy for TLS + secret generation on boot
         machine:
           type: q35
+      # DNS. KubeVirt's DHCP hands the guest whatever resolvers the virt-launcher
+      # pod has, which by default is the kube-dns ClusterIP — and a VM cannot use
+      # a ClusterIP. Cilium translates ClusterIPs in its SOCKET load balancer, and
+      # guest traffic never passes through a host socket: it is forwarded out of
+      # the guest through the masquerade interface, so the packet reaches the host
+      # stack still addressed to 10.96.0.10, where nothing answers. Confirmed on
+      # the wire — the policy verdict was `action allow` and the flow went
+      # `-> stack`, then silence. That is why this is fixed here and not with
+      # another NetworkPolicy rule; no policy can translate an address.
+      #
+      # This guest has no reason to resolve in-cluster names at all: it talks to
+      # github.com, the npm registry and the Ubuntu archive, all public. So it is
+      # given public resolvers directly and cluster DNS is left out of its path.
+      dnsPolicy: None
+      dnsConfig:
+        nameservers:
+          - 1.1.1.1
+          - 1.0.0.1
+          - 8.8.8.8
       networks:
         - name: default
           pod: {}
