@@ -41,6 +41,16 @@ spec:
         storage:
           accessModes:
             - ReadWriteOnce          # ceph-block RBD; no live migration (ADR-032 open Q3)
+          # MUST be set explicitly. Left unset, CDI consults its StorageProfile for
+          # ceph-block, whose first RWO entry is volumeMode: Block — and the CDI
+          # importer pod in this tier runs non-root (uid 107, all caps dropped,
+          # baseline PSA), so it cannot open the raw RBD device:
+          #   blockdev: cannot open /dev/cdi-block-volume: Permission denied
+          # which CrashLoopBackOffs the importer and leaves the DataVolume stuck in
+          # ImportInProgress forever with the VM in DataVolumeError. Filesystem mode
+          # imports into a disk.img on a mounted filesystem and needs no raw-device
+          # access. This matches the proven vm-app chart, which also pins it.
+          volumeMode: Filesystem
           storageClassName: ceph-block
           resources:
             requests:
