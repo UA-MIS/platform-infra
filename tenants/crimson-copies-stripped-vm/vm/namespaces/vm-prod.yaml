@@ -98,7 +98,14 @@ spec:
     # 8Gi / 8-vCPU guest to keep a first boot that is already slow from being
     # needlessly slower. CPU is overcommitted deliberately (requests 6 < 8 vCPU);
     # RAM is NOT (requests == limits), preserving the blueprint's no-overcommit rule.
-    requests.cpu: "6"
+    # NOTE the headroom over the guest's own 6-vCPU request: KubeVirt adds a small
+    # per-VM CPU overhead to the virt-launcher pod on top of
+    # domain.resources.requests.cpu, so a 6-core guest actually asks for 6005m. A
+    # quota of exactly "6" therefore rejects the launcher outright —
+    #   exceeded quota: vm-compute-quota, requested: requests.cpu=6005m, limited: 6
+    # — and the VMI sits ErrorUnschedulable with no pod ever created. Size this
+    # ceiling ABOVE the guest request, never equal to it.
+    requests.cpu: "8"
     limits.cpu: "12"
     # requests == limits => no RAM overcommit. 12Gi covers the 8Gi guest + KubeVirt
     # launcher overhead (~0.5-1Gi) + a transient CDI importer, with margin.
