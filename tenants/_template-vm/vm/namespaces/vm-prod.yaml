@@ -92,7 +92,16 @@ metadata:
     platform.capstone/tier: vm
 spec:
   hard:
-    requests.cpu: "2"
+    # SIZE CPU ABOVE THE GUEST REQUEST, NEVER LEVEL WITH IT. KubeVirt adds a small
+    # per-VM overhead to the virt-launcher pod on top of the guest's
+    # domain.resources.requests.cpu, so a guest asking for N cores makes a pod that
+    # asks for slightly more (observed: a 6-core guest -> 6005m). A ceiling set to
+    # exactly the guest request rejects the launcher outright:
+    #   exceeded quota: vm-compute-quota, requested: requests.cpu=6005m, limited: 6
+    # and the VMI then sits ErrorUnschedulable behind a MISLEADING secondary
+    # condition -- "PVC ... does not exist, waiting for it to appear" -- while the
+    # DataVolume has in fact imported cleanly. Learned on crimson-copies-stripped.
+    requests.cpu: "3"
     limits.cpu: "4"
     # requests == limits => no RAM overcommit. 6Gi fits one ~4Gi-guest VM +
     # launcher overhead + a transient importer. Guest > ~5Gi needs a quota bump.
@@ -112,7 +121,15 @@ spec:
     # covers the default import + headroom; prime+scratch are freed once the import
     # finishes, leaving only the rootdisk. A bigger guest disk still needs an
     # explicit quota bump + a platform capacity review (not a silent default).
-    requests.storage: 80Gi         # whole-project VM disk (often bundles a DB)
+    # 80Gi covers a FIRST import (rootdisk + prime + scratch, each at the image's
+    # VIRTUAL size). It does NOT cover a REBUILD, which is the supported way to
+    # re-run a failed cloud-init (see README "Rebuilding a VM"): the replacement
+    # disk imports alongside the old one, so the namespace transiently holds four
+    # claims (~85Gi). At 80Gi the scratch PVC is silently never created and the
+    # importer hangs Pending with
+    #   0/5 nodes are available: persistentvolumeclaim "...-scratch" not found
+    # which reads as a scheduling failure and is actually a quota one.
+    requests.storage: 120Gi        # whole-project VM disk + rebuild headroom
     # Hard VM/disk count caps — a baseline-PSA namespace must not become a VM farm.
     count/virtualmachines.kubevirt.io: "1"
     count/datavolumes.cdi.kubevirt.io: "2"
@@ -250,6 +267,24 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
+  # ⚠ THIS RULE DOES NOT GIVE A **VM** WORKING DNS. It selects CoreDNS by
+  # namespace -- i.e. by POD identity -- and that only matches traffic Cilium has
+  # already translated from the kube-dns ClusterIP to a CoreDNS pod IP in its
+  # SOCKET load balancer. A VM's traffic never passes through a host socket: it is
+  # forwarded out of the guest through the masquerade interface, so socket-LB does
+  # not run and Cilium judges the flow against the ClusterIP's CIDR identity, which
+  # this rule has no selector for. The query is denied:
+  #   xx drop (Policy denied) ... identity 2214->16777217: <vm> -> 10.96.0.10:53 udp
+  # Worse, adding a CIDR rule for 10.96.0.10 only gets you as far as `action allow`
+  # -- the packet then goes `-> stack` still addressed to a ClusterIP that nothing
+  # answers, because no policy can TRANSLATE an address.
+  #
+  # A VM must therefore be given resolvers it can reach directly, via the
+  # VirtualMachine's own dnsPolicy/dnsConfig, plus an egress rule for :53. See the
+  # README section "VMs and DNS". This rule is still correct and still needed for
+  # the CDI importer and any helper POD in this namespace -- it is only the VM it
+  # does not cover. Diagnosed on crimson-copies-stripped, where every pod in the
+  # namespace resolved fine and the guest resolved nothing.
   name: allow-egress-dns-and-intra-ns
   namespace: __TEAM__-vm-prod
   labels:

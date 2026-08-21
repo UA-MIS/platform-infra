@@ -62,6 +62,107 @@ Same as the parent template: `__TEAM__`, `__APPNAME__`, `__SEMESTER__`. Substitu
 half-replaced). The team group `__TEAM__-developers` is the same subject used by the
 container tier.
 
+## Field notes — things that will bite you (from the crimson-copies-stripped bring-up)
+
+Six failures cost a full afternoon on the second real VM tenant. None were exotic;
+all of them present with a symptom that points somewhere other than the cause.
+
+### VMs and DNS — the big one
+
+**The tier's `allow-egress-dns-and-intra-ns` policy does not give a VM working
+DNS.** It selects CoreDNS by namespace (pod identity), which only matches traffic
+Cilium already translated from the kube-dns ClusterIP in its **socket** load
+balancer. Guest traffic never passes through a host socket — it is forwarded out
+through the masquerade interface — so socket-LB never runs, Cilium judges the flow
+against the ClusterIP's **CIDR identity**, and the query is denied.
+
+Adding a CIDR rule for `10.96.0.10` is *not* the fix. That only gets you to
+`action allow`; the packet then goes `-> stack` still addressed to a ClusterIP that
+nothing answers. **No NetworkPolicy can translate an address.**
+
+Give the guest resolvers it can reach directly, in the VirtualMachine itself:
+
+```yaml
+spec:
+  template:
+    spec:
+      dnsPolicy: None
+      dnsConfig:
+        nameservers: [1.1.1.1, 1.0.0.1, 8.8.8.8]
+```
+
+plus an egress rule for `:53` (see below). The tell-tale symptom is that **every
+pod in the namespace resolves fine — including the CDI importer that populated the
+VM's own disk — and the guest resolves nothing.**
+
+### The VM gets no external egress by default
+
+Policies 1–5 give the guest DNS-to-kube-system and intra-namespace egress only.
+The single `0.0.0.0/0:443` rule is `podSelector`-scoped to the **CDI importer**,
+not to the virt-launcher. That is the right default for a lifted legacy VM that
+only needs to be *reached* — but a guest that **provisions itself** on first boot
+(apt, git, a package registry) is blackholed with no error the platform surfaces,
+and there is no working sshd to ask why.
+
+If your VM self-provisions, add a sixth policy selecting the VM
+(`podSelector: {matchLabels: {kubevirt.io/domain: <appName>}}`) allowing `:443`
+and `:53` to `0.0.0.0/0`, carrying the same `except` list as policy 5 so nothing
+in-cluster becomes reachable. Point apt at HTTPS mirrors and git at
+`ssh.github.com:443` rather than widening to `:80`/`:22`.
+
+### Pin `volumeMode: Filesystem` on the rootdisk
+
+Left unset, CDI consults its `StorageProfile` for `ceph-block`, whose first RWO
+entry is `Block`. The importer runs non-root (uid 107, all caps dropped, baseline
+PSA) and cannot open the raw RBD device:
+
+```
+blockdev: cannot open /dev/cdi-block-volume: Permission denied
+```
+
+The importer CrashLoopBackOffs, the DataVolume sits in `ImportInProgress` forever,
+and the VM reports `DataVolumeError`.
+
+### Rebuilding a VM (re-running a failed cloud-init)
+
+cloud-init runs **once per instance** and records that in `/var/lib/cloud` on the
+disk. A guest whose provisioning failed cannot be fixed by restarting it — it
+boots, sees the run already happened, and finishes in under a minute having done
+nothing. **The disk has to be replaced.**
+
+Do **not** delete the DataVolume or its PVC in place. `runStrategy: Always`
+recreates the VMI immediately, the new virt-launcher re-references the PVC that is
+still terminating under `kubernetes.io/pvc-protection`, and the two deadlock:
+kubelet reports `PVC is being deleted` while the PVC waits on the pod that is
+waiting on the PVC. It looks like `Scheduling` and it never resolves.
+
+Instead **rename the `dataVolumeTemplate`** (`<app>-rootdisk` → `-v2`, `-v3`, …).
+The replacement imports cleanly alongside the old one; once the VMI is restarted
+onto it, delete the superseded DataVolume. This is why the tier's storage quota
+carries rebuild headroom.
+
+### Make first-boot provisioning observable and resilient
+
+A guest has no reachable sshd (open Q7), so a first boot is only as debuggable as
+you made it before you started it:
+
+- echo step markers to `/dev/console` — `virtctl console` is the live view, and a
+  failure whose reason is only in lost scrollback costs a whole rebuild cycle;
+- bring the web server and a status endpoint up **early**, not at the end — an
+  endpoint that exists to observe a slow boot is useless if it only appears once
+  the slow part is over;
+- wait for DNS to actually resolve before the first network step, and retry
+  `apt-get update` rather than aborting. Under emulation `runcmd` genuinely can
+  beat the resolver, and a single transient mirror failure under `set -e` kills
+  the entire run.
+
+### Timing under `useEmulation: true`
+
+For calibration, a 4-service pnpm monorepo (two Next.js apps) on an 8 vCPU / 8Gi
+emulated guest: `pnpm install` ~1 min, full `pnpm build` ~20 min, whole
+boot-to-serving ~34 min. Slow but entirely workable — roughly 3–5× native, not the
+20× sometimes assumed.
+
 ## Follow-up wiring (tracked in ADR-032)
 
 - **Scaffolder `layout: vm`** — DONE: the `vm-app` Backstage template's
