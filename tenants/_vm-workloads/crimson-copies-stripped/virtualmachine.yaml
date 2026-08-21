@@ -1,0 +1,111 @@
+# ============================================================================
+# crimson-copies-stripped — the app deployed the TRADITIONAL way.
+#
+# One Ubuntu 24.04 VM that, on first boot, does exactly what the app repo's own
+# docs/manual-deploy.md runbook describes a human doing by hand: install Node and a
+# database on the box, clone the source, build it, drop the four systemd units into
+# /etc/systemd/system, and put a reverse proxy in front. No Docker, no images, no
+# registry, no Kubernetes primitives inside the app. That "before" state is the
+# point — containerising and GitOps-deploying this app is the work STUDENTS do in
+# later stories, so the platform must not have done it for them.
+#
+# EMULATION CAVEAT: the cluster's KubeVirt CR still sets `useEmulation: true`, so
+# this guest runs on QEMU TCG software emulation, not KVM. Everything works; the
+# first boot (pnpm install + two next builds) is just slow. The guest is sized
+# generously (8 vCPU / 8Gi, explicit CPU limits) to blunt that. Flipping
+# useEmulation is a platform-wide change tracked on the post-GO punch list and is
+# deliberately NOT bundled into this tenant.
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: crimson-copies-stripped
+  namespace: crimson-copies-stripped-vm-prod
+  labels:
+    app.kubernetes.io/name: crimson-copies-stripped
+    platform.capstone/team: crimson-copies-stripped
+    platform.capstone/semester: 2026-fall
+    platform.capstone/env: prod
+    platform.capstone/tier: vm
+spec:
+  runStrategy: Always
+  dataVolumeTemplates:
+    - metadata:
+        name: crimson-copies-stripped-rootdisk
+        labels:
+          platform.capstone/team: crimson-copies-stripped
+          platform.capstone/tier: vm
+      spec:
+        source:
+          http:
+            url: https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img
+        storage:
+          accessModes:
+            - ReadWriteOnce          # ceph-block RBD; no live migration (ADR-032 open Q3)
+          storageClassName: ceph-block
+          resources:
+            requests:
+              # 20Gi is the size the tier's storage quota is sized around: CDI's
+              # import transiently holds prime + scratch + rootdisk at the image's
+              # VIRTUAL size, so peak ~3x. Ubuntu base (~2Gi) + node_modules + two
+              # Next builds + MariaDB data all fit with a lot of room to spare.
+              storage: 20Gi
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: crimson-copies-stripped
+        platform.capstone/team: crimson-copies-stripped
+        platform.capstone/env: prod
+        platform.capstone/tier: vm
+        # Set explicitly (KubeVirt also derives it) because the tier's
+        # allow-egress-vm-external-https NetworkPolicy selects the virt-launcher
+        # pod on exactly this label. If it ever stops matching, the guest loses all
+        # outbound :443 and first-boot provisioning hangs with no obvious cause.
+        kubevirt.io/domain: crimson-copies-stripped
+    spec:
+      domain:
+        cpu:
+          cores: 8
+        resources:
+          requests:
+            memory: 8Gi
+            cpu: "6"
+          # Limits are set EXPLICITLY and deliberately. The tier's LimitRange
+          # defaults a container with no limit to cpu:1 — which, for an 8-vCPU
+          # guest already paying a software-emulation tax, would throttle the build
+          # to a single core and turn a slow first boot into an unusable one. It
+          # would also be REJECTED outright (default limit 1 < request 6).
+          # memory limit == request keeps Guaranteed QoS and the tier's
+          # no-RAM-overcommit rule intact.
+          limits:
+            memory: 8Gi
+            cpu: "8"
+        devices:
+          disks:
+            - name: rootdisk
+              disk:
+                bus: virtio
+            - name: cloudinitdisk
+              disk:
+                bus: virtio
+          interfaces:
+            - name: default
+              masquerade: {}
+          rng: {}                     # entropy for TLS + secret generation on boot
+        machine:
+          type: q35
+      networks:
+        - name: default
+          pod: {}
+      terminationGracePeriodSeconds: 60
+      volumes:
+        - name: rootdisk
+          dataVolume:
+            name: crimson-copies-stripped-rootdisk
+        - name: cloudinitdisk
+          cloudInitNoCloud:
+            # Raw Secret (key: userdata) — the only shape cloudInitNoCloud.secretRef
+            # accepts. It is SEALED in git (cloudinit-sealedsecret.yaml) because it
+            # carries the repo's read-only deploy key; the blueprint's whitelist
+            # note assumes a non-secret cloud-init body, which this is not.
+            secretRef:
+              name: crimson-copies-stripped-cloudinit
