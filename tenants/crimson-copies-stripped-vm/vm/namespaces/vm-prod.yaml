@@ -125,7 +125,18 @@ spec:
     # covers the default import + headroom; prime+scratch are freed once the import
     # finishes, leaving only the rootdisk. A bigger guest disk still needs an
     # explicit quota bump + a platform capacity review (not a silent default).
-    requests.storage: 80Gi         # whole-project VM disk (often bundles a DB)
+    # 80Gi covers a single disk's import peak (rootdisk + prime + scratch, each at
+    # the image's VIRTUAL size). It does NOT cover a REBUILD, which is how a VM
+    # whose cloud-init failed gets fixed: the dataVolumeTemplate is renamed so a
+    # new disk imports ALONGSIDE the old one, and for that window the namespace
+    # holds four claims (old rootdisk + new rootdisk + prime + scratch) ~= 85Gi.
+    # At 80Gi the scratch PVC is silently never created, and the only symptom is
+    # an importer pod stuck Pending with
+    #   0/5 nodes are available: persistentvolumeclaim "...-scratch" not found
+    # which reads like a scheduling problem and is actually a quota one. 120Gi
+    # covers the rebuild window with margin; Ceph has ~1.8TB free, so the ceiling
+    # is about blast-radius discipline, not capacity.
+    requests.storage: 120Gi        # whole-project VM disk + rebuild headroom
     # Hard VM/disk count caps — a baseline-PSA namespace must not become a VM farm.
     count/virtualmachines.kubevirt.io: "1"
     count/datavolumes.cdi.kubevirt.io: "2"
