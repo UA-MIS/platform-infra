@@ -28,7 +28,7 @@ metadata:
     platform.capstone/tier: vm
 spec:
   runStrategy: Always
-  # NOTE the -v2 suffix. Renaming the dataVolumeTemplate is how this VM is given a
+  # NOTE the -v4 suffix. Renaming the dataVolumeTemplate is how this VM is given a
   # genuinely FRESH disk, and it is deliberate rather than cosmetic. cloud-init
   # runs once per instance and records that in /var/lib/cloud ON THE DISK, so a
   # guest whose provisioning failed cannot be fixed by restarting it — it boots,
@@ -44,7 +44,7 @@ spec:
   # afterwards, once nothing references it.
   dataVolumeTemplates:
     - metadata:
-        name: crimson-copies-stripped-rootdisk-v3
+        name: crimson-copies-stripped-rootdisk-v4
         labels:
           platform.capstone/team: crimson-copies-stripped
           platform.capstone/tier: vm
@@ -143,7 +143,7 @@ spec:
       volumes:
         - name: rootdisk
           dataVolume:
-            name: crimson-copies-stripped-rootdisk-v3
+            name: crimson-copies-stripped-rootdisk-v4
         - name: cloudinitdisk
           cloudInitNoCloud:
             # Raw Secret (key: userdata) — the only shape cloudInitNoCloud.secretRef
