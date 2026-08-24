@@ -130,6 +130,29 @@ spec:
       ports:
         - protocol: TCP
           port: 5432
+    # ns `monitoring` -> CNPG (5432 only) — Grafana is now a live DB client of
+    # capstone-pg (db `grafana`, role `grafana`): its backend moved off the
+    # chart-default embedded SQLite, which was self-contending into constant
+    # `database is locked (5) (SQLITE_BUSY)` under Grafana 13.1's own concurrency
+    # (unified storage, 3 job-drivers, ngalert, provisioning sidecar) with zero
+    # external load. Same by-name admit as `backstage`/`slides` above: `monitoring`
+    # is a platform namespace (it carries platform.capstone/component=platform, NOT
+    # platform.capstone/team), so it is NOT covered by
+    # allow-ingress-tenant-namespaces below and needs this explicit rule — WITHOUT
+    # it the db-tier `zz-default-deny` silently blackholes every Grafana connection
+    # attempt (a Cilium-enforced drop, which surfaces to Grafana as a connect
+    # TIMEOUT, not "connection refused" — see the scrape-timeout-vs-refused note).
+    # Scoped to 5432 only (not 3306/5555/9000) — Grafana never talks to MariaDB or
+    # MinIO. NOTE: no companion egress rule is needed on the monitoring side; that
+    # namespace has no NetworkPolicy at all (verified live), so its egress is
+    # unrestricted, unlike ns `slides` which ships its own deploy/netpol.yaml.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 5432
     # ns `crossplane-system` -> MariaDB (3306) AND CNPG Postgres (5432) — the
     # Crossplane repoint cutover (docs/operator/in-cluster-db-tier-runbook.md §4c):
     # provider-sql runs its admin session against the in-cluster DB tier instead of

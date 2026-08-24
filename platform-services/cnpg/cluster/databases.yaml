@@ -45,3 +45,29 @@ spec:
   cluster:
     name: capstone-pg
   databaseReclaimPolicy: retain
+---
+# Grafana's database (grafana.capstone.uamishub.com). Owned by the `grafana` role
+# (roles.yaml). Grafana runs its OWN schema migrations on first boot against an
+# EMPTY database (it is the only writer), so no bootstrap DDL is needed here —
+# same "app creates its own tables" posture as `slides` above.
+#
+# WHY: Grafana 13.1 was on the chart-default embedded SQLite, and its own
+# concurrency (unified storage `resource_version`, 3 job-drivers, ngalert, and the
+# dashboard-provisioning sidecar) self-contends on that single file — 43 of the
+# last 50 log lines were `database is locked (5) (SQLITE_BUSY)` with ZERO external
+# load. SQLite has one writer, cluster-wide; Postgres removes the serialization
+# point. No data migration: every dashboard + datasource is PROVISIONED from
+# ConfigMaps by the sidecar and re-materializes on first boot against the empty DB.
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: capstone-pg-grafana
+  namespace: db-tier
+  labels:
+    platform.capstone/component: platform
+spec:
+  name: grafana
+  owner: grafana
+  cluster:
+    name: capstone-pg
+  databaseReclaimPolicy: retain

@@ -101,3 +101,28 @@ spec:
   databaseRoleReclaimPolicy: retain
   passwordSecret:
     name: cnpg-slides-app-credentials
+---
+# Grafana's owner role (grafana.capstone.uamishub.com). Owns the `grafana`
+# database (databases.yaml); Grafana runs its own migrations on boot, which only
+# need OWNER privileges on that database — deliberately NOT granted createdb or
+# createrole (same least-privilege posture as backstage/slides, unlike
+# crossplane_provisioner which explicitly needs both). Password from the
+# ESO-materialized basic-auth Secret (platform-services/db-tier/
+# externalsecrets.yaml -> Vault secret/platform/db/cnpg/grafana). Same
+# retain-on-delete posture as every role above.
+apiVersion: postgresql.cnpg.io/v1
+kind: DatabaseRole
+metadata:
+  name: capstone-pg-grafana
+  namespace: db-tier
+  labels:
+    platform.capstone/component: platform
+spec:
+  cluster:
+    name: capstone-pg
+  name: grafana
+  login: true
+  superuser: false
+  databaseRoleReclaimPolicy: retain
+  passwordSecret:
+    name: cnpg-grafana-app-credentials   # platform-services/db-tier/externalsecrets.yaml
