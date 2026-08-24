@@ -1,0 +1,1301 @@
+# Crimson Copies -- the team-facing app dashboard (the "my app's numbers" view).
+#
+# WHY A DEDICATED DASHBOARD: the existing fleet answers platform questions --
+# "Platform / Tenants -- App Golden Signals" shows Traefik traffic/errors/latency
+# for ANY namespace, and "Tenant Logs" shows log lines. Both are correct and both
+# are the wrong altitude for a student team, which wants to see ORDERS and
+# QUOTES, not `traefik_service_requests_total`. This dashboard is the app-level
+# view: the same ingress signals on top (they need them), plus the app's own
+# business + per-route metrics underneath.
+#
+# TWO METRIC SOURCES, deliberately:
+#   1. Traefik (`traefik_service_*`) -- already scraped, works with zero app
+#      instrumentation. NOTE the label is `exported_service`, NOT `service`:
+#      Prometheus renames Traefik's own `service` label on collision with the
+#      target's k8s Service label. Filtering on `service` here would silently
+#      match the Traefik Service itself and show the wrong numbers.
+#   2. The app's own /metrics (`http_requests_total`, `sftp_uploads_total`, ...)
+#      -- scraped via the ServiceMonitor the app repo now ships in
+#      .devops/chart/base/servicemonitor.yaml. That requires BOTH the
+#      `monitoring.coreos.com/ServiceMonitor` whitelist entry AND the `monitoring`
+#      ingress netpol rule added in this same PR; without them these panels read
+#      "No data" while the Traefik panels above keep working.
+#
+# BUSINESS PANELS ARE DERIVED, NOT BESPOKE: the app registers no order/revenue
+# counters (D-155 left instrumentation out of scope). What it does have is
+# route-labelled request counters, so "orders placed" is a successful POST to the
+# checkout route and "quotes" is a successful POST /api/quote. That is real
+# measured traffic, not an estimate -- but it does mean REVENUE is not available
+# at any price, because no metric carries order value. The "About this dashboard"
+# text panel states that gap on the dashboard itself rather than quietly shipping
+# an empty panel; see it for the exact instrumentation seam that would close it.
+#
+# Auto-provisioned by the Grafana sidecar via the `grafana_dashboard: "1"` label,
+# filed into its own folder via the `grafana_folder` annotation.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-crimson-copies-app
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: "Crimson Copies"
+data:
+  crimson-copies-app.json: |
+    {
+      "uid": "crimson-copies-your-app",
+      "title": "Crimson Copies -- Your App",
+      "description": "The team-facing view of Crimson Copies: customer traffic from Traefik, plus the app's own business and per-route metrics. Switch environments with the `namespace` selector.",
+      "tags": [
+        "crimson-copies",
+        "tenants",
+        "app"
+      ],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "graphTooltip": 1,
+      "time": {
+        "from": "now-6h",
+        "to": "now"
+      },
+      "refresh": "1m",
+      "templating": {
+        "list": [
+          {
+            "name": "datasource",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": {},
+            "hide": 0,
+            "label": "Data source"
+          },
+          {
+            "name": "namespace",
+            "type": "query",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "${datasource}"
+            },
+            "label": "Environment",
+            "description": "Which environment to show: dev, staging or prod.",
+            "query": {
+              "query": "label_values(kube_pod_info{namespace=~\"crimson-copies-(dev|staging|prod)\"}, namespace)",
+              "refId": "namespace"
+            },
+            "refresh": 2,
+            "multi": false,
+            "includeAll": false,
+            "current": {
+              "text": "crimson-copies-prod",
+              "value": "crimson-copies-prod"
+            },
+            "sort": 1
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "row",
+          "title": "Right now",
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 0
+          },
+          "collapsed": false,
+          "panels": []
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "Orders Placed",
+          "description": "Completed orders in the selected time range. Counts cart checkouts (POST /api/orders/:id/checkout) plus legacy one-shot orders (POST /api/orders). Carts that were started but never checked out are NOT counted.",
+          "gridPos": {
+            "h": 5,
+            "w": 4,
+            "x": 0,
+            "y": 1
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              },
+              "decimals": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "orientation": "auto",
+            "textMode": "auto",
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto"
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(increase(http_requests_total{namespace=\"$namespace\", job=~\".*orders-api.*\", method=\"POST\", route=~\"/api/orders|/api/orders/:id/checkout\", status_code=~\"200|201\"}[$__range])) or vector(0)",
+              "refId": "A",
+              "instant": true
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "Quotes Configured",
+          "description": "Successful price quotes from the /pricing configurator (POST /api/quote). Every time a customer changes quantity, paper or turnaround, that is one quote.",
+          "gridPos": {
+            "h": 5,
+            "w": 4,
+            "x": 4,
+            "y": 1
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  },
+                  {
+                    "color": "blue",
+                    "value": 1
+                  }
+                ]
+              },
+              "decimals": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "orientation": "auto",
+            "textMode": "auto",
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto"
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(increase(http_requests_total{namespace=\"$namespace\", job=~\".*orders-api.*\", method=\"POST\", route=\"/api/quote\", status_code=\"200\"}[$__range])) or vector(0)",
+              "refId": "A",
+              "instant": true
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "Visitors / min",
+          "description": "Requests per minute arriving at your app through the ingress, averaged over the last 5 minutes. This is every page load and asset request your visitors make.",
+          "gridPos": {
+            "h": 5,
+            "w": 4,
+            "x": 8,
+            "y": 1
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  },
+                  {
+                    "color": "green",
+                    "value": 0.1
+                  }
+                ]
+              },
+              "decimals": 1
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "orientation": "auto",
+            "textMode": "auto",
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto"
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(rate(traefik_service_requests_total{exported_service=~\"$namespace-crimson-copies-.*\"}[5m])) * 60 or vector(0)",
+              "refId": "A",
+              "instant": true
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "type": "stat",
+          "title": "Error Rate",
+          "description": "Share of requests failing with a 5xx server error over the last 5 minutes. Anything sustained above 1% deserves a look at the logs.",
+          "gridPos": {
+            "h": 5,
+            "w": 4,
+            "x": 12,
+            "y": 1
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 1
+                  },
+                  {
+                    "color": "red",
+                    "value": 5
+                  }
+                ]
+              },
+              "decimals": 2
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "orientation": "auto",
+            "textMode": "auto",
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto"
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "(sum(rate(traefik_service_requests_total{exported_service=~\"$namespace-crimson-copies-.*\", code=~\"5..\"}[5m])) or vector(0)) / (sum(rate(traefik_service_requests_total{exported_service=~\"$namespace-crimson-copies-.*\"}[5m])) > 0) * 100",
+              "refId": "A",
+              "instant": true
+            }
+          ]
+        },
+        {
+          "id": 6,
+          "type": "stat",
+          "title": "Response Time (p95)",
+          "description": "95% of requests finish faster than this. The slow tail is what users actually complain about, which is why this is p95 and not an average.",
+          "gridPos": {
+            "h": 5,
+            "w": 4,
+            "x": 16,
+            "y": 1
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 1
+                  },
+                  {
+                    "color": "red",
+                    "value": 3
+                  }
+                ]
+              },
+              "decimals": 2
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "orientation": "auto",
+            "textMode": "auto",
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto"
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(traefik_service_request_duration_seconds_bucket{exported_service=~\"$namespace-crimson-copies-.*\"}[5m])))",
+              "refId": "A",
+              "instant": true
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "type": "stat",
+          "title": "Files Uploaded",
+          "description": "Artwork files customers successfully uploaded over SFTP in the selected range. NOTE: web-dropzone uploads are not counted here -- that code path has no metric yet (see the note at the bottom of this dashboard).",
+          "gridPos": {
+            "h": 5,
+            "w": 4,
+            "x": 20,
+            "y": 1
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  },
+                  {
+                    "color": "purple",
+                    "value": 1
+                  }
+                ]
+              },
+              "decimals": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "orientation": "auto",
+            "textMode": "auto",
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto"
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(increase(sftp_uploads_total{namespace=\"$namespace\", result=\"success\"}[$__range])) or vector(0)",
+              "refId": "A",
+              "instant": true
+            }
+          ]
+        },
+        {
+          "id": 8,
+          "type": "row",
+          "title": "Customer traffic -- what visitors see",
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 6
+          },
+          "collapsed": false,
+          "panels": []
+        },
+        {
+          "id": 9,
+          "type": "timeseries",
+          "title": "Requests per minute, by site",
+          "description": "Traffic split between your storefront (customers) and staff console (your team). Measured at the ingress, so this is real outside traffic.",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 7
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "fillOpacity": 10,
+                "showPoints": "never",
+                "spanNulls": true,
+                "gradientMode": "opacity",
+                "pointSize": 5,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "axisPlacement": "auto",
+                "axisLabel": ""
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "decimals": 1
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": []
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "label_replace(sum by (exported_service) (rate(traefik_service_requests_total{exported_service=~\"$namespace-crimson-copies-.*\"}[5m])) * 60, \"site\", \"$1\", \"exported_service\", \".*crimson-copies-(storefront|staff-console|file-service)-http@kubernetes\")",
+              "refId": "A",
+              "legendFormat": "{{site}}"
+            }
+          ]
+        },
+        {
+          "id": 10,
+          "type": "timeseries",
+          "title": "Response time",
+          "description": "How long requests take. p50 is the typical experience; p95/p99 are the slow tail. A widening gap between p50 and p99 usually means something is intermittently slow, not uniformly slow.",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 7
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "showPoints": "never",
+                "spanNulls": true,
+                "gradientMode": "opacity",
+                "pointSize": 5,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "axisPlacement": "auto",
+                "axisLabel": ""
+              },
+              "color": {
+                "mode": "palette-classic"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": []
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "histogram_quantile(0.50, sum by (le) (rate(traefik_service_request_duration_seconds_bucket{exported_service=~\"$namespace-crimson-copies-.*\"}[5m])))",
+              "refId": "A",
+              "legendFormat": "p50 (typical)"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(traefik_service_request_duration_seconds_bucket{exported_service=~\"$namespace-crimson-copies-.*\"}[5m])))",
+              "refId": "B",
+              "legendFormat": "p95 (slow tail)"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "histogram_quantile(0.99, sum by (le) (rate(traefik_service_request_duration_seconds_bucket{exported_service=~\"$namespace-crimson-copies-.*\"}[5m])))",
+              "refId": "C",
+              "legendFormat": "p99 (worst)"
+            }
+          ]
+        },
+        {
+          "id": 11,
+          "type": "timeseries",
+          "title": "Responses by status code",
+          "description": "2xx = success, 3xx = redirect (sign-in bounces show up here), 4xx = the client asked for something wrong, 5xx = your app broke. Stacked, so the total height is your overall request rate.",
+          "gridPos": {
+            "h": 7,
+            "w": 24,
+            "x": 0,
+            "y": 15
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "fillOpacity": 10,
+                "showPoints": "never",
+                "spanNulls": true,
+                "gradientMode": "opacity",
+                "pointSize": 5,
+                "stacking": {
+                  "mode": "normal",
+                  "group": "A"
+                },
+                "axisPlacement": "auto",
+                "axisLabel": ""
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "decimals": 1
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": []
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (code) (rate(traefik_service_requests_total{exported_service=~\"$namespace-crimson-copies-.*\"}[5m])) * 60",
+              "refId": "A",
+              "legendFormat": "{{code}}"
+            }
+          ]
+        },
+        {
+          "id": 12,
+          "type": "row",
+          "title": "Your business -- what the app is actually doing",
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 22
+          },
+          "collapsed": false,
+          "panels": []
+        },
+        {
+          "id": 13,
+          "type": "timeseries",
+          "title": "Orders placed",
+          "description": "Completed orders over time. Cart checkouts plus legacy one-shot orders; abandoned carts are excluded.",
+          "gridPos": {
+            "h": 7,
+            "w": 8,
+            "x": 0,
+            "y": 23
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "fillOpacity": 20,
+                "showPoints": "never",
+                "spanNulls": true,
+                "gradientMode": "opacity",
+                "pointSize": 5,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "axisPlacement": "auto",
+                "axisLabel": ""
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "decimals": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": []
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(increase(http_requests_total{namespace=\"$namespace\", job=~\".*orders-api.*\", method=\"POST\", route=~\"/api/orders|/api/orders/:id/checkout\", status_code=~\"200|201\"}[10m])) or vector(0)",
+              "refId": "A",
+              "legendFormat": "orders / 10 min"
+            }
+          ]
+        },
+        {
+          "id": 14,
+          "type": "timeseries",
+          "title": "Quote requests per minute",
+          "description": "How hard customers are working the price configurator. High quote volume with low order volume means people are pricing but not buying.",
+          "gridPos": {
+            "h": 7,
+            "w": 8,
+            "x": 8,
+            "y": 23
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "fillOpacity": 20,
+                "showPoints": "never",
+                "spanNulls": true,
+                "gradientMode": "opacity",
+                "pointSize": 5,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "axisPlacement": "auto",
+                "axisLabel": ""
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "decimals": 1
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": []
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(rate(http_requests_total{namespace=\"$namespace\", job=~\".*orders-api.*\", method=\"POST\", route=\"/api/quote\", status_code=\"200\"}[5m])) * 60 or vector(0)",
+              "refId": "A",
+              "legendFormat": "quotes / min"
+            }
+          ]
+        },
+        {
+          "id": 15,
+          "type": "timeseries",
+          "title": "Order status changes",
+          "description": "Staff moving orders through the queue (received -> queued -> printing -> finishing -> ready -> completed). This is your shop floor's throughput.",
+          "gridPos": {
+            "h": 7,
+            "w": 8,
+            "x": 16,
+            "y": 23
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "fillOpacity": 20,
+                "showPoints": "never",
+                "spanNulls": true,
+                "gradientMode": "opacity",
+                "pointSize": 5,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "axisPlacement": "auto",
+                "axisLabel": ""
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "decimals": 1
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": []
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(rate(http_requests_total{namespace=\"$namespace\", job=~\".*orders-api.*\", method=\"PATCH\", route=\"/api/orders/:id/status\", status_code=\"200\"}[5m])) * 60 or vector(0)",
+              "refId": "A",
+              "legendFormat": "transitions / min"
+            }
+          ]
+        },
+        {
+          "id": 16,
+          "type": "timeseries",
+          "title": "File pipeline",
+          "description": "Customer artwork arriving over SFTP and the page-count extraction that follows. `quota_exceeded` uploads and `failed` extractions are the two that cost you a phone call.",
+          "gridPos": {
+            "h": 7,
+            "w": 12,
+            "x": 0,
+            "y": 30
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "fillOpacity": 10,
+                "showPoints": "never",
+                "spanNulls": true,
+                "gradientMode": "opacity",
+                "pointSize": 5,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "axisPlacement": "auto",
+                "axisLabel": ""
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "decimals": 2
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": []
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (result) (rate(sftp_uploads_total{namespace=\"$namespace\"}[10m])) * 60",
+              "refId": "A",
+              "legendFormat": "upload: {{result}}"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (result) (rate(extractions_total{namespace=\"$namespace\"}[10m])) * 60",
+              "refId": "B",
+              "legendFormat": "extraction: {{result}}"
+            }
+          ]
+        },
+        {
+          "id": 17,
+          "type": "timeseries",
+          "title": "Inbound email intake",
+          "description": "Orders arriving by email. `accepted` is a real order; `bad_signature` and `rate_limited` are the intake endpoint rejecting junk, which is it working correctly.",
+          "gridPos": {
+            "h": 7,
+            "w": 12,
+            "x": 12,
+            "y": 30
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "fillOpacity": 10,
+                "showPoints": "never",
+                "spanNulls": true,
+                "gradientMode": "opacity",
+                "pointSize": 5,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "axisPlacement": "auto",
+                "axisLabel": ""
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "decimals": 2
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": []
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (result) (rate(inbound_emails_total{namespace=\"$namespace\"}[10m])) * 60",
+              "refId": "A",
+              "legendFormat": "{{result}}"
+            }
+          ]
+        },
+        {
+          "id": 18,
+          "type": "row",
+          "title": "Your API -- route by route",
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 37
+          },
+          "collapsed": false,
+          "panels": []
+        },
+        {
+          "id": 19,
+          "type": "timeseries",
+          "title": "Busiest routes",
+          "description": "Top 8 API routes by request rate. Health checks and internal polling usually dominate -- that is normal, and it is why the business panels above filter to specific routes.",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 38
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "fillOpacity": 10,
+                "showPoints": "never",
+                "spanNulls": true,
+                "gradientMode": "opacity",
+                "pointSize": 5,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "axisPlacement": "auto",
+                "axisLabel": ""
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "decimals": 1
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": []
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "topk(8, sum by (route) (rate(http_requests_total{namespace=\"$namespace\", job=~\".*orders-api.*\"}[5m]) * 60))",
+              "refId": "A",
+              "legendFormat": "{{route}}"
+            }
+          ]
+        },
+        {
+          "id": 20,
+          "type": "timeseries",
+          "title": "Slowest routes (p95)",
+          "description": "Which endpoints are slow, measured inside the app itself (so this excludes network and ingress time). Compare with the ingress response time above: a big gap points at the network or Traefik, a small gap points at your code.",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 38
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "showPoints": "never",
+                "spanNulls": true,
+                "gradientMode": "opacity",
+                "pointSize": 5,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "axisPlacement": "auto",
+                "axisLabel": ""
+              },
+              "color": {
+                "mode": "palette-classic"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": []
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "topk(8, histogram_quantile(0.95, sum by (le, route) (rate(http_request_duration_seconds_bucket{namespace=\"$namespace\", job=~\".*orders-api.*\"}[5m]))))",
+              "refId": "A",
+              "legendFormat": "{{route}}"
+            }
+          ]
+        },
+        {
+          "id": 21,
+          "type": "timeseries",
+          "title": "Failing routes (4xx / 5xx)",
+          "description": "Every route currently returning errors, broken out by code. 401s on /api/* are usually an unauthenticated caller, not a bug. 5xx is always yours.",
+          "gridPos": {
+            "h": 7,
+            "w": 24,
+            "x": 0,
+            "y": 46
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "fillOpacity": 10,
+                "showPoints": "never",
+                "spanNulls": true,
+                "gradientMode": "opacity",
+                "pointSize": 5,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "axisPlacement": "auto",
+                "axisLabel": ""
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "decimals": 2
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": []
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (route, status_code) (rate(http_requests_total{namespace=\"$namespace\", job=~\".*orders-api.*\", status_code=~\"4..|5..\"}[5m]) * 60)",
+              "refId": "A",
+              "legendFormat": "{{route}} -> {{status_code}}"
+            }
+          ]
+        },
+        {
+          "id": 22,
+          "type": "text",
+          "title": "About this dashboard",
+          "gridPos": {
+            "h": 9,
+            "w": 24,
+            "x": 0,
+            "y": 53
+          },
+          "options": {
+            "mode": "markdown",
+            "content": "### What these numbers come from\n\n**Customer traffic** panels are measured by **Traefik**, the platform's ingress -- they count every request that reaches your app from outside, and they work whether or not your app is instrumented.\n\n**Business** and **API** panels come from your app's own `/metrics` endpoint (`prom-client`), scraped from `orders-api`, `notify` and `file-service`. They are derived from **route-labelled request counters** -- an order is a successful `POST` to the checkout route, a quote is a successful `POST /api/quote`.\n\n**Not measured yet** -- honest gaps, not broken panels:\n\n- **Revenue.** No metric carries order value. The app knows `order.totalCents` at checkout but only writes it to a log line, never to a counter. Adding a `Counter`/`Histogram` at that seam (`apps/orders-api/src/routes/orders.ts`, the `order checked out` log) is the single change that would unlock a revenue panel.\n- **Orders broken down by status.** Status *changes* are counted (above), but nothing exports the current number of orders sitting in each status -- that needs a `Gauge` fed from a database query.\n- **Web-dropzone uploads.** `sftp_uploads_total` covers the SFTP path only; the browser upload route is uninstrumented.\n\nEverything shown above is real measured traffic. Nothing on this dashboard is simulated or estimated."
+          }
+        }
+      ]
+    }

@@ -365,6 +365,21 @@ spec:
                       # the staging/prod overlays (overlays/{staging,prod}/pdb.yaml).
                       # Namespaced + tenancy-safe like the kinds above.
                       - { group: policy, kind: PodDisruptionBudget }
+                      # ServiceMonitor — un-defers D-155#6. A team's app can only
+                      # show "my app's numbers" (not just platform-level Traefik
+                      # counters) if Prometheus scrapes the app's OWN /metrics
+                      # endpoint, and the Prometheus Operator's scrape unit is a
+                      # namespaced ServiceMonitor that must live NEXT TO the Service
+                      # it selects — i.e. in the tenant namespace, rendered from the
+                      # tenant's own chart. Tenancy-safe for the same reason
+                      # Service/Deployment are: namespaced, selects only within its
+                      # own namespace, and the tenant AppProject's destinations
+                      # already fence which namespaces they may write to.
+                      # NOTE the matching netpol allowance below (ingress from the
+                      # `monitoring` namespace) is REQUIRED for the scrape to
+                      # actually connect — the whitelist alone only lets the object
+                      # be created, not scraped.
+                      - { group: monitoring.coreos.com, kind: ServiceMonitor }
                     roles:
                       - name: developer
                         description: {{ printf "Team %s developers — sync/get own apps only." $team | quote }}
@@ -525,6 +540,24 @@ spec:
                                 kubernetes.io/metadata.name: kube-system
                       - from:
                           - podSelector: {}
+                      # Prometheus scrape path (pairs with the ServiceMonitor kind
+                      # in namespaceResourceWhitelist above — un-defers D-155#6).
+                      # WITHOUT this rule a tenant ServiceMonitor is accepted by
+                      # ArgoCD, renders a healthy-looking target, and then every
+                      # scrape BLACKHOLES: Cilium enforces these policies for real
+                      # (SEC-011 deny-test), and a denied scrape surfaces as
+                      # `context deadline exceeded` (a timeout), NOT `connection
+                      # refused` — which reads like a slow app rather than a
+                      # firewall. Scoped to the port named `http` so this opens the
+                      # app's own HTTP port to the monitoring namespace and nothing
+                      # else (no SFTP, no SMTP, no S3 sidecar ports).
+                      - from:
+                          - namespaceSelector:
+                              matchLabels:
+                                kubernetes.io/metadata.name: monitoring
+                        ports:
+                          - protocol: TCP
+                            port: http
             ---
             apiVersion: kubernetes.crossplane.io/v1alpha1
             kind: Object
