@@ -11,6 +11,12 @@
 #   - argocd-redis                   → in-memory cache singleton; an eviction flushes
 #       the reconcile cache and briefly slows every app. Low value, left recommend-only.
 #
+# NOTE (argocd-dex-server): single-replica Deployment, but the exception to the
+# "~15-30s blip, no user-facing impact" framing above — it's the SSO broker, so an
+# eviction mid-login breaks in-flight logins. updateMode "Initial", NOT "Auto" -- D-180:
+# never evict a single-replica user-facing service midday; sizing lands on natural
+# restarts.
+#
 # Deployment names are the argo-cd chart defaults. controlledValues: RequestsOnly —
 # VPA sets right-sized REQUESTS only, never touches limits.
 ---
@@ -111,7 +117,9 @@ spec:
     kind: Deployment
     name: argocd-dex-server
   updatePolicy:
-    updateMode: "Auto"
+    # Initial: never evict a single-replica user-facing service midday; sizing
+    # lands on natural restarts.
+    updateMode: "Initial"
   resourcePolicy:
     containerPolicies:
       - containerName: "*"

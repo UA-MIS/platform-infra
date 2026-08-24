@@ -1,13 +1,12 @@
 # Active right-sizing for Backstage (ns backstage) — the developer portal. Stateless
-# Deployment (its catalog/state live in the external CNPG Postgres, not in-pod), so a
-# VPA eviction is safe.
+# Deployment (its catalog/state live in the external CNPG Postgres, not in-pod).
 #
-# ⚠ SLOW START: Backstage takes 60-120s to boot (plugin init + catalog client). An
-# Auto eviction is a 1-2 min PORTAL OUTAGE — sequence it LAST in the supervised apply
-# and confirm Ready before moving on. Reclaim here is marginal (req 576Mi vs target
-# ~560Mi ≈ already right-sized); it is included for correctness/consistency, not RAM
-# savings. If the 1-2 min outage is unwanted, set this one object's updateMode to
-# "Initial" (right-sizes at the next natural image-bump restart, no forced eviction).
+# updateMode "Initial", NOT "Auto" -- D-180: never evict a single-replica user-facing
+# service midday; sizing lands on natural restarts. Backstage also takes 60-120s to
+# boot (plugin init + catalog client), so a forced Auto eviction would additionally be
+# a 1-2 min PORTAL OUTAGE on top of the eviction-blip risk. Reclaim here is marginal
+# (req 576Mi vs target ~560Mi ≈ already right-sized); it is included for
+# correctness/consistency, not RAM savings.
 ---
 apiVersion: autoscaling.k8s.io/v1
 kind: VerticalPodAutoscaler
@@ -22,7 +21,9 @@ spec:
     kind: Deployment
     name: backstage
   updatePolicy:
-    updateMode: "Auto"
+    # Initial: never evict a single-replica user-facing service midday; sizing
+    # lands on natural restarts.
+    updateMode: "Initial"
   resourcePolicy:
     containerPolicies:
       - containerName: "*"
