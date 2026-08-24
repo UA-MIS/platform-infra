@@ -701,18 +701,20 @@ spec:
               # in, sees their app cleanly" default view). Dashboards with no
               # annotation land in "General" (none do, as of this PR).
               folderAnnotation: grafana_folder
-              # REQUIRED for folderAnnotation to do anything. The sidecar always
-              # honours the annotation on the FILESYSTEM side -- its log says
-              # "Found a folder override annotation, placing ... in
-              # /tmp/dashboards/Platform / Tenants" -- but Grafana's dashboard
-              # PROVIDER is what decides where those files get filed in the UI,
-              # and by default it ingests every file into one flat folder
-              # regardless of subdirectory. Without this flag the annotation is
-              # silently cosmetic: all 21 dashboards land in "General", which is
-              # exactly what was live before this change despite the comment
-              # above describing folders that had never existed.
-              provider:
-                foldersFromFilesStructure: true
+              # NOTE (tried and reverted, #523): adding
+              # `provider.foldersFromFilesStructure: true` here is NOT sufficient
+              # to make the annotation above take effect, and is actively worse.
+              # It does make Grafana create the folders, but the provisioner will
+              # not MOVE a dashboard that is already provisioned into General --
+              # it matches on uid and updates in place -- so the result is the
+              # same 44 dashboards in General PLUS three empty folders. Worse,
+              # the existing annotation values contain "/" ("Platform / Infra"),
+              # which the sidecar writes as a nested directory, yielding three
+              # sibling folders all titled "Platform".
+              # Making this work needs the provisioned dashboards deleted so they
+              # are re-created in the right folder, and the "/" dropped from the
+              # annotation values. Left as a follow-up rather than done here --
+              # it is cosmetic, and a dashboard wipe is not a pre-demo change.
               # ALL (not just this release's own `monitoring` namespace): lets
               # the sidecar also pick up the OFFICIAL dashboards baked into the
               # cilium Helm chart itself (dashboards.enabled / operator.
