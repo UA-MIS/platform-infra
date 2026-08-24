@@ -567,6 +567,49 @@ spec:
           # as the break-glass fallback alongside the "Sign in with Dex" button,
           # never bypassed.
           "grafana.ini":
+            # ── Backend database: Postgres on the in-cluster CNPG cluster ──────────
+            # Grafana's backend store, moved OFF the chart-default embedded SQLite.
+            #
+            # WHY: Grafana 13.1 SELF-contends on the one SQLite file — unified
+            # storage's `resource_version` table, three concurrent job-drivers,
+            # ngalert's scheduler, and the dashboard-provisioning sidecar all
+            # serialize on SQLite's single writer. Measured live with ZERO external
+            # load: 43 of the last 50 log lines were `database is locked (5)
+            # (SQLITE_BUSY)`, and ngalert.scheduler was failing to update alert rules
+            # outright. This took Grafana down 4x in one day. It is an architectural
+            # limit (one writer, period), not a tuning problem — Postgres removes the
+            # serialization point entirely.
+            #
+            # `host` MUST carry the port: Grafana's [database] host is a single
+            # `host:port` string, NOT a bare hostname with a separate port key.
+            # Points at the RW (primary) service — Grafana writes constantly, so the
+            # -ro/-r replica services would be wrong.
+            #
+            # NO `password` key here, deliberately: it arrives as the
+            # GF_DATABASE_PASSWORD env var (envValueFrom below, ESO <- Vault
+            # platform/db/cnpg/grafana). Grafana maps GF_<SECTION>_<KEY> onto this
+            # ini, so that env var IS this section's `password` — no secret material
+            # in git (ADR-030 §0).
+            #
+            # `ssl_mode: require` — encrypts the credential + query traffic on the
+            # wire. Verified against this exact cluster before the cutover: `disable`
+            # and `require` both connect; `verify-ca` does NOT (it needs the CNPG CA
+            # bundle mounted into the Grafana pod — a worthwhile follow-up, not a
+            # prerequisite). CNPG's pg_hba is `host all all all scram-sha-256`, which
+            # permits both, so `require` is a free upgrade over the plaintext path.
+            #
+            # The `grafana` role owns the `grafana` database and runs Grafana's own
+            # schema migrations on first boot (platform-services/cnpg/cluster/
+            # {databases,roles}.yaml). NO data migration is performed or needed: every
+            # dashboard and datasource is PROVISIONED from ConfigMaps by the sidecar
+            # and re-materializes against the empty database. See this PR's body for
+            # the exact (small) list of what does not carry over.
+            database:
+              type: postgres
+              host: capstone-pg-rw.db-tier.svc.cluster.local:5432
+              name: grafana
+              user: grafana
+              ssl_mode: require
             users:
               default_theme: dark
               # Belt-and-suspenders default for any auth path that doesn't hit
@@ -611,6 +654,19 @@ spec:
           # `grafana-client-secret` key in platform-services/dex/sealedsecret.yaml
           # (both sides of the OAuth handshake must agree).
           envValueFrom:
+            # GF_DATABASE_PASSWORD — the `[database] password` for the CNPG backend
+            # configured in grafana.ini above (Grafana maps GF_<SECTION>_<KEY> onto
+            # its ini, and env takes precedence over the file). Reads the
+            # GF_DATABASE_PASSWORD key from the `grafana-cnpg-db-credentials` Secret,
+            # materialized by ESO from Vault platform/db/cnpg/grafana
+            # (platform-services/monitoring/externalsecret-cnpg-db.yaml) — the SAME
+            # Vault value CNPG's own `cnpg-grafana-app-credentials` Secret in ns
+            # db-tier uses to set the role's password, so the two can never drift.
+            # Same injection mechanism as the OAuth client secret below.
+            GF_DATABASE_PASSWORD:
+              secretKeyRef:
+                name: grafana-cnpg-db-credentials
+                key: GF_DATABASE_PASSWORD
             GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET:
               secretKeyRef:
                 name: grafana-oauth
