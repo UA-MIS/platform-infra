@@ -4,10 +4,21 @@ The curated allowlist of **active** VPA right-sizing objects, synced by
 `applicationsets/vpa-platform-policies-app.yaml` (directory-source app,
 sync-wave 1 — after the VPA CRDs from `platform-vpa`, wave 0).
 
-Every object here is `updateMode: Auto` + `controlledValues: RequestsOnly`: VPA
-sets right-sized **requests** (never touches limits) for a **stateless,
-single-eviction-safe controller**. Pre-k8s-1.33 Auto applies by evicting the pod,
-so this directory is the ONLY place Auto VPAs live and the allowlist is
+Every object here is `controlledValues: RequestsOnly`: VPA sets right-sized
+**requests** (never touches limits) for a stateless, single-eviction-safe
+controller. Pre-k8s-1.33 Auto applies by evicting the pod, so within that
+constraint this directory splits into two `updateMode`s (D-180):
+- **`Auto`** — controllers and collectors, plus PDB-guarded multi-replica edges
+  (traefik, cloudflared, portal, argocd-server). A blip here is invisible (no
+  human is looking at it) or zero-downtime (the PDB rolls one replica at a
+  time), so evicting live is correct and gets the resize applied immediately.
+- **`Initial`** — single-replica, user-facing services with no PDB possible
+  (grafana, backstage, argocd-dex-server, thanos-query, ntfy). A live eviction
+  here is a visible outage (UI down, SSO logins broken, dashboards/datasource
+  gone) for a resize that isn't urgent, so sizing lands only at the pod's next
+  natural restart instead.
+
+This directory is the ONLY place Auto VPAs live, and the allowlist is
 deliberately curated (one file per component group, one object per Deployment).
 
 > Auto only actively evicts single-replica workloads because the **vpa-updater is
