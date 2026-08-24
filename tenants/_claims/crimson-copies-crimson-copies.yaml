@@ -51,6 +51,24 @@ spec:
   # cannot show real traffic AND real business metrics on one dashboard -- the
   # whole point of it being the reference app.
   #
+  # ALL THREE DEV HOSTS, not just the storefront. Traefik's
+  # `router.middlewares` annotation lives on the Ingress OBJECT, not per-rule,
+  # and this chart puts all three hosts on one Ingress -- so the gate drops from
+  # crimson-copies-dev, crimson-copies-staff-dev AND crimson-copies-intake-dev
+  # together. The intake host is the one worth thinking about: it is the
+  # ADR-058 email webhook, path-scoped `Exact` to /inbound/email, and it CREATES
+  # ORDERS. It is safe here because it was designed to face the internet without
+  # the platform gate and carries its own stack: HMAC-SHA256 over the raw body
+  # with timingSafeEqual, a 5-minute replay window with the timestamp bound into
+  # the signed material, size/extension/attachment caps, a per-sender rate limit,
+  # and one indistinguishable 401 for every failure (no oracle). Its secret is
+  # per-env (secret/tenants/crimson-copies/dev/app), so a dev compromise cannot
+  # be replayed at prod. And prod's intake host has NEVER been gated -- prod is
+  # unconditionally excluded from $nonProd -- so this endpoint has always had to
+  # survive on its own guards. Dev is catching up to prod's posture, not
+  # departing from it. (It also un-breaks something: with the gate on, Cloudflare
+  # could not have POSTed to dev's intake host at all.)
+  #
   # Exposure this actually grants: dev's public pages (/, /pricing, /sign-in)
   # become reachable without an org login -- exactly what prod already exposes.
   # Everything behind them is still Clerk-gated by the app itself (/order,
