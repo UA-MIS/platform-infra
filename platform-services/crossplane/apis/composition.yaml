@@ -47,6 +47,9 @@ spec:
             {{- $port := $spec.port | default 8080 }}
             {{- $domain := $spec.domain | default "capstone.uamishub.com" }}
             {{- $preview := $spec.previewEnabled | default false }}
+            {{- /* SECURITY-GATED opt-out from the non-prod SSO forwardAuth, DEV ONLY.
+                   Default false, so every existing tenant keeps the gate untouched. */}}
+            {{- $publicDev := $spec.publicDevIngress | default false }}
             {{- $database := $spec.database | default "none" }}
             {{- /* MySQL identifiers from the team slug: hyphens -> underscores, since
                    `<team>_<env>` becomes a MariaDB schema + username (ADR-033). */}}
@@ -904,6 +907,13 @@ spec:
                     templatePatch: |
                       {{ `{{- $gate := (index .environments .env).gate }}` }}
                       {{ `{{- $nonProd := ne .env "prod" }}` }}
+                      {{- if $publicDev }}
+                      {{- /* spec.publicDevIngress: drop the gate for DEV ONLY.
+                             staging keeps it (still $nonProd), prod was never
+                             gated. Emitted only for tenants that opted in, so
+                             every other tenant's patch is byte-identical. */}}
+                      {{ `{{- $nonProd = and $nonProd (ne .env "dev") }}` }}
+                      {{- end }}
                       spec:
                       {{ `{{- if $nonProd }}` }}
                         # non-prod-sso-gate PR (STAGED — see that PR's body for the

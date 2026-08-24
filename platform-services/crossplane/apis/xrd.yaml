@@ -111,6 +111,23 @@ spec:
                     Enable the per-PR preview ApplicationSet (security-gated — see
                     tenants/_template/applicationset-preview.yaml). Default off.
                   default: false
+                publicDevIngress:
+                  type: boolean
+                  description: >-
+                    SECURITY-GATED, default off. Drop the non-prod SSO forwardAuth
+                    from the DEV ingress only (staging and preview stay gated;
+                    prod is public regardless). Set this ONLY for an app whose dev
+                    environment is deliberately a public showcase carrying no real
+                    user data -- it makes dev exactly as reachable as prod already
+                    is. The app's own auth (e.g. Clerk) still protects everything
+                    behind it; this removes the platform's outer org-membership
+                    gate, not the application's own login.
+                    Motivation: the SSO gate returns a 302 BEFORE Traefik routes to
+                    the backend, so a gated env produces no per-service ingress
+                    metrics at all -- its Grafana traffic panels are structurally
+                    empty. Enabling this is what lets a showcase app demonstrate
+                    real traffic and real business metrics in ONE dashboard.
+                  default: false
                 domain:
                   type: string
                   description: Public base domain for ingress hosts.

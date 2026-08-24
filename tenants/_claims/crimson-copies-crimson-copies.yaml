@@ -38,6 +38,27 @@ spec:
   # binds the literal `crimson-copies-preview` namespace which the preview
   # ApplicationSet never creates. Not safe to enable for this tenant.
   previewEnabled: false
+  # SECURITY-GATED (default false platform-wide; see xrd.yaml). Drops the non-prod
+  # SSO forwardAuth from the DEV ingress only -- staging stays gated, prod was
+  # never gated.
+  #
+  # WHY, specifically: the SSO gate returns a 302 BEFORE Traefik routes to the
+  # backend, so a gated environment emits NO per-service ingress metrics at all --
+  # measured, not assumed: 453 requests to dev produced 453 entries in
+  # traefik_entrypoint_requests_total and ZERO in traefik_service_requests_total.
+  # That makes dev's Grafana traffic panels structurally empty, and dev is the only
+  # env where synthetic orders are permitted. Without this flag the reference app
+  # cannot show real traffic AND real business metrics on one dashboard -- the
+  # whole point of it being the reference app.
+  #
+  # Exposure this actually grants: dev's public pages (/, /pricing, /sign-in)
+  # become reachable without an org login -- exactly what prod already exposes.
+  # Everything behind them is still Clerk-gated by the app itself (/order,
+  # /orders, /api/orders are middleware-protected), the staff console needs a
+  # staff role, and orders-api has no public ingress at all. The data is
+  # synthetic. This removes the platform's outer org-membership gate, not the
+  # application's own login.
+  publicDevIngress: true
   domain: "capstone.uamishub.com"
   # MySQL-compatible (in-cluster MariaDB 11.8). Every backend in this app is
   # MySQL-only (Drizzle + mysql2), so `postgres` is not an option here.
