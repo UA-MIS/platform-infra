@@ -96,6 +96,13 @@ resources:
   - dashboard-tenant-cicd.yaml
   - dashboard-tenant-golden-signals.yaml
   - dashboard-tenant-logs.yaml
+  # --- Reference app (Crimson Copies) ------------------------------------------
+  # The app-level "my app's numbers" view: the same Traefik signals the golden-
+  # signals dashboard shows, PLUS this app's own business + per-route metrics
+  # (scraped via the ServiceMonitor the app repo ships). Filed into its own
+  # "Crimson Copies" Grafana folder rather than "Platform / Tenants" -- it is
+  # tenant-SPECIFIC, not a namespace-templated view that works for any team.
+  - dashboard-crimson-copies-app.yaml
   # "Tenant / App Observability" (DASH-1) — the capstone-team-facing "my app
   # broke, where do I look" dashboard: Traefik RED metrics (exported_service
   # label, NOT the always-"traefik-metrics" service label the Golden Signals

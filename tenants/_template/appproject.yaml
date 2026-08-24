@@ -104,6 +104,22 @@ spec:
     # rendered manifests.
     - group: argoproj.io
       kind: Rollout
+    # ServiceMonitor (un-defers D-155#6) — kept in sync with the Crossplane
+    # Composition's namespaceResourceWhitelist
+    # (platform-services/crossplane/apis/composition.yaml), which is what
+    # ACTUALLY renders live tenant AppProjects; this template is the reviewed
+    # reference copy and the two must never drift.
+    # Rationale: a team's dashboard can only show "my app's numbers" (orders,
+    # quote requests, per-route latency) rather than platform-level Traefik
+    # counters if Prometheus scrapes the app's OWN /metrics. The Operator's
+    # scrape unit is a namespaced ServiceMonitor that must sit next to the
+    # Service it selects, so it has to be renderable from the tenant chart.
+    # Tenancy-safe like Service/Deployment: namespaced, selects only inside its
+    # own namespace. Pairs with the `monitoring` ingress rule in
+    # namespaces/*.yaml — the whitelist lets the object EXIST, the netpol is
+    # what lets the scrape CONNECT.
+    - group: monitoring.coreos.com
+      kind: ServiceMonitor
 
   # --- ArgoCD RBAC role for the team (§3.3) -----------------------------------
   # Phase 1: bound to the local admin for demonstration. Phase 2: bound to a

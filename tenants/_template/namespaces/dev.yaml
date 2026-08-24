@@ -129,6 +129,21 @@ spec:
     # Intra-namespace: pods of THIS team's namespace may talk to each other.
     - from:
         - podSelector: {}
+    # Prometheus scrapes (un-defers D-155#6; pairs with the ServiceMonitor kind
+    # in appproject.yaml's namespaceResourceWhitelist). WITHOUT this rule a
+    # tenant ServiceMonitor is accepted, the target renders, and every scrape
+    # silently BLACKHOLES -- Cilium enforces these policies for real (SEC-011
+    # deny-test), and a denied scrape shows up as `context deadline exceeded`
+    # (a timeout that reads like a slow app), NOT `connection refused`.
+    # Scoped to the port named `http`, so this exposes the app's HTTP port to
+    # the monitoring namespace and nothing else.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: http
 ---
 # NetworkPolicy 3/3 — allow egress to cluster DNS only, plus intra-namespace
 # (§3.4). The sample app needs DNS; it does NOT need the API server (its SA token
