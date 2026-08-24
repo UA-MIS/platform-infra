@@ -13,9 +13,10 @@
 # hand from the Goldilocks recommendation at a maintenance restart.
 #
 # NOTE (grafana): single-replica Deployment backed by a PVC (kube-prometheus-stack-grafana).
-# VPA-Auto eviction is safe (PVC re-attaches, dashboards are provisioned from ConfigMaps),
-# but expect ~30-60s of dashboard downtime on the resize. This is a request INCREASE
-# (~672Mi → ~890Mi, its real footprint across the grafana + 2 sidecar containers).
+# updateMode "Initial", NOT "Auto" -- live incident 2026-08: never evict a single-replica
+# UI midday; sizing lands on natural restarts (sqlite Grafana must stay 1 replica). This
+# is a request INCREASE (~672Mi → ~890Mi, its real footprint across the grafana + 2
+# sidecar containers), applied at the pod's next natural restart instead of a live evict.
 ---
 apiVersion: autoscaling.k8s.io/v1
 kind: VerticalPodAutoscaler
@@ -30,7 +31,9 @@ spec:
     kind: Deployment
     name: kube-prometheus-stack-grafana
   updatePolicy:
-    updateMode: "Auto"
+    # Initial: never evict a single-replica UI midday; sizing lands on natural
+    # restarts (sqlite Grafana must stay 1 replica).
+    updateMode: "Initial"
   resourcePolicy:
     containerPolicies:
       - containerName: "*"          # grafana + sc-dashboard + sc-datasources sidecars

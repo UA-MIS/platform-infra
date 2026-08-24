@@ -94,6 +94,34 @@ patches:
   # bootstrap install now carries ONLY `server.insecure` (genuinely install-time:
   # the server flag must be set before ArgoCD first serves). See argocd-config/.
 
+  # argocd-server → 2 replicas (incident: two live VPA-Auto evictions on
+  # single-replica argocd-server took the ArgoCD UI down within seconds of the
+  # grafana VPA eviction on the same day — see platform-services/vpa-policies/
+  # monitoring-vpa.yaml's grafana entry and pdbs.yaml for the matching PDB).
+  # argocd-server is stateless (upstream docs: "stateless and probably the
+  # least likely to cause issues" scaling it); no HA-manifest swap needed — this
+  # is NOT the Phase-3 HA migration described in values-notes.md (that also
+  # HAs redis + shards the application-controller, which we are not doing here).
+  # ARGOCD_API_SERVER_REPLICAS must match `replicas:` — it divides the
+  # concurrent-login rate limit across instances (upstream HA docs).
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: argocd-server
+      spec:
+        replicas: 2
+        template:
+          spec:
+            containers:
+              - name: argocd-server
+                env:
+                  - name: ARGOCD_API_SERVER_REPLICAS
+                    value: "2"
+    target:
+      kind: Deployment
+      name: argocd-server
+
 labels:
   - pairs:
       platform.capstone/component: platform
