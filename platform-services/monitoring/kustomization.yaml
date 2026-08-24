@@ -51,6 +51,15 @@ resources:
   - sealedsecret-alertmanager-webhook.yaml
   - sealedsecret-grafana-admin.yaml
   - sealedsecret-grafana-oauth.yaml
+  # Grafana's CNPG database credential (SQLite -> Postgres backend migration).
+  # ExternalSecret (not a seal — the value lives in Vault at
+  # platform/db/cnpg/grafana, same as its db-tier sibling). Consumed by
+  # `grafana.envValueFrom.GF_DATABASE_PASSWORD` in the SEPARATE
+  # kube-prometheus-stack Helm Application, same cross-app pattern as the three
+  # seals above. ⚠ This `resources:` list is EXPLICIT, not globbed — see the
+  # alerts-crossplane-robot-race.yaml note above for the incident where adding a
+  # file WITHOUT registering it here rendered nothing while the PR merged clean.
+  - externalsecret-cnpg-db.yaml
   # Tracing: Tempo (raw manifests — the single-binary Helm chart is upstream
   # `deprecated: true`, see the file header) + the OTel Collector Helm Application's
   # matching ConfigMap comment (applicationsets/otel-collector-app.yaml).
