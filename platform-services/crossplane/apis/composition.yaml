@@ -76,9 +76,16 @@ spec:
                    quota ABOVE steady-state, not level with it; an exact-fit ceiling turns
                    every rollout into a scheduling failure. Only cpuReq/cpuLim moved —
                    memory/pods/storage/pvcs are untouched. */}}
+            {{- /* D-176 — dev/staging memory doubled to 2x (4Gi/8Gi), same surge-headroom
+                   rationale as D-175, now applied to memory: #517 raised CPU only and left
+                   memory at an exact-fit ceiling. Live incident (crimson-copies-staging):
+                   steady-state replicas already summed to ~3968Mi against a 4Gi limit, so
+                   a RollingUpdate surge (old + new ReplicaSet both live) had zero headroom
+                   and FailedCreate'd — orders-api + file-service ReplicaSets stuck ~55min.
+                   Only memReq/memLim moved — cpu/pods/storage/pvcs are untouched. */}}
             {{- $envs := list
-                  (dict "name" "dev"     "cpuReq" "4" "memReq" "2Gi" "cpuLim" "8" "memLim" "4Gi"  "pods" "10" "storageReq" "5Gi"  "pvcs" "4")
-                  (dict "name" "staging" "cpuReq" "4" "memReq" "2Gi" "cpuLim" "8" "memLim" "4Gi"  "pods" "10" "storageReq" "5Gi"  "pvcs" "4")
+                  (dict "name" "dev"     "cpuReq" "4" "memReq" "4Gi" "cpuLim" "8" "memLim" "8Gi"  "pods" "10" "storageReq" "5Gi"  "pvcs" "4")
+                  (dict "name" "staging" "cpuReq" "4" "memReq" "4Gi" "cpuLim" "8" "memLim" "8Gi"  "pods" "10" "storageReq" "5Gi"  "pvcs" "4")
                   (dict "name" "prod"    "cpuReq" "4" "memReq" "4Gi" "cpuLim" "8" "memLim" "8Gi"  "pods" "20" "storageReq" "20Gi" "pvcs" "6") }}
 
             {{- /* =====================================================================

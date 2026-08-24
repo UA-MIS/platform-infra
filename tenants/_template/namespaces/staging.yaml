@@ -27,7 +27,14 @@ metadata:
 # RollingUpdate surge (old + new replica set both live) needs quota ABOVE
 # steady-state, not level with it; an exact-fit ceiling turns every rollout
 # into a scheduling failure. Only cpuReq/cpuLim moved — memory/pods/storage
-# are untouched. MUST STAY IN SYNC with the staging row of the env list in
+# are untouched.
+# D-176 — memory doubled to 2x (4Gi/8Gi) too, same surge-headroom rationale:
+# #517 raised CPU only and left memory at an exact-fit ceiling. Live incident
+# (crimson-copies-staging): steady-state replicas already summed to ~3968Mi
+# against a 4Gi limit, so a RollingUpdate surge had zero headroom and
+# FailedCreate'd — orders-api + file-service ReplicaSets stuck ~55min. Only
+# memReq/memLim moved — cpu/pods/storage/pvcs are untouched. MUST STAY IN
+# SYNC with the staging row of the env list in
 # platform-services/crossplane/apis/composition.yaml.
 apiVersion: v1
 kind: ResourceQuota
@@ -41,9 +48,9 @@ metadata:
 spec:
   hard:
     requests.cpu: "4"
-    requests.memory: 2Gi
+    requests.memory: 4Gi
     limits.cpu: "8"
-    limits.memory: 4Gi
+    limits.memory: 8Gi
     pods: "10"
     services: "15"
     # Storage cap (replica-3 Ceph starvation fence). Generous default; tune per team.
