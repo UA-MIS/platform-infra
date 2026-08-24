@@ -84,8 +84,23 @@ spec:
                    and FailedCreate'd — orders-api + file-service ReplicaSets stuck ~55min.
                    Only memReq/memLim moved — cpu/pods/storage/pvcs are untouched. */}}
             {{- $envs := list
-                  (dict "name" "dev"     "cpuReq" "4" "memReq" "4Gi" "cpuLim" "8" "memLim" "8Gi"  "pods" "10" "storageReq" "5Gi"  "pvcs" "4")
-                  (dict "name" "staging" "cpuReq" "4" "memReq" "4Gi" "cpuLim" "8" "memLim" "8Gi"  "pods" "10" "storageReq" "5Gi"  "pvcs" "4")
+                  {{- /* pods 10 -> 16 for dev/staging. 10 is too low for a
+                         multi-component app once ROLLOUT SURGE is counted, which is
+                         easy to miss because the steady state fits fine.
+                         crimson-copies runs 8 pods in dev (7 components + the db
+                         console). Every Deployment is RollingUpdate with the default
+                         maxSurge 25%, which on a 1-replica Deployment rounds UP to 1,
+                         so each rolling component transiently needs one EXTRA pod.
+                         A bump-dev run rewrites all 5 image tags at once -> 5
+                         components roll together -> 13 pods needed against a cap of
+                         10. The quota does not fail the deploy loudly; it rejects pod
+                         creation and the Deployment controller retries, so rollouts
+                         just crawl, which reads as "the cluster is slow today".
+                         16 leaves room for the full 5-component surge plus an
+                         operational pod. cpu/memory quotas are UNCHANGED -- those are
+                         the real cost control; `pods` is only a count guard. */}}
+                  (dict "name" "dev"     "cpuReq" "4" "memReq" "4Gi" "cpuLim" "8" "memLim" "8Gi"  "pods" "16" "storageReq" "5Gi"  "pvcs" "4")
+                  (dict "name" "staging" "cpuReq" "4" "memReq" "4Gi" "cpuLim" "8" "memLim" "8Gi"  "pods" "16" "storageReq" "5Gi"  "pvcs" "4")
                   (dict "name" "prod"    "cpuReq" "4" "memReq" "4Gi" "cpuLim" "8" "memLim" "8Gi"  "pods" "20" "storageReq" "20Gi" "pvcs" "6") }}
 
             {{- /* =====================================================================
