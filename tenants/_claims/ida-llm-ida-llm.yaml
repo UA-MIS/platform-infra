@@ -90,3 +90,12 @@ spec:
   # the SAME four properties the MySQL path writes, so the consumer contract is
   # engine-agnostic and only the DSN scheme differs (postgresql://).
   database: "postgres"
+
+  # Pinned explicitly (2026-08-25, owner-decided): the platform default for
+  # spec.maxRunners just dropped 8→5 (xrd.yaml) now that it's a per-tenant claim
+  # field instead of a value hardcoded for every tenant (#535 follow-on). This
+  # tenant's near-term 3-4 image build matrix is the reason 8 was raised
+  # platform-wide in the first place, so it stays at 8 here explicitly — pinning
+  # it in the claim is what keeps this tenant from silently regressing to the
+  # new 5 default.
+  maxRunners: 8
