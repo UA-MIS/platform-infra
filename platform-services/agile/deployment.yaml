@@ -119,7 +119,12 @@ spec:
             failureThreshold: 30
           resources:
             requests: { cpu: 50m, memory: 256Mi }
-            limits:   { memory: 768Mi }
+            # Kyverno's require-limits wants BOTH cpu and memory (Audit mode, so
+            # this is policy-report hygiene rather than admission). The cpu limit
+            # is set generously — the only CPU-hungry moment is boot (migrations
+            # + first SSR render) and throttling that would eat the startupProbe
+            # budget.
+            limits:   { cpu: 1, memory: 768Mi }
           volumeMounts:
             # Next.js wants a writable tmp even though the app keeps no state.
             - { name: tmp, mountPath: /tmp }
