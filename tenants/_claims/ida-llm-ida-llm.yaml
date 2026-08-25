@@ -42,52 +42,24 @@ spec:
   # XRD field is only the default the Composition carries.
   port: 3000
 
-  # ── PREVIEW: ON. Every blocker below was closed first, not waived. ────────
-  # Turning this flag on used to produce previews that were broken AND unfenced.
-  # The four blockers named in tenants/_template/applicationset-preview.yaml
-  # ("UNTIL B1 LANDS, PREVIEWS ARE UNFENCED — do not enable") are now addressed:
+  # ── PREVIEW: OFF. Deferred by owner decision, 2026-08-25. ─────────────────
+  # This is the HONEST value: previews do not work on this platform today, and
+  # nobody reading this claim should assume otherwise.
   #
-  #   B1  NO FENCE. A preview namespace is ArgoCD-created, so the Composition's
-  #       per-env bundle (which ranges over dev|staging|prod) never gave it a
-  #       quota, LimitRange or NetworkPolicy — it had MORE network reach than
-  #       prod while running untrusted PR code. CLOSED by
-  #       applicationsets/ida-llm-preview-guardrails.yaml: a PLATFORM-project
-  #       ApplicationSet on the same pullRequest generator and the same `preview`
-  #       label gate, rendering the fence into ida-llm-pr-<n>. It must be a
-  #       platform app — a tenant that can write its own quota and netpol has no
-  #       fence at all.
+  # An attempt to enable them was made and REVERTED. What it cost is worth
+  # recording, because it is the reason the remaining work is not "just flip the
+  # flag": the fence a preview namespace needs (quota / LimitRange /
+  # NetworkPolicy) must be applied by a PLATFORM-project Application, and the
+  # directory holding it was picked up by the platform-services directory
+  # generator before its own exclude could take effect. The generated app applied
+  # a default-deny NetworkPolicy into `kube-system` and took CLUSTER DNS DOWN.
+  # It then self-healed back after cleanup, because with DNS down ArgoCD could no
+  # longer render the commit containing the fix — a deadlock that had to be broken
+  # by patching the live ApplicationSet directly.
   #
-  #   B2  VAULT AUTH. The k8s-auth role's bound_service_account_namespaces is an
-  #       exact list (the three envs + the literal `ida-llm-preview`), not a
-  #       glob, and provider-vault v0.1.0 exposes no namespace-SELECTOR field —
-  #       verified against the live CRD, not assumed. Binding ["*"] would let any
-  #       namespace assume the tenant role, which is strictly worse. CLOSED by
-  #       not needing it: preview secrets come from the platform-owned
-  #       `vault-backend` ClusterSecretStore, rendered by the guardrails app so
-  #       the tenant cannot repoint the path.
-  #
-  #   B3  IMAGE PULLS. harbor-pull is explicitly not rendered for preview, so
-  #       every pod ImagePullBackOff'd against the private Harbor project. CLOSED
-  #       by the guardrails app materialising it from the same dev robot token.
-  #
-  #   B4  STATIC pr-1 COLLISION. Only ever affected the OLD blueprint path
-  #       (tenants/_template/namespaces/preview.yaml). This tenant was created
-  #       from the CapstoneTenant claim, which renders no static pr-1 namespace —
-  #       confirmed by reading the Composition. Not applicable here.
-  #
-  # AND THE THING THAT MAKES A PREVIEW SAFE TO RUN AT ALL: it never touches the
-  # team's data or their money. The fence grants NO egress to the db-tier, so a
-  # preview gets a THROWAWAY in-namespace Postgres instead of the shared tenant
-  # database — one bad migration in a PR cannot drop the team's dev tables. Its
-  # provider keys come from a SEPARATE Vault path holding mock values only, and
-  # the overlay points the harness at the in-cluster mock model endpoint, so a
-  # pull request cannot spend cloud credits or reach campus hardware.
-  #
-  # Lifecycle is unchanged: a preview exists IFF its PR carries the `preview`
-  # label. CI re-adds it on every PR build; the cohort-gc preview-ttl CronJob
-  # removes it at 12h, which drops the element from BOTH generators so the app
-  # and its fence are pruned together.
-  previewEnabled: true
+  # The four gaps, and what each would take, are written up for the next person in
+  # docs/operator/tenant-preview-gaps.md. Read that before trying again.
+  previewEnabled: false
 
   # Default (false). Dev keeps the platform's non-prod SSO forwardAuth gate.
   # Unlike crimson-copies there is no showcase-metrics argument for dropping it
