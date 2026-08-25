@@ -1,0 +1,16 @@
+# platform-services/ida-slides — the PLATFORM-owned prerequisites for the
+# externally-sourced `ida-slides` app (static reveal.js deck site for the IDA
+# capstone team, ida-slides.capstone.uamishub.com). Same split as slidedeck,
+# minus the ExternalSecret: this app has no server-side component and no
+# secrets to materialize from Vault — just the sealed image-pull robot secret
+# and the ArgoCD Application that GitOps-manages the workload from the
+# SEPARATE app repo (github.com/UA-MIS/ida-slides, path deploy). The workload
+# manifests (namespace + deployment + service + ingress + netpol) live in
+# that repo and are synced by the nested `ida-slides` Application below — NOT
+# here.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - sealedsecret-pull.yaml
+  - application.yaml

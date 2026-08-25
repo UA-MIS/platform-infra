@@ -1,0 +1,43 @@
+# ArgoCD Application — GitOps-manages the ida-slides workload from its OWN
+# repo (github.com/UA-MIS/ida-slides), same external-repo pattern as
+# `slidedeck` (platform-services/slidedeck/application.yaml — the precedent).
+# Unlike slidedeck, there is NO sibling ExternalSecret here: ida-slides is a
+# static nginx site with no server-side app, no database, no secrets — the
+# only platform-side prerequisite besides this Application is the sealed
+# Harbor pull-robot secret (sealedsecret-pull.yaml, same dir).
+#
+# The `platform` AppProject's sourceRepos already needs to allow
+# `github.com/UA-MIS/ida-slides` (bootstrap/platform-appproject.yaml) — it's
+# a bootstrap-only object; re-apply with `make bootstrap-reapply` after merge
+# if this wasn't already covered by the existing UA-MIS wildcard entry, or
+# this Application InvalidSpecErrors "repo not permitted".
+#
+# Applied indirectly: the platform-services directory generator emits
+# `platform-svc-ida-slides` over this dir (app-of-apps). CreateNamespace=true
+# so the ns exists for the workload; the sibling SealedSecret retries until
+# it does.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: ida-slides
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/UA-MIS/ida-slides
+    targetRevision: main
+    path: deploy
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: ida-slides
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff: { duration: 5s, factor: 2, maxDuration: 3m }
