@@ -13,7 +13,7 @@ instead of editing these files.
 | Path | Purpose |
 | --- | --- |
 | `app-metadata.yaml` | The team/cohort values: `team`, `semester`, `app-name`, `port`. |
-| `components.yaml` | **The component model** (this is the MULTI-COMPONENT variant): lists each deployable component (`name`/`kind`/`context`/`dockerfile`/`image`/`port`/`path`). The single source the CI matrix + the chart derive from. (A single-component app has NO components.yaml.) |
+| `components.yaml` | **The component model** (this is the MULTI-COMPONENT variant): lists each deployable component (`name`/`kind`/`context`/`dockerfile`/`image`/`port`/`path`/`needsDb`/`migrate`). The single source the CI matrix + the chart derive from. (A single-component app has NO components.yaml.) |
 | `chart/base/` | Kustomize base: `deployments.yaml` + `services.yaml` render **one Deployment + one Service per component**, `ingress.yaml` renders **one Ingress with one path per component**, plus a shared `ServiceAccount`. Environment-agnostic. |
 | `chart/overlays/{dev,staging,prod,preview}/` | Per-environment diffs: per-component image-tag seam (one `images[]` entry per component), replicas, ingress host, env label, the per-namespace ESO `SecretStore` + app-secret `ExternalSecret`, and the `harbor-pull` SealedSecret (v1; ESO reserved for post-v1). |
 | `promotion.yaml` | **The single configured place** (§4.1): trigger→env→tag-convention→overlay→gate. The CI scripts read only this. |
@@ -62,6 +62,42 @@ the chart. To add one (say a `worker`):
 The CI matrix (`resolve-components.sh`) and the bump (`bump-image.sh`) pick up the new
 component automatically from `components.yaml` + the overlays — no CI edit needed.
 Validate with `kubectl kustomize chart/overlays/dev` (see below).
+
+## Deploy-time database migrations (`migrate:`)
+
+A component whose `components.yaml` entry has a non-empty `migrate:` gets a **migration
+initContainer**: before the app container starts, on **every** deploy in **every**
+environment, the chart runs that shell command **inside the component's own image** (the
+same build being deployed — the overlay's `images:` tag override rewrites the initContainer
+too). An empty `migrate: ""` renders no initContainer at all.
+
+```yaml
+components:
+  - name: app
+    needsDb: true
+    migrate: "python manage.py migrate --noinput"
+```
+
+Which starters use it: the ones whose framework does **not** create its schema from the
+running app process — `fullstack/nextjs` (Prisma), `backend/django`, `backend/laravel`,
+`backend/rails`. Starters that create their tables at boot (`CREATE TABLE IF NOT EXISTS`,
+`EnsureCreated()`) ship `migrate: ""` on purpose: an initContainer running a command their
+image does not have would wedge the pod in `Init`.
+
+Behaviour worth knowing:
+
+- **`DATABASE_URL` unset -> skipped.** The migrator exits 0 without doing anything, so a
+  repo with nothing in Vault still starts (zero-config). When the secret later lands,
+  Reloader restarts the pod and the migration runs for real.
+- **Failure is loud and blocking.** A migration that fails leaves the pod in `Init` and it
+  never becomes Ready — on a rolling update the previous version keeps serving, and traffic
+  never reaches the bad revision. This is deliberate: it replaces a "Healthy" pod that 500s
+  on every data route.
+- **Bounded retry.** 3 attempts, 5s apart, then the pod stays in `Init`. This absorbs
+  replicas racing the same migration on a fresh environment and brief DB unavailability.
+- **You can change it.** Edit `migrate:` in `components.yaml` (e.g. append a seed step).
+  Migration tooling must already be in your runtime image, and the command runs under
+  `/bin/sh -c`.
 
 ## Secrets — External Secrets Operator + Vault (ADR-030 B1)
 

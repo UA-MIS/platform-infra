@@ -12,6 +12,16 @@ slots:
 defaultPort: 8080
 ingressPath: /api
 needsDB: true
+# DEPLOY-TIME MIGRATION (D-123, board #48) — MIGRATIONS.md's contract, now actually executed
+# by the chart's migration initContainer instead of only documented. gunicorn (the CMD) never
+# runs migrate, so without this the shipped items/migrations/0001_initial.py is dead weight
+# and /api/items 500s on a missing table. `manage.py` + the venv are already in the runtime
+# image; --noinput keeps it non-interactive. Django records applied migrations in
+# django_migrations, so re-running on every deploy is a no-op. CONCURRENCY (measured,
+# D-123): migrate takes NO cross-process lock — replicas racing an empty database make the
+# losers exit 1 on `1050 Table ... already exists`; the winner's schema is correct and the
+# chart's bounded retry absorbs it.
+migrate: python manage.py migrate --noinput
 buildType: container
 dockerfile: Dockerfile
 healthPath: /healthz

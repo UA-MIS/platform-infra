@@ -42,7 +42,8 @@ RUN npm run build
 # WHY a dedicated toolchain: `next build`'s standalone output only traces the node_modules
 # subset that `server.js` imports — the Prisma CLI is NOT among them, so migrations need
 # their own copy. We build a closed, PINNED v6 CLI tree here; the chart's migration
-# initContainer runs it (see .devops/chart/base/deployment.yaml). We NEVER call
+# initContainer runs it (see .devops/chart/base/deployments.yaml, and the `migrate:` entry
+# in .devops/components.yaml that selects this command). We NEVER call
 # `npx prisma` at runtime: npx resolves to the LATEST prisma (v7), which dropped
 # `url = env(...)` in schema.prisma — it now demands a prisma.config.ts loaded through
 # `jiti` — and would fail this v6 schema with `Cannot find module 'jiti'`. A pinned v6 CLI

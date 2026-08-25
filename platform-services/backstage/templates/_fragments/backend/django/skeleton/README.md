@@ -31,4 +31,5 @@ ruff check .
 
 ## Database migrations
 
-See [`MIGRATIONS.md`](./MIGRATIONS.md). Run `python manage.py migrate` at deploy time.
+See [`MIGRATIONS.md`](./MIGRATIONS.md). The platform runs `python manage.py migrate` for you
+on every deploy, in a migration initContainer — you do not have to apply them yourself.

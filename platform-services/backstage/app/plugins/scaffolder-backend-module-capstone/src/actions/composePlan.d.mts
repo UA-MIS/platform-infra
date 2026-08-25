@@ -12,6 +12,9 @@ export interface FragmentMeta {
   buildType: 'container' | 'static' | 'mobile-artifact';
   dockerfile?: string;
   healthPath?: string;
+  /** Deploy-time migration command (D-123). Non-empty => the chart renders a migration
+   *  initContainer running this shell command in the component's own image. */
+  migrate?: string;
   notes?: string;
   [k: string]: unknown;
 }
@@ -25,6 +28,8 @@ export interface PlanComponent {
   path: string;
   needsDb: boolean;
   buildType: string;
+  /** '' when the fragment has no deploy-time migration step. */
+  migrate: string;
 }
 
 export interface PlanCopy {

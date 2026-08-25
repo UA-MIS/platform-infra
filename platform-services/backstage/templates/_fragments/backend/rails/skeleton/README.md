@@ -30,4 +30,5 @@ bin/rails test                         # SQLite test DB; no MySQL needed
 
 ## Database migrations
 
-See [`MIGRATIONS.md`](./MIGRATIONS.md). Run `bin/rails db:migrate` at deploy time.
+See [`MIGRATIONS.md`](./MIGRATIONS.md). The platform runs `bundle exec rails db:migrate` for you
+on every deploy, in a migration initContainer — you do not have to apply them yourself.

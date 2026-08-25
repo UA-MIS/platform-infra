@@ -131,3 +131,55 @@ test('blank/BYO single + host-postgres -> postgres provisioned + wired (driver-f
 test('slot misuse is rejected (react cannot fill single)', () => {
   assert.throws(() => planComposition({ projectType: 'web', layout: 'single', fragments: { single: react }, database: 'none' }), /cannot fill the 'single' slot/);
 });
+
+/* ---------------------------------------------------------------------------------------
+ * DEPLOY-TIME MIGRATION contract (D-123, board #48).
+ *
+ * The bug: four fragments (nextjs/django/laravel/rails) shipped migration assets, documented
+ * that "the chart's migration initContainer" applies them, and nothing ever ran them — every
+ * tenant on those stacks deployed Healthy and served "table does not exist". The chart now
+ * renders that initContainer, gated ONLY on the fragment declaring `migrate`. These tests pin
+ * both halves of the gate, because a WRONGLY-ON migrator is as harmful as a missing one: the
+ * 11+ fragments that self-migrate at boot would get a command their image does not have and
+ * wedge in Init.
+ * ------------------------------------------------------------------------------------- */
+const nextjs = { id: 'nextjs', category: 'fullstack', slots: ['single'], defaultPort: 3000, ingressPath: '/', needsDB: true, buildType: 'container', dockerfile: 'Dockerfile', migrate: 'node /app/prisma-cli/node_modules/prisma/build/index.js migrate deploy --schema=/app/prisma/schema.prisma' };
+const django = { id: 'django', category: 'backend', slots: ['backend', 'single'], defaultPort: 8080, ingressPath: '/api', needsDB: true, buildType: 'container', dockerfile: 'Dockerfile', migrate: 'python manage.py migrate --noinput' };
+
+test('a fragment declaring migrate propagates the command onto its component', () => {
+  const p = planComposition({ projectType: 'web', layout: 'single', fragments: { single: nextjs }, database: 'host-mysql', port: 8080 });
+  assert.equal(p.components[0].migrate, nextjs.migrate);
+});
+
+test('a fragment with NO migrate declaration gets migrate: "" (chart renders no initContainer)', () => {
+  const p = planComposition({ projectType: 'web', layout: 'single', fragments: { single: express }, database: 'host-mysql', port: 8080 });
+  assert.equal(p.components[0].migrate, '');
+});
+
+test('migrate is PER-COMPONENT: a FE+BE app migrates only the backend', () => {
+  const p = planComposition({ projectType: 'web', layout: 'frontend-backend', fragments: { frontend: react, backend: django }, database: 'host-mysql', port: 8080 });
+  assert.equal(p.components.find(c => c.name === 'frontend').migrate, '');
+  assert.equal(p.components.find(c => c.name === 'backend').migrate, django.migrate);
+});
+
+test('the mobile-artifact component always has migrate: "" (it is not a k8s workload)', () => {
+  const p = planComposition({ projectType: 'mobile', fragments: { backend: django, mobile }, database: 'host-mysql', port: 8080 });
+  assert.equal(p.components.find(c => c.name === 'mobile').migrate, '');
+});
+
+test('migrate is trimmed, so trailing YAML block-scalar whitespace never reaches the chart', () => {
+  const p = planComposition({ projectType: 'web', layout: 'single', fragments: { single: { ...django, migrate: '  python manage.py migrate --noinput\n' } }, database: 'host-mysql', port: 8080 });
+  assert.equal(p.components[0].migrate, 'python manage.py migrate --noinput');
+});
+
+test('a non-string migrate is rejected (it must be one shell command, not an argv array)', () => {
+  assert.throws(() => planComposition({ projectType: 'web', layout: 'single', fragments: { single: { ...django, migrate: ['python', 'manage.py', 'migrate'] } }, database: 'host-mysql' }), /non-string `migrate`/);
+});
+
+test('a blank migrate is rejected (omit the key instead of declaring an empty migrator)', () => {
+  assert.throws(() => planComposition({ projectType: 'web', layout: 'single', fragments: { single: { ...django, migrate: '   ' } }, database: 'host-mysql' }), /blank `migrate`/);
+});
+
+test('migrate without needsDB is rejected — the chart would never give it a DATABASE_URL', () => {
+  assert.throws(() => planComposition({ projectType: 'web', layout: 'single', fragments: { single: { ...django, needsDB: false } }, database: 'none' }), /declares `migrate` but not `needsDB`/);
+});

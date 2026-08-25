@@ -1,0 +1,198 @@
+task: "D-123 (launch blocker, board #48): deploy-time DB migrations never ran — the chart had no migration initContainer"
+board_item: 48
+owner: devops
+branch: fix/migration-initcontainer
+date: 2026-08-25
+
+root_cause: >
+  `_fragments/_contract/.devops/chart/base/deployments.yaml` contained no `initContainers`
+  key, and neither did any overlay — while four fragments shipped migration assets and
+  DOCUMENTED that the chart applied them. fullstack/nextjs built a dedicated `migrator`
+  Dockerfile stage with a pinned Prisma CLI at /app/prisma-cli, and both that Dockerfile and
+  prisma/schema.prisma stated "the chart's migration initContainer runs `prisma migrate
+  deploy` on every deploy". backend/rails/skeleton/MIGRATIONS.md stated the same contract
+  independently ("at deploy time — as a one-shot Job or an init-container — NOT from the
+  running app process"). The mechanism did not exist. The migrator was built into every
+  image and never invoked.
+
+  The failure was SILENT in the worst possible way: the pod passed its DB-independent
+  /healthz probe, ArgoCD reported Synced + Healthy, and every data route returned
+  "The table 'Note' does not exist in the current database" — on all three environments.
+  DATABASE_URL was wired correctly throughout; this was never a secrets or connectivity bug.
+
+  Not caught earlier because the 08-19 golden-path run used backend/express, which
+  self-migrates at boot (CREATE TABLE IF NOT EXISTS) and therefore never needed the
+  missing mechanism.
+
+blast_radius:
+  affected_ship_migrations_nothing_ran_them:
+    - fullstack/nextjs      # prisma/migrations; CMD is `node server.js`
+    - backend/django        # items/migrations; CMD is gunicorn only
+    - backend/laravel       # database/migrations; CMD is `artisan serve` only
+    - backend/rails         # db/migrate; CMD is puma only
+  unaffected_self_migrate_at_boot:
+    - backend/express, fastapi, flask, go, nestjs, node-bare, rust-axum, spring-boot  # CREATE TABLE IF NOT EXISTS
+    - backend/dotnet-aspnet                                                            # db.Database.EnsureCreated()
+    - fullstack/nuxt, fullstack/sveltekit                                              # ensureSchema(); see decision below
+    - blank/bring-your-own                                                             # ships no DB code by design
+
+fix: >
+  A fragment declares `migrate: "<shell command>"` in its fragment.yaml. The planner
+  (composePlan.mjs — the single no-drift core shared by the live Backstage action, the
+  offline dry-render harness and the node unit tests) carries it onto the component and into
+  .devops/components.yaml. The chart renders a migration initContainer ONLY when that field
+  is non-empty, running the command in the component's OWN image (the overlay's kustomize
+  `images:` override rewrites initContainers[] too, so the migration always runs the exact
+  build being deployed — no second image, no extra build step).
+
+  Rendered in BOTH workload templates: base/deployments.yaml AND overlays/prod/rollout.yaml.
+  Prod is the one env where the base Deployment is `$patch: delete`d in favour of an Argo
+  Rollouts Rollout carrying its own copy of the pod template, so a block added only to the
+  base would have silently skipped migrations in production alone.
+
+gating_mechanism_and_why: >
+  Explicit per-fragment OPT-IN, not inference. Inferring from `needsDb` would have injected an
+  initContainer into 11 fragments that self-migrate at boot, where it is not a harmless no-op:
+  a command their image does not contain turns a working pod into a permanent Init:Error.
+  Inferring from "ships a migrations/ directory" would misfire on nuxt/sveltekit (see below).
+  The field is a shell command STRING rather than an argv array because the chart wraps it in
+  a /bin/sh -c guard that no-ops on an unset DATABASE_URL, preserving the M4 zero-config
+  promise. composePlan rejects `migrate` without `needsDB`, a non-string `migrate`, and a
+  blank `migrate` (fail closed).
+
+nuxt_sveltekit_decision: >
+  DELIBERATELY NO MIGRATOR. They ship migrations/0001_init.sql + drizzle-kit db:generate /
+  db:migrate scripts, which LOOKS like the same "ships migrations, nothing runs them" bug.
+  It is not: both create their sample table themselves at boot — nuxt via
+  server/plugins/schema.ts -> ensureSchema() (CREATE TABLE IF NOT EXISTS), sveltekit via
+  src/hooks.server.ts -> ensureSchema() on first request. A zero-touch student on those
+  stacks DOES get tables. The migrations/ dir is the documented opt-in UPGRADE PATH off that
+  bootstrap, and each migrations/README.md tells the team to remove ensureSchema() when they
+  adopt it. Declaring `migrate` there would ADD a failure surface without fixing a bug:
+  drizzle-kit is a devDependency and is NOT in either runtime image, so the initContainer
+  would fail and wedge every pod in Init. Both fragment.yaml files now carry this reasoning
+  inline so the question is not silently re-litigated.
+
+failure_mode_decisions:
+  migration_fails_pod_stuck_in_init:
+    call: "ACCEPTED, deliberately — with a bounded retry in front of it."
+    rationale: >
+      A failed migration leaves the pod in Init and it never becomes Ready. On a rolling
+      update the previous ReplicaSet keeps serving and the bad revision takes no traffic; on
+      a brand-new env it is a loud, obvious stop. Both beat what this replaces: a Ready,
+      "Healthy", 200-reporting pod serving "table does not exist" on every request. The
+      wrapper retries 3x/5s first, so transient causes self-heal, and a genuinely broken
+      migration still wedges the pod (measured: 17s to a hard, logged failure).
+  concurrent_rollouts_racing_the_same_migration:
+    call: "ACCEPTED — measured, not assumed; absorbed by the bounded retry."
+    measured: >
+      3 concurrent migrators against one empty database, per fragment:
+      nextjs 3/3 exit 0 (Prisma takes a MySQL advisory lock and serializes);
+      rails losers raise ActiveRecord::ConcurrentMigrationError (the advisory lock is taken
+      but not queued on — it refuses rather than double-applying);
+      django and laravel losers exit 1 on `1050 Table ... already exists` (neither takes a
+      cross-process lock; laravel's --isolated needs a lock-capable cache store and this
+      image runs CACHE_STORE=array).
+      In every case the winner completed and the final schema was correct, and a serial
+      re-run then exited 0. With the retry wrapper in place the same 3-way race gives
+      3/3 exit 0 on all four fragments.
+    rejected_alternative: >
+      An ArgoCD PreSync hook Job would serialize properly, but changes sync semantics for
+      every tenant (a failed hook fails the whole app sync) and is a much larger blast radius
+      than the blocker warrants. rails/MIGRATIONS.md sanctions either shape; the initContainer
+      is the smaller change. Recorded as the option to revisit if a team hits a migration that
+      is genuinely unsafe under concurrency.
+  fresh_env_db_user_may_lack_ddl_rights:
+    call: "NOT A RISK — verified against the actual grant set, not assumed."
+    evidence: >
+      The Composition grants the tenant app user SELECT, INSERT, UPDATE, DELETE, CREATE, DROP,
+      REFERENCES, INDEX, ALTER, CREATE TEMPORARY TABLES, LOCK TABLES, EXECUTE on its own
+      database (composition.yaml:1941-1953). All four migrators were run against a MariaDB
+      11.8 user provisioned with EXACTLY that list and nothing more — all four succeeded.
+      Postgres is not reachable here: host-postgres is offered only for blank/bring-your-own,
+      which ships no DB code and no migrator.
+  zero_config_regression_risk:
+    call: "CLOSED by the guard — this was a NEW failure mode the fix would otherwise have introduced."
+    rationale: >
+      DATABASE_URL is optional:true so a fresh repo with nothing in Vault still starts. An
+      unguarded migrator would have turned that into a pod wedged in Init forever. The
+      initContainer exits 0 when DATABASE_URL is unset; when ESO later materializes the
+      Secret, the existing Reloader annotation (FIX-9/D-065) restarts the pod and the
+      migration runs for real.
+
+verification:
+  method: >
+    Execution, not manifest reading. Each fragment was composed with the real planner, its
+    image built, and the migration script read back OUT OF THE RENDERED CHART (kubectl
+    kustomize) — so the commands below are the literal bytes a tenant's cluster runs, not a
+    reimplementation. Every run used the chart's real runtime contract: --read-only,
+    --tmpfs /tmp, --tmpfs /dev/shm:size=64m, image USER 65532, and a bare
+    mysql://user:pass@host:3306/db DSN in the platform's exact shape.
+  fresh_migrate_against_tenant_grant_set:
+    nextjs:  "exit 0 — tables: Note, _prisma_migrations"
+    django:  "exit 0 — tables: items_item, django_migrations, auth_* (9 total)"
+    laravel: "exit 0 — tables: items, migrations, users, cache, jobs, ... (10 total)"
+    rails:   "exit 0 — tables: items, schema_migrations, ar_internal_metadata"
+  idempotency_second_run:  "all four exit 0 (`No pending migrations` / `Nothing to migrate`)"
+  unset_database_url:      "all four exit 0, logging the zero-config skip"
+  unreachable_database:    "all four exit 1 after 3 attempts — the pod would stay in Init"
+  three_way_race_with_retry: "all four 3/3 exit 0, final schema correct"
+  end_to_end_before_and_after:
+    nextjs:  "GET /api/notes BEFORE = the reported error (\"The table `Note` does not exist\"); AFTER = {\"notes\":[]}; POST /api/notes -> 201 and the row reads back"
+    django:  "GET /api/items BEFORE = 503 db unavailable; AFTER = 200 []"
+    laravel: "GET /api/items BEFORE = 503 db unavailable; AFTER = 200 []"
+    rails:   "GET /api/items BEFORE = 503 db unavailable; AFTER = 200 []"
+  memory_sizing: "all four migrators complete inside a hard 256Mi cgroup limit; the initContainer limit is set to 512Mi as headroom for team-authored data migrations"
+  rendered_contract:
+    - "dev/staging/preview Deployment and prod Rollout all carry the initContainer for the four affected fragments"
+    - "the overlay images: override rewrites the initContainer image as well as the app container's (verified in both dev Deployment and prod Rollout)"
+    - "self-migrating fragments (express, go, nuxt, sveltekit, dotnet-aspnet, blank/BYO) render ZERO initContainers"
+  not_verified_end_to_end_in_cluster: >
+    HONEST LIMIT: no in-cluster deploy was performed. The task forbade applying anything to
+    the cluster, so there is no "provisioned tenant came up with tables already present"
+    observation from a live namespace. Everything above is container-level execution of the
+    rendered manifests' own bytes under the chart's runtime contract, plus rendered-manifest
+    assertions — which covers the migrator, the guard, the retry, the privileges and the
+    prod Rollout path, but does not cover kubelet's init ordering itself or ESO/Reloader
+    timing in a real namespace. Those should be confirmed on the first tenant scaffolded
+    after this merges.
+
+regression_gates_added:
+  hermetic_no_docker: >
+    green-check.py stage (b2) `migrate-initcontainer[<env>]` — for every fragment and all four
+    overlays, asserts a migration initContainer exists for EXACTLY the components declaring a
+    migrator, and that it runs the same image as the app container. Proven to catch both
+    directions by injecting each bug: removing the block from rollout.yaml only fails prod
+    alone (the exact prod-only trap), and ungating the block fails every self-migrating
+    fragment. 22/26 fragments GREEN with it; the 4 reds are the pre-existing F-3/D-058 mobile
+    quarantine, unchanged.
+  runtime_gate1: >
+    boot_probe.py now runs the rendered migration script against the fragment's fresh
+    disposable MariaDB BEFORE booting the app, twice (the second run asserts idempotency,
+    since the chart re-runs it on every deploy). Proves the declared command actually works in
+    the runtime image, as UID 65532, on a read-only root fs, within the tenant's real
+    privileges — none of which a manifest check can see. All four affected fragments pass;
+    a control self-migrating fragment is unaffected.
+  unit: "8 new composePlan tests (21/21 pass) pin propagation, per-component scoping, trimming, and all three fail-closed validations."
+
+fleet_rollout_risk:
+  question: "Does an existing healthy tenant pick up the new initContainer on next ArgoCD sync?"
+  answer: "NO. Zero change to any running tenant."
+  evidence: >
+    `.devops/` is RENDERED INTO THE STUDENT'S REPO at scaffold time. The tenant ApplicationSet
+    sources each env from repoURL https://github.com/UA-MIS/<app> path
+    .devops/chart/overlays/<env> (composition.yaml:70, 988-990) — the tenant's OWN repo, not
+    platform-infra's _contract. Confirmed live: UA-MIS/sprintdemo carries its own copy of
+    .devops/chart/base/deployments.yaml with zero initContainers, and nothing in this PR
+    touches it. This change reaches NEW scaffolds only.
+  corollary_needs_a_follow_up: >
+    The same fact means already-scaffolded affected repos are NOT fixed by this PR. Two live
+    tenants are on Next.js + Prisma and still carry the broken chart: UA-MIS/swami and
+    UA-MIS/sprintdemo. They need a small backport PR to each repo's .devops/ (or a re-scaffold).
+    Tracked separately — not done here, since the constraint was branch-and-PR against
+    platform-infra only.
+
+known_unrelated_failure: >
+  `make validate` fails identically on clean main and on this branch, at step 4/6:
+  "argocd-rbac policy references project 'sample' with no matching AppProject" — the dead
+  role:sample block, board #63. Steps 1-3 pass on both. Not touched here.

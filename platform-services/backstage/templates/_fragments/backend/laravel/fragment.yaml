@@ -12,6 +12,16 @@ slots:
 defaultPort: 8080
 ingressPath: /api
 needsDB: true
+# DEPLOY-TIME MIGRATION (D-123, board #48) — MIGRATIONS.md's contract, now actually executed
+# by the chart's migration initContainer. `artisan serve` (the CMD) never migrates, so the
+# shipped database/migrations/ never ran. --force is REQUIRED: artisan refuses to migrate in
+# a production environment without it. artisan + vendor/ are already in the runtime image;
+# applied migrations are recorded in the `migrations` table, so re-running is a no-op.
+# CONCURRENCY (measured, D-123): artisan migrate takes NO lock by default (--isolated needs a
+# lock-capable cache store; this image runs CACHE_STORE=array), so replicas racing an empty
+# database make the losers exit 1 on `1050 Table ... already exists`; the winner's schema is
+# correct and the chart's bounded retry absorbs it.
+migrate: php artisan migrate --force
 buildType: container
 dockerfile: Dockerfile
 healthPath: /healthz

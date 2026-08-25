@@ -19,6 +19,17 @@ defaultPort: 8080
 # owns the whole origin (UI at /, its API under /api/*).
 ingressPath: /
 needsDB: true              # reads DATABASE_URL (mysql://...) — the wizard offers the DB question
+# NO DEPLOY-TIME MIGRATION, DELIBERATELY (D-123, board #48). This fragment ships
+# `migrations/0001_init.sql` + `db:generate`/`db:migrate` drizzle-kit scripts, which LOOKS
+# like the nextjs/rails "ships migrations, nothing runs them" bug — it is not. The starter
+# creates its sample table itself at boot (src/hooks.server.ts -> ensureSchema(), `CREATE TABLE IF NOT
+# EXISTS`), so a zero-touch student HAS tables; the migrations/ dir is the documented
+# UPGRADE PATH off that bootstrap, opt-in, and migrations/README.md tells the team to remove
+# ensureSchema() when they adopt it. Declaring `migrate` here would add a failure surface
+# (drizzle-kit is a devDependency and is NOT in the runtime image — the initContainer would
+# fail and wedge every pod in Init) to fix a bug this fragment does not have. A TEAM that
+# adopts drizzle migrations sets `migrate` in their own .devops/components.yaml and adds the
+# CLI to their runtime stage; that is a per-team choice, not a platform default.
 buildType: container
 dockerfile: Dockerfile
 healthPath: /healthz

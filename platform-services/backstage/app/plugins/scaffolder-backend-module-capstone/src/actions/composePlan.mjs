@@ -86,6 +86,61 @@ function portFor(meta, port) {
   return Number(port) || Number(meta.defaultPort) || 8080;
 }
 
+/**
+ * migrateFor — the DEPLOY-TIME MIGRATION declaration (D-123 / board #48).
+ *
+ * A fragment that ships migration ASSETS but does NOT create its schema from the running app
+ * process declares `migrate: "<shell command>"` in its fragment.yaml. That string is the ONLY
+ * gate: when it is non-empty the chart renders a migration initContainer that runs the command
+ * in THIS component's own image before the app container starts; when it is empty the chart
+ * renders no initContainer at all.
+ *
+ * Gating on an explicit per-fragment OPT-IN (rather than inferring from `needsDb`, or from the
+ * presence of a migrations/ directory) is deliberate and load-bearing:
+ *
+ *   - MOST needsDb fragments self-migrate at boot (`CREATE TABLE IF NOT EXISTS` in express /
+ *     fastapi / flask / go / nestjs / node-bare / rust-axum / spring-boot / nuxt / sveltekit,
+ *     `EnsureCreated()` in dotnet-aspnet). For them an initContainer is not a harmless no-op:
+ *     it is a NEW failure surface (a command that does not exist in that image, or a migration
+ *     tool that is not installed, turns a working pod into a permanent `Init:Error`). An
+ *     opt-out default would have silently broken 11 working stacks to fix 4 broken ones.
+ *   - `blank/bring-your-own` ships no DB code AT ALL by design, so there is nothing to run.
+ *   - Inferring from a migrations/ directory would MISFIRE on nuxt/sveltekit, which ship
+ *     `migrations/0001_init.sql` + a `db:migrate` script purely as the documented UPGRADE PATH
+ *     off their boot-time `ensureSchema()` bootstrap (see their migrations/README.md).
+ *
+ * It is a SHELL COMMAND STRING, not an argv array, because the chart wraps it in a
+ * `/bin/sh -c` guard that no-ops when DATABASE_URL is unset — preserving the M4 zero-config
+ * promise that a fresh repo with nothing in Vault still starts. A fragment whose runtime image
+ * has NO shell (scratch/distroless) therefore must not declare `migrate`.
+ */
+function migrateFor(meta) {
+  const cmd = meta.migrate;
+  if (cmd === undefined || cmd === null || cmd === '') return '';
+  if (typeof cmd !== 'string') {
+    throw new Error(
+      `compose: fragment '${meta.id}' has a non-string \`migrate\` (${typeof cmd}) — it must be ` +
+        `a single shell command string, e.g. migrate: "python manage.py migrate --noinput".`,
+    );
+  }
+  const trimmed = cmd.trim();
+  if (!trimmed) {
+    throw new Error(
+      `compose: fragment '${meta.id}' has a blank \`migrate\` — omit the key entirely if the ` +
+        `fragment has no deploy-time migration step.`,
+    );
+  }
+  if (!meta.needsDB) {
+    // Fail closed: a migrator on a component the chart will never give a DATABASE_URL can only
+    // ever no-op (best case) or wedge the pod in Init (worst case). Catch it at compose time.
+    throw new Error(
+      `compose: fragment '${meta.id}' declares \`migrate\` but not \`needsDB\` — a migration ` +
+        `initContainer is only rendered for components the chart wires DATABASE_URL into.`,
+    );
+  }
+  return trimmed;
+}
+
 /** Build one components[] entry from a slot assignment. */
 function component({ name, meta, context, path, port }) {
   return {
@@ -97,6 +152,10 @@ function component({ name, meta, context, path, port }) {
     path,
     needsDb: Boolean(meta.needsDB),
     buildType: meta.buildType,
+    // '' = this fragment needs no deploy-time migration step (it self-migrates at boot, or
+    // ships no DB code). Non-empty = the chart renders a migration initContainer. See
+    // migrateFor() above for why this is an explicit opt-in.
+    migrate: migrateFor(meta),
   };
 }
 
@@ -163,6 +222,10 @@ function planComposition(input) {
       path: '',
       needsDb: false,
       buildType: 'mobile-artifact',
+      // A build artifact (.ipa/.apk), never a k8s workload — the chart loops skip it entirely,
+      // so it can never carry a migration initContainer. Set explicitly so every component in
+      // the plan has the key (the chart templates render under StrictUndefined).
+      migrate: '',
     });
     copies.push({ fragment: be, targetDir: 'backend' });
     copies.push({ fragment: mob, targetDir: 'mobile' });

@@ -58,6 +58,11 @@ PROBE_FAILURE_THRESHOLD = 30  # -> 60s total budget
 # rather than testing against whatever `:latest` happens to be today.
 MARIADB_IMAGE = "mariadb:11.8"
 
+# A migration initContainer's own budget. The chart's wrapper retries 3x with a 5s gap, and a
+# framework CLI (rails/laravel booting the whole framework) is slower than a plain query, so
+# this is deliberately generous — a timeout here should mean "wedged", not "slow".
+MIGRATE_TIMEOUT_SECONDS = 300
+
 BUILD_TIMEOUT_SECONDS = 300
 CONTAINER_START_TIMEOUT_SECONDS = 30
 MARIADB_READY_TIMEOUT_SECONDS = 60
@@ -177,7 +182,7 @@ class MariaDBFixture:
         self.stop()
 
 
-def boot_probe_component(comp, out, mariadb):
+def boot_probe_component(comp, out, mariadb, migrate_script=None):
     """Build (unless comp already declares buildType mobile-artifact — caller's job to
     filter those out) and RUN one composed component's image against `mariadb`, with a bare
     mysql:// DATABASE_URL in the platform's exact shape, and probe /healthz on the chart's
@@ -213,6 +218,45 @@ def boot_probe_component(comp, out, mariadb):
     # THE fidelity point (see module docstring): bare scheme, no driver decoration, no
     # query string — exactly database.externalsecret.yaml:56's output shape.
     database_url = f"mysql://{dbuser}:{dbpass}@{mariadb.container}:3306/{dbname}"
+
+    # MIGRATION initContainer (D-123, board #48) — run it FIRST, exactly as the chart does,
+    # against this fragment's freshly created empty database. `migrate_script` is read back out
+    # of the RENDERED chart (see compose_lib.rendered_migration_script), so this executes the
+    # literal bytes a tenant's cluster runs, not a reimplementation of them.
+    #
+    # Why this belongs in GATE-1 and not in a static check. green-check's hermetic
+    # migrate-initcontainer stage proves the initContainer is RENDERED for the right
+    # components; it cannot prove the declared command actually WORKS — that the CLI is in the
+    # runtime image, that it runs as UID 65532 on a read-only root filesystem, that the DDL it
+    # issues is inside the privileges the tenant's Crossplane Grant actually confers. Board #48
+    # was exactly a documented-but-never-executed migration; a gate that only reads manifests
+    # would have reproduced that blind spot one level up.
+    if migrate_script:
+        mig = subprocess.run([
+            DOCKER_CMD, "run", "--rm", "--network", mariadb.network,
+            "--read-only", "--tmpfs", "/tmp", "--tmpfs", "/dev/shm:size=64m",
+            "-e", f"DATABASE_URL={database_url}",
+            "--entrypoint", "/bin/sh", image_id, "-c", migrate_script,
+        ], capture_output=True, text=True, timeout=MIGRATE_TIMEOUT_SECONDS)
+        if mig.returncode != 0:
+            tail = (mig.stdout[-1500:] + mig.stderr[-1500:]).strip()
+            return False, (
+                f"migration initContainer FAILED (exit {mig.returncode}) — in-cluster this "
+                f"leaves the pod in Init and it never becomes Ready:\n{tail}")
+        # Idempotency: the chart runs this on EVERY deploy, so a migrator that only works
+        # against an empty database would break the SECOND deploy of every tenant.
+        again = subprocess.run([
+            DOCKER_CMD, "run", "--rm", "--network", mariadb.network,
+            "--read-only", "--tmpfs", "/tmp", "--tmpfs", "/dev/shm:size=64m",
+            "-e", f"DATABASE_URL={database_url}",
+            "--entrypoint", "/bin/sh", image_id, "-c", migrate_script,
+        ], capture_output=True, text=True, timeout=MIGRATE_TIMEOUT_SECONDS)
+        if again.returncode != 0:
+            tail = (again.stdout[-1500:] + again.stderr[-1500:]).strip()
+            return False, (
+                f"migration is NOT IDEMPOTENT — it succeeded on an empty database but failed "
+                f"(exit {again.returncode}) on a second run, which is what every redeploy "
+                f"does:\n{tail}")
 
     container = f"gate1-app-{suffix}"
     port = comp.get("port") or 8080
