@@ -1,0 +1,625 @@
+# Grafana dashboard for the ida-llm tenant.
+#
+# ⚠ PROVISIONED BY THE SIDECAR, NOT THE HTTP API. The `grafana_dashboard: "1"`
+# LABEL is what makes the sidecar pick this ConfigMap up, and the
+# `grafana_folder` ANNOTATION files it. Grafana runs on Postgres now, but the
+# ConfigMap-sidecar remains the only provisioning path -- a dashboard created
+# through the API is not in git and does not survive a rebuild.
+#
+# ⚠ `exported_service`, NOT `service`. Prometheus renames Traefik's own `service`
+# label when it collides with the Kubernetes Service label, so a query filtering
+# on `service` silently matches the Traefik Service OBJECT and returns nothing --
+# an empty panel that looks like "no traffic" rather than "wrong label".
+# Traefik service names are `<namespace>-<name>-<port>@kubernetes`, which is why
+# the regex is anchored on `$namespace-ida-llm-.*`.
+#
+# The platform's generic "Tenants -- App Golden Signals" dashboard already covers
+# this tenant automatically (its namespace variable is cluster-wide). This one
+# exists for what a generic dashboard cannot know: the harness's own worker,
+# queue and API-route metrics, scraped from the app's /metrics via the
+# ServiceMonitors the tenant repo ships.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-ida-llm-app
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: "IDA-LLM"
+data:
+  ida-llm-app.json: |
+    {
+      "uid": "ida-llm-your-app",
+      "title": "IDA-LLM -- Your App",
+      "tags": [
+        "ida-llm",
+        "tenants",
+        "app"
+      ],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "30s",
+      "time": {
+        "from": "now-6h",
+        "to": "now"
+      },
+      "templating": {
+        "list": [
+          {
+            "name": "datasource",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": {},
+            "hide": 0,
+            "label": "Datasource"
+          },
+          {
+            "name": "namespace",
+            "type": "query",
+            "label": "Environment",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "${datasource}"
+            },
+            "query": {
+              "query": "label_values(kube_pod_info{namespace=~\"ida-llm-(dev|staging|prod)\"}, namespace)",
+              "refId": "namespace"
+            },
+            "refresh": 1,
+            "sort": 1,
+            "current": {},
+            "includeAll": false,
+            "multi": false
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "title": "Traffic \u2014 the edge view (Traefik)",
+          "type": "row",
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 0
+          },
+          "panels": []
+        },
+        {
+          "id": 2,
+          "title": "Requests / min",
+          "type": "stat",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 0,
+            "y": 1
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum(rate(traefik_service_requests_total{exported_service=~\"$namespace-ida-llm-.*\"}[5m])) * 60 or vector(0)",
+              "legendFormat": "req/min",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqpm"
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 3,
+          "title": "5xx rate",
+          "type": "stat",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 6,
+            "y": 1
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "(sum(rate(traefik_service_requests_total{exported_service=~\"$namespace-ida-llm-.*\", code=~\"5..\"}[5m])) or vector(0)) / (sum(rate(traefik_service_requests_total{exported_service=~\"$namespace-ida-llm-.*\"}[5m])) > 0) * 100",
+              "legendFormat": "5xx %",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "orange",
+                    "value": 1
+                  },
+                  {
+                    "color": "red",
+                    "value": 5
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 4,
+          "title": "p95 latency",
+          "type": "stat",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 12,
+            "y": 1
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(traefik_service_request_duration_seconds_bucket{exported_service=~\"$namespace-ida-llm-.*\"}[5m])))",
+              "legendFormat": "p95",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s"
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 5,
+          "title": "Pods ready",
+          "type": "stat",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 18,
+            "y": 1
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum(kube_pod_status_ready{namespace=\"$namespace\", condition=\"true\"}) or vector(0)",
+              "legendFormat": "ready",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": []
+          }
+        },
+        {
+          "id": 6,
+          "title": "Requests by service",
+          "type": "timeseries",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 5
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by (exported_service) (rate(traefik_service_requests_total{exported_service=~\"$namespace-ida-llm-.*\"}[5m])) * 60",
+              "legendFormat": "{{exported_service}}",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqpm"
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 7,
+          "title": "Latency percentiles",
+          "type": "timeseries",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 5
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "histogram_quantile(0.50, sum by (le) (rate(traefik_service_request_duration_seconds_bucket{exported_service=~\"$namespace-ida-llm-.*\"}[5m])))",
+              "legendFormat": "p50",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              }
+            },
+            {
+              "refId": "B",
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(traefik_service_request_duration_seconds_bucket{exported_service=~\"$namespace-ida-llm-.*\"}[5m])))",
+              "legendFormat": "p95",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              }
+            },
+            {
+              "refId": "C",
+              "expr": "histogram_quantile(0.99, sum by (le) (rate(traefik_service_request_duration_seconds_bucket{exported_service=~\"$namespace-ida-llm-.*\"}[5m])))",
+              "legendFormat": "p99",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s"
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 10,
+          "title": "The harness \u2014 workers and queue",
+          "type": "row",
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 13
+          },
+          "panels": []
+        },
+        {
+          "id": 11,
+          "title": "Workers up",
+          "type": "stat",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 0,
+            "y": 14
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum(ida_llm_runner_up{namespace=\"$namespace\"}) or vector(0)",
+              "legendFormat": "workers",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "orange",
+                    "value": 1
+                  },
+                  {
+                    "color": "green",
+                    "value": 2
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 12,
+          "title": "Queue depth",
+          "type": "stat",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 6,
+            "y": 14
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "max(ida_llm_runner_queue_depth{namespace=\"$namespace\"}) or vector(0)",
+              "legendFormat": "queued",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": []
+          }
+        },
+        {
+          "id": 13,
+          "title": "Jobs claimed / min",
+          "type": "stat",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 12,
+            "y": 14
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum(rate(ida_llm_runner_jobs_claimed_total{namespace=\"$namespace\"}[5m])) * 60 or vector(0)",
+              "legendFormat": "jobs/min",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": []
+          }
+        },
+        {
+          "id": 14,
+          "title": "Runner replicas (HPA)",
+          "type": "stat",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 18,
+            "y": 14
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "kube_horizontalpodautoscaler_status_current_replicas{namespace=\"$namespace\", horizontalpodautoscaler=\"ida-llm-runner\"} or vector(0)",
+              "legendFormat": "current",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": []
+          }
+        },
+        {
+          "id": 15,
+          "title": "Queue depth vs workers",
+          "type": "timeseries",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 18
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "max(ida_llm_runner_queue_depth{namespace=\"$namespace\"})",
+              "legendFormat": "queue depth",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              }
+            },
+            {
+              "refId": "B",
+              "expr": "sum(ida_llm_runner_up{namespace=\"$namespace\"})",
+              "legendFormat": "workers up",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": []
+          }
+        },
+        {
+          "id": 16,
+          "title": "API requests by route",
+          "type": "timeseries",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 18
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by (path) (rate(ida_llm_http_requests_total{namespace=\"$namespace\"}[5m])) * 60",
+              "legendFormat": "{{path}}",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqpm"
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 20,
+          "title": "Workload health",
+          "type": "row",
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 26
+          },
+          "panels": []
+        },
+        {
+          "id": 21,
+          "title": "Container restarts (1h)",
+          "type": "timeseries",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 27
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by (pod) (increase(kube_pod_container_status_restarts_total{namespace=\"$namespace\"}[1h]))",
+              "legendFormat": "{{pod}}",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": []
+          }
+        },
+        {
+          "id": 22,
+          "title": "Memory vs namespace quota",
+          "type": "timeseries",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 27
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum(container_memory_working_set_bytes{namespace=\"$namespace\", container!=\"\"})",
+              "legendFormat": "in use",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              }
+            },
+            {
+              "refId": "B",
+              "expr": "sum(kube_resourcequota{namespace=\"$namespace\", resource=\"requests.memory\", type=\"hard\"})",
+              "legendFormat": "quota (hard)",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes"
+            },
+            "overrides": []
+          }
+        }
+      ]
+    }

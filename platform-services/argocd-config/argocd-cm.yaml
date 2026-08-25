@@ -97,6 +97,39 @@ data:
     - .spec.dataFrom[].extract.nullBytePolicy
     - .metadata.annotations["force-sync"]
 
+  # --- Deployment.spec.replicas ignoreDifferences, org-wide -------------------
+  # WITHOUT THIS, A HorizontalPodAutoscaler CANNOT WORK ON THIS PLATFORM.
+  #
+  # Every tenant Application syncs with `selfHeal: true`. An HPA's entire job is
+  # to change `.spec.replicas` away from what git says, which ArgoCD then sees as
+  # drift and reverts — so the HPA scales up, ArgoCD scales back down, and the two
+  # controllers fight in a loop that burns reconciles and never settles. The
+  # workload looks like it is flapping for no reason.
+  #
+  # This is not hypothetical-only: the tenant AppProject has whitelisted
+  # `autoscaling/HorizontalPodAutoscaler` since the fence was written, but NO HPA
+  # has ever existed on this cluster (`kubectl get hpa -A` was empty before this
+  # change), so the combination had never actually been exercised. ida-llm is the
+  # first tenant to use one — its `runner` workload is explicitly variable (2-4
+  # workers depending on benchmark load).
+  #
+  # SAFE FOR EVERY OTHER TENANT, because it is a no-op for them: nothing changes
+  # `.spec.replicas` out-of-band unless an autoscaler is present. What it does
+  # give up is ArgoCD reverting a manual `kubectl scale` — which is precisely the
+  # field you WANT to be externally adjustable, and the one field where GitOps
+  # enforcement and autoscaling are mutually exclusive by construction.
+  #
+  # Scoped to `.spec.replicas` ONLY. Every other field of a Deployment — image,
+  # env, probes, resources, securityContext — stays fully enforced.
+  #
+  # Placed at the org-wide `resource.customizations.<group>_<kind>` layer rather
+  # than per-Application for the same reason the ExternalSecret rule above is:
+  # the ApplicationSet template is Composition-rendered, so a per-template patch
+  # would mean a Composition edit for every tenant that ever adds an autoscaler.
+  resource.customizations.ignoreDifferences.apps_Deployment: |
+    jsonPointers:
+    - /spec/replicas
+
   url: https://argocd.capstone.uamishub.com
 
   # ArgoCD-server fetches the issuer's discovery doc SERVER-SIDE over the in-cluster

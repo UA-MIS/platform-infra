@@ -105,8 +105,18 @@ spec:
             # previously aborting the whole script (see the project-resolution loop
             # below for the tolerance fix that now also covers this case for any
             # FUTURE torn-down project left in this list).
+            # `ida-llm` added: a tenant that builds THREE images on every push to
+            # main accumulates tags fast, and registry-wide GC alone does not bound
+            # that -- GC only reclaims UNTAGGED manifests, so without a retention
+            # rule pruning old tags first, every tag ever pushed is kept forever
+            # and GC has nothing to collect. This was the gap: crimson-copies is
+            # not in this list either, so no tenant currently gets tag retention.
+            # Adding ida-llm here fixes it for the tenant being provisioned;
+            # widening it to every tenant project is a follow-up worth doing, but
+            # it is a change to OTHER teams' registries and should be its own
+            # decision rather than a side effect of this onboarding.
             - name: RETENTION_PROJECTS
-              value: "backstage"
+              value: "backstage ida-llm"
             - name: RETENTION_KEEP_LAST_N
               value: "10"
           command: ["/bin/sh", "-eu", "-c"]
