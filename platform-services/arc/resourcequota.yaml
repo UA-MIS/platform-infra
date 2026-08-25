@@ -1,0 +1,75 @@
+# ResourceQuota for `arc-runners` (2026-08-25, owner-approved — lands alongside the
+# maxRunners raise and platform-services/arc/limitrange.yaml).
+#
+# WHY THIS EXISTS: `arc-runners` had NO ResourceQuota before this change — the only
+# ceiling on total concurrent CI load was each scale set's own maxRunners
+# (crimson-copies-kaniko 8, ida-llm-kaniko 8, ua-mis-kaniko 4 as of this PR — see
+# applicationsets/arc-runner-scaleset-app.yaml + platform-services/crossplane/apis/
+# composition.yaml). Summed, that's 20 possible concurrent runners with no
+# CROSS-TENANT aggregate cap — three tenants bursting at once could stack requests
+# the individual per-scale-set knobs can't see. This Quota is that aggregate
+# backstop, sized independently of any one tenant's maxRunners.
+#
+# SCOPE — pod count + REQUESTS only, deliberately NOT limits: a `limits.cpu` /
+# `limits.memory` hard quota would force every container in the namespace to
+# declare a limit (k8s quota admission requires it once a resource is quota'd),
+# which would break unmodified upstream ARC listener/runner pods that only set
+# requests. Gating on requests (what the scheduler actually admits against) plus
+# the LimitRange's per-container default limit (4 CPU / 8Gi, arc-runners-defaults)
+# gets the same "nothing unbounded" outcome without that requirement.
+#
+# ARITHMETIC (per concurrent CI job, containerMode:kubernetes, steps run
+# sequentially so peak is runner-pod + ONE active job/step pod at a time — verified
+# against .github/workflows/tenant-build.yaml's per-image matrix shape):
+#   Light tenant job (crimson-copies / ida-llm — the per-tenant hook-template
+#   ConfigMap sets no resources, so the new LimitRange default applies to the
+#   Kaniko step pod):
+#     runner  250m cpu / 1Gi mem  (fixed, declared in the scale-set spec)
+#   + $job    500m cpu / 1Gi mem  (LimitRange default)
+#   = 750m cpu / 2Gi mem per light job
+#   Heavy ua-mis job (org-wide hook-template already sets an explicit 4Gi memory
+#   request on `$job`; LimitRange fills in the still-unset 500m CPU request):
+#     runner  250m cpu / 1Gi mem
+#   + $job    500m cpu / 4Gi mem  (500m from LimitRange, 4Gi from hook-template.yaml)
+#   = 750m cpu / 5Gi mem per heavy job
+#
+#   Target: ~18 concurrent jobs (below the 20-runner theoretical max — the whole
+#   point is that a rare all-scale-sets-maxed burst QUEUES a couple of jobs in
+#   GitHub Actions rather than being sized to never bind), mixed roughly in the
+#   scale sets' own maxRunners ratio (8:8:4 tenant:tenant:ua-mis, i.e. ~40/40/20):
+#     ~14.4 light jobs × 2Gi  = ~28.8Gi
+#   +  ~3.6 heavy jobs × 5Gi  = ~18Gi
+#   ≈ 47Gi  → rounded up to 50Gi for headroom (rounding + step-transition overlap)
+#     18 jobs × 750m cpu      = 13.5 CPU → rounded up to 20 for burst headroom
+#     18 jobs × ~2 pods/job (runner + one active step pod; the ARC k8s-mode
+#     container hook runs non-container steps ON the runner pod itself — only a
+#     `uses: docker://` step, i.e. the Kaniko build, spawns a separate pod — so a
+#     job is never 3 pods at once) = 36 → rounded up to 40 for headroom
+#
+#   Cluster affordability check (80 vCPU / ~216GiB allocatable across 5 nodes,
+#   observed 2026-08-25 at 4-8% CPU / 27-45% memory, i.e. ~76.5GiB / ~3.2-6.4 vCPU
+#   already committed to steady-state platform workloads):
+#     CPU:    ~5 vCPU baseline + 20 quota  = ~25 of 80  (~31%)
+#     Memory: ~76.5Gi baseline + 50Gi quota = ~126.5 of ~216 (~59%)
+#   Both leave real headroom for the platform's other workloads even if CI maxes
+#   the quota out. Re-tune (`kubectl describe resourcequota -n arc-runners` shows
+#   live used/hard) if a real build's actual peak footprint differs meaningfully
+#   from this estimate — see the PR description for the live verification run.
+#
+# INTENDED BEHAVIOR WHEN EXHAUSTED: new runner pods simply stop being admitted;
+# GitHub Actions shows those jobs "Waiting for a runner" and they QUEUE — no OOM,
+# no failed run, no cascade. Same "wait, don't fail" stance as maxRunners and the
+# capstone-ci-build PriorityClass (priorityclass-ci-build.yaml), just at the
+# cross-tenant aggregate layer instead of the per-scale-set layer.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: arc-runners-quota
+  namespace: arc-runners
+  labels:
+    platform.capstone/component: platform
+spec:
+  hard:
+    pods: "40"
+    requests.cpu: "20"
+    requests.memory: "50Gi"

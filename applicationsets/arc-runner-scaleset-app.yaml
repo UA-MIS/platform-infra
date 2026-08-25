@@ -74,11 +74,24 @@ spec:
         # 4th… jobs QUEUE in GitHub Actions — the operator's "wait, don't fail". #372's
         # soft RAM-aware affinity + the 4Gi request guarantee at most ONE 8Gi pair per
         # node, so the <=2 pods that DO spawn either place or stay Pending — never
-        # admission-OOM. (Ultra-safe alt = 1: pure serial, everything GHA-queues, no warm
-        # standby, db1 unused — 2 keeps db1 usable + gives handoff while still below the
-        # OOM-race point. Raise when db1 sheds its DB tier or a 3rd `pool=build` node joins.)
+        # admission-OOM.
+        #
+        # ── 2 → 4 (2026-08-25, owner-approved): the "laptop-01 / db1, 2-node pool" the
+        # math above describes is stale — the pool is now 5 nodes (capstone-n1..n3
+        # control-plane + capstone-w1/w2, `capstone.io/pool=build` on w1/w2), 80 vCPU /
+        # ~216GiB allocatable, at 4-8% CPU / 27-45% memory. ua-mis-kaniko will hit the
+        # same "3rd job serializes into a 2nd wave for no reason" wall the tenant scale
+        # sets (crimson-copies-kaniko, ida-llm-kaniko, raised 3→8 the same PR) already hit
+        # — its own 9Gi worst-case per-build footprint (runner 1Gi + job 4Gi + kaniko 4Gi)
+        # fits comfortably 4-wide on the current node pool. The admission-OOM failure mode
+        # above was a scheduler REQUEST-sizing bug (2Gi request under-reserving a pod that
+        # bursts to 8Gi), already fixed by the 4Gi job/kaniko request raise documented
+        # below — it is not re-introduced by widening the GHA-layer queue knob. The
+        # cross-tenant aggregate ceiling is now the arc-runners ResourceQuota
+        # (platform-services/arc/resourcequota.yaml), not any single scale set's
+        # maxRunners — GHA queues jobs beyond quota, it does not spawn unplaceable pods.
         minRunners: 0
-        maxRunners: 2
+        maxRunners: 4
 
         # --- containerMode KUBERNETES: workflow job steps run as separate K8s PODS,
         #     NO dind, NO docker socket, NOT privileged — the rootless model Kaniko

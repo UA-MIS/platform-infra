@@ -1573,7 +1573,22 @@ spec:
                             name: arc-gha-rs-controller
                             namespace: arc-system
                           minRunners: 0
-                          maxRunners: 3
+                          # 3 → 8 (2026-08-25, owner-approved): the cluster grew from the
+                          # ~64GiB/2-node build pool this value dates from to 80 vCPU /
+                          # ~216GiB allocatable across 5 nodes (capstone-n1..n3 control-plane
+                          # + capstone-w1/w2, all in the placement candidate set below —
+                          # `capstone.io/pool=build` now labels w1/w2 and every n1..n3 matches
+                          # `control-plane Exists`, so ALL 5 nodes are schedulable targets, not
+                          # the 2-node pool the inline comments below still describe). At 3, a
+                          # 5-image tenant build matrix (crimson-copies) could only run 3
+                          # runners at once and serialized into two waves for no reason at
+                          # 4-8% cluster CPU / 27-45% memory. 8 lets a full 5-image matrix (and
+                          # ida-llm's near-term 3-4 image matrix) run fully concurrently. The
+                          # aggregate ceiling across ALL scale sets is now enforced by the
+                          # arc-runners ResourceQuota (platform-services/arc/resourcequota.yaml)
+                          # instead of by starving any single tenant's maxRunners — GHA queues
+                          # jobs beyond quota, it does not spawn unplaceable pods.
+                          maxRunners: 8
                           containerMode:
                             type: "kubernetes"
                             kubernetesModeWorkVolumeClaim:

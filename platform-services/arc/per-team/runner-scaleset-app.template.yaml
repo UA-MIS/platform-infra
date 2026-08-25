@@ -42,10 +42,13 @@ spec:
           namespace: arc-system
         minRunners: 0
         # maxRunners = OPERATOR-QUEUE lever: jobs beyond it wait "Waiting for a runner"
-        # IN GitHub Actions (no pod → no OOM). Mirrors the org-wide set (3→2, see
-        # applicationsets/arc-runner-scaleset-app.yaml) — cap to the build pool's real
-        # simultaneous capacity so excess QUEUES instead of spawning unplaceable pods.
-        maxRunners: 2
+        # IN GitHub Actions (no pod → no OOM). Mirrors the LIVE per-tenant value rendered
+        # by the Crossplane composition (platform-services/crossplane/apis/composition.yaml,
+        # the actual source of truth for onboarded tenants — this file is the manual-render
+        # fallback per per-team/README.md) — raised 3→8 there 2026-08-25 (owner-approved,
+        # cluster now 80 vCPU / ~216GiB across 5 nodes). Keep this in sync if hand-rendering
+        # a team that predates the Crossplane composition path.
+        maxRunners: 8
         containerMode:
           type: "kubernetes"
           kubernetesModeWorkVolumeClaim:
