@@ -1,0 +1,126 @@
+# D-186 — wizard-provisioned per-team sprint boards. Gate evidence.
+#
+# The merge condition set for this work was: prove BOTH legs end-to-end on a
+# throwaway team, or leave the PR open and say so. This file records what was
+# actually observed, including the leg that was NOT proven.
+id: D-186-board-provisioning
+date: 2026-08-25
+branch: feat/wizard-sprint-board
+test_team: zzboardtest            # throwaway; torn down, see cleanup below
+verdict: NOT_MERGED
+
+summary: >-
+  Gate 1 is proven for everything downstream of the wizard — the board
+  provisions, runs, migrates, serves at its host and completes the Dex leg of
+  sign-in — but was NOT driven through the Backstage wizard UI, because doing so
+  would require a commit to main registering the branch's template, which is the
+  very surface the gate exists to protect. Gate 2 is proven structurally and
+  mechanically rather than by a second wizard run, for the same reason. Both
+  limitations are stated plainly rather than papered over.
+
+gate_1_with_board:
+  status: PROVEN_BELOW_THE_WIZARD
+  not_proven: >-
+    The checkbox was not clicked in the live portal. The board file was created
+    byte-identical to what the template's `commit-board` step renders, and the
+    step's action/inputs are covered by existing unit tests (below), but the
+    form -> step -> commit path itself was not exercised through the UI.
+  observations:
+    - applicationset_generated_application: "agile-board-zzboardtest  Synced/Healthy, 20s from apply"
+    - pod: "zzboardtest-agile-6764786f9-6zx6n  1/1 Running"
+    - github_credential: "[startup] GitHub credential: GitHub App (app id 4097147, installation 141394298)"
+    - migrations: "[migrate] applied 001_init.sql / 002_deps_sprints_repos.sql / 003_pages.sql; database schema is up to date"
+    - readiness: "GET /api/readyz -> 200; GET /api/healthz -> {\"status\":\"ok\"}"
+    - schema_isolation: "psql agile_boards -> schemas {public, zzboardtest}; 17 tables in zzboardtest"
+    - public_host: "https://zzboardtest-agile.capstone.uamishub.com/ -> 307 /login?returnTo=%2F (no DNS, cert or tunnel change)"
+    - oidc_request: >-
+        /api/auth/login builds client_id=agile-board, the derived redirect_uri,
+        PKCE S256, scope 'openid profile email groups' and an ESSENTIAL groups
+        claim — i.e. the board itself is correctly configured.
+  dex_leg_controlled_experiment:
+    # This is the load-bearing claim behind the generator, the make-validate
+    # guard and the sync workflow. It was measured, not argued.
+    before_uri_registered: "GET /auth/github?...redirect_uri=<board> -> HTTP 400"
+    control_same_request_registered_uri: "redirect_uri=https://agile.uamishub.com/... -> HTTP 302 to github.com/login/oauth/authorize"
+    after_uri_registered: "GET /auth/github?...redirect_uri=<board> -> HTTP 302 to github.com/login/oauth/authorize"
+    conclusion: >-
+      Dex has no wildcard redirect URIs and answers an unregistered one with a
+      bare 400. A board whose URI is missing therefore deploys, goes Ready and
+      serves its landing page, and fails only when a student clicks Sign in.
+      That is why the drift check blocks `make validate` and why the sync
+      workflow also runs on a schedule.
+  reloader:
+    claim: "a Dex ConfigMap change rolls Dex automatically; no manual restart"
+    observed: "config change pushed -> pod dex-5d48cb7f74-b4zjk -> dex-65469f6894-mcqrb, unattended"
+    note: >-
+      It did NOT fire on the very first sync, where the annotation and the
+      ConfigMap change landed together. Every subsequent change (i.e. every real
+      onboarding) has the annotation already present, which is the case that
+      matters.
+
+gate_2_without_board:
+  status: PROVEN_MECHANICALLY
+  method: >-
+    The regression that matters is "a board addition must not perturb a normal
+    project". Rather than infer that from a second wizard run, the branch's
+    template was diffed against main's structurally.
+  results:
+    - "steps: main 7, branch 8 — the first 7 byte-for-byte identical"
+    - "the single added step (commit-board) is the LAST step and is gated `if: ${{ parameters.agileBoard }}`"
+    - "page-1 properties added: [agileBoard]; every pre-existing property unchanged"
+    - "page-1 `required` unchanged; the new property is NOT required"
+    - "all other parameter pages identical"
+    - "output.links identical"
+    - "no other spec key changed"
+    - "template diff is +67 / -0 — purely additive"
+  why_this_is_strong: >-
+    The wizard change is TEMPLATE-ONLY. No scaffolder backend action was added or
+    modified, so no Backstage image is rebuilt and the code executing steps 1-7 is
+    literally the same binary serving the golden path today. With the box
+    unticked the new step does not run, and nothing else in the template differs.
+  residual_risk: >-
+    Not covered: that the boolean renders as a checkbox in rjsf and that
+    scaffolder evaluates `if` on it. Step-level `if:` is already used by two
+    other templates in this repo against the same scaffolder version.
+
+blast_radius_checks:
+  - "maintainers' board (platform-services/agile, #543) sign-in: 302 to GitHub — unaffected"
+  - "maintainers' board pod: 1/1 Running; https://agile.uamishub.com/ -> 307"
+  - "ArgoCD SSO client: 302 — unaffected"
+  - "dex-github SealedSecret: NOT modified by this branch (an earlier revision re-sealed it and would have broken #543's board — see below)"
+
+bugs_found_by_deploying_rather_than_reviewing:
+  - id: no-destination
+    what: "the board ApplicationSet template had no `destination`"
+    how_found: "API server rejected it: spec.template.spec.destination: Required value"
+    why_review_missed_it: "it renders and validates as YAML; every board Application would simply never have generated"
+  - id: externalsecret-drift
+    what: "ExternalSecret `data[].remoteRef` CRD defaults left the Application permanently OutOfSync with a correct Secret"
+    fix: "dataFrom.extract, which has no list items for ArgoCD to diff"
+    why_it_matters: "a chronically-OutOfSync Application trains operators to ignore the one signal that says a sync is broken"
+  - id: db-tier-blackhole
+    what: "a board in its own namespace had its Postgres connection blackholed"
+    how_found: "connect TIMEOUT (not 'refused') — db-tier runs its own default-deny and names permitted namespaces explicitly"
+    fix: "boards live in `agile`, which db-tier/netpol.yaml already names on 5432"
+  - id: client-id-collision
+    what: >-
+      An earlier revision of this branch independently created a Dex client
+      `agile-board`, an AGILE_BOARD_CLIENT_SECRET env, and a re-sealed
+      dex-github key — all of which #543 had just landed on main with DIFFERENT
+      values. Merging it would have silently broken sign-in on the maintainers'
+      board.
+    how_found: "rebasing before merge, not review"
+    fix: "team boards are extra redirect URIs on the EXISTING client; Vault holds the value already sealed"
+
+cleanup:
+  - "ArgoCD ApplicationSet `agile-boards` and Application `agile-board-zzboardtest`: deleted"
+  - "platform-svc-dex targetRevision restored to HEAD; ignoreApplicationDifferences removed from the platform-services ApplicationSet"
+  - "GitHub team UA-MIS/zzboardtest: deleted"
+  - "Postgres schema zzboardtest in agile_boards: dropped"
+  - "Vault secret/platform/agile-board-pull (a temporary copy of the ida-llm pull robot, used before the design switched to the existing harbor-pull secret): deleted"
+  - "tenants/_boards/zzboardtest.yaml and its generated Dex redirect URI: removed from the branch"
+
+left_open:
+  - "the wizard UI run (both legs) — needs the template registered on main"
+  - "the platform Harbor project's visibility (public would remove the pull credential entirely) — owned by cc-devops-agileboard"
+  - "`make validate` step 4/6 fails on clean main (argocd-rbac references project 'sample' with no AppProject) — PRE-EXISTING, not from this branch, verified against a clean worktree of origin/main"

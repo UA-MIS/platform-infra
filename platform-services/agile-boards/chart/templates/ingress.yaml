@@ -1,0 +1,41 @@
+# ONE host, one path, one board.
+#
+# The host is a SINGLE hyphenated label under capstone.uamishub.com, which is
+# what makes this free: the Cloudflare Tunnel's one wildcard Public Hostname
+# (`*.capstone.uamishub.com -> Traefik`) and the wildcard certificate already
+# cover it, so a new board needs NO DNS record, NO certificate and NO dashboard
+# action. Verified live before this was committed:
+#   $ openssl s_client -connect ida-agile.capstone.uamishub.com:443 ... -> SAN *.capstone.uamishub.com
+#   $ curl https://<never-provisioned-name>.capstone.uamishub.com/ -> 404 from Traefik, TLS verified
+# The 404 (not a DNS/TLS failure) is the proof: the edge already routes arbitrary
+# unregistered single-label names into the cluster.
+#
+# A DOTTED host (<team>.agile.capstone.uamishub.com) would NOT work — a DNS
+# wildcard matches exactly one label, so two-level hosts fall outside both the
+# tunnel route and the certificate (D-044/ADR-028). Hyphen, never a dot.
+#
+# NO SSO forwardAuth middleware here, deliberately: unlike a tenant app, this app
+# authenticates itself against Dex and gates on the `groups` claim, so a platform
+# gate in front would mean two consecutive sign-ins for one page.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "agile-board.name" . }}
+  labels:
+    {{- include "agile-board.labels" . | nindent 4 }}
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: {{ include "agile-board.host" . | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "agile-board.name" . }}
+                port:
+                  name: http
+  tls:
+    - hosts:
+        - {{ include "agile-board.host" . | quote }}

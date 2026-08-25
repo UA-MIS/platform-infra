@@ -7,9 +7,21 @@
 # `dex-github` Secret (materialised by the SealedSecret) as env vars, which the
 # ConfigMap references as $VARS (Dex expands env at config load).
 #
-# A change to the ConfigMap does NOT auto-restart the pod: ArgoCD syncs the new
-# ConfigMap, then a manual `kubectl -n dex rollout restart deploy/dex` picks it up
-# (documented in the dex README). Phase-2 can add a config-hash annotation later.
+# CONFIG RELOAD (changed 2026-08-25, D-186). Dex reads its config ONCE at process
+# start, so a ConfigMap edit alone changes nothing — historically that meant a
+# manual `kubectl -n dex rollout restart deploy/dex` after every client change,
+# and the restart is the step you forget.
+#
+# That was tolerable while clients were added by hand a few times a year. It is
+# not tolerable now that provisioning a team sprint board appends a redirect URI
+# to this ConfigMap on an ordinary onboarding: forgetting the restart produces a
+# board that deploys, goes Ready, serves its landing page, and then fails at
+# sign-in with an opaque OIDC error — measured, not theorised (Dex answers an
+# unregistered redirect_uri with a bare HTTP 400).
+#
+# Stakater Reloader (already deployed cluster-wide, `reloader` ns) watches the
+# two objects named below and rolls this Deployment when either changes. The
+# manual restart still works and is still correct; it is no longer REQUIRED.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -20,6 +32,11 @@ metadata:
     app.kubernetes.io/name: dex
   annotations:
     argocd.argoproj.io/sync-wave: "1"   # after namespace/rbac/secret/configmap
+    # Auto-reload on config change (see header). Named explicitly rather than
+    # `reloader.stakater.com/auto` so unrelated churn in this namespace cannot
+    # roll the platform's only OIDC broker.
+    configmap.reloader.stakater.com/reload: "dex"
+    secret.reloader.stakater.com/reload: "dex-github"
 spec:
   replicas: 1
   selector:

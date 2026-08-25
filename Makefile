@@ -746,25 +746,25 @@ vault-ca-manifest: ## (ESO+Vault) Emit the per-tenant `vault-ca` ConfigMap (publ
 #       Cilium policy cluster-wide and starved the Vault raft leader's node).
 # Run before committing tenancy changes; cluster-independent.
 .PHONY: validate
-validate: ## Static validation of tenant manifests (kubeconform + RBAC-name + stray-file + argocd-rbac-project + claim-uniqueness guards)
+validate: ## Static validation of tenant manifests (kubeconform + RBAC-name + stray-file + argocd-rbac-project + claim-uniqueness + dex-board-client guards)
 	@command -v kubeconform >/dev/null || { echo "ERROR: kubeconform not found (install to ~/.local/bin)."; exit 1; }
-	@echo "==> [1/5] kubeconform -strict on tenant namespace bundles..."
+	@echo "==> [1/6] kubeconform -strict on tenant namespace bundles..."
 	@kubeconform -strict -summary -kubernetes-version 1.31.5 tenants/*/namespaces/*.yaml
-	@echo "==> [2/5] RBAC-name guard: every Role/RoleBinding name must be 'team-developer'..."
+	@echo "==> [2/6] RBAC-name guard: every Role/RoleBinding name must be 'team-developer'..."
 	@bad=$$(grep -rnE '^\s+name:\s+team-[a-z0-9-]+eloper\b' tenants/ | grep -v 'team-developer' || true); \
 	  if [ -n "$$bad" ]; then echo "FAIL: malformed RBAC names (SEC-001 regression):"; echo "$$bad"; exit 1; fi; \
 	  echo "  OK — no malformed RBAC names"
-	@echo "==> [3/5] stray-file guard: tenant dirs may contain only .yaml (recurse-sync safe)..."
+	@echo "==> [3/6] stray-file guard: tenant dirs may contain only .yaml (recurse-sync safe)..."
 	@stray=$$(find tenants -type f ! -name '*.yaml' ! -name 'README.md' || true); \
 	  if [ -n "$$stray" ]; then echo "FAIL: non-manifest files in tenants/ (would break recurse sync):"; echo "$$stray"; exit 1; fi; \
 	  echo "  OK — no stray non-manifest files"
-	@echo "==> [4/5] argocd-rbac project guard: every project token in a 'p, role:...' policy must be an existing AppProject (SEC-006)..."
+	@echo "==> [4/6] argocd-rbac project guard: every project token in a 'p, role:...' policy must be an existing AppProject (SEC-006)..."
 	@projects="platform $$(grep -rhA2 '^kind: AppProject' tenants/*/appproject.yaml bootstrap/platform-appproject.yaml 2>/dev/null | grep -E '^\s+name:' | awk '{print $$2}' | sort -u | tr '\n' ' ')"; \
 	  refs=$$(grep -hE '^\s*p,\s*role:' platform-services/argocd-config/argocd-rbac-cm.yaml | sed -E 's#.*,\s*([a-z0-9-]+)/[^,]*,\s*(allow|deny)\s*$$#\1#' | grep -vE ',|allow|deny' | sort -u); \
 	  fail=0; for r in $$refs; do echo " $$projects " | grep -q " $$r " || { echo "FAIL: argocd-rbac policy references project '$$r' with no matching AppProject (inert role, SEC-006)"; fail=1; }; done; \
 	  if [ "$$fail" = "1" ]; then echo "  known AppProjects: $$projects"; exit 1; fi; \
 	  echo "  OK — all argocd-rbac policy projects ($$refs) resolve to AppProjects"
-	@echo "==> [5/5] claim-uniqueness guard: at most ONE CapstoneTenant claim per team+semester..."
+	@echo "==> [5/6] claim-uniqueness guard: at most ONE CapstoneTenant claim per team+semester..."
 	@dups=$$(for f in tenants/_claims/*.yaml; do \
 	    [ -f "$$f" ] || continue; \
 	    t=$$(sed -nE 's/^  team: *"?([A-Za-z0-9-]+)"?.*/\1/p' "$$f" | head -1); \
@@ -779,6 +779,11 @@ validate: ## Static validation of tenant manifests (kubeconform + RBAC-name + st
 	    echo "team; a team's primary app is that claim's appName."; \
 	    echo "$$dups"; exit 1; fi; \
 	  echo "  OK — one CapstoneTenant claim per team+semester"
+	@echo "==> [6/6] dex board-client guard: every tenants/_boards/ entry must have its Dex redirect URI (D-186)..."
+	@# Dex has no wildcard redirect URIs, so a provisioned board whose callback is
+	@# missing from platform-services/dex/configmap.yaml deploys, goes Ready, serves
+	@# its landing page — and fails only when someone clicks "Sign in". Catch it here.
+	@python3 platform-services/dex/gen-board-clients.py --check
 	@echo "validate: PASS"
 
 # ---- reversible tenant on/off switch ---------------------------------------

@@ -1,0 +1,72 @@
+# Default-deny for THIS board's pod, plus exactly what it needs.
+#
+# ⚠ WHY EACH BOARD SHIPS ITS OWN, rather than relying on the namespace it shares
+# with the maintainers' board: platform-services/agile/netpol.yaml is scoped
+# `podSelector: {matchLabels: {app: agile}}` — it selects that one pod, not the
+# namespace. There is no cluster-wide default-deny on this platform, so a board
+# pod with no policy selecting it is UNFENCED, with full egress including the
+# apiserver and every admission webhook. Discovered by reading that file rather
+# than assuming a namespace-wide fence; do not delete this in a tidy-up.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "agile-board.name" . }}
+  labels:
+    {{- include "agile-board.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "agile-board.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # Traefik and the Cloudflare tunnel are the only front doors.
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: cloudflared }
+      ports:
+        - port: 8080
+    # Prometheus scrape.
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: monitoring }
+      ports:
+        - port: 8080
+  egress:
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+    # CNPG Postgres — the board's only durable state.
+    # ⚠ Half the path only: db-tier runs its own default-deny, so
+    # platform-services/db-tier/netpol.yaml must ALSO name this namespace on
+    # 5432. It already does (`agile`), which is one more reason team boards live
+    # in that namespace instead of one of their own. Without the far side the
+    # connection is blackholed and surfaces as a connect TIMEOUT, not "refused".
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: db-tier }
+      ports:
+        - port: 5432
+    # HTTPS out — the GitHub API, and Dex discovery/JWKS at
+    # id.capstone.uamishub.com, which resolves to a PUBLIC Cloudflare address and
+    # returns through the tunnel (verified from a live board pod: `getent hosts`
+    # returns 2606:4700:...). There is no in-cluster shortcut to Dex here — the
+    # coredns split-horizon rewrite is inert on Talos.
+    #
+    # ⚠ Do NOT collapse this to `- to: []`. An empty peer list matches EVERY
+    # destination, in-cluster included — handing the pod reach to the apiserver
+    # ClusterIP and every admission webhook on 443. The excepts below keep this an
+    # internet hole rather than a lateral-movement hole.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.244.0.0/16    # pod CIDR
+              - 10.96.0.0/12     # service CIDR
+              - 10.237.168.0/22  # node LAN
+              - 100.64.0.0/10    # tailnet
+      ports:
+        - { port: 443, protocol: TCP }

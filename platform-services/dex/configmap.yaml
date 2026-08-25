@@ -193,6 +193,33 @@ data:
         secretEnv: AGILE_BOARD_CLIENT_SECRET
         redirectURIs:
           - https://agile.uamishub.com/api/auth/callback
+          # ── PER-TEAM SPRINT BOARDS (D-186) ──────────────────────────────────
+          # Every team board provisioned by the wizard is ANOTHER redirect URI on
+          # THIS client, not a client of its own. One GitHub OAuth app, one Dex
+          # client, N boards — the same "one broker, N tools" argument this file
+          # makes for ArgoCD/Harbor/Backstage, carried one level further.
+          #
+          # WHY NOT A CLIENT PER TEAM: Dex has no wildcard redirect URIs, so both
+          # shapes cost an edit here per board. But a per-team client would ALSO
+          # need its own `<TEAM>_CLIENT_SECRET` env in deployment.yaml AND a
+          # re-seal of sealedsecret.yaml — and `make seal` needs live cluster
+          # credentials plus a full plaintext rebuild of every existing key, so
+          # onboarding would block on an operator with a kubeconfig. Twelve times.
+          # Sharing the client costs one generated line and no secret work at all.
+          #
+          # Holding this secret does not let anyone read a board: authorization
+          # codes only ever go to a URI in this list, every one of which is a
+          # platform-owned host, and each board independently requires
+          # `UA-MIS:<its own team>` on the groups claim.
+          #
+          # ⚠ GENERATED. Do not hand-edit — edit tenants/_boards/ and run
+          # platform-services/dex/gen-board-clients.py. `make validate` fails on
+          # drift, and .github/workflows/dex-board-clients.yaml opens the fix PR.
+          # Each URI must equal that board's APP_URL + /api/auth/callback exactly;
+          # both sides derive from the one team slug so they cannot disagree.
+          # ── BEGIN GENERATED team board redirect URIs (gen-board-clients.py) ──
+          # (no team boards provisioned -- add a file to tenants/_boards/)
+          # ── END GENERATED team board redirect URIs ──
 
     oauth2:
       # Skip the per-login "approve this app" screen — these are first-party
