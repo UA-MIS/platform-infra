@@ -42,4 +42,27 @@ serverTLSBootstrap: false
 # Talos nodes run swapless; we disabled swap in the common role.
 failSwapOn: true
 
+# ── Pod ceiling ─────────────────────────────────────────────────────────────
+# Default is 110; raised to 200 for the Debian workers (2026-08-25, owner-approved).
+#
+# WHY: a fixed pod count is a poor capacity proxy when the pods are small. At the
+# 110 ceiling capstone-w1 averaged ~0.15 CPU and ~145 MB per pod on a 16 vCPU /
+# 64 GB box — i.e. it hit its POD limit at roughly a quarter of its CPU and
+# memory, with the rest stranded.
+#
+# This ceiling is load-bearing for CI. ARC pins every pod of a job to the
+# runner's own node (the workflow pod via the hook's createPod, and each
+# `uses: docker://` step via createJob), so ONE concurrent job is up to THREE
+# pods on ONE node. Because those pods carry an explicit spec.nodeName they
+# bypass the scheduler, so a node at its ceiling REJECTS them — kubelet
+# `OutOfpods`, phase Failed — instead of queueing them Pending. The job then
+# hangs in `Initialize containers` until its lease expires (~10 min) and fails
+# with "Executing the custom container implementation failed". capstone-w1 hit
+# exactly that at 110/110 on 2026-08-25. See ADR-038.
+#
+# 200 fits the addressing: each node gets a /24 podCIDR (254 usable) and Cilium
+# runs `ipam: kubernetes`, so it allocates out of that same /24 — verified on
+# both workers; there is no separate Cilium pool to resize.
+maxPods: 200
+
 # Where the kubelet stores its rotating PKI.

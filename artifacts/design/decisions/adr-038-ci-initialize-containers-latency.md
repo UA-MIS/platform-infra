@@ -1,11 +1,19 @@
 # ADR-038 — CI `Initialize containers` latency: runner spread, and the externals-copy tax
 
-- **Status:** Partially accepted (spread implemented here; storage swap PROPOSED, awaiting owner go/no-go)
+- **Status:** Accepted (spread + maxPods implemented; storage swap APPROVED, not yet implemented)
 - **Date:** 2026-08-25
 - **Deciders:** platform owner (ccsmith33)
 - **Related:** #535 (ARC ResourceQuota/LimitRange), #372 (soft RAM-aware affinity), #374 (CI node taint), ADR-031 (Crossplane onboarding)
 
 ---
+
+> ### ⚠ #540 removed the CLIFF, not the TAX. Do not read it as a performance fix.
+> Spread stopped jobs **hanging and failing** at a node's pod ceiling. It did **not** make
+> `Initialize containers` faster. Verified on a real 5-job rerun after #540 merged:
+> `python 162s · migrations 189s · chart 181s · frontend 132s · task-schema 60s` — **worse**
+> than the ~107s baseline, because runners spread onto cold control-plane nodes. The ~47s
+> figure quoted elsewhere in this ADR is an **idle-node benchmark**, not a prediction for
+> concurrent load. **Only the storage swap (§3, §5) moves the tax.**
 
 ## 1. Context
 
@@ -106,8 +114,12 @@ described in §2b.
 
 ### Measured headroom (2026-08-25, allocatable 110/node)
 
-CI is fenced to `capstone.io/pool=build` — **w1 + w2 only**; n1–n3 carry neither `pool=build`
-nor the standard control-plane label, so that `nodeSelectorTerm` never matches.
+**CORRECTION (2026-08-25, verified live):** an earlier reading held that CI was fenced to
+`pool=build` (w1+w2) because n1–n3 supposedly lacked the standard control-plane label. That is
+**wrong** — `kubectl` confirms n1/n2/n3 all carry `node-role.kubernetes.io/control-plane`, so the
+second `nodeSelectorTerm` (`control-plane Exists`) **does** match and the candidate set is **all
+five nodes**. Headroom is therefore materially better than the w1+w2-only figures below imply.
+Those figures are retained as the *observed* state during the incident, not as a fence.
 
 | Node | Non-terminal pods | Headroom | Jobs at 3 pods/job |
 |---|---|---|---|
@@ -178,4 +190,5 @@ that interaction must be settled first. See §5.
 | Node imbalance (w1 103/110 vs w2 63/110) — THE root capacity issue, see §2c | Descheduler is effectively inert here: `thresholds.pods: 20` means n1–n3 (~25%) never qualify as under-utilized, `targetThresholds.pods: 50` means w2 (59%) is not a valid destination, `PodsWithPVC` protection exempts most tenant pods, and `maxNoOfPodsToEvictTotal: 5`/hour cannot correct a 41-pod skew. |
 | 34 Velero `kopia-maintain` pods | `keepLatestMaintenanceJobs: 1` is already minimal and deliberate (breadcrumb); the problem is that all 34 land on one node. Spread, not TTL, is the fix. |
 | `capstone.io/ci-build=true` preference | Matches **no node** — a live no-op. Either label the dedicated CI node or drop the weight-100 rule. |
-| `maxPods: 110` | w1/w2 are **Debian**, so this is kubelet config on those hosts, not Talos machine config. Verify provisioning before proposing. |
+| Control-plane placement | #540's spread treated all 5 nodes as equal domains and put runners on n1-n3 — against the owner's preference, and measurably slower. Fixed by dropping the control-plane toleration + `nodeTaintsPolicy: Honor`, which removes n1-n3 from spread **domains** while `PreferNoSchedule` keeps them **schedulable** as fallback. |
+| ~~`maxPods: 110`~~ **DONE** | Raised 110→200 on both Debian workers 2026-08-25. Durable in `ansible/roles/kubelet_join/templates/kubelet-config.yaml.j2` (Ansible-managed; a hand-edit would be reverted). Applied w2-first as canary, then w1: kubelet active with 0 restarts and zero error-priority log entries on both, nodes Ready, `/configz` + node capacity both report 200, w1 running pods 101→101 (none lost). Build pool now ~400 slots vs ~166 used. |

@@ -71,12 +71,25 @@ spec:
         # blocks in `Initialize containers` until the job lease expires (~10 min) and
         # the run fails with "Executing the custom container implementation failed".
         #
-        # Measured 2026-08-25 (allocatable pods = 110/node; CI is fenced to the
-        # capstone.io/pool=build nodes, i.e. w1+w2 only — n1..n3 carry neither
-        # pool=build nor the standard control-plane label, so that nodeSelectorTerm
-        # never matches):
+        # CORRECTION (2026-08-25): an earlier revision of this comment claimed n1-n3
+        # carry neither pool=build nor the standard control-plane label, so the
+        # second nodeSelectorTerm "never matches". That is WRONG. All three DO carry
+        # node-role.kubernetes.io/control-plane, so `operator: Exists` matches and
+        # the required candidate set is ALL FIVE nodes.
+        #   GOTCHA that produced the error: control-plane labels carry an EMPTY
+        #   VALUE, so a jsonpath/`-o` lookup prints "" and reads as absent. `Exists`
+        #   matches empty-valued labels. Check for the KEY, not a value.
+        # Routine CI is nevertheless kept off n1-n3 by the spread/toleration
+        # mechanism above, with those nodes retained as a genuine fallback.
+        #
+        # Measured 2026-08-25, BEFORE the maxPods raise (allocatable was 110/node):
         #     capstone-w1  103/110  → headroom  7 pods ≈ 2 jobs
         #     capstone-w2   63/110  → headroom 47 pods ≈ 15 jobs
+        # maxPods has since been raised 110 -> 200 on BOTH Debian workers (durable,
+        # in ansible/roles/kubelet_join/templates/kubelet-config.yaml.j2), giving the
+        # build pool ~400 slots against ~166 in use — roughly 234 free, i.e. ~78 CI
+        # triples. The pool-headroom arithmetic below is therefore no longer the
+        # binding constraint; re-derive before changing any maxRunners value.
         # and Velero's hourly kopia-maintenance burst (~34 pods, landing mostly on w1)
         # moves w1's baseline by up to ~23 pods with no CI involvement at all.
         #
@@ -130,10 +143,23 @@ spec:
             # SET that EXCLUDES the 8GiB Mac workers. Uses only labels that exist live →
             # applies on the next ArgoCD sync, no `kubectl label` step.
             tolerations:
-              - key: capstone.io/control-plane
-                operator: Equal
-                value: "true"
-                effect: PreferNoSchedule
+              # REMOVED 2026-08-25 — the capstone.io/control-plane PreferNoSchedule
+              # toleration. This absence is load-bearing, NOT an oversight: it is what
+              # keeps routine CI off the control plane while leaving n1-n3 available
+              # under genuine pressure.
+              #   - topologySpreadConstraints below sets `nodeTaintsPolicy: Honor`, which
+              #     counts a tainted node as a spread domain ONLY if the pod TOLERATES
+              #     that taint. Dropping this toleration removes n1-n3 from the spread
+              #     DOMAINS, so spread balances across the build pool (w1+w2) instead of
+              #     pulling runners onto the control plane.
+              #   - The taint is PreferNoSchedule (SOFT), so n1-n3 remain SCHEDULABLE
+              #     without the toleration — they just carry a scheduling penalty and
+              #     stay reachable via the weight-10 nodeAffinity preference. Fallback
+              #     preserved; routine placement corrected.
+              # WHY: with the toleration present, #540's spread treated all 5 nodes as
+              # equal domains and placed 1 of 5 ida-llm runners on EACH control-plane
+              # node. That violated the owner's stated preference AND measured slower
+              # (cold image caches / different disks on n1-n3). See ADR-038.
               # DEDICATE laptop-01 to CI: tolerate `capstone.io/dedicated=ci-build:NoSchedule`
               # so this per-team RUNNER pod can land on the CI-dedicated node. Mirrors
               # per-team/hook-template.template.yaml; complements #372 affinity.
@@ -208,6 +234,10 @@ spec:
               - maxSkew: 2
                 topologyKey: kubernetes.io/hostname
                 whenUnsatisfiable: ScheduleAnyway
+                # Honor => a tainted node counts as a spread domain only if this pod
+                # tolerates its taint. With the control-plane toleration dropped above,
+                # this confines spread to the pool=build nodes (w1+w2).
+                nodeTaintsPolicy: Honor
                 labelSelector:
                   matchLabels:
                     app.kubernetes.io/part-of: gha-runner-scale-set
