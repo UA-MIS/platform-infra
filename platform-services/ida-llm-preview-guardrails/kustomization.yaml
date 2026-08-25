@@ -1,0 +1,48 @@
+# ida-llm PREVIEW GUARDRAILS — the platform half of a per-PR preview environment.
+#
+# ⚠ THIS DIRECTORY IS *NOT* RENDERED BY THE platform-services DIRECTORY GENERATOR.
+# It is excluded there (see applicationsets/platform-services-appset.yaml) and is
+# instead rendered once PER OPEN PR by
+# applicationsets/ida-llm-preview-guardrails.yaml, which sets
+# `kustomize.namespace: ida-llm-pr-<n>`. Every manifest here is therefore written
+# WITHOUT a namespace — the ApplicationSet supplies it. Rendering this directory
+# standalone would put the fence in the wrong place, which is exactly why the
+# exclude exists.
+#
+# ── WHY A SEPARATE, PLATFORM-PROJECT APPLICATION ────────────────────────────
+# This is blocker B1 from tenants/_template/applicationset-preview.yaml
+# ("UNTIL B1 LANDS, PREVIEWS ARE UNFENCED — do not enable"), implemented.
+#
+# A preview namespace is created by ArgoCD (`CreateNamespace=true`), NOT by the
+# CapstoneTenant Composition — whose per-env bundle ranges over dev|staging|prod
+# only. So a preview namespace was born with NO quota, NO LimitRange, NO
+# NetworkPolicy and NO image-pull credential: it had MORE network reach than
+# prod, while being the one environment that runs UNTRUSTED PULL-REQUEST CODE.
+#
+# The tenant's own Application cannot fix that: its AppProject's
+# namespaceResourceWhitelist excludes ResourceQuota, LimitRange, NetworkPolicy
+# and RBAC, and its clusterResourceWhitelist is empty. That exclusion is correct
+# — a tenant that can write its own quota and netpol has no fence at all. So the
+# fence MUST come from a platform-project Application, which is this one.
+#
+# ── AND WHY THE SECRETS LIVE HERE TOO ───────────────────────────────────────
+# The ExternalSecrets below reference the CLUSTER-SCOPED `vault-backend` store,
+# which can read `secret/data/tenants/*` — every tenant's subtree. That is
+# deliberately a PLATFORM-OWNED capability: these objects are rendered from
+# platform-infra by a platform-project Application, so the tenant cannot change
+# which Vault path they point at. The tenant's own chart never references
+# `vault-backend`.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - fence.yaml
+  - secrets.yaml
+  - preview-db.yaml
+
+labels:
+  - pairs:
+      platform.capstone/team: ida-llm
+      platform.capstone/env: preview
+      platform.capstone/component: tenant
+    includeSelectors: false

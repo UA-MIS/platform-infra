@@ -42,38 +42,52 @@ spec:
   # XRD field is only the default the Composition carries.
   port: 3000
 
-  # ── PREVIEW: OFF, and this is NOT a preference. ────────────────────────────
-  # Previews were requested for this tenant. They cannot be turned on today, and
-  # turning them on would not produce working previews — it would produce broken
-  # AND unfenced ones. Four independent blockers, each verified against
-  # origin/main rather than assumed:
+  # ── PREVIEW: ON. Every blocker below was closed first, not waived. ────────
+  # Turning this flag on used to produce previews that were broken AND unfenced.
+  # The four blockers named in tenants/_template/applicationset-preview.yaml
+  # ("UNTIL B1 LANDS, PREVIEWS ARE UNFENCED — do not enable") are now addressed:
   #
-  #   1. NO FENCE. The Composition's per-env bundle (quota / LimitRange / three
-  #      NetworkPolicies / RBAC / eso-tenant SA / vault-ca ConfigMap /
-  #      SecretStore / harbor-pull ES) is `range $envs` over dev|staging|prod
-  #      only. A `<team>-pr-<n>` namespace is ArgoCD-created
-  #      (CreateNamespace=true) and gets NONE of it — including the netpol, so a
-  #      preview would have MORE network reach than prod.
-  #   2. VAULT AUTH CANNOT RESOLVE. AuthBackendRole.boundServiceAccountNamespaces
-  #      is an exact list — the three env namespaces plus the LITERAL
-  #      `ida-llm-preview`. It is not a glob, so `ida-llm-pr-7`'s eso-tenant SA
-  #      gets a 403 and every ExternalSecret in the preview fails.
-  #   3. IMAGE PULLS CANNOT RESOLVE. The Harbor project is `public: false` and
-  #      the composition's own comment says harbor-pull is "intentionally NOT
-  #      covered" for preview. Every preview pod ImagePullBackOffs.
-  #   4. NEVER PROVEN, AND SELF-DECLARED UNSAFE.
-  #      tenants/_template/applicationset-preview.yaml still carries
-  #      "⚠⚠⚠ DRAFT — DO NOT MERGE WITHOUT SECURITY REVIEW" with four open
-  #      blockers B1–B4, one of which reads "UNTIL B1 LANDS, PREVIEWS ARE
-  #      UNFENCED — do not enable". No tenant has ever run one.
+  #   B1  NO FENCE. A preview namespace is ArgoCD-created, so the Composition's
+  #       per-env bundle (which ranges over dev|staging|prod) never gave it a
+  #       quota, LimitRange or NetworkPolicy — it had MORE network reach than
+  #       prod while running untrusted PR code. CLOSED by
+  #       applicationsets/ida-llm-preview-guardrails.yaml: a PLATFORM-project
+  #       ApplicationSet on the same pullRequest generator and the same `preview`
+  #       label gate, rendering the fence into ida-llm-pr-<n>. It must be a
+  #       platform app — a tenant that can write its own quota and netpol has no
+  #       fence at all.
   #
-  # The app repo nevertheless SHIPS a complete .devops/chart/overlays/preview/
-  # and PR-preview CI legs, so this is a one-field flip the day those close —
-  # no app-repo change will be needed. And the requirement that motivated the
-  # ask ("no PR may burn cloud credits or hit campus hardware") is already met
-  # without previews: the mock model endpoint is the DEFAULT in CI, not a
-  # preview-only special case.
-  previewEnabled: false
+  #   B2  VAULT AUTH. The k8s-auth role's bound_service_account_namespaces is an
+  #       exact list (the three envs + the literal `ida-llm-preview`), not a
+  #       glob, and provider-vault v0.1.0 exposes no namespace-SELECTOR field —
+  #       verified against the live CRD, not assumed. Binding ["*"] would let any
+  #       namespace assume the tenant role, which is strictly worse. CLOSED by
+  #       not needing it: preview secrets come from the platform-owned
+  #       `vault-backend` ClusterSecretStore, rendered by the guardrails app so
+  #       the tenant cannot repoint the path.
+  #
+  #   B3  IMAGE PULLS. harbor-pull is explicitly not rendered for preview, so
+  #       every pod ImagePullBackOff'd against the private Harbor project. CLOSED
+  #       by the guardrails app materialising it from the same dev robot token.
+  #
+  #   B4  STATIC pr-1 COLLISION. Only ever affected the OLD blueprint path
+  #       (tenants/_template/namespaces/preview.yaml). This tenant was created
+  #       from the CapstoneTenant claim, which renders no static pr-1 namespace —
+  #       confirmed by reading the Composition. Not applicable here.
+  #
+  # AND THE THING THAT MAKES A PREVIEW SAFE TO RUN AT ALL: it never touches the
+  # team's data or their money. The fence grants NO egress to the db-tier, so a
+  # preview gets a THROWAWAY in-namespace Postgres instead of the shared tenant
+  # database — one bad migration in a PR cannot drop the team's dev tables. Its
+  # provider keys come from a SEPARATE Vault path holding mock values only, and
+  # the overlay points the harness at the in-cluster mock model endpoint, so a
+  # pull request cannot spend cloud credits or reach campus hardware.
+  #
+  # Lifecycle is unchanged: a preview exists IFF its PR carries the `preview`
+  # label. CI re-adds it on every PR build; the cohort-gc preview-ttl CronJob
+  # removes it at 12h, which drops the element from BOTH generators so the app
+  # and its fence are pruned together.
+  previewEnabled: true
 
   # Default (false). Dev keeps the platform's non-prod SSO forwardAuth gate.
   # Unlike crimson-copies there is no showcase-metrics argument for dropping it

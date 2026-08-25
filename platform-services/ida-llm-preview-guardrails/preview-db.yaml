@@ -1,0 +1,115 @@
+# A THROWAWAY Postgres, one per preview namespace.
+#
+# ⚠ THIS IS THE POINT OF THE WHOLE DESIGN. Without it a preview would have to
+# use the shared tenant database, and a preview runs UNTRUSTED PULL-REQUEST
+# CODE — one bad migration in a PR and the team's dev data is gone. The fence in
+# fence.yaml deliberately omits any egress rule to the db-tier, so this is not
+# merely the preferred path, it is the only reachable one.
+#
+# emptyDir, not a PVC: a preview lives at most 12 hours (the preview-ttl CronJob
+# removes the `preview` label and the App is pruned), nothing in it is worth
+# keeping, and a PVC per open PR would consume the storage quota and leave
+# orphaned volumes behind on teardown.
+#
+# Migrations: the tenant's own `api` Deployment runs `alembic upgrade head` in an
+# initContainer against whatever DATABASE_URL it is given, so a preview gets the
+# PR's schema applied to an empty database automatically — which is exactly the
+# thing a reviewer wants to see work.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ida-llm-preview-db
+  labels:
+    app.kubernetes.io/name: ida-llm
+    app.kubernetes.io/component: preview-db
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ida-llm
+    app.kubernetes.io/component: preview-db
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ida-llm-preview-db
+  labels:
+    app.kubernetes.io/name: ida-llm
+    app.kubernetes.io/component: preview-db
+  annotations:
+    # The credentials arrive from ESO; without a reload the server would keep the
+    # unresolved env for the life of the container while the app tried to connect
+    # with the real ones.
+    secret.reloader.stakater.com/reload: "ida-llm-db"
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ida-llm
+      app.kubernetes.io/component: preview-db
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ida-llm
+        app.kubernetes.io/component: preview-db
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70          # the `postgres` user in the alpine image
+        runAsGroup: 70
+        fsGroup: 70
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          # Through the Harbor pull-through cache, and PINNED to the same major
+          # the tenant DB tier runs (PG17) so a preview exercises the dialect
+          # production actually uses.
+          image: harbor.capstone.uamishub.com/dockerhub-proxy/library/postgres:17-alpine
+          ports:
+            - name: postgres
+              containerPort: 5432
+          envFrom:
+            # POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB come from the SAME
+            # Secret that builds DATABASE_URL, so server and client cannot drift.
+            - secretRef:
+                name: ida-llm-db
+          env:
+            # The image refuses to initialise on a non-empty or non-owned mount
+            # unless PGDATA is a SUBDIRECTORY of the volume.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            requests: { cpu: "50m", memory: "128Mi" }
+            limits: { cpu: "500m", memory: "512Mi" }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: run
+              mountPath: /var/run/postgresql
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: run
+          emptyDir: {}

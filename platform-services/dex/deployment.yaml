@@ -98,6 +98,23 @@ spec:
                 secretKeyRef:
                   name: dex-github
                   key: grafana-client-secret
+            # IDA Agile Board (ida-llm tenant) static-client secret. Sealed with a
+            # REAL value in the same change that added the staticClient, so this is
+            # required from the start -- no `optional:` placeholder period, same as
+            # GRAFANA_CLIENT_SECRET above.
+            #
+            # ⚠ THE SAME VALUE EXISTS IN TWO PLACES BY NECESSITY: here (Dex's side of
+            # the client) and in Vault at tenants/ida-llm/prod/agile OIDC_CLIENT_SECRET
+            # (the app's side, delivered by ESO). They are different trust domains --
+            # the tenant must not be able to read the platform's SealedSecret, and the
+            # platform does not write into the tenant's Vault subtree -- so a single
+            # source is not available. Rotate BOTH TOGETHER; if they drift, sign-in
+            # fails at the token exchange with an opaque OIDC error.
+            - name: IDA_AGILE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: dex-github
+                  key: ida-agile-client-secret
           volumeMounts:
             - name: config
               mountPath: /etc/dex

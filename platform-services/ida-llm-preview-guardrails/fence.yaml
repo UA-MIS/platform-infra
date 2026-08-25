@@ -1,0 +1,131 @@
+# The per-PR fence: quota, per-container defaults, and network policy.
+# Namespace is injected by the ApplicationSet (kustomize.namespace).
+#
+# ⚠ SIZED SMALLER THAN dev ON PURPOSE. A preview is a review aid, not an
+# environment: one replica of everything, a throwaway database, no sweeps. N open
+# PRs each get one of these, so the ceiling here is multiplied by the number of
+# reviewers, not by anything the app needs.
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: preview-compute
+spec:
+  hard:
+    requests.cpu: "2"
+    requests.memory: 2Gi
+    limits.cpu: "4"
+    limits.memory: 4Gi
+    # Counted, not guessed: frontend + api + runner + mock-model + object-store
+    # (agile is scaled to 0 here) = 5, plus redis = 6, plus the throwaway Postgres
+    # = 7 steady-state. Four of those are RollingUpdate Deployments and maxSurge
+    # 25% rounds UP to 1 at any replica count, so a re-sync that rewrites all the
+    # image tags at once needs 4 more = 11. The three nightly sweeps are SUSPENDED
+    # in the preview overlay, so no CronJob pods are counted.
+    #
+    # 16, not 12: the same exact-fit-ceiling mistake this platform has now made
+    # four times (D-175 cpu, D-176 memory, #526 pods, D-187 pods). Quota rejection
+    # does not fail loudly — the Deployment controller just retries — so a preview
+    # at its ceiling reads as "the preview is slow", not "the preview is capped".
+    pods: "16"
+    services: "10"
+    requests.storage: 3Gi
+    persistentvolumeclaims: "3"
+---
+# Without this, a pod with no resources block is admitted with NO request, the
+# quota cannot account for it, and one runaway preview starves the node.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: preview-limits
+spec:
+  limits:
+    - type: Container
+      default: { cpu: "500m", memory: 512Mi }
+      defaultRequest: { cpu: "50m", memory: 128Mi }
+      max: { cpu: "1", memory: 1Gi }
+---
+# Default deny. Everything below is an additive allow on top of this.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-traefik-and-intra-ns
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    # Traefik lives in kube-system on this cluster.
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+    - from:
+        - podSelector: {}
+    # Prometheus scrape. ⚠ `port: http` matches the CONTAINER port NAME, which is
+    # why every scraped port in the tenant chart is named `http` — a port named
+    # `metrics` is silently dropped and shows up as a scrape timeout, not a
+    # refused connection.
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: monitoring }
+      ports:
+        - port: http
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-dns-and-intra-ns
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - to:
+        - podSelector: {}
+---
+# ⚠ NOTE WHAT IS *NOT* HERE: there is NO egress rule to the db-tier.
+#
+# The three real environments get one, because they use the shared tenant
+# Postgres. A preview must NOT: it runs untrusted pull-request code, and pointing
+# that at the same database the team's dev environment uses means a PR can drop
+# their tables. Previews get a THROWAWAY in-namespace Postgres instead
+# (preview-db.yaml), reached over the intra-namespace allow above.
+#
+# External HTTPS is still granted so the app can reach package registries and so
+# the mock-model path behaves like the real one. Cloud LLM APIs are reachable in
+# principle — but the preview overlay points MOCK_MODEL_BASE_URL at the in-cluster
+# stub and seeds only mock provider keys, so a PR cannot spend real credits.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-external-https
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.244.0.0/16    # pods — ENFORCED (endpoint identity)
+              - 10.96.0.0/12     # services — ENFORCED
+              - 10.237.168.0/22  # node LAN — INERT today (Cilium CIDR caveat)
+              - 100.64.0.0/10    # tailnet — INERT today
+      ports:
+        - protocol: TCP
+          port: 443

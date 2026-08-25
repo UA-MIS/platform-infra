@@ -1,0 +1,116 @@
+# ida-llm tenant alerts.
+#
+# ⚠ SCOPE: only what the GENERIC rules cannot express. platform-failure-modes
+# (alerts.yaml) already covers this tenant automatically — its tenant rules match
+# on the namespace REGEX `.*-(dev|staging|prod)`, which `ida-llm-*` satisfies, so
+# CrashLoopBackOff / ImagePullBackOff / Degraded-Application / missing-DB-secret
+# are ALREADY ALERTING for ida-llm with no entry anywhere. Re-stating them here
+# would double-page on every incident.
+#
+# What is left is the app-shaped failure this tenant has and no generic rule can
+# see: the benchmark WORKERS. They have no Ingress, no Service traffic and no
+# HTTP surface, so "every worker is dead" produces no signal at the platform
+# layer at all — the queue just silently stops draining, which nobody notices
+# until results are missing the next morning. That is what the first two rules
+# below are for, and it is why the runner now exports metrics at all.
+#
+# ROUTING: Alertmanager routes purely on the `severity` label (critical|warning
+# -> platform-oncall, an ntfy webhook). No tenant-specific matcher exists or is
+# needed. `impact: student-facing` mirrors the convention in alerts.yaml.
+#
+# PICKUP: the live Prometheus has ruleSelector: {} and ruleNamespaceSelector: {}
+# (verified, not assumed), so this is discovered anywhere. It lives in
+# `monitoring` by convention and carries the `release` label for the same reason
+# — belt-and-suspenders if those selectors are ever tightened.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: ida-llm-tenant
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    platform.capstone/team: ida-llm
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: ida-llm-harness
+      rules:
+        # THE ONE THAT MATTERS. Absent metrics, not a zero value: if every runner
+        # pod is gone the series stops being reported entirely, so `== 0` would
+        # never fire. `absent_over_time` is what catches the total-loss case, and
+        # the `or` arm catches the "processes alive but all reporting 0" case
+        # (clean shutdown that never came back).
+        - alert: IdaLlmNoBenchmarkWorkers
+          expr: >-
+            absent_over_time(ida_llm_runner_up{namespace="ida-llm-prod"}[10m])
+            or sum(ida_llm_runner_up{namespace="ida-llm-prod"}) == 0
+          for: 10m
+          labels:
+            severity: critical
+            impact: student-facing
+          annotations:
+            summary: "ida-llm: no benchmark workers are running in prod"
+            description: >-
+              Every `runner` pod is gone or reporting down for 10m. The queue is
+              not draining and scheduled sweeps will produce no results. This
+              produces NO other signal — the workers have no Ingress and no
+              Service traffic — so this alert is the only way anyone finds out.
+
+        # A queue that grows without workers consuming it. Deliberately a LONG
+        # `for`: benchmark load is bursty by nature and a deep queue is normal
+        # for minutes at a time. 30m of monotonic backlog is not.
+        - alert: IdaLlmQueueBacklogGrowing
+          expr: >-
+            max(ida_llm_runner_queue_depth{namespace="ida-llm-prod"}) > 50
+            and deriv(max(ida_llm_runner_queue_depth{namespace="ida-llm-prod"})[30m:]) > 0
+          for: 30m
+          labels:
+            severity: warning
+            impact: student-facing
+          annotations:
+            summary: "ida-llm: benchmark queue is deep and still growing"
+            description: >-
+              Queue depth above 50 and rising for 30m — workers are running but
+              not keeping up. The HPA tops out at 4 replicas; if this is
+              sustained, that ceiling (or the per-job cost) is the thing to look
+              at, not the workers.
+
+    - name: ida-llm-app
+      rules:
+        # Traefik-level, so it covers the frontend and the sprint board without
+        # either needing to export anything. Scoped to prod: dev is where people
+        # deliberately break things.
+        - alert: IdaLlmHigh5xxRate
+          expr: >-
+            (sum(rate(traefik_service_requests_total{exported_service=~"ida-llm-prod-ida-llm-.*", code=~"5.."}[5m]))
+             / sum(rate(traefik_service_requests_total{exported_service=~"ida-llm-prod-ida-llm-.*"}[5m])) > 0.05)
+          for: 10m
+          labels:
+            severity: warning
+            impact: student-facing
+          annotations:
+            summary: "ida-llm: over 5% of prod requests are returning 5xx"
+            description: >-
+              Sustained server errors at the edge for 10m. Note the metric label
+              is `exported_service`, not `service` — Prometheus renames Traefik's
+              own label on collision.
+
+        # Catches the case a Deployment is nominally "there" but has been running
+        # under-replicated long enough to have lost its redundancy. Distinct from
+        # the generic CrashLoopBackOff rule: a pod can be Pending on quota, or
+        # unschedulable, without ever entering a waiting REASON that rule matches.
+        - alert: IdaLlmDeploymentUnderReplicated
+          expr: >-
+            kube_deployment_status_replicas_available{namespace=~"ida-llm-(staging|prod)"}
+            < kube_deployment_spec_replicas{namespace=~"ida-llm-(staging|prod)"}
+          for: 30m
+          labels:
+            severity: warning
+            impact: student-facing
+          annotations:
+            summary: "ida-llm: {{ $labels.deployment }} has been under-replicated for 30m"
+            description: >-
+              Fewer available replicas than desired in {{ $labels.namespace }}.
+              If this is the `runner`, check the HPA and the namespace pod quota
+              before assuming the app is at fault — quota rejection does not
+              crash-loop, it just quietly never schedules.
