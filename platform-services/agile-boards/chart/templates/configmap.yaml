@@ -1,0 +1,54 @@
+# Non-secret per-board config. Everything here is derived from the team slug or
+# copied from tenants/_boards/<team>.yaml — nothing is hand-set per board.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "agile-board.name" . }}-config
+  labels:
+    {{- include "agile-board.labels" . | nindent 4 }}
+data:
+  NODE_ENV: "production"
+
+  # ── Identity: WHO this board is for ────────────────────────────────────────
+  # Authorization is membership of this GitHub Team. The Dex connector sets
+  # `teamNameField: slug` and, with `orgs:` set, emits ONLY `<org>:<team-slug>`
+  # groups (never the bare org — SEC-007), so REQUIRED_GROUP below is exactly
+  # the group Dex will present. It is written explicitly rather than left to the
+  # app's default so that the authorization boundary is visible in `kubectl get
+  # cm` without knowing the app's defaulting rules.
+  GITHUB_ORG: {{ .Values.github.org | quote }}
+  GITHUB_TEAM: {{ include "agile-board.team" . | quote }}
+  REQUIRED_GROUP: {{ printf "%s:%s" .Values.github.org (include "agile-board.team" .) | quote }}
+  GITHUB_REPOS: {{ include "agile-board.repos" . | quote }}
+
+  # ── Public identity ────────────────────────────────────────────────────────
+  # APP_URL builds the OAuth callback. It MUST equal the Ingress host and the
+  # Dex redirectURI; all three come from one helper (chart/templates/_helpers.tpl).
+  APP_URL: {{ include "agile-board.appUrl" . | quote }}
+
+  # ── Branding ───────────────────────────────────────────────────────────────
+  BOARD_TITLE: {{ include "agile-board.title" . | quote }}
+  BOARD_ACCENT: {{ .Values.accent | quote }}
+
+  # ── Web sign-in ────────────────────────────────────────────────────────────
+  OIDC_ISSUER: {{ .Values.oidc.issuer | quote }}
+  OIDC_CLIENT_ID: {{ .Values.oidc.clientId | quote }}
+
+  # ── Storage isolation ──────────────────────────────────────────────────────
+  # Every board shares ONE Postgres database on the existing capstone-tenant-pg
+  # cluster and is separated by SCHEMA — the app's own sanctioned multi-instance
+  # option (apps/agile README, "Deploying another instance"). Migrations run
+  # in-process at startup and create this schema; no initContainer, no per-team
+  # provisioning step, and therefore nothing per-team that can fail at 2am.
+  #
+  # KNOW THE TRADE-OFF: one database means one Postgres ROLE, so the boundary
+  # between two teams' boards is the application's schema scoping, not a
+  # database grant. That is proportionate here — every board runs the SAME
+  # platform-built image from the same registry, students never get the DSN, and
+  # the data is sprint items rather than credentials. Tightening it to a role per
+  # team is a provider-sql Role+Grant per board; deliberately NOT taken, because
+  # provider-sql rotation/finalizer wedges are a documented teardown hazard and
+  # this is the golden path. See ../README.md "Isolation".
+  AGILE_DB_SCHEMA: {{ include "agile-board.team" . | quote }}
+  # Belt-and-braces: every user-visible row is additionally scoped by instance key.
+  BOARD_INSTANCE: {{ printf "%s/%s" .Values.github.org (include "agile-board.team" .) | quote }}

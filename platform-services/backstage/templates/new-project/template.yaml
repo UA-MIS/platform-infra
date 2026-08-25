@@ -144,6 +144,23 @@ spec:
             Security-gated and off by default — leave unchecked for the standard
             merge -> dev / tag -> staging / manual-gate -> prod golden path.
           default: false
+        # Team sprint board (D-186). ON by default — this is the one wizard toggle that
+        # is opt-OUT rather than opt-in, because a capstone team without a plan of record
+        # is the common failure, not the rare one. Unticking it changes NOTHING else about
+        # the project: the board is provisioned by a SEPARATE file in a SEPARATE directory
+        # (tenants/_boards/<team>.yaml), consumed by a SEPARATE ApplicationSet, into a
+        # SEPARATE platform namespace. It does not touch the CapstoneTenant claim, the
+        # Composition, the team's namespaces, or any other step of this template — so a
+        # project provisioned WITHOUT a board follows byte-for-byte the path it follows today.
+        agileBoard:
+          title: Sprint board for your team
+          type: boolean
+          description: >-
+            Give your TEAM a sprint/story board at https://<team-slug>-agile.capstone.uamishub.com —
+            work items, a kanban board, sprints, branch-on-start and PR linking, signed in with
+            your UA-MIS GitHub account. One board per team (not per project): if your team
+            already has one, this reuses it rather than making a second.
+          default: true
 
     # ----------------------------------------------------------------------------------
     # What are you building? The projectType choice REVEALS the relevant follow-up fields
@@ -781,6 +798,52 @@ spec:
         sourcePath: ./claim/${{ steps['emit-claim'].output.claimPath }}
         commitMessage: "onboard tenant (zero-touch): ${{ parameters.team }}-${{ parameters.appName }} (Capstone ${{ parameters.season }} ${{ parameters.year }})"
 
+    # 8) TEAM SPRINT BOARD (D-186) — OPTIONAL, and skipped entirely when unticked.
+    #
+    #    Lands ONE small file, tenants/_boards/<team>.yaml, on platform-infra main.
+    #    applicationsets/agile-boards-appset.yaml (a git-files generator over that
+    #    directory) turns it into one ArgoCD Application rendering the SHARED
+    #    agile-board image with this team's environment. No per-team build, no
+    #    per-team code, no per-team secret.
+    #
+    #    KEYED ON THE TEAM, NOT THE PROJECT. The filename IS the team slug, so a team
+    #    cannot end up with two boards — the file either exists already or it does not.
+    #    (Step 1's preflight independently allows only one claim per team per semester,
+    #    so in practice the only way to reach this twice is a NEW semester, where
+    #    refreshing the board's tracked repo is the behaviour you want.)
+    #
+    #    WHY `content:` AND NOT `sourcePath:` — the file is four lines fully determined
+    #    by values already on this form, so rendering it inline keeps the whole feature
+    #    a TEMPLATE-ONLY change. Nothing in the scaffolder backend image changes, which
+    #    means the golden path everyone else uses cannot regress from a bad build.
+    #
+    #    allowedPathPrefix is narrowed to tenants/_boards/ so this step cannot write a
+    #    claim, a workflow, or anything else in platform-infra even if `team` were hostile.
+    - id: commit-board
+      name: Give the team a sprint board
+      if: ${{ parameters.agileBoard }}
+      action: capstone:commit-to-main
+      input:
+        repoUrl: github.com?owner=UA-MIS&repo=platform-infra
+        branch: main
+        path: tenants/_boards/${{ parameters.team }}.yaml
+        allowedPathPrefix: tenants/_boards/
+        content: |
+          # Sprint board for team `${{ parameters.team }}` — emitted by The Process
+          # scaffolder (new-project, D-186). ONE board per TEAM; the filename is the
+          # team slug, which is what makes that structural.
+          #
+          # Rendered by applicationsets/agile-boards-appset.yaml into the shared
+          # `agile-boards` namespace, from the ONE shared image. Host is derived:
+          # ${{ parameters.team }}-agile.capstone.uamishub.com
+          #
+          # De-provision = `git rm` this file.
+          team: ${{ parameters.team }}
+          repos: UA-MIS/${{ parameters.appName }}
+          title: ${{ parameters.team }} Board
+          accent: "#9e1b32"
+        commitMessage: "board: provision sprint board for team ${{ parameters.team }} (Capstone ${{ parameters.season }} ${{ parameters.year }})"
+
   output:
     links:
       - title: Repository
@@ -801,6 +864,10 @@ spec:
           4. Tag `vX.Y.Z` -> **staging** auto-deploys; **prod** waits on the manual gate.
           Your app will be at `https://${{ parameters.appName }}.capstone.uamishub.com`.
 
+          {% if parameters.agileBoard %}Your team's **sprint board** is at `https://${{ parameters.team }}-agile.capstone.uamishub.com`
+          — sign in with your UA-MIS GitHub account. It is your team's board, shared across every
+          project your team owns, and it takes a couple of minutes to come up on first provision.
+          {% endif %}
           A **tenant claim** was committed directly to `UA-MIS/platform-infra` main (link
           above) — no PR, no merge. Everything provisions automatically from it: your team's
           namespaces, RBAC, Harbor project/robots, Vault policy, and (if you picked Auto

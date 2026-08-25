@@ -1,0 +1,108 @@
+# PER-TEAM sprint board ApplicationSet (D-186).
+#
+# A git FILES generator over `tenants/_boards/*.yaml` in THIS repo: one file per
+# team, one Application per file, rendering the shared chart at
+# platform-services/agile-boards/chart into the shared `agile-boards` namespace.
+#
+# ── WHY A FILE PER TEAM, AND NOT A FIELD ON THE CapstoneTenant CLAIM ─────────
+# The owner's requirement is "one board per TEAM, not per app — a team creating a
+# second project reuses the existing board". A claim is keyed `<team>-<app>`, so
+# expressing the board there would let two claims for one team both render
+# board resources under the same team-keyed names: two reconcile loops fighting
+# over one object every 30-60s. That is not hypothetical — it is the 2026-07-10
+# duplicate-claim incident (NetworkPolicy apply-fight -> Cilium CPU pin).
+#
+# A file whose NAME is the team slug cannot double-provision. "Reuse the existing
+# board" is not a guard somebody has to remember to write; it is `test -f`.
+#
+# ── IMAGE ────────────────────────────────────────────────────────────────────
+# ONE image serves every board (UA-MIS/agile-board -> harbor .../platform/agile-board).
+# The tag is pinned HERE, once, for all boards — never per team. A team's board
+# differs from another team's ONLY by environment variables. There is no per-team
+# copy of the code and no per-team build; that is the entire point of the
+# extraction, and it is what keeps a bug fix a single rebuild rather than twelve.
+#
+# ── ADVERSARIAL-RENDER SAFETY (the labs-students C-2 precedent) ───────────────
+# With `goTemplateOptions: missingkey=error`, a raw {{.team}} against a file that
+# lacks the key can abort the render for EVERY element, not just the bad one. So
+# every field below is hasKey-guarded and degrades to "" for that one board; the
+# chart's _helpers.tpl fail-guards then reject the empty value LOUDLY but only
+# inside that single Application.
+#
+# NOT guarded against: two files declaring the same `team` — impossible here,
+# because the team slug IS the filename.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: agile-boards
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - git:
+        repoURL: https://github.com/UA-MIS/platform-infra
+        revision: HEAD
+        files:
+          - path: "tenants/_boards/*.yaml"
+          # `_`-prefixed files are examples, not live boards — same convention as
+          # tenants/_claims/ (_example-acme-app.yaml) and the claims Application's
+          # own `exclude: '{_*.yaml,README.md}'`.
+          - path: "tenants/_boards/_*.yaml"
+            exclude: true
+  template:
+    metadata:
+      name: 'agile-board-{{ if hasKey . "team" }}{{ .team }}{{ end }}'
+      labels:
+        platform.capstone/component: platform
+        platform.capstone/team: '{{ if hasKey . "team" }}{{ .team }}{{ end }}'
+      annotations:
+        argocd.argoproj.io/sync-wave: "1"   # after the base namespace/secrets (wave 0)
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io
+    spec:
+      project: platform
+      source:
+        repoURL: https://github.com/UA-MIS/platform-infra
+        targetRevision: HEAD
+        path: platform-services/agile-boards/chart
+        helm:
+          valuesObject:
+            team: '{{ if hasKey . "team" }}{{ .team }}{{ end }}'
+            repos: '{{ if hasKey . "repos" }}{{ .repos }}{{ end }}'
+            title: '{{ if hasKey . "title" }}{{ .title }}{{ end }}'
+            accent: '{{ if hasKey . "accent" }}{{ .accent }}{{ else }}#9e1b32{{ end }}'
+            image:
+              # ── THE SHARED IMAGE TAG. Bump here; every board moves together. ──
+              # Immutable tag, never `latest` (Kyverno disallow-latest-tag is Enforce
+              # and this namespace is not excluded). The chart refuses `latest` too.
+              tag: "dfd66c8f5970a96cdbda01ab3aa43d99c68abc57"
+      destination:
+        server: https://kubernetes.default.svc
+        # EVERY board lands in this ONE platform namespace — never the team's own
+        # <team>-prod. That is the security boundary, not filing: the tenant
+        # AppProject whitelists `networking.k8s.io/Ingress` in a team's own
+        # namespaces, so a student could otherwise commit an Ingress claiming
+        # ANOTHER team's board host and collect its OAuth authorization code.
+        # Students have no RBAC here. It also keeps the shared Dex client secret
+        # and GitHub App private key out of a namespace whose occupants can
+        # schedule pods.
+        namespace: agile
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          # The namespace is owned by platform-svc-agile. If a board Application
+          # could create it too, N boards plus that Application would each claim
+          # ownership of one namespace — the SharedResourceWarning dual-owner race.
+          - CreateNamespace=false
+          - ServerSideApply=true
+        retry:
+          limit: 5
+          backoff: { duration: 10s, factor: 2, maxDuration: 5m }
+  # No `syncPolicy.preserveResourcesOnDeletion`: removing a team's board file
+  # SHOULD tear its board down. That is the de-provision contract, symmetric with
+  # `git rm` on a tenant claim.

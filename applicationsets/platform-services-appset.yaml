@@ -103,6 +103,17 @@ spec:
             exclude: true
           - path: platform-services/crossplane-mr-prune
             exclude: true
+          # EXCLUDE agile-boards/ (D-186, per-team sprint boards): like lab-hosting/
+          # above, this dir holds ONLY a shared Helm CHART, rendered once per team
+          # by applicationsets/agile-boards-appset.yaml (a git-files generator over
+          # tenants/_boards/). There is no root kustomization.yaml, so without this
+          # exclude the glob emits a `platform-svc-agile-boards` that renders the
+          # bare chart with its PLACEHOLDER-* defaults — the exact
+          # double-management failure every other exclude here documents. NOTE this
+          # is NOT platform-services/agile/, the maintainers' board, which IS a
+          # normal kustomize dir and stays generated.
+          - path: platform-services/agile-boards
+            exclude: true
           # NOTE (P5/M1, D-046): platform-services/backstage IS generated as
           # `platform-svc-backstage` (ns + the REAL sealed secrets: backstage-process-secrets
           # / backstage-postgresql / harbor-pull) — the prereqs the dedicated chart app

@@ -1,0 +1,102 @@
+{{- $name := include "agile-board.name" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "agile-board.labels" . | nindent 4 }}
+  annotations:
+    # Both Secrets are consumed via envFrom/secretKeyRef, and env is resolved ONLY
+    # at container start — so without Reloader a rotated shared credential leaves
+    # the pod running happily on the old value while reporting Ready. That exact
+    # failure (optional secretKeyRef + no Reloader = a pod silently running on
+    # stale/absent config while serving 200s) is a documented incident class here.
+    secret.reloader.stakater.com/reload: "{{ $name }}-shared,{{ $name }}-session"
+    configmap.reloader.stakater.com/reload: "{{ $name }}-config"
+spec:
+  # ONE replica, deliberately. The board holds a team's plan of record in Postgres
+  # and has no leader election; a second replica buys nothing (the DB is the state)
+  # and costs a rolling-update window where two versions run migrations at once.
+  replicas: 1
+  strategy:
+    # Recreate, not RollingUpdate: migrations run IN-PROCESS at startup, so a
+    # rolling update would briefly run old and new schema versions concurrently
+    # against one schema. A few seconds of downtime on a sprint board is cheaper
+    # than a half-migrated table.
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "agile-board.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "agile-board.labels" . | nindent 8 }}
+    spec:
+      {{- with .Values.image.pullSecret }}
+      imagePullSecrets:
+        - name: {{ . }}
+      {{- end }}
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: agile
+          image: "{{ .Values.image.repository }}:{{ include "agile-board.imageTag" . }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: HOSTNAME
+              value: "0.0.0.0"
+            # Per-board, generated in-cluster, never rotated under a live pod.
+            - name: SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $name }}-session
+                  key: SESSION_SECRET
+          envFrom:
+            # Non-secret per-board config (identity, host, branding, schema).
+            - configMapRef:
+                name: {{ $name }}-config
+            # SHARED platform credentials, identical for every board:
+            #   OIDC_CLIENT_SECRET            — the one Dex static client
+            #   GITHUB_APP_ID / _INSTALLATION_ID / _PRIVATE_KEY — the one GitHub App
+            #   DATABASE_URL                  — the shared boards database
+            # This is the whole reason the design scales: onboarding team #12 adds
+            # no secret material anywhere. `envFrom` (not named secretKeyRefs) so a
+            # key added to the Vault object flows through on the next refresh with
+            # no manifest edit — the slidedeck contract, reused.
+            - secretRef:
+                name: {{ $name }}-shared
+          # Probes are split BY DESIGN (app README): liveness must never touch the
+          # database or a DB blip becomes a restart storm; readiness is 200 only
+          # once migrations are done and Postgres is reachable.
+          livenessProbe:
+            httpGet: { path: /api/healthz, port: http }
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          readinessProbe:
+            httpGet: { path: /api/readyz, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 12
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

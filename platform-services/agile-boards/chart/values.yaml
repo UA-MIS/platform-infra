@@ -1,0 +1,48 @@
+# Per-board values. Supplied by applicationsets/agile-boards-appset.yaml from
+# tenants/_boards/<team>.yaml. The PLACEHOLDER defaults below are deliberate:
+# rendering the bare chart with no values must FAIL LOUDLY in _helpers.tpl
+# rather than quietly deploy a board for a team called "PLACEHOLDER".
+
+# REQUIRED. GitHub Team slug. Every derived name comes from this.
+team: "PLACEHOLDER-team"
+# REQUIRED. Comma-separated repo list the board tracks, e.g. "UA-MIS/swami".
+repos: "PLACEHOLDER-repos"
+# Optional branding.
+title: ""
+accent: "#9e1b32"
+
+# Public base domain. The board's host is <team>-agile.<domain> — a SINGLE
+# hyphenated label, which is what keeps it inside the existing Cloudflare
+# wildcard Public Hostname and the *.capstone.uamishub.com certificate. A dotted
+# two-level host would need a paid Advanced Cert and a new tunnel route (D-044).
+domain: "capstone.uamishub.com"
+
+github:
+  org: "UA-MIS"
+
+image:
+  # ONE image serves EVERY board — the same one the maintainers' board runs
+  # (platform-services/agile). Per-team difference is env, never a build.
+  repository: "harbor.capstone.uamishub.com/platform/agile-board"
+  tag: "PLACEHOLDER-tag"
+  pullPolicy: IfNotPresent
+  # Already present in the `agile` namespace, sealed by platform-services/agile
+  # (robot$platform+platform-pull). Reused rather than duplicated: kubeseal is
+  # namespace-strict, so a second copy would buy nothing and drift.
+  pullSecret: "harbor-pull"
+
+oidc:
+  issuer: "https://id.capstone.uamishub.com"
+  # ONE shared Dex static client for every board (see the ApplicationSet header
+  # and platform-services/dex/README.md for why this is one client and not N).
+  clientId: "agile-board"
+
+# Vault object holding the credentials EVERY board shares: the Dex client
+# secret, the GitHub App triple, and the boards DSN. Each board materializes its
+# own Secret from it (see templates/shared-secret.yaml) — same source, no shared
+# k8s object for N Applications to fight over.
+sharedVaultKey: "platform/agile-board"
+
+resources:
+  requests: { cpu: 50m, memory: 256Mi }
+  limits:   { cpu: 500m, memory: 512Mi }

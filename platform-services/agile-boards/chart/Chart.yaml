@@ -1,0 +1,6 @@
+apiVersion: v2
+name: agile-board
+description: One team's sprint board — the shared agile-board image with per-team config.
+type: application
+version: 1.0.0
+appVersion: "1.0.0"

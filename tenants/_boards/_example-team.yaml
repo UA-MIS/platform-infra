@@ -1,0 +1,8 @@
+# EXAMPLE — not a live board (leading `_` is excluded by the ApplicationSet,
+# mirroring tenants/_claims/_example-acme-app.yaml).
+#
+# Copy to `<team-slug>.yaml`. The FILENAME must equal `team`.
+team: acme
+repos: UA-MIS/acme-app
+title: ACME Board
+accent: "#9e1b32"

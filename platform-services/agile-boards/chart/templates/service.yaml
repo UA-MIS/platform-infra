@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "agile-board.name" . }}
+  labels:
+    {{- include "agile-board.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "agile-board.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
