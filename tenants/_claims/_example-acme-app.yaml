@@ -20,3 +20,4 @@ spec:
   port: 8080
   previewEnabled: false        # per-PR preview ApplicationSet (security-gated)
   domain: capstone.uamishub.com
+  maxRunners: 5                # per-tenant ARC scale-set concurrency ceiling (1-10, default 5)

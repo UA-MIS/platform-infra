@@ -150,6 +150,26 @@ spec:
                     `none`.
                   enum: [none, mysql, postgres]
                   default: none
+                maxRunners:
+                  type: integer
+                  description: >-
+                    Per-tenant ARC (actions-runner-controller) scale-set concurrency
+                    ceiling — how many CI runner pods this tenant's <team>-kaniko
+                    scale set may run at once (the Composition wires this straight
+                    into the gha-runner-scale-set Helm values,
+                    platform-services/crossplane/apis/composition.yaml). Default 5
+                    for new tenants; raise a tenant's own value in its claim only
+                    when that team's image build matrix genuinely needs more
+                    parallelism (crimson-copies and ida-llm pin 8 — a wide
+                    multi-image matrix, owner-approved 2026-08-25, #535). The
+                    cross-tenant AGGREGATE ceiling is the arc-runners ResourceQuota
+                    (platform-services/arc/resourcequota.yaml, pods 40 /
+                    requests.cpu 20 / requests.memory 50Gi) — this field only widens
+                    one tenant's own GHA-queue knob; jobs beyond the aggregate quota
+                    queue in GitHub Actions rather than spawning unplaceable pods.
+                  minimum: 1
+                  maximum: 10
+                  default: 5
             status:
               type: object
               properties:
