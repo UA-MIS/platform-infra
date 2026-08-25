@@ -12,6 +12,10 @@ kind: Kustomization
 resources:
   - namespace.yaml
   - externalsecrets.yaml
+  # Password for the `agile` CNPG role (platform-services/cnpg/cluster/roles.yaml).
+  # A SealedSecret rather than a Vault-backed ExternalSecret like its siblings
+  # above — see platform-services/agile/README.md "Why SealedSecret, not Vault".
+  - sealedsecret-agile.yaml
   - netpol.yaml
 
 labels:

@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: agile
+  namespace: agile
+  labels:
+    platform.capstone/component: platform
+spec:
+  type: ClusterIP
+  selector:
+    app: agile
+  ports:
+    - port: 80
+      targetPort: 8080

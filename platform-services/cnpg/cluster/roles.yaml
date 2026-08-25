@@ -126,3 +126,25 @@ spec:
   databaseRoleReclaimPolicy: retain
   passwordSecret:
     name: cnpg-grafana-app-credentials   # platform-services/db-tier/externalsecrets.yaml
+---
+# Owner role for the platform agile board's database (databases.yaml). The app
+# self-migrates on boot, which needs OWNER on that one database and nothing more
+# — no createdb, no createrole, not superuser (same least-privilege posture as
+# backstage/slides/grafana). Password comes from the SealedSecret-materialized
+# basic-auth Secret in platform-services/db-tier/sealedsecret-agile.yaml.
+apiVersion: postgresql.cnpg.io/v1
+kind: DatabaseRole
+metadata:
+  name: capstone-pg-agile
+  namespace: db-tier
+  labels:
+    platform.capstone/component: platform
+spec:
+  cluster:
+    name: capstone-pg
+  name: agile
+  login: true
+  superuser: false
+  databaseRoleReclaimPolicy: retain
+  passwordSecret:
+    name: cnpg-agile-app-credentials   # platform-services/db-tier/sealedsecret-agile.yaml

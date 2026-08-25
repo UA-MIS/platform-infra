@@ -1,0 +1,133 @@
+# UA-MIS Platform board — the maintainers' instance of the SHARED agile-board
+# image (github.com/UA-MIS/agile-board -> harbor .../platform/agile-board).
+#
+# Everything that makes this "the platform's board" rather than "IDA's board" is
+# in the env below. That is the whole architectural point: a second team's board
+# is a second Deployment with a second env block, never a second copy of the code.
+#
+# SECRETS come from `agile-env` (sealedsecret-env.yaml, same dir): OIDC_CLIENT_SECRET
+# (must equal the `agile-board-client-secret` key sealed into dex-github),
+# SESSION_SECRET, DATABASE_URL, GITHUB_WEBHOOK_SECRET, GITHUB_APP_PRIVATE_KEY.
+#
+# ⚠ Image tag is an immutable sha (Kyverno disallow-latest-tag is Enforce and ns
+# `agile` is NOT on its exclude list). There is no CI auto-bump into this repo —
+# main is branch-protected — so rolling a new build is a deliberate PR here.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agile
+  namespace: agile
+  labels:
+    platform.capstone/component: platform
+spec:
+  # One replica by design. The app is stateless (sessions are encrypted cookies,
+  # everything durable is in Postgres) so this is a capacity choice, not a
+  # correctness one — migrations take a Postgres advisory lock, so scaling up
+  # later is safe with no manifest change beyond this number.
+  replicas: 1
+  selector:
+    matchLabels: { app: agile }
+  template:
+    metadata:
+      labels:
+        app: agile
+        platform.capstone/component: platform
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: harbor-pull        # robot$platform+platform-pull (pull-only)
+      containers:
+        - name: agile
+          image: harbor.capstone.uamishub.com/platform/agile-board:dfd66c8f5970a96cdbda01ab3aa43d99c68abc57
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+            # The image writes nothing to disk: state is Postgres, uploads are
+            # object storage, migrations are read-only from the image. Verified
+            # upstream, so a read-only rootfs costs nothing and closes a class of
+            # container-escape footholds.
+            readOnlyRootFilesystem: true
+          ports:
+            - containerPort: 8080
+          env:
+            # ── Identity: WHO THIS BOARD IS FOR ──────────────────────────────
+            # Membership of UA-MIS:labmx IS the authorization rule. `labmx` is a
+            # SECRET GitHub team; that is fine — Dex reads it via /user/teams with
+            # read:org, which returns secret teams the member belongs to, so the
+            # groups claim still carries `UA-MIS:labmx` (verified before deploy).
+            - { name: GITHUB_ORG,  value: "UA-MIS" }
+            - { name: GITHUB_TEAM, value: "labmx" }
+            - { name: REQUIRED_GROUP, value: "UA-MIS:labmx" }
+            # Repos this board links branches and PRs against. ida-slides is
+            # deliberately EXCLUDED (owner's call — it is the IDA team's, not the
+            # platform maintainers').
+            - name: GITHUB_REPOS
+              value: "UA-MIS/platform-infra,UA-MIS/capstone-ops-secrets,UA-MIS/slidedeck"
+
+            # ── Public origin ────────────────────────────────────────────────
+            # ⚠ APP_URL builds the OIDC callback. It MUST agree exactly with the
+            # `agile-board` redirectURI in platform-services/dex/configmap.yaml —
+            # Dex has no wildcard redirects, and a mismatch fails sign-in at the
+            # redirect with an opaque OIDC error. Change the two together.
+            - { name: APP_URL, value: "https://agile.uamishub.com" }
+
+            # ── Dex OIDC ─────────────────────────────────────────────────────
+            - { name: OIDC_ISSUER,    value: "https://id.capstone.uamishub.com" }
+            - { name: OIDC_CLIENT_ID, value: "agile-board" }
+
+            # ── Branding ─────────────────────────────────────────────────────
+            - { name: BOARD_TITLE,  value: "UA-MIS Platform" }
+            - { name: BOARD_ACCENT, value: "#9e1b32" }
+
+            # ── The board's own GitHub identity ──────────────────────────────
+            # Under Dex the session carries NO GitHub token, so without an App
+            # credential the assignee picker, "Start work" branch creation and PR
+            # backlink comments all degrade. These point at the platform App that
+            # is already installed org-wide (the same one Backstage uses) — three
+            # copied values, not a new App registration. The private key is in
+            # `agile-env`; the app's normalizePrivateKey() accepts it PEM or
+            # base64-wrapped.
+            - { name: GITHUB_APP_ID,              value: "4097147" }
+            - { name: GITHUB_APP_INSTALLATION_ID, value: "141394298" }
+
+            # Own schema inside its own database — belt and braces against ever
+            # sharing a database with another board.
+            - { name: AGILE_DB_SCHEMA, value: "agile" }
+          envFrom:
+            - secretRef: { name: agile-env }
+          # Split probes on purpose: liveness NEVER touches Postgres, so a DB blip
+          # degrades the board instead of triggering a restart storm. Readiness is
+          # 200 only once migrations are done and Postgres is reachable.
+          livenessProbe:
+            httpGet: { path: /api/healthz, port: 8080 }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet: { path: /api/readyz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          # Startup probe buys migrations time on a cold/empty database without
+          # loosening the liveness threshold afterwards.
+          startupProbe:
+            httpGet: { path: /api/readyz, port: 8080 }
+            periodSeconds: 5
+            failureThreshold: 30
+          resources:
+            requests: { cpu: 50m, memory: 256Mi }
+            # Kyverno's require-limits wants BOTH cpu and memory (Audit mode, so
+            # this is policy-report hygiene rather than admission). The cpu limit
+            # is set generously — the only CPU-hungry moment is boot (migrations
+            # + first SSR render) and throttling that would eat the startupProbe
+            # budget.
+            limits:   { cpu: 1, memory: 768Mi }
+          volumeMounts:
+            # Next.js wants a writable tmp even though the app keeps no state.
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}

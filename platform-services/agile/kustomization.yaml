@@ -1,0 +1,29 @@
+# platform-services/agile — the UA-MIS Platform sprint board (agile.uamishub.com).
+#
+# ⚠ DIFFERENT SHAPE FROM slidedeck/ida-slides ON PURPOSE. Those are external-repo
+# Applications: this dir would hold only glue, and the workload manifests would
+# live in the app repo's `deploy/`. This one ships the workload HERE instead,
+# because the app repo (github.com/UA-MIS/agile-board) is a SHARED, multi-instance
+# image — one instance's deployment config has no business squatting in it, and a
+# future wizard-provisioned team board must be able to exist without touching the
+# code repo at all. Keeping instance config in platform-infra also avoids adding
+# a `sourceRepos` entry to bootstrap/platform-appproject.yaml, which is
+# INSTALL-OWNED and only reaches the cluster via `make bootstrap-reapply` — a
+# documented drift footgun this PR does not need to step in.
+#
+# Picked up automatically by the platform-services directory generator
+# (applicationsets/platform-services-appset.yaml) as Application `platform-svc-agile`.
+#
+# ⚠ resources: is an EXPLICIT list, not a glob. A file added here but not listed
+# renders nothing while the PR still merges clean.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - sealedsecret-pull.yaml
+  - sealedsecret-env.yaml
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+  - netpol.yaml

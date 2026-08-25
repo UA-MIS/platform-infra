@@ -1,0 +1,87 @@
+# Default-deny for the board pod, plus exactly what it needs.
+#
+# There is no cluster-wide default-deny on this platform; declaring both
+# policyTypes here is what makes everything not listed below denied for this pod.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agile
+  namespace: agile
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector:
+    matchLabels: { app: agile }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # Traefik (kube-system) and the Cloudflare tunnel are the only front doors.
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: cloudflared }
+      ports:
+        - port: 8080
+  egress:
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+    # CNPG Postgres — the board's only durable state.
+    # ⚠ This egress allow is only half the path: db-tier runs its own
+    # default-deny, so platform-services/db-tier/netpol.yaml ALSO needs a
+    # matching ingress rule naming this namespace. Without that side, the
+    # connection is blackholed and surfaces as a connect TIMEOUT (not
+    # "connection refused") — see the note there.
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: db-tier }
+      ports:
+        - port: 5432
+    # HTTPS out, in TWO rules on purpose.
+    #
+    # ⚠ Do NOT collapse these back into `- to: []`. An empty peer list matches
+    # EVERY destination, in-cluster included — that would hand this pod reach to
+    # the apiserver ClusterIP and to every admission webhook on 443
+    # (argocd-server, kyverno-svc, cnpg-webhook-service, external-secrets-webhook,
+    # ...). `automountServiceAccountToken: false` means it holds no token to use
+    # against the apiserver, but the lateral-probe surface is real and free to
+    # remove.
+    #
+    # (1) The EXTERNAL leg — api.github.com, for App installation tokens, branch
+    #     creation, PR backlink comments and webhook reconciliation. Same
+    #     ipBlock/except shape as platform-services/ida-llm-egress/netpol.yaml,
+    #     and it carries the SAME documented residual: Cilium does not match
+    #     CIDRs against in-cluster identities, so the pod and service excepts
+    #     enforce while the node-LAN and tailnet excepts are INERT until
+    #     `policyCIDRMatchMode: nodes` + Host Firewall land (SEC-019). Accepted
+    #     here on the same terms as ida-llm and crimson-copies.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.244.0.0/16      # pods
+              - 10.96.0.0/12       # services
+              - 10.237.168.0/22    # node LAN
+              - 100.64.0.0/10      # tailnet
+      ports:
+        - protocol: TCP
+          port: 443
+    # (2) The DEX leg — OIDC discovery and the code exchange against
+    #     id.capstone.uamishub.com, which terminates at Traefik in kube-system.
+    #     Separate from rule (1) because rule (1) deliberately excludes the
+    #     service CIDR.
+    #     ⚠ `coredns-custom` carries an `id-issuer.override` rewrite intended to
+    #     resolve that host to Traefik's ClusterIP, but the *.override import is
+    #     INERT on Talos — an in-cluster lookup returns the public Cloudflare
+    #     addresses today, so the Dex round trip currently egresses via rule (1).
+    #     This rule is what keeps sign-in working if that rewrite is ever
+    #     repaired; without it, fixing coredns-custom would silently break this
+    #     board's login.
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+      ports:
+        - protocol: TCP
+          port: 443

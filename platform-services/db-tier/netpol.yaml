@@ -153,6 +153,20 @@ spec:
       ports:
         - protocol: TCP
           port: 5432
+    # ns `agile` -> CNPG Postgres (5432) — the UA-MIS Platform sprint board
+    # (platform-services/agile). Platform namespaces do NOT carry
+    # `platform.capstone/team`, so `allow-ingress-tenant-namespaces` never matches
+    # them and each one needs an explicit by-name rule here, exactly like
+    # monitoring/backstage/slides above. Omitting it does not fail loudly: the
+    # connect is blackholed by Cilium and shows up as a TIMEOUT, not
+    # "connection refused".
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: agile
+      ports:
+        - protocol: TCP
+          port: 5432
     # ns `crossplane-system` -> MariaDB (3306) AND CNPG Postgres (5432) — the
     # Crossplane repoint cutover (docs/operator/in-cluster-db-tier-runbook.md §4c):
     # provider-sql runs its admin session against the in-cluster DB tier instead of

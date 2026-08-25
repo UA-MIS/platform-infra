@@ -115,6 +115,18 @@ spec:
                 secretKeyRef:
                   name: dex-github
                   key: ida-agile-client-secret
+            # UA-MIS Platform board (agile.uamishub.com). Unlike IDA_AGILE above,
+            # BOTH sides of this client secret are platform-owned — the app is a
+            # platform service, not a tenant — so there is no cross-trust-domain
+            # duplication: the same value is sealed once for Dex (this key) and
+            # once for the app (platform-services/agile/sealedsecret-env.yaml).
+            # Still rotate both together; drift fails sign-in at the token
+            # exchange with an opaque OIDC error.
+            - name: AGILE_BOARD_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: dex-github
+                  key: agile-board-client-secret
           volumeMounts:
             - name: config
               mountPath: /etc/dex

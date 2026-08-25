@@ -1,0 +1,40 @@
+# Public ingress for the maintainers' board.
+#
+# NO oauth2-proxy middleware, deliberately: this app does its OWN Dex OIDC
+# sign-in and gates on the `groups` claim (REQUIRED_GROUP=UA-MIS:labmx), exactly
+# like slidedeck does its own EntraID auth. Adding a forwardAuth middleware here
+# would double-authenticate and break the app's own callback.
+#
+# HOST NOTE — `agile.uamishub.com` is on the APEX zone, not `*.capstone.uamishub.com`.
+# Cloudflare already tunnels the apex host to Traefik: before this was written a
+# bare request to https://agile.uamishub.com/ returned Traefik's plain-text
+# `404 page not found` (NOT Cloudflare's HTML error page), which proves the
+# tunnel + Public Hostname already resolve here and only an Ingress was missing.
+# So there is NO Cloudflare change and NO new DNS record in this PR.
+#
+# TLS: no `secretName` and no cert-manager annotation, matching slides.uamishub.com.
+# Traefik serves the default TLSStore certificate (`wildcard-platform-tls`), and
+# Cloudflare terminates at the edge.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: agile
+  namespace: agile
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    traefik.ingress.kubernetes.io/router.priority: "10"
+spec:
+  rules:
+    - host: agile.uamishub.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: agile
+                port:
+                  number: 80
+  tls:
+    - hosts: [agile.uamishub.com]
