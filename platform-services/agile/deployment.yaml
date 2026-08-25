@@ -43,7 +43,7 @@ spec:
         - name: harbor-pull        # robot$platform+platform-pull (pull-only)
       containers:
         - name: agile
-          image: harbor.capstone.uamishub.com/platform/agile-board:dfd66c8f5970a96cdbda01ab3aa43d99c68abc57
+          image: harbor.capstone.uamishub.com/platform/agile-board:251f9f153866b60ecc3490f3c18c37a6c45c53d6
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: { drop: [ALL] }
