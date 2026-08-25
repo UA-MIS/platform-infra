@@ -218,7 +218,7 @@ data:
           # Each URI must equal that board's APP_URL + /api/auth/callback exactly;
           # both sides derive from the one team slug so they cannot disagree.
           # ── BEGIN GENERATED team board redirect URIs (gen-board-clients.py) ──
-          - https://lasttest-agile.capstone.uamishub.com/api/auth/callback
+          # (no team boards provisioned -- add a file to tenants/_boards/)
           # ── END GENERATED team board redirect URIs ──
 
     oauth2:
