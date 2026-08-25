@@ -105,10 +105,42 @@ spec:
                    is INSIDE the action's operand list -- Go templates cannot nest an
                    action inside an action, and it broke every tenant render with
                    `manifests:49: unexpected "{" in operand`. */}}
+            {{- /* D-187 — pods 16 -> 24 (dev/staging) and 20 -> 28 (prod). The FOURTH
+                   exact-fit-ceiling incident in this file's history (D-175 cpu, D-176
+                   memory, #526 pods) says the lesson has not been learned yet, so this
+                   time the raise ships WITH the arithmetic that justifies it.
+
+                   Worked example — ida-llm (2026-fall), the tenant that motivated the
+                   StatefulSet/Job/CronJob whitelist entries above. Its PROD steady state:
+                     frontend 2 + api 2 + runner 4 + redis 1 + minio 1 + agile 1  = 11 pods
+                   Rollout surge: four of those are RollingUpdate Deployments, and the
+                   default maxSurge 25% rounds UP to 1 on any replica count, so a bump that
+                   rewrites every image tag at once rolls them together:      +4  = 15 pods
+                   Three nightly CronJobs, which CAN overlap a rollout:       +3  = 18 pods
+                   The per-team Adminer db-console (dev ns only, so dev not prod): +0/+1
+                   That is 18 against a ceiling of 20 — 90% utilised at the exact moment
+                   the app is least able to tolerate a rejected pod. Under quota pressure
+                   the Deployment controller does NOT fail loudly; it retries, so the
+                   rollout merely crawls and reads as "the cluster is slow today" (#526's
+                   words, and #526 still under-sized it).
+
+                   28 leaves the full surge + the full CronJob fan-out + operational
+                   headroom. dev/staging get 24 on the same arithmetic minus prod's replica
+                   counts, plus the db-console pod dev alone carries.
+
+                   ⚠ cpu/memory/storage/pvcs are DELIBERATELY UNTOUCHED. Those are the real
+                   cost control on a 3-box Ceph/Talos cluster; `pods` is only a count guard
+                   (the composition's own #526 note). A tenant whose workload genuinely
+                   needs more CPU or RAM should be sized to fit the existing cpu/memory
+                   fence — which is exactly what ida-llm did: its runner is network-bound
+                   (it blocks on remote LLM APIs, it does not compute), so it requests
+                   256Mi rather than the 512Mi a naive reading would pick, and the whole
+                   app fits inside prod's unchanged 4Gi requests.memory with surge room.
+                   Raising a count guard is cheap; raising the cost fence is not. */}}
             {{- $envs := list
-                  (dict "name" "dev"     "cpuReq" "4" "memReq" "4Gi" "cpuLim" "8" "memLim" "8Gi"  "pods" "16" "storageReq" "5Gi"  "pvcs" "4")
-                  (dict "name" "staging" "cpuReq" "4" "memReq" "4Gi" "cpuLim" "8" "memLim" "8Gi"  "pods" "16" "storageReq" "5Gi"  "pvcs" "4")
-                  (dict "name" "prod"    "cpuReq" "4" "memReq" "4Gi" "cpuLim" "8" "memLim" "8Gi"  "pods" "20" "storageReq" "20Gi" "pvcs" "6") }}
+                  (dict "name" "dev"     "cpuReq" "4" "memReq" "4Gi" "cpuLim" "8" "memLim" "8Gi"  "pods" "24" "storageReq" "5Gi"  "pvcs" "4")
+                  (dict "name" "staging" "cpuReq" "4" "memReq" "4Gi" "cpuLim" "8" "memLim" "8Gi"  "pods" "24" "storageReq" "5Gi"  "pvcs" "4")
+                  (dict "name" "prod"    "cpuReq" "4" "memReq" "4Gi" "cpuLim" "8" "memLim" "8Gi"  "pods" "28" "storageReq" "20Gi" "pvcs" "6") }}
 
             {{- /* =====================================================================
                    GITHUB — DELIBERATELY EMPTY (ADR-035 §D2, human-approved).
@@ -370,6 +402,37 @@ spec:
                       - { group: '', kind: PersistentVolumeClaim }
                       - { group: apps, kind: Deployment }
                       - { group: apps, kind: ReplicaSet }
+                      # StatefulSet + Job + CronJob (D-186). Three kinds a real tenant
+                      # workload needs that this list never carried, so ArgoCD REFUSED
+                      # them at sync with "resource <kind> is not permitted in project
+                      # <team>" — a loud failure, but one discovered only after the team
+                      # had already written the manifests.
+                      #
+                      # Cited tenant: ida-llm (LLM benchmark harness, 2026-fall). It runs
+                      # Redis as a StatefulSet (a queue broker whose data directory must
+                      # survive rescheduling with a stable identity — the one workload
+                      # shape a Deployment+PVC genuinely cannot express, because RWO
+                      # rebinding races on reschedule) and three nightly sweeps as
+                      # CronJobs (re-benchmark, model sweep, judge calibration). Job comes
+                      # with CronJob: a CronJob CREATES Jobs, so whitelisting CronJob
+                      # without Job lets the schedule exist and every firing be refused.
+                      #
+                      # TENANCY-SAFE, same argument as Deployment/ReplicaSet directly
+                      # above: all three are namespaced, they create only Pods inside
+                      # their own namespace, and the AppProject `destinations` block
+                      # already fences which namespaces this project may write to at all.
+                      # They consume the SAME ResourceQuota (pods/cpu/memory) and the SAME
+                      # LimitRange as every other pod-producing kind — nothing here
+                      # escapes an existing fence, it only stops refusing shapes the fence
+                      # was already sized for.
+                      #
+                      # ⚠ The `pods` quota is what actually bounds a runaway CronJob (a
+                      # misconfigured schedule + a long-running Job cannot exceed it), which
+                      # is why the pods raise below ships in the SAME change rather than
+                      # after it.
+                      - { group: apps, kind: StatefulSet }
+                      - { group: batch, kind: Job }
+                      - { group: batch, kind: CronJob }
                       - { group: autoscaling, kind: HorizontalPodAutoscaler }
                       - { group: networking.k8s.io, kind: Ingress }
                       - { group: bitnami.com, kind: SealedSecret }

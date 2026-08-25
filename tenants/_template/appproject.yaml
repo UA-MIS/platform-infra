@@ -82,6 +82,24 @@ spec:
       kind: Deployment
     - group: apps
       kind: ReplicaSet
+    # StatefulSet + Job + CronJob (D-186) — kept in sync with the Crossplane
+    # Composition's namespaceResourceWhitelist
+    # (platform-services/crossplane/apis/composition.yaml), which is what ACTUALLY
+    # renders live tenant AppProjects; this template is the reviewed reference copy
+    # and the two must never drift.
+    # Rationale: a tenant that needs a stable-identity stateful workload (Redis as a
+    # queue broker) or scheduled work (nightly sweeps) had NO permitted kind for
+    # either — ArgoCD refused the manifests at sync. Job accompanies CronJob because
+    # a CronJob creates Jobs; whitelisting CronJob alone lets the schedule exist and
+    # every firing be refused. Tenancy-safe like Deployment/ReplicaSet above:
+    # namespaced, pods land only in this project's own fenced destinations, and both
+    # the ResourceQuota and the LimitRange apply to them unchanged.
+    - group: apps
+      kind: StatefulSet
+    - group: batch
+      kind: Job
+    - group: batch
+      kind: CronJob
     - group: autoscaling
       kind: HorizontalPodAutoscaler
     - group: networking.k8s.io
