@@ -20,6 +20,15 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
+# ⚠ THIS IS AN EXPLICIT RESOURCE LIST, NOT A DIRECTORY GLOB.
+# A .yaml file dropped into this directory and NOT listed below is silently
+# ignored: ArgoCD reports the Application `Synced` and `successfully synced (all
+# tasks run)`, because from its point of view there is nothing to apply. There is
+# no error anywhere -- the object simply never exists.
+# (Cost real time twice now: once on the deploy-contract change #481->#483, and
+# again adding dashboard-ida-llm-app.yaml + alerts-ida-llm.yaml, which sat on
+# main for half an hour looking deployed.)
+# ADD THE FILE HERE IN THE SAME COMMIT THAT CREATES IT.
 resources:
   - namespace.yaml
   - alerts.yaml
@@ -35,6 +44,7 @@ resources:
   # `resources:` list is explicit, not globbed, so the rule never rendered/deployed
   # despite the PR merging clean; caught during live post-merge verification.
   - alerts-crossplane-robot-race.yaml
+  - alerts-ida-llm.yaml
   # FIX-4: dedicated kube-state-metrics (CustomResourceState) exporting series for
   # the 11 Crossplane MR kinds the Composition creates — the metrics source
   # alerts-crossplane-vault.yaml's CrossplaneManagedResourceNotSynced/
@@ -112,6 +122,7 @@ resources:
   # "Crimson Copies" Grafana folder rather than "Platform / Tenants" -- it is
   # tenant-SPECIFIC, not a namespace-templated view that works for any team.
   - dashboard-crimson-copies-app.yaml
+  - dashboard-ida-llm-app.yaml
   # "Tenant / App Observability" (DASH-1) — the capstone-team-facing "my app
   # broke, where do I look" dashboard: Traefik RED metrics (exported_service
   # label, NOT the always-"traefik-metrics" service label the Golden Signals
