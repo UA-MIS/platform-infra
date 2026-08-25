@@ -108,6 +108,50 @@ spec:
                     preference:
                       matchExpressions:
                         - { key: node-role.kubernetes.io/control-plane, operator: Exists }
+              # ── SOFT SPREAD runner pods across the build pool ──────────────────
+              # One runner pod exists per in-flight build. Soft-prefer a pool node not
+              # already running another runner pod so concurrent builds spread instead
+              # of stacking. `preferred` never blocks (a one-free-node pool still
+              # schedules); topologyKey per-node scales to N pool nodes with no edit.
+              #
+              # RESTORED 2026-08-25 (#CI-latency): this block is present in the org-wide
+              # scale set (applicationsets/arc-runner-scaleset-app.yaml) and in the Kaniko
+              # step pod (platform-services/arc/hook-template.yaml), but was DROPPED when
+              # the nodeAffinity tiers were copied here — so every TENANT pool
+              # (ida-llm-kaniko, crimson-copies-kaniko) ran with NO spread signal while
+              # the platform pool had one. Live consequence: all 8 ida-llm runners stacked
+              # onto capstone-w1 and drove it to its 110-pod kubelet ceiling. That is not
+              # merely slow: the ARC hook pins each workflow pod to its runner's node via
+              # spec.nodeName (bypassing the scheduler), so a full node REJECTS the pod
+              # as OutOfpods instead of queueing it Pending — jobs hang in
+              # `Initialize containers` until the 10-minute lease expires.
+              podAntiAffinity:
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 100
+                    podAffinityTerm:
+                      labelSelector:
+                        matchLabels:
+                          app.kubernetes.io/part-of: gha-runner-scale-set
+                      topologyKey: kubernetes.io/hostname
+            # ── HARD-ish pod-count spread across the build pool ────────────────
+            # The soft podAntiAffinity above is only a SCORE, and it loses to
+            # ImageLocality (the node with the runner/Kaniko images cached wins every
+            # tiebreak) — which is how one node got packed to its ceiling. Pod COUNT is
+            # not a scheduler scoring input at all, so nothing bounded the skew.
+            # maxSkew:2 bounds it explicitly; ScheduleAnyway keeps this a preference so
+            # a single-node pool, or a burst larger than the pool, still schedules
+            # rather than hanging Pending. Counts only this scale-set's own runner pods.
+            # ⚠ MUST STAY IN SYNC with the same block in
+            # applicationsets/arc-runner-scaleset-app.yaml and
+            # platform-services/crossplane/apis/composition.yaml.
+            # Change ALL THREE or none.
+            topologySpreadConstraints:
+              - maxSkew: 2
+                topologyKey: kubernetes.io/hostname
+                whenUnsatisfiable: ScheduleAnyway
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/part-of: gha-runner-scale-set
             securityContext:
               runAsNonRoot: true
               runAsUser: 1001
