@@ -12,6 +12,8 @@ export interface FragmentMeta {
   buildType: 'container' | 'static' | 'mobile-artifact';
   dockerfile?: string;
   healthPath?: string;
+  /** Deploy-time migration argv, run in this fragment's own image (F-1/#48). */
+  migrate?: string[];
   notes?: string;
   [k: string]: unknown;
 }
@@ -25,6 +27,8 @@ export interface PlanComponent {
   path: string;
   needsDb: boolean;
   buildType: string;
+  /** Deploy-time migration argv, or null when this component self-migrates / has no DB. */
+  migrate: string[] | null;
 }
 
 export interface PlanCopy {

@@ -95,6 +95,83 @@ spec:
         runAsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
+{#! ---------------------------------------------------------------------------------
+     DEPLOY-TIME MIGRATIONS (F-1/#48). Rendered ONLY when this component's fragment
+     declares a `migrate` argv in fragment.yaml AND the tenant actually has a platform
+     database. A fragment that creates its own schema at boot (CREATE TABLE IF NOT
+     EXISTS / EnsureCreated()) declares no `migrate` and this block does not render, so
+     its manifests stay byte-identical to before this change.
+
+     WHY BOTH HALVES OF THE GATE. `c.migrate` alone is not enough: a student can pick a
+     migrator-bearing stack with database "none" or "bring your own", where DATABASE_URL
+     is absent or arrives later by hand. Today that scaffolds a working pod that serves a
+     clear 503 on the data routes with /healthz green (M4 zero-config). An ungated
+     migrator would turn that into a pod wedged in Init forever — trading a documented,
+     recoverable state for a hard failure. So the auto-DB condition below MIRRORS the
+     Reloader annotation and the DATABASE_URL source selection above: one rule, three
+     places, no drift.
+
+     SAME IMAGE, SAME TAG. The migrator runs THIS component's image (the migration CLI
+     and the migration files are already inside it), named with the same placeholder the
+     app container uses — kustomize's `images:` transformer rewrites initContainers as
+     well as containers, so the per-env tag bump in every overlay applies here for free
+     and the migrator can never run a different build than the app it precedes.
+
+     DATABASE_URL IS REQUIRED HERE (no `optional: true`, unlike the app container). If
+     ESO has not yet materialized `<app>-db`, the kubelet holds the pod in
+     CreateContainerConfigError and retries until it does — a visible wait that resolves
+     itself. `optional: true` would instead start the migrator with no DATABASE_URL and
+     fail it on a confusing error. Loud and correct beats quiet and wrong.
+
+     FAILURE MODE, CHOSEN DELIBERATELY. A migration that fails leaves the pod in Init
+     with the migrator's own log as the reason, and the Deployment simply does not
+     progress — the PREVIOUS ReplicaSet keeps serving, so a broken migration cannot take
+     a running tenant down; it blocks the rollout instead. That is the intended
+     behaviour: a bad migration must stop the deploy, not half-apply behind a green pod.
+
+     CONCURRENCY. A rolling update surges one pod at a time (25% of <=4 replicas), so
+     migrators run sequentially there. The one genuinely concurrent case is a brand-new
+     env, where the ReplicaSet creates all replicas at once. Prisma `migrate deploy` and
+     Rails `db:migrate` both take a DB advisory lock and are safe. Django and Laravel do
+     not lock: a loser can fail on "table already exists", the kubelet restarts its
+     initContainer, and the retry sees the winner's ledger row and succeeds. Self-healing
+     and visible, at the cost of one transient Init:Error on a first prod rollout that
+     carries a new migration. A PreSync Job would remove even that; it is deliberately
+     out of scope here because it introduces a second, hook-shaped mechanism the fragments
+     do not document and this platform has been bitten by before.
+!#}
+{%- if c.migrate and c.needsDb and (values.database == 'mysql' or values.database == 'postgres') %}
+      initContainers:
+        - name: migrate
+          image: ${{ values.appName }}-${{ c.name }}:latest
+          imagePullPolicy: IfNotPresent
+          command:
+{%- for arg in c.migrate %}
+            - ${{ arg | dump }}
+{%- endfor %}
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ${{ values.appName }}-db
+                  key: DATABASE_URL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+{%- endif %}
       containers:
         - name: ${{ c.name }}
           # SEAM: overlays override registry + tag via kustomize images: (entry name

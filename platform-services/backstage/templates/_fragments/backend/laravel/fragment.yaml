@@ -12,6 +12,16 @@ slots:
 defaultPort: 8080
 ingressPath: /api
 needsDB: true
+# DEPLOY-TIME MIGRATIONS (F-1/#48). Ships database/migrations; the runtime CMD is
+# `artisan serve` only, so nothing applies them at boot. --force is required because
+# APP_ENV=production makes artisan prompt for confirmation otherwise (a prompt in an
+# initContainer would hang, not fail). --isolated is deliberately NOT used: the image
+# sets CACHE_STORE=array, a per-process driver that cannot provide a cross-pod lock.
+migrate:
+  - php
+  - artisan
+  - migrate
+  - --force
 buildType: container
 dockerfile: Dockerfile
 healthPath: /healthz

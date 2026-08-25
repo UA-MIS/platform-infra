@@ -12,6 +12,22 @@ slots:
 defaultPort: 8080
 ingressPath: /api
 needsDB: true
+# DEPLOY-TIME MIGRATIONS (F-1/#48). Ships db/migrate; the runtime CMD is puma only.
+# This is exactly the argv skeleton/MIGRATIONS.md already documents as the contract
+# ("applied at deploy time — as a one-shot Job or an init-container — NOT from the
+# running app process"); this fragment declared the expectation before the contract
+# could honour it. Safe under readOnlyRootFilesystem: production.rb sets
+# `config.active_record.dump_schema_after_migration = false`, so no schema.rb write.
+# Invoked as `ruby bin/rails` rather than `bin/rails`: the scaffolder renders every file
+# through nunjucks and writes it fresh, which does NOT preserve the source tree's exec
+# bit, so bin/rails arrives in the image as -rw-rw-r-- and `exec bin/rails` dies with
+# "permission denied". Verified by building this fragment's real image and running both
+# forms, 2026-08-25. (Same reason MIGRATIONS.md's literal `bin/rails db:migrate` would
+# not have worked from a scaffolded repo — filed separately.)
+migrate:
+  - ruby
+  - bin/rails
+  - db:migrate
 buildType: container
 dockerfile: Dockerfile
 healthPath: /healthz

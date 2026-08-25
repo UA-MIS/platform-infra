@@ -22,6 +22,18 @@ defaultPort: 3000
 # owns the whole origin (UI at /, its API under /api/*).
 ingressPath: /
 needsDB: true              # reads DATABASE_URL (mysql://...) — the wizard offers the DB question
+# DEPLOY-TIME MIGRATIONS (F-1/#48). This fragment ships migrations under prisma/migrations
+# and does NOT create its schema at boot, so the shared contract runs this argv as a
+# migration initContainer in THIS image before the app container starts. The image already
+# carries the pinned, self-contained Prisma CLI at /app/prisma-cli (see Dockerfile) — no
+# build change was needed. Verified by execution against a live tenant DB, 2026-08-25.
+migrate:
+  - node
+  - /app/prisma-cli/node_modules/prisma/build/index.js
+  - migrate
+  - deploy
+  - --schema
+  - /app/prisma/schema.prisma
 buildType: container
 dockerfile: Dockerfile
 healthPath: /healthz

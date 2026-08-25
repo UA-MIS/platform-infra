@@ -131,3 +131,53 @@ test('blank/BYO single + host-postgres -> postgres provisioned + wired (driver-f
 test('slot misuse is rejected (react cannot fill single)', () => {
   assert.throws(() => planComposition({ projectType: 'web', layout: 'single', fragments: { single: react }, database: 'none' }), /cannot fill the 'single' slot/);
 });
+
+// ---------------------------------------------------------------------------------
+// F-1 / #48 — deploy-time migrations. The planner's only job here is to carry a
+// fragment's declared `migrate` argv onto the component (the chart decides whether to
+// RENDER it) and to reject a malformed declaration at compose time, where the wizard
+// shows the error, rather than at deploy time, where it shows up as a wedged pod.
+// ---------------------------------------------------------------------------------
+const nextjs = { id: 'nextjs', category: 'fullstack', slots: ['single'], defaultPort: 3000, ingressPath: '/', needsDB: true, buildType: 'container', dockerfile: 'Dockerfile', migrate: ['node', '/app/prisma-cli/node_modules/prisma/build/index.js', 'migrate', 'deploy'] };
+
+test('a fragment declaring migrate carries the argv onto its component', () => {
+  const p = planComposition({ projectType: 'web', layout: 'single', fragments: { single: nextjs }, database: 'host-mysql', port: 8080 });
+  assert.deepEqual(p.components[0].migrate, ['node', '/app/prisma-cli/node_modules/prisma/build/index.js', 'migrate', 'deploy']);
+});
+
+test('a fragment that self-migrates gets migrate: null (chart gate stays closed)', () => {
+  const p = planComposition({ projectType: 'web', layout: 'single', fragments: { single: express }, database: 'host-mysql', port: 8080 });
+  assert.equal(p.components[0].migrate, null);
+});
+
+test('migrate is carried in the backend slot too, not just single', () => {
+  const be = { ...nextjs, id: 'django-like', category: 'backend', slots: ['backend', 'single'], ingressPath: '/api' };
+  const p = planComposition({ projectType: 'web', layout: 'frontend-backend', fragments: { frontend: react, backend: be }, database: 'host-mysql', port: 8080 });
+  const backend = p.components.find(c => c.name === 'backend');
+  assert.deepEqual(backend.migrate, nextjs.migrate);
+  assert.equal(p.components.find(c => c.name === 'frontend').migrate, null);
+});
+
+test('the plan is unchanged by the DB choice — gating on database is the chart\'s job', () => {
+  // The planner must NOT drop the argv for database:none; the chart's own condition is
+  // what keeps a migrator from wedging a DB-less pod. Keeping both rules in the planner
+  // would hide the chart's gate from anyone reading the manifests.
+  const p = planComposition({ projectType: 'web', layout: 'single', fragments: { single: nextjs }, database: 'none', port: 8080 });
+  assert.deepEqual(p.components[0].migrate, nextjs.migrate);
+});
+
+test('a malformed migrate is rejected at compose time', () => {
+  const bad = argv => () => planComposition({ projectType: 'web', layout: 'single', fragments: { single: { ...nextjs, migrate: argv } }, database: 'host-mysql' });
+  assert.throws(bad('npm run migrate'), /invalid 'migrate'/);   // string, not argv
+  assert.throws(bad([]), /invalid 'migrate'/);                  // empty
+  assert.throws(bad(['ruby', '']), /invalid 'migrate'/);        // empty member
+  assert.throws(bad([1, 2]), /invalid 'migrate'/);              // non-strings
+});
+
+test('migrate without needsDB is rejected (an unreachable migrator)', () => {
+  const meta = { ...nextjs, needsDB: false };
+  assert.throws(
+    () => planComposition({ projectType: 'web', layout: 'single', fragments: { single: meta }, database: 'none' }),
+    /declares 'migrate' but not needsDB/,
+  );
+});

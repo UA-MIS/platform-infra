@@ -12,6 +12,14 @@ slots:
 defaultPort: 8080
 ingressPath: /api
 needsDB: true
+# DEPLOY-TIME MIGRATIONS (F-1/#48). Ships items/migrations; the runtime CMD is gunicorn
+# only, so nothing applies them at boot. The runtime image puts the venv first on PATH
+# (ENV PATH=/opt/venv/bin:$PATH) and WORKDIRs at /app next to manage.py.
+migrate:
+  - python
+  - manage.py
+  - migrate
+  - --no-input
 buildType: container
 dockerfile: Dockerfile
 healthPath: /healthz

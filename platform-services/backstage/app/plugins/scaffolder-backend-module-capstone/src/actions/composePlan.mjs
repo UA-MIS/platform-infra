@@ -68,6 +68,30 @@ function validateMeta(meta, where) {
   if (!Array.isArray(meta.slots) || meta.slots.length === 0) {
     throw new Error(`compose: ${where} fragment '${meta.id}' declares no slots`);
   }
+  // `migrate` (OPTIONAL) — the argv a deploy-time migration initContainer runs in THIS
+  // fragment's own image (F-1/#48). Declared only by fragments that ship migration assets
+  // and do NOT apply them at boot; fragments that self-migrate (CREATE TABLE IF NOT EXISTS,
+  // EnsureCreated(), ...) MUST NOT declare it — an unnecessary migrator is a new failure
+  // mode, not a no-op. Validated strictly here so a typo fails at compose time (loudly,
+  // in the wizard) rather than at deploy time (quietly, as a pod stuck in Init).
+  if (meta.migrate !== undefined && meta.migrate !== null) {
+    if (
+      !Array.isArray(meta.migrate) ||
+      meta.migrate.length === 0 ||
+      !meta.migrate.every(a => typeof a === 'string' && a.length > 0)
+    ) {
+      throw new Error(
+        `compose: ${where} fragment '${meta.id}' has an invalid 'migrate' — expected a ` +
+          `non-empty array of non-empty strings (an argv), got ${JSON.stringify(meta.migrate)}`,
+      );
+    }
+    if (!meta.needsDB) {
+      throw new Error(
+        `compose: ${where} fragment '${meta.id}' declares 'migrate' but not needsDB:true — ` +
+          `a migrator without a database is unreachable`,
+      );
+    }
+  }
   return meta;
 }
 
@@ -97,6 +121,9 @@ function component({ name, meta, context, path, port }) {
     path,
     needsDb: Boolean(meta.needsDB),
     buildType: meta.buildType,
+    // null (not undefined) for the no-migrator case so the value is explicit in the plan
+    // JSON the scaffolder logs, and falsy in the chart's nunjucks gate either way.
+    migrate: Array.isArray(meta.migrate) ? [...meta.migrate] : null,
   };
 }
 
@@ -163,6 +190,7 @@ function planComposition(input) {
       path: '',
       needsDb: false,
       buildType: 'mobile-artifact',
+      migrate: null,
     });
     copies.push({ fragment: be, targetDir: 'backend' });
     copies.push({ fragment: mob, targetDir: 'mobile' });
