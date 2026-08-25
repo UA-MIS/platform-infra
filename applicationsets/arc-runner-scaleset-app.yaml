@@ -175,7 +175,22 @@ spec:
           # taken: owner go/no-go, ADR-038 §5.
           kubernetesModeWorkVolumeClaim:
             accessModes: ["ReadWriteOnce"]
-            storageClassName: "ceph-block"
+            # SWITCHED ceph-block -> local-path-ci (2026-08-25, ADR-038 §3). The hook copies
+            # 594 MB / 8,986 files of runner externals into THIS volume on EVERY job before
+            # the workflow pod is created; on ceph-block that measured ~47s idle and
+            # 132-189s under concurrency. Node-local measured ~13s for the same tree.
+            # ACCESS MODE STAYS RWO — deliberately. The job-container + Kaniko step
+            # co-pinning argument that sizes their 4Gi requests depends on it, and it costs
+            # nothing here: the class is WaitForFirstConsumer, so the PV is created on the
+            # node the runner lands on, and ARC pins the workflow pod and every step pod to
+            # that same node. Node-local RWO binds correctly BY CONSTRUCTION.
+            # TRADE-OFF, know it: local-path does NOT enforce the requested size — it is a
+            # directory on the node root fs, so `storage: 5Gi` is NOMINAL, not a hard cap.
+            # A runaway build can now pressure the NODE instead of failing alone at 5Gi.
+            # Compensating control: the BuildPoolDiskFilling alert
+            # (platform-services/monitoring/alerts.yaml) fires at <20% free, ahead of the
+            # kubelet's 10% eviction threshold.
+            storageClassName: "local-path-ci"
             resources:
               requests:
                 storage: "5Gi"

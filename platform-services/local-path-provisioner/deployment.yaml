@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: local-path-provisioner
+  namespace: local-path-storage
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: local-path-provisioner }
+  template:
+    metadata:
+      labels: { app: local-path-provisioner }
+    spec:
+      serviceAccountName: local-path-provisioner-service-account
+      # Control-plane toleration: the provisioner must be able to run SOMEWHERE
+      # even if the Debian workers are saturated, since nothing schedules without
+      # it once the ARC work volume depends on this class.
+      tolerations:
+        - key: capstone.io/control-plane
+          operator: Equal
+          value: "true"
+          effect: PreferNoSchedule
+      containers:
+        - name: local-path-provisioner
+          # Version-pinned tag, served through the Harbor pull-through cache
+          # rather than docker.io: platform egress is :443-to-Harbor and Docker
+          # Hub rate limits have bitten this cluster before.
+          # NOTE: tag-only, no digest. The verify-harbor-image-signed Kyverno
+          # policy WARNS on tag-only refs ("missing digest") but does not block.
+          # Left as a tag deliberately for readability; pin to a digest here if
+          # that policy is ever moved to enforce.
+          image: harbor.capstone.uamishub.com/dockerhub-proxy/rancher/local-path-provisioner:v0.0.31
+          imagePullPolicy: IfNotPresent
+          command: ["local-path-provisioner"]
+          args:
+            - start
+            - --config=/etc/config/config.json
+            - --service-account-name=local-path-provisioner-service-account
+            - --provisioner-name=rancher.io/local-path
+            - --helper-pod-file=/etc/config/helperPod.yaml
+            - --configmap-name=local-path-config
+          volumeMounts:
+            - name: config-volume
+              mountPath: /etc/config/
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef: { fieldPath: metadata.namespace }
+            - name: CONFIG_MOUNT_PATH
+              value: /etc/config/
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits:   { cpu: 500m, memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            runAsNonRoot: true
+            runAsUser: 65534
+            seccompProfile: { type: RuntimeDefault }
+      volumes:
+        - name: config-volume
+          configMap:
+            name: local-path-config

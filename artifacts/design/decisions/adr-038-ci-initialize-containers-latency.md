@@ -1,6 +1,6 @@
 # ADR-038 — CI `Initialize containers` latency: runner spread, and the externals-copy tax
 
-- **Status:** Accepted (spread + maxPods implemented; storage swap APPROVED, not yet implemented)
+- **Status:** Accepted (spread + maxPods + storage swap all implemented)
 - **Date:** 2026-08-25
 - **Deciders:** platform owner (ccsmith33)
 - **Related:** #535 (ARC ResourceQuota/LimitRange), #372 (soft RAM-aware affinity), #374 (CI node taint), ADR-031 (Crossplane onboarding)
@@ -163,13 +163,50 @@ runner definitions, kept in sync:
    outweighs. `ScheduleAnyway` keeps it a preference, so a single-node pool or an
    over-pool-size burst still schedules instead of hanging Pending.
 
-**Proposed, NOT implemented — move the ARC work volume to a node-local StorageClass.**
+**Accepted and implemented — move the ARC work volume to a node-local StorageClass.**
 Evidence supports it (3.6× on an idle node, far more under load) and the co-scheduling
 constraint is *not* a blocker: the hook pins the workflow pod to the runner's node itself,
 so a node-affine RWO volume binds correctly by construction. Held back because it requires
 installing a new cluster-wide provisioner (`local-path-provisioner`), whose per-volume
 create/delete **helper pods add pod churn to the very nodes that just hit a pod ceiling** —
 that interaction must be settled first. See §5.
+
+## 3a. Storage swap — as built
+
+New platform service `platform-services/local-path-provisioner/` (picked up automatically by
+the `platform-services/*` directory generator), providing StorageClass **`local-path-ci`**.
+It is **not** the cluster default — `ceph-block` keeps that role; only the three ARC
+`kubernetesModeWorkVolumeClaim` definitions opt in.
+
+| Decision | Why |
+|---|---|
+| `volumeBindingMode: WaitForFirstConsumer` | Load-bearing. The runner pod is the first consumer, so the PV is created on the node the scheduler picked for it. ARC then pins the workflow pod (`createPod`) and every `uses: docker://` step pod (`createJob`) to that same node. With `Immediate` the PV could land elsewhere and wedge every job. |
+| **RWO retained** | The job-container + Kaniko-step co-pinning argument that sizes their 4Gi requests depends on it, and node-local RWO binds correctly *by construction* here. No reason to touch it. |
+| `nodePathMap` → `/var/local-path-provisioner` | The one path writable on **both** node families. Talos (n1–n3) has a read-only root; `/var` is its writable partition — verified live with a hostPath probe on capstone-n1 (wrote, read back, removed; `/dev/nvme0n1p4`, 442G free) before choosing it. |
+| Covers **all five** nodes, not just the build pool | Routine CI is kept off n1–n3 (#541), but they remain a genuine fallback. A node the runner can land on but the provisioner cannot serve would hang the PVC Pending — reintroducing exactly the wedge #540/#541 removed. |
+| Helper-pod image from the Harbor pull-through cache | Platform egress is :443-to-Harbor; Docker Hub rate limits have bitten this cluster before. Pull verified through the proxy. |
+| Helper pod tolerates `node.kubernetes.io/disk-pressure` | Teardown is `rm -rf`. If the helper could not schedule under disk pressure, the node could never reclaim space — a deadlock precisely when it matters most. |
+
+### Cost: helper-pod churn
+
+`local-path-provisioner` runs one short-lived helper pod per volume **create** and one per
+**delete**. Against the corrected triple multiplier, a pool running N concurrent jobs peaks at
+`3N` steady pods **plus up to 2 transient helpers per job**. At the live 8/8/4 that is a
+worst case of ~60 steady + ~40 transient. With `maxPods` now 200 on both workers (~400 slots
+against ~166 used) there is real room; at the previous 110 ceiling this change would have
+been unsafe. **Sequencing mattered.**
+
+### Regression accepted, with a compensating control
+
+`ceph-block` gave each job a real 5Gi RBD **block device** — a runaway build hit `ENOSPC`
+inside its own volume and failed alone. `local-path` is a **directory on the node root
+filesystem** and does **not** enforce the PVC's requested size, so `storage: 5Gi` is now
+**nominal**. A runaway build can pressure the *node* and trigger DiskPressure evictions for
+unrelated pods. capstone-w1 was already at 64% used / 150G free when this landed.
+
+Compensating control: the **`BuildPoolDiskFilling`** alert (`platform-services/monitoring/alerts.yaml`)
+fires at <20% free, ahead of the kubelet's 10% eviction threshold. This is a deliberate trade
+of hard size enforcement for ~35s per job, not an oversight.
 
 ## 4. Consequences
 
@@ -185,7 +222,7 @@ that interaction must be settled first. See §5.
 
 | Item | Note |
 |---|---|
-| Node-local StorageClass for the work volume | Owner go/no-go. Weigh 3.6× against local-path helper-pod churn. |
+| ~~Node-local StorageClass~~ **DONE** | Implemented as `local-path-ci`; see §3a. |
 | Trim `externals` | node*_alpine is 227 MB (38%) and is only needed for Alpine job containers; requires a derived runner image and per-release maintenance. |
 | Node imbalance (w1 103/110 vs w2 63/110) — THE root capacity issue, see §2c | Descheduler is effectively inert here: `thresholds.pods: 20` means n1–n3 (~25%) never qualify as under-utilized, `targetThresholds.pods: 50` means w2 (59%) is not a valid destination, `PodsWithPVC` protection exempts most tenant pods, and `maxNoOfPodsToEvictTotal: 5`/hour cannot correct a 41-pod skew. |
 | 34 Velero `kopia-maintain` pods | `keepLatestMaintenanceJobs: 1` is already minimal and deliberate (breadcrumb); the problem is that all 34 land on one node. Spread, not TTL, is the fix. |

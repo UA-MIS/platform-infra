@@ -1,0 +1,17 @@
+# local-path-provisioner — node-local dynamic PV provisioner for the ARC CI work
+# volume. See ADR-038 §3 for why this exists.
+#
+# PodSecurity: PRIVILEGED is REQUIRED and is not negotiable for this component.
+# The provisioner's helper pods bind-mount a host directory to create and, more
+# importantly, to DELETE (rm -rf) each job's work directory. hostPath is a
+# "restricted volume type", so the cluster-default `baseline` would reject them
+# and every PVC would hang Pending. Scope is limited to this one namespace.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: local-path-storage
+  labels:
+    platform.capstone/component: platform
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged

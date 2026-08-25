@@ -393,6 +393,42 @@ spec:
               Node {{ $labels.node }} has been NotReady for 10m. Pods on it may be
               evicted/unschedulable. Check `kubectl describe node {{ $labels.node }}`.
 
+        # ── Build-pool disk headroom (added with the local-path CI work volume) ──
+        # WHY THIS EXISTS — a deliberate trade recorded in ADR-038 §3. The ARC CI
+        # work volume moved from ceph-block (a real 5Gi RBD block device) to the
+        # node-local `local-path-ci` class, which is a DIRECTORY on the node's
+        # root filesystem. local-path-provisioner does NOT enforce the PVC's
+        # requested size, so the 5Gi request is now NOMINAL:
+        #   - before: a runaway build hit ENOSPC inside its own 5Gi volume and
+        #     failed just that job.
+        #   - after:  a runaway build can consume the NODE's free space, trip the
+        #     kubelet's DiskPressure eviction threshold, and take out unrelated
+        #     pods on the same node.
+        # That regression is the price of ~47s -> ~13s on the per-job externals
+        # copy. This alert is the compensating control: it must fire with enough
+        # margin to intervene BEFORE the kubelet's default nodefs eviction
+        # threshold (10% available) starts evicting.
+        # capstone-w1 was already at 64% used / 150G free when this landed, so
+        # the margin there is real but not generous.
+        - alert: BuildPoolDiskFilling
+          expr: >-
+            (node_filesystem_avail_bytes{mountpoint="/", fstype!~"tmpfs|overlay"}
+             / node_filesystem_size_bytes{mountpoint="/", fstype!~"tmpfs|overlay"}) < 0.20
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Node {{ $labels.instance }} root filesystem below 20% free"
+            description: >-
+              {{ $labels.instance }} has less than 20% free on /. CI work volumes
+              (local-path-ci) are unquoted directories on this filesystem, so a
+              runaway build can fill it and trigger DiskPressure evictions for
+              unrelated pods. Check
+              `du -sh /var/local-path-provisioner/*` on the node and confirm no
+              orphaned job directories remain (teardown is done by a helper pod;
+              if the provisioner is unhealthy, directories leak). Kubelet begins
+              evicting at 10% available.
+
     # ── (g) TENANT / LAB DELIVERY PATH (FIX-7, BLOCK-1 durable half) ──────────
     # WHY THIS GROUP EXISTS. Two student lab tenants sat completely broken for
     # NINE DAYS and nobody found out. Their images were never published (the
