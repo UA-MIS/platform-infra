@@ -81,6 +81,66 @@ pods, requested: 1, used: 110, capacity: 110
 hook had not even reached `createPod` — it was still inside the externals copy, which is why
 the job log shows 11m18s of *total silence* rather than repeated pod-creation errors.
 
+## 2c. The cap was reasoned in the wrong unit (owner correction, refined)
+
+`maxRunners` was sized against **cluster-wide CPU/memory** ("80 vCPU / ~216GiB across 5
+nodes … 4-8% cluster CPU"). The binding constraint is the **per-node kubelet pod ceiling**,
+which was never modelled.
+
+The owner's correction was that a job consumes a *pair* of pod slots on one node. Measured,
+it is worse than that — **up to three**:
+
+| # | Pod | Pinned by |
+|---|---|---|
+| 1 | runner pod | the scale set |
+| 2 | workflow pod (the job's `container:`) | hook `createPod()` → `spec.nodeName` |
+| 3 | container-step pod, per `uses: docker://` step (Kaniko, scanners, toolchains) | hook `createJob()` → `job.spec.template.spec.nodeName` |
+
+The RWO `_work` PVC co-pins them regardless. The existing "pair" language in
+`arc-runner-scaleset-app.yaml` (job-container + Kaniko step = 8Gi) counts only #2 and #3 —
+it **omits the runner pod**. So `maxRunners: N` ⇒ **up to 3N pods on one node**.
+
+Because all three are `nodeName`-pinned they bypass the scheduler, so a node at its ceiling
+**rejects** them (`OutOfpods`, phase Failed) instead of queueing them Pending — the cliff
+described in §2b.
+
+### Measured headroom (2026-08-25, allocatable 110/node)
+
+CI is fenced to `capstone.io/pool=build` — **w1 + w2 only**; n1–n3 carry neither `pool=build`
+nor the standard control-plane label, so that `nodeSelectorTerm` never matches.
+
+| Node | Non-terminal pods | Headroom | Jobs at 3 pods/job |
+|---|---|---|---|
+| capstone-w1 | 103 / 110 | **7** | **~2** |
+| capstone-w2 | 63 / 110 | 47 | ~15 |
+
+Velero's hourly kopia-maintenance burst (~34 pods, landing disproportionately on w1) moves
+w1's baseline by up to ~23 pods with no CI involvement at all.
+
+### Sizing rule
+
+Spread is `ScheduleAnyway` (soft) and ImageLocality biases toward the warm node, so size
+against the **worst** pool node, not the average:
+
+```
+ceil(N_pool_total / n_build_nodes) * 3  ≤  min(per-node headroom) − burst_margin
+```
+
+Today's live 8/8/4 = 20 concurrent jobs ⇒ **up to 60 pods** against **54** pool-wide
+headroom, most of it stranded on the node with 7 free slots. The arithmetic does not
+support it.
+
+**Recommended until w1 is rebalanced: ida-llm 4 / crimson-copies 4 / ua-mis 2** (aggregate
+~10 jobs ≈ 30 pods). Restoring 8/8/4 is fine once w1's baseline approaches w2's, or once
+`maxPods` is raised — re-derive with the rule above rather than guessing.
+
+**The `arc-runners` ResourceQuota (`pods: 40`) was itself sized on pair math**: at 3 pods/job
+it admits ~13 jobs, not the 20 that 8/8/4 permits. It is a cluster-wide backstop only — it
+never modelled the per-node dimension that actually wedged us.
+
+> The caps are not the root problem. **w1 carrying 103 pods against w2's 63 is.** Lowering
+> `maxRunners` is a tourniquet; rebalancing that baseline is the fix.
+
 ## 3. Decision
 
 **Accepted and implemented here — restore and strengthen runner spread.** Add to all three
@@ -115,7 +175,7 @@ that interaction must be settled first. See §5.
 |---|---|
 | Node-local StorageClass for the work volume | Owner go/no-go. Weigh 3.6× against local-path helper-pod churn. |
 | Trim `externals` | node*_alpine is 227 MB (38%) and is only needed for Alpine job containers; requires a derived runner image and per-release maintenance. |
-| Node imbalance (w1 106/110 vs w2 65/110) | Descheduler is effectively inert here: `thresholds.pods: 20` means n1–n3 (~25%) never qualify as under-utilized, `targetThresholds.pods: 50` means w2 (59%) is not a valid destination, `PodsWithPVC` protection exempts most tenant pods, and `maxNoOfPodsToEvictTotal: 5`/hour cannot correct a 41-pod skew. |
+| Node imbalance (w1 103/110 vs w2 63/110) — THE root capacity issue, see §2c | Descheduler is effectively inert here: `thresholds.pods: 20` means n1–n3 (~25%) never qualify as under-utilized, `targetThresholds.pods: 50` means w2 (59%) is not a valid destination, `PodsWithPVC` protection exempts most tenant pods, and `maxNoOfPodsToEvictTotal: 5`/hour cannot correct a 41-pod skew. |
 | 34 Velero `kopia-maintain` pods | `keepLatestMaintenanceJobs: 1` is already minimal and deliberate (breadcrumb); the problem is that all 34 land on one node. Spread, not TTL, is the fix. |
 | `capstone.io/ci-build=true` preference | Matches **no node** — a live no-op. Either label the dedicated CI node or drop the weight-100 rule. |
 | `maxPods: 110` | w1/w2 are **Debian**, so this is kubelet config on those hosts, not Talos machine config. Verify provisioning before proposing. |

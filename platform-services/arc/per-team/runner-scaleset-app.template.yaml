@@ -48,9 +48,68 @@ spec:
         # fallback per per-team/README.md) — raised 3→8 there 2026-08-25 (owner-approved,
         # cluster now 80 vCPU / ~216GiB across 5 nodes). Keep this in sync if hand-rendering
         # a team that predates the Crossplane composition path.
+        # ── SIZE THIS IN PODS-PER-NODE, NOT CLUSTER CPU/MEMORY (2026-08-25) ────────
+        # The reasoning below sizes maxRunners against CLUSTER-WIDE cpu/memory. That is
+        # the wrong frame and it is how we wedged CI on 2026-08-25. The binding
+        # constraint is the PER-NODE kubelet pod ceiling.
+        #
+        # Each concurrent job pins up to THREE pods to ONE node:
+        #   1. the runner pod (this scale set),
+        #   2. the workflow pod  — the job's `container:` — created by the hook's
+        #      createPod(), which sets spec.nodeName = the runner's node,
+        #   3. a container-step pod per `uses: docker://` step (Kaniko, scanners,
+        #      toolchains) — created by the hook's createJob(), which sets
+        #      job.spec.template.spec.nodeName the same way.
+        # The RWO `_work` PVC co-pins them regardless. So `maxRunners: N` means up to
+        # 3N pods on a single node — NOT N, and not the 2N that the older "pair"
+        # language (job-container + Kaniko step) implies: that phrasing omits the
+        # runner pod itself.
+        #
+        # This is a CLIFF, not a slowdown. Because those pods are nodeName-pinned they
+        # bypass the scheduler, so a node at its ceiling REJECTS them — kubelet
+        # `OutOfpods`, phase Failed — rather than queueing them Pending. The hook then
+        # blocks in `Initialize containers` until the job lease expires (~10 min) and
+        # the run fails with "Executing the custom container implementation failed".
+        #
+        # Measured 2026-08-25 (allocatable pods = 110/node; CI is fenced to the
+        # capstone.io/pool=build nodes, i.e. w1+w2 only — n1..n3 carry neither
+        # pool=build nor the standard control-plane label, so that nodeSelectorTerm
+        # never matches):
+        #     capstone-w1  103/110  → headroom  7 pods ≈ 2 jobs
+        #     capstone-w2   63/110  → headroom 47 pods ≈ 15 jobs
+        # and Velero's hourly kopia-maintenance burst (~34 pods, landing mostly on w1)
+        # moves w1's baseline by up to ~23 pods with no CI involvement at all.
+        #
+        # SIZING RULE — spread is `ScheduleAnyway` (soft) and ImageLocality biases
+        # toward the warm node, so size against the WORST pool node, not the average:
+        #     ceil(N_pool_total / n_build_nodes) * 3  ≤  min(per-node headroom) − burst
+        # Today that arithmetic does NOT support the live 8/8/4 (=20 jobs ⇒ up to 60
+        # pods against 54 pool-wide headroom, most of it on one node). Until w1's
+        # baseline is brought down toward w2's, keep the AGGREGATE at ~10 concurrent
+        # jobs (ida-llm 4 / crimson-copies 4 / ua-mis 2). Restoring 8/8/4 is fine once
+        # w1 is rebalanced or maxPods is raised — re-derive with the rule above, don't
+        # guess. NOTE the arc-runners ResourceQuota (pods 40) was itself sized on pair
+        # math: at 3 pods/job it admits ~13 jobs, not 20.
         maxRunners: 8
         containerMode:
           type: "kubernetes"
+          # ⚠ MUST STAY IN SYNC — this work-volume claim is defined in THREE places and
+          # NOTHING (no comment, no CI check) bound them before 2026-08-25:
+          #   applicationsets/arc-runner-scaleset-app.yaml            (ua-mis-kaniko)
+          #   platform-services/crossplane/apis/composition.yaml      (all tenant pools)
+          #   platform-services/arc/per-team/runner-scaleset-app.template.yaml
+          # Change ALL THREE or none. That exact unbound-copies pattern is what dropped
+          # podAntiAffinity from the tenant pools and wedged CI (see ADR-038).
+          #
+          # PERF (measured, ADR-038 §2a): the ARC hook's copyExternalsToRoot() copies the
+          # runner's externals/ — 594 MB / 8,986 files — into THIS volume on EVERY job,
+          # before the workflow pod is created. Benchmarked on an idle node with the real
+          # runner image: ~47s on ceph-block vs ~13s on node-local disk. Moving this to a
+          # node-local StorageClass is the single biggest CI latency win available and is
+          # safe (the hook pins every job pod to the runner's node, so node-affine RWO
+          # binds by construction) — but it needs a new cluster-wide provisioner whose
+          # per-volume helper pods add churn to pod-constrained nodes. PROPOSED, not
+          # taken: owner go/no-go, ADR-038 §5.
           kubernetesModeWorkVolumeClaim:
             accessModes: ["ReadWriteOnce"]
             storageClassName: "ceph-block"
