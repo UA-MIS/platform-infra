@@ -1,0 +1,57 @@
+# LimitRange for `arc-runners` (2026-08-25, owner-approved — lands alongside the
+# maxRunners raise in applicationsets/arc-runner-scaleset-app.yaml and
+# platform-services/crossplane/apis/composition.yaml).
+#
+# WHY THIS EXISTS: only the ORG-WIDE hook template (platform-services/arc/
+# hook-template.yaml, used by ua-mis-kaniko) declares a `resources:` block on the
+# `$job` container. The PER-TENANT hook templates rendered by the Crossplane
+# composition (arc-hook-template-crimson-copies, arc-hook-template-ida-llm — see
+# `kubectl get cm -n arc-runners <name> -o jsonpath='{.data.content}'`, confirmed
+# live 2026-08-25) set NO resources at all on `$job`. Those job/Kaniko step pods are
+# therefore BestEffort and UNBOUNDED — fine when maxRunners was capped at 3, but
+# raising tenant concurrency to 8 without this would let up to 8 unbounded builds
+# burst memory/CPU on whichever node the scheduler happens to place them on, with
+# no admission-time signal to the scheduler at all (BestEffort pods don't even
+# count against a node's requestable capacity). This LimitRange supplies sane
+# per-container defaults for any container in the namespace that declares nothing,
+# so no `$job` pod is ever BestEffort again — without touching the per-tenant
+# ConfigMap content (which is machine-rendered by the Crossplane composition, not
+# hand-edited per team).
+#
+# NUMBERS:
+#   defaultRequest 500m / 1Gi — Kaniko builds are bursty (idle during layer pull,
+#     CPU-heavy during snapshot/compress); a request this low lets the scheduler
+#     pack builds without starving them, while still making every pod count toward
+#     the arc-runners ResourceQuota (platform-services/arc/resourcequota.yaml) so
+#     the aggregate ceiling is real. Matches the CPU the org-wide hook-template's
+#     `$job` container was implicitly getting (it declares memory only; before this
+#     LimitRange existed, an unset CPU request meant "0" — i.e. also uncounted).
+#   default (limit) 4 CPU / 8Gi — 8Gi mirrors the org-wide hook-template's existing,
+#     already-tuned `$job` memory limit (platform-services/arc/hook-template.yaml —
+#     6Gi previously OOM-killed a real node_modules build, PR #329/#334), so a
+#     tenant build gets the SAME ceiling a ua-mis build already relies on instead of
+#     a fresh, unvalidated number. 4 CPU gives Kaniko's compress/snapshot phase
+#     headroom without letting one build pod claim a whole node (16 vCPU on the
+#     smallest node) uncontested.
+#
+# Applies namespace-wide (Container type, no per-workload override needed): the
+# runner pod itself already declares explicit resources in every scale-set spec
+# (arc-runner-scaleset-app.yaml, composition.yaml, per-team template) and is
+# unaffected; only containers that declare nothing — today, only the per-tenant
+# `$job` pods — pick up these defaults.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: arc-runners-defaults
+  namespace: arc-runners
+  labels:
+    platform.capstone/component: platform
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: "500m"
+        memory: "1Gi"
+      default:
+        cpu: "4"
+        memory: "8Gi"

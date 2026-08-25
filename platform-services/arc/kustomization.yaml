@@ -21,6 +21,8 @@ resources:
   - priorityclass-ci-build.yaml    # cluster-scoped: CI builds wait-not-fail, never preempt (queue-not-OOM)
   - sealedsecret-harbor-push.yaml
   - platform-ca-configmap.yaml     # platform CA → mounted into Kaniko so the push verifies Traefik's cert
+  - limitrange.yaml                # per-container defaults so no $job pod is ever BestEffort
+  - resourcequota.yaml             # cross-tenant aggregate concurrency ceiling (~18 concurrent jobs)
 labels:
   - pairs:
       platform.capstone/component: platform
