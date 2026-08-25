@@ -75,21 +75,6 @@ spec:
           # unaddressed; not repeated here).
           - path: platform-services/kyverno-policies
             exclude: true
-          # EXCLUDE ida-llm-preview-guardrails/: it is a PER-PR template, not a
-          # single service. It is rendered once per open pull request by
-          # applicationsets/ida-llm-preview-guardrails.yaml, which supplies the
-          # namespace (`kustomize.namespace: ida-llm-pr-<n>`) — every manifest in
-          # that directory deliberately carries NO namespace of its own.
-          #
-          # Without this exclude the glob would ALSO emit
-          # `platform-svc-ida-llm-preview-guardrails`, which would apply a
-          # ResourceQuota, a LimitRange, four NetworkPolicies and a Postgres into
-          # the appset's default destination namespace (kube-system) — a quota and
-          # a default-deny netpol landing on kube-system is not a sync error, it is
-          # an outage. Same class of trap as the harbor-onboarding exclude above,
-          # with a much worse blast radius.
-          - path: platform-services/ida-llm-preview-guardrails
-            exclude: true
           # EXCLUDE cnpg/ (db-setup task, in-cluster DB tier): same reason as
           # kubevirt/cdi above — platform-services/cnpg/ holds only a README + the
           # GRANDCHILD dirs barman-plugin/ and cluster/, each owned by its own

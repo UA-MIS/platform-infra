@@ -116,6 +116,11 @@ Two classes. **Runtime app secrets:** name in git, value in **Vault**; **ESO** s
 Backstage Secrets UI, never touching Vault directly. **Platform/bootstrap secrets**
 (Dex, Harbor OIDC, ARC GitHub App, Talos): **Sealed Secrets** (committed encrypted) and
 sops/age (Talos). → **[secrets-eso.md](secrets-eso.md)**, [vault-and-dr.md](vault-and-dr.md),
+
+- **PR preview environments are NOT enabled** on any tenant, and the four gaps
+  standing in the way (plus the cluster-DNS outage a first attempt caused) are
+  written up in **[tenant-preview-gaps.md](tenant-preview-gaps.md)**. Read it
+  before enabling `previewEnabled` on any claim.
 [developer/secrets.md](../developer/secrets.md).
 
 ### 4.4 Promote to prod
