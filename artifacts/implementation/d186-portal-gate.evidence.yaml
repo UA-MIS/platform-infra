@@ -1,0 +1,188 @@
+# D-186 gate closure — the LIVE PORTAL run that PR #545 could not do before merge.
+# Merged commit under test: 571d9d6 (platform-infra main).
+# Running/checkpointed by: devops teammate, 2026-08-25.
+id: D-186-portal-gate
+status: COMPLETE
+verdict: BOTH_GATE_LEGS_PASS — no live defect in 571d9d6; nothing reverted
+
+baseline_before_any_action:
+  boards_dir_on_main: "tenants/_boards/{README.md,_example-team.yaml} only — no live board file"
+  applicationset_agile_boards: "present in argocd (created by the merge), 0 generated Applications"
+  agile_namespace: "1 pod (agile-5b5885664c-4858j 1/1) — maintainers' board only"
+  claims_on_main: "crimson-copies-crimson-copies.yaml, ida-llm-ida-llm.yaml (+README/_example)"
+
+step_1_template_pickup:
+  status: PASS
+  method: "live catalog API on process.capstone.uamishub.com (backend service token)"
+  observations:
+    - "template:default/new-project served from url:.../tree/main/.../new-project/template.yaml"
+    - "page-1 property `agileBoard` present: type boolean, default true, NOT in `required`"
+    - "steps: preflight,compose,publish,wait-for-content,register,emit-claim,commit-claim,commit-board"
+    - "commit-board carries if=${{ parameters.agileBoard }}, action capstone:commit-to-main, path tenants/_boards/${{ parameters.team }}.yaml, allowedPathPrefix tenants/_boards/"
+  note: "no catalog refresh needed — the GithubEntityProvider had already re-ingested main."
+
+method_note: >-
+  The portal's sign-in is OIDC-through-Dex-through-GitHub, which cannot be driven
+  headlessly without the owner's GitHub credentials. Both legs are therefore driven by
+  POSTing the SAME /api/scaffolder/v2/tasks request the wizard form issues, against the
+  LIVE portal, using a Backstage backend service token. This exercises the registered
+  template, parameter values, the `if:` gate and every step/action for real. What it does
+  NOT exercise is the rjsf checkbox widget rendering in the browser. Stated plainly.
+
+leg_a_with_board:
+  status: PASS
+  team: lasttest        # pre-existing throwaway GitHub team, reused; app zzboarda
+  task_id: 0f1b07e6-14f6-4030-b031-c06e61da6e5c
+  observations:
+    - "all 8 steps ran; run completed"
+    - "commit-board committed tenants/_boards/lasttest.yaml to main (5671a7e), content exactly the 4 keys team/repos/title/accent"
+    - "claim tenants/_claims/lasttest-zzboarda.yaml committed to main (3a27191); CapstoneTenant XR appeared 12s later"
+    - "repo UA-MIS/zzboarda created, catalog-registered, 3 env Applications + platform-arc-runner-lasttest generated"
+    - "ApplicationSet generated Application agile-board-lasttest -> Synced/Healthy"
+    - "pod lasttest-agile-b94d78b68-nzbfx 1/1; log: GitHub App (app id 4097147, installation 141394298); migrations 001/002/003 applied"
+    - "https://lasttest-agile.capstone.uamishub.com/ -> 307 /login?returnTo=%2F (no DNS/cert/tunnel change)"
+    - "board /api/auth/login -> 307 to Dex with client_id=agile-board, PKCE S256, essential groups claim"
+  redirect_uri_generator_and_drift_gate:
+    - "gen-board-clients.py --check on main FAILED (blocking) the moment the board file landed: 'DRIFT ... boards found: lasttest'"
+    - "dex-board-clients workflow fired on the push and opened PR #546 within ~11s (run 32870358914)"
+    - "PR #546 diff was EXACTLY one line inside the generated region — no hand-editing, no bypass credential"
+    - "controlled experiment BEFORE merge: board redirect_uri -> HTTP 400; registered maintainers URI (control) -> 302 to github.com"
+    - "after merging #546: ArgoCD synced the ConfigMap and Reloader rolled Dex UNATTENDED (dex-598748bc5f -> dex-7fb9d47d5d)"
+    - "controlled experiment AFTER merge: board redirect_uri -> 302 to github.com/login/oauth/authorize; control still 302"
+
+leg_b_without_board:
+  status: PASS
+  team: testfb          # pre-existing throwaway GitHub team, reused; app zzboardb
+  task_id: baf6e05f-f068-4bec-b281-86b100b7b48b
+  observations:
+    - "run completed; commit-board logged 'Skipping step commit-board because its if condition was false'"
+    - "tenants/_boards/ on main still contains ONLY README.md, _example-team.yaml and leg-A's lasttest.yaml — no testfb.yaml"
+    - "no agile-board-testfb Application; nothing named testfb anywhere in the agile namespace"
+    - "https://testfb-agile.capstone.uamishub.com/ -> 404 (Traefik: no such ingress)"
+    - "ingresses in agile ns: exactly `agile` (maintainers) and `lasttest-agile` — no third"
+  parity_against_leg_a:
+    method: "enumerate deploy/svc/ingress/secret/netpol/quota/limitrange/rolebinding/sa/externalsecret across <team>-{dev,staging,prod}, substitute team+app names, diff"
+    in_cluster: "44 resources each — diff IDENTICAL"
+    crossplane_managed: "45 managed resources each; kind composition and Object KIND composition both diff IDENTICAL (1 Vault authbackendrole, 1 Vault policy, 1 Harbor project, 2 Harbor robots, 40 Objects)"
+    conclusion: "a board-less project provisions byte-for-byte the same tenant as one with a board; the board is purely additive"
+
+teardown:
+  status: COMPLETE
+  method: "PR #547 (admin-merged): git rm both claims + the board file, and regenerate the Dex ConfigMap in the SAME commit so the board-client guard never went red and no follow-up PR was needed."
+  verified_by_checking_not_asserting:
+    - "CapstoneTenant XRs: 2 -> 0"
+    - "namespaces lasttest-{dev,staging,prod} + testfb-{dev,staging,prod}: 6 -> 0"
+    - "ArgoCD Applications matching lasttest|testfb|zzboard: 0; ApplicationSets: 0 strays"
+    - "Crossplane managed resources for both teams: 79 -> 0 (incl. Harbor projects, Harbor robots, Vault policy + authbackendrole)"
+    - "Harbor projects: no lasttest/testfb project exists (project-scoped robots therefore cannot exist; the robots API itself 403s for the provisioner robot, so that is inference, not a direct read)"
+    - "GitHub repos UA-MIS/zzboarda, UA-MIS/zzboardb: DELETE 204, now 404"
+    - "GitHub teams lasttest/testfb: NOT deleted — they PRE-EXISTED this test and are back to repos_count=1 each, exactly as found"
+    - "Postgres: schema `lasttest` in agile_boards DROPped CASCADE; agile_boards now has only `public`"
+    - "Dex ConfigMap: live cm no longer contains the board URI; Reloader rolled Dex a SECOND time unattended (dex-7fb9d47d5d -> dex-5cbf65f86)"
+    - "Dex leg re-measured after teardown: torn-down board URI -> 400 again; maintainers' URI -> 302"
+    - "agile namespace back to exactly its pre-test object set (deployment/agile, svc, ingress, netpol, secret agile-env, secret harbor-pull)"
+    - "Backstage catalog: both zzboard Components auto-removed by orphanStrategy once the repos were deleted; their two generated Locations deleted explicitly (204)"
+    - "catalog entities still matching lasttest/testfb are PRE-EXISTING: Component/Location for repos UA-MIS/lasttest and UA-MIS/testfb, plus the two ingested Groups — none created by this run"
+    - "open PRs on platform-infra: only #406 (long-standing, unrelated)"
+    - "gen-board-clients.py --check on current main: GREEN (0 boards)"
+
+collateral_check_shared_dex_client:
+  - "https://agile.uamishub.com/ -> 307 /login (maintainers' board unaffected end to end)"
+  - "https://agile.uamishub.com/api/auth/login -> 307 to Dex with client_id=agile-board and the maintainers' redirect_uri"
+  - "that redirect_uri -> 302 to github.com/login/oauth/authorize, measured after BOTH Dex rolls"
+  - "https://process.capstone.uamishub.com/ -> 200; https://ida-agile.capstone.uamishub.com/ -> 307"
+
+secondary_findings:
+  harbor_platform_project_visibility: "PRIVATE (metadata.public=false). So the board's harbor-pull credential is still required; the 'make it public and drop the credential' option in #545's left_open was NOT taken."
+  make_validate_step_4_of_6:
+    status: CONFIRMED_AND_WORSE_THAN_REPORTED — NOT a one-liner, left unfixed
+    reported: "argocd-rbac references project 'sample' with no AppProject"
+    what_is_actually_wrong: >-
+      TWO independent stalenesses in one guard. (1) argocd-rbac-cm.yaml still carries the
+      `sample` example role block (p, role:sample ... sample/*), and no `sample` AppProject
+      exists. (2) The guard DISCOVERS AppProjects by globbing `tenants/*/appproject.yaml` +
+      bootstrap/platform-appproject.yaml — but since ADR-031 every real tenant AppProject is
+      composed by Crossplane from platform-services/crossplane/apis/composition.yaml, which
+      the guard never reads. Observed known-projects list is literally "platform __TEAM__
+      platform": the only file that glob still matches is the _template placeholder.
+      Live AppProjects are crimson-copies, crimson-copies-stripped-vm, ida-llm, platform.
+    why_not_fixed_here: >-
+      The tempting one-liner — delete the inert `sample` block — turns the guard GREEN while
+      making it check NOTHING (refs becomes empty). That converts a visibly-broken SEC-006
+      guard into an invisibly-vacuous one, which is worse. The honest fix is to teach the
+      discovery step to read composition.yaml (and skip __TEAM__), which is a real change
+      with its own test, not a one-liner. Diagnosis only, as instructed.
+  wizard_bug_found_en_route:
+    status: PRE-EXISTING, live on main, NOT from #545 — reported, not fixed
+    symptom: "InputError: Invalid input passed to action capstone:compose-project, instance requires property \"database\""
+    trigger: "any of the three no-DB single-component stacks: static/bare-html, static/react-static, frontend/angular"
+    cause: >-
+      The wizard's singleFragment oneOf omits the `database` property entirely for those three
+      stacks, so the form submits no `database`. composeProject.ts declares
+      `database: z.enum(['host-mysql','host-postgres','bring-your-own','none'])` with NO
+      .optional()/.default(), so the action rejects the input at step 2 of 8.
+    blast_radius: "3 of 19 single-component stacks. Fails CLEAN — preflight passes first and compose is before publish, so no repo/claim/catalog object is created."
+    reproduced: "task e7850e6c-5a24-48de-92e8-d7e31ffe7d3f (first Leg-A attempt, static/bare-html). Re-run with blank/bring-your-own + database=none succeeded."
+
+residual_not_proven:
+  - "the rjsf CHECKBOX WIDGET rendering in a browser, and a human clicking it. Everything the click produces — the parameter value, the `if:` evaluation, the step, the commit, the ApplicationSet, the board, the Dex leg — is proven. The widget itself is not, because portal sign-in is OIDC->Dex->GitHub and cannot be driven without the owner's GitHub credentials." 
+teardown:
+  status: COMPLETE
+  method: "PR #547 (admin-merged): git rm both claims + the board file, and regenerate the Dex ConfigMap in the SAME commit so the board-client guard never went red and no follow-up PR was needed."
+  verified_by_checking_not_asserting:
+    - "CapstoneTenant XRs: 2 -> 0"
+    - "namespaces lasttest-{dev,staging,prod} + testfb-{dev,staging,prod}: 6 -> 0"
+    - "ArgoCD Applications matching lasttest|testfb|zzboard: 0; ApplicationSets: 0 strays"
+    - "Crossplane managed resources for both teams: 79 -> 0 (incl. Harbor projects, Harbor robots, Vault policy + authbackendrole)"
+    - "Harbor projects: no lasttest/testfb project exists (project-scoped robots therefore cannot exist; the robots API itself 403s for the provisioner robot, so that is inference, not a direct read)"
+    - "GitHub repos UA-MIS/zzboarda, UA-MIS/zzboardb: DELETE 204, now 404"
+    - "GitHub teams lasttest/testfb: NOT deleted — they PRE-EXISTED this test and are back to repos_count=1 each, exactly as found"
+    - "Postgres: schema `lasttest` in agile_boards DROPped CASCADE; agile_boards now has only `public`"
+    - "Dex ConfigMap: live cm no longer contains the board URI; Reloader rolled Dex a SECOND time unattended (dex-7fb9d47d5d -> dex-5cbf65f86)"
+    - "Dex leg re-measured after teardown: torn-down board URI -> 400 again; maintainers' URI -> 302"
+    - "agile namespace back to exactly its pre-test object set (deployment/agile, svc, ingress, netpol, secret agile-env, secret harbor-pull)"
+    - "Backstage catalog: both zzboard Components auto-removed by orphanStrategy once the repos were deleted; their two generated Locations deleted explicitly (204)"
+    - "catalog entities still matching lasttest/testfb are PRE-EXISTING: Component/Location for repos UA-MIS/lasttest and UA-MIS/testfb, plus the two ingested Groups — none created by this run"
+    - "open PRs on platform-infra: only #406 (long-standing, unrelated)"
+    - "gen-board-clients.py --check on current main: GREEN (0 boards)"
+
+collateral_check_shared_dex_client:
+  - "https://agile.uamishub.com/ -> 307 /login (maintainers' board unaffected end to end)"
+  - "https://agile.uamishub.com/api/auth/login -> 307 to Dex with client_id=agile-board and the maintainers' redirect_uri"
+  - "that redirect_uri -> 302 to github.com/login/oauth/authorize, measured after BOTH Dex rolls"
+  - "https://process.capstone.uamishub.com/ -> 200; https://ida-agile.capstone.uamishub.com/ -> 307"
+
+secondary_findings:
+  harbor_platform_project_visibility: "PRIVATE (metadata.public=false). So the board's harbor-pull credential is still required; the 'make it public and drop the credential' option in #545's left_open was NOT taken."
+  make_validate_step_4_of_6:
+    status: CONFIRMED_AND_WORSE_THAN_REPORTED — NOT a one-liner, left unfixed
+    reported: "argocd-rbac references project 'sample' with no AppProject"
+    what_is_actually_wrong: >-
+      TWO independent stalenesses in one guard. (1) argocd-rbac-cm.yaml still carries the
+      `sample` example role block (p, role:sample ... sample/*), and no `sample` AppProject
+      exists. (2) The guard DISCOVERS AppProjects by globbing `tenants/*/appproject.yaml` +
+      bootstrap/platform-appproject.yaml — but since ADR-031 every real tenant AppProject is
+      composed by Crossplane from platform-services/crossplane/apis/composition.yaml, which
+      the guard never reads. Observed known-projects list is literally "platform __TEAM__
+      platform": the only file that glob still matches is the _template placeholder.
+      Live AppProjects are crimson-copies, crimson-copies-stripped-vm, ida-llm, platform.
+    why_not_fixed_here: >-
+      The tempting one-liner — delete the inert `sample` block — turns the guard GREEN while
+      making it check NOTHING (refs becomes empty). That converts a visibly-broken SEC-006
+      guard into an invisibly-vacuous one, which is worse. The honest fix is to teach the
+      discovery step to read composition.yaml (and skip __TEAM__), which is a real change
+      with its own test, not a one-liner. Diagnosis only, as instructed.
+  wizard_bug_found_en_route:
+    status: PRE-EXISTING, live on main, NOT from #545 — reported, not fixed
+    symptom: "InputError: Invalid input passed to action capstone:compose-project, instance requires property \"database\""
+    trigger: "any of the three no-DB single-component stacks: static/bare-html, static/react-static, frontend/angular"
+    cause: >-
+      The wizard's singleFragment oneOf omits the `database` property entirely for those three
+      stacks, so the form submits no `database`. composeProject.ts declares
+      `database: z.enum(['host-mysql','host-postgres','bring-your-own','none'])` with NO
+      .optional()/.default(), so the action rejects the input at step 2 of 8.
+    blast_radius: "3 of 19 single-component stacks. Fails CLEAN — preflight passes first and compose is before publish, so no repo/claim/catalog object is created."
+    reproduced: "task e7850e6c-5a24-48de-92e8-d7e31ffe7d3f (first Leg-A attempt, static/bare-html). Re-run with blank/bring-your-own + database=none succeeded."
+
+residual_not_proven:
+  - "the rjsf CHECKBOX WIDGET rendering in a browser, and a human clicking it. Everything the click produces — the parameter value, the `if:` evaluation, the step, the commit, the ApplicationSet, the board, the Dex leg — is proven. The widget itself is not, because portal sign-in is OIDC->Dex->GitHub and cannot be driven without the owner's GitHub credentials." 
