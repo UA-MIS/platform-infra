@@ -1,0 +1,29 @@
+# ida-llm scoped egress — rendered by the platform-services directory generator
+# (applicationsets/platform-services-appset.yaml) into Application
+# `platform-svc-ida-llm-egress`, project `platform`.
+#
+# The appset template's destination namespace is kube-system, but every resource
+# here declares its OWN metadata.namespace (the three ida-llm env namespaces) and
+# the platform AppProject permits namespace '*', so they land correctly.
+#
+# WHY A PLATFORM-PROJECT APP AND NOT THE TENANT'S OWN CHART: NetworkPolicy IS in
+# the tenant AppProject's namespaceResourceWhitelist, so the tenant could in
+# principle ship this itself — and that is exactly why it must not. A tenant that
+# writes its own egress policy can widen its own fence at will. Keeping it in a
+# platform-project Application means the team can read the policy but only the
+# platform can change it. Same reason crimson-copies' equivalent lives here.
+#
+# ORDERING: the three namespaces are created by the CapstoneTenant Composition,
+# not here. On a from-scratch apply this Application may briefly fail to sync
+# ("namespace not found") until Crossplane reconciles the claim. The appset's
+# retry + selfHeal settles it; no manual step.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - netpol.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: tenant
+    includeSelectors: false

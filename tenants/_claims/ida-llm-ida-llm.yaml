@@ -1,0 +1,92 @@
+# IDA-LLM — an LLM benchmark harness + results platform (2026-fall).
+#
+# PROVISIONED BY HAND, deliberately. The Backstage zero-touch wizard emits this
+# same XR, but not for this SHAPE: the wizard has no `database: postgres` option
+# (D-185 — "ask us and we set it up by hand" is the documented path for it), and
+# the app runs two kinds the tenant AppProject only just learned to permit
+# (StatefulSet for Redis, CronJob for the nightly sweeps — platform-infra #532).
+# Everything below is otherwise the ordinary contract; nothing here is bespoke.
+#
+# ONE CapstoneTenant XR; the reviewed-once Crossplane Composition
+# (platform-services/crossplane/apis/composition.yaml) expands it into the full
+# tenant: Harbor project + push/pull robots, Vault policy/role, the k8s tenancy
+# fence (3 namespaces + quota/limitrange/netpol/RBAC/PSA), ESO plumbing
+# (SecretStore vault-tenant + SA eso-tenant + vault-ca), the env ApplicationSet,
+# a per-team ARC runner scale set (runs-on: ida-llm-kaniko), and — because
+# `database: postgres` — a per-env PG17 database + login role + grant on the
+# in-cluster tenant DB tier, with credentials pushed to
+# tenants/ida-llm/<env>/database plus the per-team Adminer console in ida-llm-dev.
+#
+# The Composition creates NO GitHub state (ADR-035 §D2) — the app repo
+# UA-MIS/ida-llm is owned end-to-end outside this claim. The env ApplicationSet
+# reads .devops/promotion.yaml from that repo at HEAD, so the repo must exist and
+# carry the contract before dev can render. It does.
+#
+# De-provision = `git rm` this file (plus strip the app repo's `capstone-tenant`
+# topic — see tenants/_claims/README.md).
+apiVersion: platform.capstone.uamishub.com/v1alpha1
+kind: CapstoneTenant
+metadata:
+  name: ida-llm-ida-llm
+  labels:
+    platform.capstone/team: "ida-llm"
+    platform.capstone/semester: "2026-fall"
+    platform.capstone/component: tenant
+spec:
+  team: "ida-llm"
+  appName: "ida-llm"
+  semester: "2026-fall"
+  githubTeam: "ida-llm"
+  # Container port of the PUBLIC entrypoint (the Next.js frontend, standalone).
+  # The chart sets each component's own port from .devops/components.yaml; this
+  # XRD field is only the default the Composition carries.
+  port: 3000
+
+  # ── PREVIEW: OFF, and this is NOT a preference. ────────────────────────────
+  # Previews were requested for this tenant. They cannot be turned on today, and
+  # turning them on would not produce working previews — it would produce broken
+  # AND unfenced ones. Four independent blockers, each verified against
+  # origin/main rather than assumed:
+  #
+  #   1. NO FENCE. The Composition's per-env bundle (quota / LimitRange / three
+  #      NetworkPolicies / RBAC / eso-tenant SA / vault-ca ConfigMap /
+  #      SecretStore / harbor-pull ES) is `range $envs` over dev|staging|prod
+  #      only. A `<team>-pr-<n>` namespace is ArgoCD-created
+  #      (CreateNamespace=true) and gets NONE of it — including the netpol, so a
+  #      preview would have MORE network reach than prod.
+  #   2. VAULT AUTH CANNOT RESOLVE. AuthBackendRole.boundServiceAccountNamespaces
+  #      is an exact list — the three env namespaces plus the LITERAL
+  #      `ida-llm-preview`. It is not a glob, so `ida-llm-pr-7`'s eso-tenant SA
+  #      gets a 403 and every ExternalSecret in the preview fails.
+  #   3. IMAGE PULLS CANNOT RESOLVE. The Harbor project is `public: false` and
+  #      the composition's own comment says harbor-pull is "intentionally NOT
+  #      covered" for preview. Every preview pod ImagePullBackOffs.
+  #   4. NEVER PROVEN, AND SELF-DECLARED UNSAFE.
+  #      tenants/_template/applicationset-preview.yaml still carries
+  #      "⚠⚠⚠ DRAFT — DO NOT MERGE WITHOUT SECURITY REVIEW" with four open
+  #      blockers B1–B4, one of which reads "UNTIL B1 LANDS, PREVIEWS ARE
+  #      UNFENCED — do not enable". No tenant has ever run one.
+  #
+  # The app repo nevertheless SHIPS a complete .devops/chart/overlays/preview/
+  # and PR-preview CI legs, so this is a one-field flip the day those close —
+  # no app-repo change will be needed. And the requirement that motivated the
+  # ask ("no PR may burn cloud credits or hit campus hardware") is already met
+  # without previews: the mock model endpoint is the DEFAULT in CI, not a
+  # preview-only special case.
+  previewEnabled: false
+
+  # Default (false). Dev keeps the platform's non-prod SSO forwardAuth gate.
+  # Unlike crimson-copies there is no showcase-metrics argument for dropping it
+  # here, and benchmark results are the team's own research output.
+  publicDevIngress: false
+
+  domain: "capstone.uamishub.com"
+
+  # PostgreSQL — the PG17 engine of the in-cluster tenant DB tier, via
+  # provider-sql (postgresql.sql.crossplane.io Database + login Role + Grant).
+  # Chosen because the app is Python/SQLAlchemy + Alembic and stores benchmark
+  # run records relationally. Per env this mints database + role `ida_llm_<env>`
+  # and pushes username/password/host/port to tenants/ida-llm/<env>/database —
+  # the SAME four properties the MySQL path writes, so the consumer contract is
+  # engine-agnostic and only the DSN scheme differs (postgresql://).
+  database: "postgres"
