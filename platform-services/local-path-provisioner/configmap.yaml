@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: local-path-config, namespace: local-path-storage }
+data:
+  # /var is the ONE path writable on BOTH node families:
+  #   - Debian workers (w1/w2): ordinary root fs.
+  #   - Talos control-plane (n1-n3): root is READ-ONLY; /var is the writable
+  #     partition. Verified live before choosing this path — a hostPath probe on
+  #     capstone-n1 wrote, read back and removed a file under /var successfully
+  #     (/dev/nvme0n1p4, 442G free).
+  # Covering n1-n3 matters: routine CI is kept off them (#541), but they remain a
+  # genuine fallback under pressure. If the provisioner could not serve a node the
+  # runner can land on, the PVC would hang Pending and the job would wedge — the
+  # exact failure mode #540/#541 removed.
+  config.json: |-
+    {
+      "nodePathMap": [
+        {
+          "node": "DEFAULT_PATH_FOR_NON_LISTED_NODES",
+          "paths": ["/var/local-path-provisioner"]
+        }
+      ]
+    }
+  setup: |-
+    #!/bin/sh
+    set -eu
+    mkdir -m 0777 -p "$VOL_DIR"
+  teardown: |-
+    #!/bin/sh
+    set -eu
+    rm -rf "$VOL_DIR"
+  # Helper pod: runs setup/teardown on the target node. Image comes from the
+  # Harbor pull-through cache, not docker.io — arc-runners/platform egress is
+  # :443-only to Harbor and Docker Hub rate limits are a known failure source.
+  helperPod.yaml: |-
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: helper-pod
+    spec:
+      priorityClassName: system-node-critical
+      tolerations:
+        - key: node.kubernetes.io/disk-pressure
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: helper-pod
+          image: harbor.capstone.uamishub.com/dockerhub-proxy/library/busybox:1.36
+          imagePullPolicy: IfNotPresent

@@ -1,0 +1,28 @@
+# The CI work-volume StorageClass.
+#
+# NOT the cluster default — `ceph-block` keeps that role (rook-ceph-cluster-app.yaml,
+# isDefault: true). This class is opted into explicitly by the three ARC
+# kubernetesModeWorkVolumeClaim definitions and nothing else.
+#
+# volumeBindingMode: WaitForFirstConsumer is LOAD-BEARING, not a default worth
+# skipping. The runner pod is the volume's first consumer, so binding is deferred
+# until the scheduler places it; the PV is then created on THAT node with node
+# affinity pinned to it. ARC subsequently pins the workflow pod (createPod) and
+# every `uses: docker://` step pod (createJob) to the same node via spec.nodeName,
+# so the whole job triple and its node-local volume always agree. With Immediate
+# binding the PV would be placed before the runner is scheduled and could land on
+# a different node, wedging every job.
+#
+# reclaimPolicy: Delete — these are per-job ephemeral volumes; the helper pod
+# removes the directory on teardown. That teardown is also the TENANT ISOLATION
+# boundary: without it a later job could read a previous tenant's checkout.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-path-ci
+  labels:
+    platform.capstone/component: platform
+provisioner: rancher.io/local-path
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Delete
+allowVolumeExpansion: false
