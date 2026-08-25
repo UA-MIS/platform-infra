@@ -39,6 +39,13 @@ spec:
     # merge or the app InvalidSpecErrors "repository not permitted".
     - https://github.com/UA-MIS/course-demos
     - https://github.com/UA-MIS/course-demos.git
+    # ida-slides (ida-slides.capstone.uamishub.com) — third external-repo app, same
+    # pattern as slidedeck/course-demos above (the `ida-slides` Application,
+    # platform-services/ida-slides/application.yaml). Same ⚠ INSTALL-OWNED caveat:
+    # reaches the live `platform` AppProject only via `make bootstrap-reapply` —
+    # re-apply after merge or the app InvalidSpecErrors "repository not permitted".
+    - https://github.com/UA-MIS/ida-slides
+    - https://github.com/UA-MIS/ida-slides.git
     # --- P2.2 (deploy method A, D-022): pinned external Helm chart repos for
     #     platform services that are Helm-only upstream. This widens the supply-chain
     #     allowlist by ONE named repo per chart; security audits each addition; chart
