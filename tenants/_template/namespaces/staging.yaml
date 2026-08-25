@@ -51,7 +51,14 @@ spec:
     requests.memory: 4Gi
     limits.cpu: "8"
     limits.memory: 8Gi
-    pods: "10"
+    # ⚠ MUST STAY IN SYNC with the Crossplane Composition's $envs quota tiers
+    # (platform-services/crossplane/apis/composition.yaml). Both are LIVE
+    # tenant-creation paths and nothing references the other, so alignment is
+    # manual only — and it HAD drifted again: #526 raised the Composition's
+    # dev/staging pods 10 -> 16 and never touched this blueprint, so a team's pod
+    # ceiling depended on which onboarding path created it. Realigned here to the
+    # D-187 values (dev/staging 24, prod 28). Change BOTH or neither.
+    pods: "24"
     services: "15"
     # Storage cap (replica-3 Ceph starvation fence). Generous default; tune per team.
     requests.storage: 5Gi
