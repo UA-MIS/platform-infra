@@ -1,0 +1,47 @@
+# Default-deny for the board pod, plus exactly what it needs.
+#
+# There is no cluster-wide default-deny on this platform; declaring both
+# policyTypes here is what makes everything not listed below denied for this pod.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agile
+  namespace: agile
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector:
+    matchLabels: { app: agile }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # Traefik (kube-system) and the Cloudflare tunnel are the only front doors.
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: cloudflared }
+      ports:
+        - port: 8080
+  egress:
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+    # CNPG Postgres — the board's only durable state.
+    # ⚠ This egress allow is only half the path: db-tier runs its own
+    # default-deny, so platform-services/db-tier/netpol.yaml ALSO needs a
+    # matching ingress rule naming this namespace. Without that side, the
+    # connection is blackholed and surfaces as a connect TIMEOUT (not
+    # "connection refused") — see the note there.
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: db-tier }
+      ports:
+        - port: 5432
+    # HTTPS out: api.github.com (App installation tokens, branch creation, PR
+    # backlinks, webhook reconciliation) and the Dex issuer, which the app
+    # resolves through the coredns-custom rewrite -> Traefik, i.e. still :443.
+    - to: []
+      ports:
+        - port: 443

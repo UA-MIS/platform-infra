@@ -71,3 +71,26 @@ spec:
   cluster:
     name: capstone-pg
   databaseReclaimPolicy: retain
+---
+# UA-MIS Platform agile board (agile.uamishub.com) — the maintainers' instance of
+# the shared `agile-board` image. The app runs its own migrations in-process at
+# startup (Next.js instrumentation, advisory-locked so concurrent replicas are
+# safe) and creates everything inside its OWN schema (`agile`, AGILE_DB_SCHEMA),
+# so it needs nothing beyond ownership of this database.
+#
+# Deliberately a SEPARATE database from the IDA board's: the two instances share
+# an image, not state. `retain` so removing this manifest can never DROP a board's
+# entire backlog — the same posture as every database above.
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: capstone-pg-agile
+  namespace: db-tier
+  labels:
+    platform.capstone/component: platform
+spec:
+  name: agile
+  owner: agile
+  cluster:
+    name: capstone-pg
+  databaseReclaimPolicy: retain

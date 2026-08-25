@@ -168,6 +168,31 @@ data:
         secretEnv: IDA_AGILE_CLIENT_SECRET
         redirectURIs:
           - https://ida-agile.capstone.uamishub.com/api/auth/callback
+      # UA-MIS Platform board (agile.uamishub.com) — the MAINTAINERS' instance of
+      # the SAME application as `ida-agile` above. Both run the identical image
+      # (harbor.capstone.uamishub.com/platform/agile-board, built from
+      # github.com/UA-MIS/agile-board); everything that differs between them is
+      # environment. That is the whole point of the extraction: a second team's
+      # board is a second Dex client and a second env block, never a second copy
+      # of the code.
+      #
+      # Authorization is `UA-MIS:labmx` (the platform maintainers' team), derived
+      # by the app from its GITHUB_ORG/GITHUB_TEAM. Note `labmx` is a SECRET
+      # GitHub team; that is fine — the connector reads it through `/user/teams`
+      # with `read:org`, which returns secret teams the member belongs to, so it
+      # still appears in the `groups` claim as `UA-MIS:labmx` (verified).
+      #
+      # ⚠ Host is on the APEX zone `uamishub.com`, NOT `*.capstone.uamishub.com`
+      # like every client above. Cloudflare already tunnels it to Traefik (a bare
+      # `agile.uamishub.com` request returns Traefik's plain-text 404, not
+      # Cloudflare's HTML error page — verified before this was added), so no DNS
+      # or certificate change was needed. Same no-wildcard-redirect caveat as
+      # ida-agile: this URI and the app's APP_URL must be changed together.
+      - id: agile-board
+        name: UA-MIS Platform Board
+        secretEnv: AGILE_BOARD_CLIENT_SECRET
+        redirectURIs:
+          - https://agile.uamishub.com/api/auth/callback
 
     oauth2:
       # Skip the per-login "approve this app" screen — these are first-party

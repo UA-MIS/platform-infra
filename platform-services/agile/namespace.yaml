@@ -1,0 +1,20 @@
+# `agile` namespace — the UA-MIS Platform sprint board (agile.uamishub.com), the
+# maintainers' instance of the shared agile-board image.
+#
+# Its own namespace rather than a corner of an existing one: the board holds the
+# platform's own backlog, is gated to a DIFFERENT group than any tenant console
+# (UA-MIS:labmx, the same disjoint maintainers' group db-admin uses), and its
+# quota/PSA posture should be reviewable on its own.
+#
+# Ships via the platform-services directory generator
+# (applicationsets/platform-services-appset.yaml) -> Application `platform-svc-agile`.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agile
+  labels:
+    platform.capstone/component: platform
+    goldilocks.fairwinds.com/enabled: "true"
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
