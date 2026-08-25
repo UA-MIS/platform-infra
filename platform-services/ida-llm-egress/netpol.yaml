@@ -1,0 +1,174 @@
+# ============================================================================
+# ida-llm — scoped external HTTPS egress.
+# ============================================================================
+# WHY THIS EXISTS. The Composition-rendered tenant egress policy
+# (`allow-egress-dns-and-intra-ns`) permits exactly three destinations:
+# kube-system:53, in-namespace pods, and the db tier. There is NO internet egress
+# for any tenant namespace, and the CapstoneTenant XRD exposes no knob for one.
+#
+# ida-llm is an LLM benchmark harness. Its `runner` workers exist to call model
+# APIs; with the default fence every one of those calls is dropped, so the app is
+# not degraded, it is entirely non-functional — the same argument that justified
+# the crimson-copies precedent this file is modelled on. The `api` and CronJob
+# workloads share the need (package registries at build-adjacent runtime, model
+# provider SDKs at request time).
+#
+# NetworkPolicy allow-rules are a UNION, so this file is purely ADDITIVE — it does
+# not weaken, replace, or race the Composition-owned policies (different object
+# name, same namespaces). Crossplane keeps owning `default-deny-all`,
+# `allow-ingress-traefik-and-intra-ns` and `allow-egress-dns-and-intra-ns`; this
+# adds a fourth, egress-only, port-443-only rule.
+#
+# SCOPED ON PURPOSE: three namespaces, this tenant only. The tenant-wide
+# equivalent (moving this into the Composition so every tenant gets internet
+# egress by default) is a deliberate FOLLOW-UP gated on security review, not a
+# side effect of onboarding one team.
+#
+# ⚠ SECURITY REVIEW — READ BEFORE APPROVING. Two of the four `except:` blocks
+# below are INERT under this cluster's current Cilium configuration, exactly as
+# hardening/netpol-runners/runner-netpol.yaml documents for its own copy:
+# "CIDR-based selectors do not match in-cluster entities", so an ipBlock except
+# does NOT subtract node / host / apiserver IDENTITIES. Concretely:
+#   - 10.244.0.0/16 (pods) and 10.96.0.0/12 (services) DO enforce — Cilium
+#     matches those by managed-endpoint identity.
+#   - 10.237.168.0/22 (node LAN) and 100.64.0.0/10 (tailnet) DO NOT enforce
+#     today. They become real with Cilium `policyCIDRMatchMode: nodes` plus Host
+#     Firewall.
+# So this grants slightly MORE reach than the YAML reads: an ida-llm pod can
+# reach node-LAN and tailnet addresses on :443. Accepted for this tenant as the
+# same residual risk already carried by the ARC runner pool (SEC-019) and by
+# crimson-copies, and closable by the same two Cilium settings, not by editing
+# this file.
+#
+# NOT granted: any port other than 443. No plaintext :80 (the runners' package
+# installs go over HTTPS — the same constraint the ARC runner pool already lives
+# under), no SMTP, no DNS-over-anything-else. Redis, MinIO and Postgres are
+# reached over the existing intra-namespace / db-tier allows, so no additional
+# hole is needed for any of them.
+#
+# ── ⚠ DEFERRED, ON PURPOSE: THE OFF-CLUSTER "SPARKS" vLLM ROUTE ──────────────
+# The project's design also calls for inference against campus-hosted vLLM
+# hardware ("Sparks") that is NOT on this cluster. That route is NOT opened here.
+# It is deferred by the OWNER's explicit decision, not by oversight and not
+# because it is hard — the address, port and network path (campus LAN? tailnet?)
+# were never pinned down, and writing a placeholder CIDR would be inventing a
+# security boundary rather than implementing one.
+#
+# Adding it later is a ONE-BLOCK change to this file and nothing else. Append a
+# second element to each namespace's `egress:` list:
+#
+#     - to:
+#         - ipBlock:
+#             cidr: <SPARKS_ADDR>/32       # the vLLM host, exactly one address
+#       ports:
+#         - protocol: TCP
+#           port: <SPARKS_PORT>            # vLLM's OpenAI-compatible listener
+#
+# Three things to get right when that day comes, all of them easy to get wrong:
+#   (a) Use a /32, not the enclosing subnet. The point of a separate block is
+#       that it is narrower than the :443 rule above, otherwise skip it.
+#   (b) If the port is 443 the rule is REDUNDANT — the block above already
+#       covers it, and adding a second one implies a fence that is not there.
+#       vLLM defaults to :8000, which is why this is a real gap and not a no-op.
+#   (c) If Sparks sits on the node LAN or the tailnet, re-read the INERT-except
+#       warning above: those ranges are already reachable today, so the new block
+#       documents intent but does not (yet) change enforcement. It becomes real
+#       with the same two Cilium settings.
+# The app repo's .devops/README.md carries the matching note on the app side
+# (SPARKS_BASE_URL is wired but unset), so the two halves stay findable together.
+# ============================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-external-https
+  namespace: ida-llm-dev
+  labels:
+    platform.capstone/team: ida-llm
+    platform.capstone/semester: "2026-fall"
+    platform.capstone/env: dev
+    platform.capstone/component: tenant
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # Cloud LLM provider APIs, package registries, and anything else the harness
+    # legitimately calls. HTTPS only.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.244.0.0/16    # pods — ENFORCED (endpoint identity)
+              - 10.96.0.0/12     # services — ENFORCED
+              - 10.237.168.0/22  # node LAN — INERT today (see header)
+              - 100.64.0.0/10    # tailnet — INERT today (see header)
+      ports:
+        - protocol: TCP
+          port: 443
+    # ── PLACEHOLDER: off-cluster "Sparks" vLLM. Deliberately EMPTY — see the
+    #    header for the exact block to append and the three traps to avoid.
+    #    Deferred by owner decision; not an oversight.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-external-https
+  namespace: ida-llm-staging
+  labels:
+    platform.capstone/team: ida-llm
+    platform.capstone/semester: "2026-fall"
+    platform.capstone/env: staging
+    platform.capstone/component: tenant
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # Cloud LLM provider APIs, package registries, and anything else the harness
+    # legitimately calls. HTTPS only.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.244.0.0/16    # pods — ENFORCED (endpoint identity)
+              - 10.96.0.0/12     # services — ENFORCED
+              - 10.237.168.0/22  # node LAN — INERT today (see header)
+              - 100.64.0.0/10    # tailnet — INERT today (see header)
+      ports:
+        - protocol: TCP
+          port: 443
+    # ── PLACEHOLDER: off-cluster "Sparks" vLLM. Deliberately EMPTY — see the
+    #    header for the exact block to append and the three traps to avoid.
+    #    Deferred by owner decision; not an oversight.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-external-https
+  namespace: ida-llm-prod
+  labels:
+    platform.capstone/team: ida-llm
+    platform.capstone/semester: "2026-fall"
+    platform.capstone/env: prod
+    platform.capstone/component: tenant
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # Cloud LLM provider APIs, package registries, and anything else the harness
+    # legitimately calls. HTTPS only.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.244.0.0/16    # pods — ENFORCED (endpoint identity)
+              - 10.96.0.0/12     # services — ENFORCED
+              - 10.237.168.0/22  # node LAN — INERT today (see header)
+              - 100.64.0.0/10    # tailnet — INERT today (see header)
+      ports:
+        - protocol: TCP
+          port: 443
+    # ── PLACEHOLDER: off-cluster "Sparks" vLLM. Deliberately EMPTY — see the
+    #    header for the exact block to append and the three traps to avoid.
+    #    Deferred by owner decision; not an oversight.
