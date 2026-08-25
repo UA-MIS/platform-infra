@@ -61,6 +61,24 @@ siblings, and the app env to `secret/platform/agile`. Both are drop-in
 replacements — the Secret names (`cnpg-agile-app-credentials`, `agile-env`) and
 keys stay identical, so only the producing manifest changes.
 
+## `sslmode` — why the DSN says `uselibpqcompat=true`
+
+`DATABASE_URL` ends `?sslmode=require&uselibpqcompat=true`. The suffix is
+load-bearing, not decoration.
+
+`pg` 8.23 (via `pg-connection-string`) treats a bare `sslmode=require` as
+**`verify-full`** — it validates the server certificate against the system CA
+bundle. CNPG serves its own internally-issued certificate, so the first boot
+failed with `SELF_SIGNED_CERT_IN_CHAIN` and migrations retried forever while
+`/api/readyz` stayed 503. `uselibpqcompat=true` restores libpq semantics, where
+`require` means *encrypt the connection, do not verify the CA* — which is
+precisely what Grafana's `ssl_mode: require` already means on this cluster.
+
+So the connection IS encrypted; what it does not do is authenticate the server.
+The stronger posture is `verify-full` with the CNPG CA bundle mounted into the
+pod; that is a known unfinished platform follow-up affecting every CNPG client
+here, not just this one.
+
 ## The pieces
 
 | File | What it is |
