@@ -743,10 +743,13 @@ vault-ca-manifest: ## (ESO+Vault) Emit the per-tenant `vault-ca` ConfigMap (publ
 #   (3) schema-invalid k8s objects,
 #   (4) duplicate CapstoneTenant claims for one team (the 2026-07-09 provider
 #       apply-fight: two XRs co-managing the same team-keyed netpols churned
-#       Cilium policy cluster-wide and starved the Vault raft leader's node).
+#       Cilium policy cluster-wide and starved the Vault raft leader's node),
+#   (5) AppProject role groups that are not the group Dex emits (SEC-021/SEC-006 —
+#       the same defect class twice: a role bound to a string no identity provider
+#       ever produces, which fails SILENTLY as "inert role", never as an error).
 # Run before committing tenancy changes; cluster-independent.
 .PHONY: validate
-validate: ## Static validation of tenant manifests (kubeconform + RBAC-name + stray-file + argocd-rbac-project + claim-uniqueness + dex-board-client guards)
+validate: ## Static validation of tenant manifests (kubeconform + RBAC-name + stray-file + argocd-rbac-project + claim-uniqueness + dex-board-client + appproject-group guards)
 	@command -v kubeconform >/dev/null || { echo "ERROR: kubeconform not found (install to ~/.local/bin)."; exit 1; }
 	@echo "==> [1/6] kubeconform -strict on tenant namespace bundles..."
 	@kubeconform -strict -summary -kubernetes-version 1.31.5 tenants/*/namespaces/*.yaml
@@ -784,6 +787,20 @@ validate: ## Static validation of tenant manifests (kubeconform + RBAC-name + st
 	@# missing from platform-services/dex/configmap.yaml deploys, goes Ready, serves
 	@# its landing page — and fails only when someone clicks "Sign in". Catch it here.
 	@python3 platform-services/dex/gen-board-clients.py --check
+	@echo "==> [7/7] appproject-group guard: every AppProject role group must be 'UA-MIS:<slug>' (SEC-021)..."
+	@# SEC-006 and SEC-021 are the SAME defect in two places, four years of
+	@# codebase apart: an ArgoCD role bound to a group string no identity provider
+	@# emits. It never errors — the role is simply inert and users fall through to
+	@# policy.default — so only a lint catches it. Dex's GitHub connector
+	@# (teamNameField: slug, orgs set) emits ONLY `<org>:<team-slug>`.
+	@# Covers both blueprint paths and the Crossplane generator.
+	@python3 hack/lint-appproject-groups.py
+	@# The format check above cannot see whether a slug is a REAL GitHub team, nor
+	@# whether students are MEMBERS of it (repo collaborators get no group claim).
+	@# Both are required for access to actually work. Cluster/GitHub-dependent, so
+	@# it cannot live in this offline gate — `make verify-appproject-groups` does it.
+	@echo "  NOTE: slug-resolves-to-a-real-GitHub-team is NOT checked here (needs the"
+	@echo "        GitHub API) — run 'make verify-appproject-groups' for that."
 	@echo "validate: PASS"
 
 # ---- tenant credential audit (SEC-037) -------------------------------------
@@ -805,6 +822,18 @@ validate: ## Static validation of tenant manifests (kubeconform + RBAC-name + st
 .PHONY: audit-tenant-credentials
 audit-tenant-credentials: ## Find platform-shared credentials in tenant-reachable namespaces (needs a cluster)
 	@python3 hack/audit-tenant-credentials.py
+
+# ---- AppProject group resolution (online companion to validate [7/7]) -------
+# validate [7/7] proves the group STRING is well-formed. It cannot prove the two
+# things that decide whether a student can actually sync:
+#   (a) the slug is a real GitHub team, and
+#   (b) the students are MEMBERS of that team (repo COLLABORATORS get no group
+#       claim from Dex at all, so they hold no team-scoped ArgoCD access).
+# Both failed silently for real tenants during the SEC-021 audit, so this target
+# exists to make them loud. Needs `gh` authenticated + cluster read access.
+.PHONY: verify-appproject-groups
+verify-appproject-groups: ## Check every live AppProject role group resolves to a real GitHub team with members
+	@python3 hack/verify-appproject-groups.py
 
 # ---- reversible tenant on/off switch ---------------------------------------
 # Pause a tenant (stop it running + make it VANISH from k9s) and bring it back,

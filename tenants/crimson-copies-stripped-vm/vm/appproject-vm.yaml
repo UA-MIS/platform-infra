@@ -121,6 +121,19 @@ spec:
       policies:
         - p, proj:crimson-copies-stripped-vm:developer, applications, get, crimson-copies-stripped-vm/*, allow
         - p, proj:crimson-copies-stripped-vm:developer, applications, sync, crimson-copies-stripped-vm/*, allow
+        # Pod logs for THIS project's apps only — scoped replacement for the
+        # cluster-wide `logs, get, */*` that SEC-022 removes from policy.default.
+        - p, proj:crimson-copies-stripped-vm:developer, logs, get, crimson-copies-stripped-vm/*, allow
         # Explicitly NO delete, NO override, NO action/* — least privilege.
       groups:
-        - crimson-copies-stripped-developers
+        # SEC-021: the group Dex actually emits is `<org>:<team-slug>`, never
+        # `<team>-developers`. The project is `crimson-copies-stripped-vm` but the
+        # GitHub team would be `crimson-copies-stripped` — the VM tier is the SAME
+        # team, so no `-vm` suffix on the group.
+        #
+        # ⚠ STILL INERT AFTER THIS FIX, and deliberately so: GitHub team
+        # `UA-MIS/crimson-copies-stripped` DOES NOT EXIST (verified: API 404). This
+        # line is now correctly FORMATTED, not live. It starts granting access only
+        # if someone creates that team — which is the fail-closed direction. Do not
+        # read this as "VM tenant access works".
+        - UA-MIS:crimson-copies-stripped
