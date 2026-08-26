@@ -55,6 +55,22 @@ spec:
             {{- /* SECURITY-GATED opt-out from the non-prod SSO forwardAuth, DEV ONLY.
                    Default false, so every existing tenant keeps the gate untouched. */}}
             {{- $publicDev := $spec.publicDevIngress | default false }}
+            {{- /* Outbound TCP/443 to the internet (xrd.yaml spec.externalEgress).
+                   DEFAULTS TRUE -- rationale at the netpol rule below.
+
+                   ⚠ DO NOT rewrite this as `$spec.externalEgress | default true`.
+                   sprig's `default` treats boolean FALSE as empty, so that form
+                   silently converts an explicit `externalEgress: false` back into
+                   true and the opt-out becomes a no-op -- a security control that
+                   reads as present and does nothing. `$preview` and `$publicDev`
+                   above are safe with `| default` only because THEIR default is
+                   false. hasKey is the correct construction for a default-true
+                   boolean, and it also survives an XR persisted before this field
+                   existed (missingkey=error is set on this template). */}}
+            {{- $externalEgress := true }}
+            {{- if hasKey $spec "externalEgress" }}
+            {{-   $externalEgress = $spec.externalEgress }}
+            {{- end }}
             {{- $database := $spec.database | default "none" }}
             {{- /* MySQL identifiers from the team slug: hyphens -> underscores, since
                    `<team>_<env>` becomes a MariaDB schema + username (ADR-033). */}}
@@ -713,6 +729,140 @@ spec:
                           - protocol: TCP
                             port: {{ if eq $database "postgres" }}5432{{ else }}3306{{ end }}
                       {{- end }}
+            {{- if $externalEgress }}
+            ---
+            # ========================================================================
+            # OUTBOUND INTERNET, TCP/443 ONLY — the fourth tenant policy (xrd.yaml
+            # spec.externalEgress, DEFAULT TRUE).
+            # ========================================================================
+            # WHAT THIS FIXES. Before this rule the three policies above permitted
+            # exactly three destinations: kube-system:53, in-namespace pods, and (when
+            # the tenant asked for one) the db tier. NOTHING reached the internet, and
+            # the XRD exposed no knob to ask for it. Every zero-touch tenant therefore
+            # shipped unable to reach Clerk/Auth0, an OAuth JWKS endpoint, Stripe, an
+            # LLM API or a CDN font — i.e. unable to complete a first page load. The two
+            # tenants that worked (crimson-copies, ida-llm) worked because a human
+            # noticed they were broken and hand-wrote platform-services/<team>-egress/.
+            #
+            # WHY DEFAULT TRUE, DELIBERATELY. Default-off is only the conservative
+            # choice if someone would actually leave it off. Nobody did: both tenants
+            # that hit this got it opened by hand within days. So default-off does not
+            # produce LESS egress than default-on — it produces the SAME egress, later,
+            # after a broken first impression and a bespoke platform PR, twenty times
+            # over. Against that it buys nothing, and it costs a great deal, because of
+            # HOW it fails: a NetworkPolicy drop is a TIMEOUT, not a `connection
+            # refused`. The student sees "the API is slow", not "the platform blocked
+            # me", and there is no TA to ask. This platform has already written that
+            # diagnostic down after learning it on its own metrics scrapes (see the
+            # monitoring rule in allow-ingress-traefik-and-intra-ns above). Shipping a
+            # default whose failure mode is a silent hang, to an audience that cannot
+            # diagnose it, is not caution.
+            # The opt-out is preserved and real: `externalEgress: false` renders no
+            # policy at all and restores the old behaviour exactly.
+            #
+            # WHY A PLAIN NetworkPolicy AND NOT A CiliumNetworkPolicy. The sibling
+            # policies in hardening/ use CNP `toEntities:` — but only where the target
+            # is an in-cluster IDENTITY (kube-apiserver, cluster, host), which an
+            # ipBlock genuinely cannot express. This rule's target is the outside world,
+            # where the ipBlock form is the one PROVEN to work on this cluster: it is
+            # exactly the shape running today in crimson-copies-* and ida-llm-*, and
+            # verified live before this change (crimson-copies-dev reached
+            # https://api.github.com in 0.13s; capstone-demo-dev, which lacks the
+            # policy, timed out after 8s with DNS resolving fine). A CNP is also not
+            # available here regardless: provider-kubernetes' ClusterRole
+            # (rbac/provider-kubernetes-rbac.yaml) grants networking.k8s.io only — it
+            # has no cilium.io verbs, so a rendered CNP would fail RBAC-forbidden.
+            #
+            # WHY NO PER-TENANT PORT LIST. An `egressPorts` field was considered and
+            # rejected. The XR auto-commits to main via the GitHub App with NO human
+            # merge (xrd.yaml RESERVED-NAME GUARD header), so any port the scaffolder
+            # form can emit becomes an open port with nobody in the loop. A hard-coded
+            # 443 keeps the reviewed-once property: the SHAPE of what is possible is
+            # fixed by this file. A tenant that genuinely needs another port gets a
+            # scoped platform-services/ Application with a human on the PR — which is
+            # what the ida-llm "Sparks" vLLM :8000 route is already deferred to.
+            #
+            # NAME IS DELIBERATELY `-default`, NOT the bare `allow-egress-external-https`
+            # the two hand-written files use. Sharing the name would put ArgoCD and
+            # Crossplane on the same object in crimson-copies-* and ida-llm-*, which is
+            # the 2026-07-09 apply-fight that pinned Cilium's CPU. A distinct name makes
+            # this purely ADDITIVE — NetworkPolicy allow-rules are a UNION, so the two
+            # snowflakes keep working untouched and there is never a window with no
+            # policy. Retiring those two directories is a SEPARATE follow-up PR, safe to
+            # do only AFTER this one is live (render first, then delete — the reverse of
+            # the same-name ordering).
+            #
+            # ⚠ SECURITY CAVEAT, CARRIED FORWARD NOT SOLVED. Of the four `except:`
+            # blocks below, only two enforce. Cilium matches in-cluster entities by
+            # IDENTITY, not by CIDR, so an ipBlock `except:` cannot subtract node/host
+            # identities (documented at length in hardening/netpol-runners/
+            # runner-netpol.yaml and in both hand-written tenant files):
+            #   - 10.244.0.0/16 (pods) and 10.96.0.0/12 (services) DO enforce.
+            #   - 10.237.168.0/22 (node LAN) and 100.64.0.0/10 (tailnet) DO NOT.
+            # So a tenant pod can reach node-LAN and tailnet addresses on :443. That is
+            # the SEC-019 residual already accepted for the ARC runner pool and for the
+            # two hand-written tenants — but this change widens it from 2 tenants to
+            # ALL of them, which is a real increase in blast radius and the single thing
+            # a reviewer should weigh. It is closed by two Cilium settings
+            # (`policyCIDRMatchMode: nodes` + Host Firewall), NOT by editing this file.
+            # Because that caveat is the kind that stops a reviewer's search — the
+            # `except:` list makes the policy LOOK fenced — it is stamped as an
+            # annotation on every rendered object, so `kubectl get netpol -o yaml` at
+            # 2am shows it too, instead of only this source file.
+            #
+            # NOT granted at any setting: plaintext :80 (verified live — the same
+            # crimson-copies-dev pod that reached https://api.github.com in 0.13s timed
+            # out after 8s on http://api.github.com), SMTP, or any other port. DNS is
+            # already granted by allow-egress-dns-and-intra-ns above and is deliberately
+            # NOT repeated here.
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: Object
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation (printf "k8s-netpol-egress-ext-%s" $e.name) }}
+            spec:
+              providerConfigRef:
+                name: default
+              forProvider:
+                manifest:
+                  apiVersion: networking.k8s.io/v1
+                  kind: NetworkPolicy
+                  metadata:
+                    name: allow-egress-external-https-default
+                    namespace: {{ $ns | quote }}
+                    labels:
+                      platform.capstone/team: {{ $team | quote }}
+                      platform.capstone/semester: {{ $sem | quote }}
+                      platform.capstone/env: {{ $e.name | quote }}
+                    annotations:
+                      platform.capstone/security-caveat: >-
+                        The 10.237.168.0/22 (node LAN) and 100.64.0.0/10 (tailnet)
+                        except-blocks in this policy are INERT under this cluster's
+                        Cilium config -- CIDR selectors do not match in-cluster
+                        identities. Tenant pods CAN reach those ranges on :443.
+                        Accepted residual (SEC-019); closed by Cilium
+                        policyCIDRMatchMode=nodes + Host Firewall, not by editing
+                        this object. The 10.244.0.0/16 and 10.96.0.0/12 excepts DO
+                        enforce.
+                      platform.capstone/opt-out: >-
+                        Set spec.externalEgress=false on this tenant's CapstoneTenant
+                        XR (tenants/_claims/) to remove this policy entirely.
+                  spec:
+                    podSelector: {}
+                    policyTypes: [Egress]
+                    egress:
+                      - to:
+                          - ipBlock:
+                              cidr: 0.0.0.0/0
+                              except:
+                                - 10.244.0.0/16    # pods — ENFORCED (endpoint identity)
+                                - 10.96.0.0/12     # services — ENFORCED
+                                - 10.237.168.0/22  # node LAN — INERT today (see header)
+                                - 100.64.0.0/10    # tailnet — INERT today (see header)
+                        ports:
+                          - protocol: TCP
+                            port: 443
+            {{- end }}
             ---
             # Developer RBAC (CXP-2): a namespaced RoleBinding to the pre-reviewed
             # ClusterRole capstone-tenant-developer (rbac/capstone-tenant-developer-

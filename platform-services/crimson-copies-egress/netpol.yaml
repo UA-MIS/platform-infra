@@ -1,7 +1,27 @@
 # ============================================================================
 # crimson-copies — scoped external HTTPS egress (D-155 #1).
 # ============================================================================
-# WHY THIS EXISTS. The Composition-rendered tenant egress policy
+# ⚠ SUPERSEDED — PENDING RETIREMENT. The tenant-wide fix this file's own header
+# below defers ("a deliberate FOLLOW-UP gated on security review") has landed:
+# the CapstoneTenant XRD now carries `externalEgress` (default true) and the
+# Composition renders `allow-egress-external-https-default` per env namespace.
+# So the paragraph below beginning "There is NO internet egress" is HISTORY, not
+# current fact — do not cite it as evidence that the platform still lacks a knob.
+#
+# This file is deliberately still here and still named
+# `allow-egress-external-https` — a DIFFERENT object name from the
+# Composition's. NetworkPolicy allow-rules are a UNION, so the two coexist with
+# no change in effective access and, crucially, ArgoCD and Crossplane never own
+# the same object (that co-ownership is the 2026-07-09 apply-fight).
+#
+# TO RETIRE (a separate PR, safe only AFTER the Composition change is live and
+# `kubectl get netpol -n crimson-copies-dev` shows
+# allow-egress-external-https-default): `git rm -r` this directory. Nothing else
+# is needed — crimson-copies' claim needs no edit, because externalEgress
+# defaults to true. Delete only after the replacement is confirmed present, or
+# the tenant loses egress in the gap.
+# ============================================================================
+# WHY THIS EXISTED. The Composition-rendered tenant egress policy
 # (`allow-egress-dns-and-intra-ns`, platform-services/crossplane/apis/composition.yaml)
 # permits exactly three destinations: kube-system:53, in-namespace pods, and
 # db-tier:3306. There is NO internet egress for any tenant namespace, and the

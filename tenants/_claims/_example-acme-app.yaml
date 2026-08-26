@@ -21,3 +21,10 @@ spec:
   previewEnabled: false        # per-PR preview ApplicationSet (security-gated)
   domain: capstone.uamishub.com
   maxRunners: 5                # per-tenant ARC scale-set concurrency ceiling (1-10, default 5)
+  externalEgress: true         # outbound TCP/443 to the internet. DEFAULT TRUE — leave it
+                               # alone unless this tenant must be fenced off the internet.
+                               # Setting false is a real fence, and its failure mode is a
+                               # TIMEOUT, not a refusal: the app's Clerk/Stripe/LLM/JWKS
+                               # calls hang with no error that names the platform. Only
+                               # :443 is ever opened; :80 and every other port stay closed
+                               # at either setting.

@@ -1,7 +1,31 @@
 # ============================================================================
 # ida-llm — scoped external HTTPS egress.
 # ============================================================================
-# WHY THIS EXISTS. The Composition-rendered tenant egress policy
+# ⚠ PARTIALLY SUPERSEDED — :443 RULE PENDING RETIREMENT, SPARKS NOTE IS NOT.
+# The tenant-wide fix this file's header below defers has landed: the
+# CapstoneTenant XRD now carries `externalEgress` (default true) and the
+# Composition renders `allow-egress-external-https-default` per env namespace.
+# The paragraph beginning "There is NO internet egress" is HISTORY, not current
+# fact.
+#
+# This file is deliberately still here and still named
+# `allow-egress-external-https` — a DIFFERENT object name from the
+# Composition's. NetworkPolicy allow-rules are a UNION, so the two coexist with
+# no change in effective access and ArgoCD and Crossplane never own the same
+# object (that co-ownership is the 2026-07-09 apply-fight).
+#
+# TO RETIRE (a separate PR, safe only AFTER the Composition change is live and
+# `kubectl get netpol -n ida-llm-dev` shows allow-egress-external-https-default):
+# `git rm -r` this directory. ida-llm's claim needs no edit — externalEgress
+# defaults to true.
+#
+# ⚠ BUT DO NOT LOSE THE SPARKS BLOCK. The deferred off-cluster vLLM route
+# documented at the bottom of this header is NOT covered by the Composition
+# (which opens :443 only, deliberately — no per-tenant port list). If this
+# directory is deleted, that block must move somewhere, or the ":8000 is a real
+# gap, not a no-op" reasoning is lost with the file.
+# ============================================================================
+# WHY THIS EXISTED. The Composition-rendered tenant egress policy
 # (`allow-egress-dns-and-intra-ns`) permits exactly three destinations:
 # kube-system:53, in-namespace pods, and the db tier. There is NO internet egress
 # for any tenant namespace, and the CapstoneTenant XRD exposes no knob for one.
