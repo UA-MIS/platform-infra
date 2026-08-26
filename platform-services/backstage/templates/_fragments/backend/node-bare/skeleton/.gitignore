@@ -1,0 +1,27 @@
+# Node (no framework) starter.
+# The repo root has a .gitignore too; this one covers this component's stack.
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+
+# Test / coverage
+coverage/
+.nyc_output/
+
+# Local env -- real secrets belong in Vault, not here
+.env
+.env.local
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor / OS cruft
+.DS_Store
+.idea/
+.vscode/

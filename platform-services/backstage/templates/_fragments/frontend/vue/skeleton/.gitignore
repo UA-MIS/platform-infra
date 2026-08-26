@@ -1,0 +1,31 @@
+# Vue + Vite starter.
+# The repo root has a .gitignore too; this one covers this component's stack.
+
+# Dependencies
+node_modules/
+
+# Vite build output
+dist/
+dist-ssr/
+*.tsbuildinfo
+
+# Test / coverage
+coverage/
+
+# Local-only overrides
+*.local
+
+# Local env -- real secrets belong in Vault, not here.
+# Remember that anything Vite inlines as VITE_* is PUBLIC in the shipped bundle.
+.env
+.env.local
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor / OS cruft
+.DS_Store
+.idea/
+.vscode/

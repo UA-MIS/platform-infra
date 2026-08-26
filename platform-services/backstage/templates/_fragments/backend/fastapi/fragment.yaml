@@ -17,5 +17,10 @@ dockerfile: Dockerfile
 healthPath: /healthz
 notes: >-
   FastAPI + SQLAlchemy 2.x + PyMySQL with sample /items CRUD. Reads DATABASE_URL
-  (mysql+pymysql://...); falls back to in-memory SQLite when unset so it boots zero-config.
-  /healthz is DB-independent. Harvested from the proven python-fastapi-api template.
+  (mysql+pymysql://...); when it is unset the data routes return 503 with a clear
+  message, matching the backend contract in _fragments/README.md and the reference
+  implementation in backend/express. /healthz is DB-independent, so the pod still
+  becomes Ready. An in-memory SQLite database is available for local test runs via
+  FASTAPI_ALLOW_MEMORY_DB=1 (set by conftest.py) — it is deliberately NOT the
+  behaviour you get by leaving DATABASE_URL unset. Harvested from the proven
+  python-fastapi-api template.

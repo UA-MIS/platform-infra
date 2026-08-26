@@ -19,7 +19,15 @@ host/scheme structure a real tenant secret has, fake user/password. Do not repla
 them with a real credential (see DSN-001, artifacts/reviews/review-fix8-dsn.md).
 """
 
-from app.db import _normalize_mysql_url, _normalize_url, _resolve_database_url
+import pytest
+
+from app.db import (
+    MEMORY_DATABASE_URL,
+    _memory_db_allowed,
+    _normalize_mysql_url,
+    _normalize_url,
+    _resolve_database_url,
+)
 
 FAKE_MYSQL_URL = (
     "mysql://exampleteam_dev:not-a-real-password@"
@@ -102,22 +110,51 @@ def test_resolve_database_url_normalizes_bare_postgres():
     assert result == FAKE_POSTGRES_PSYCOPG_URL
 
 
-def test_resolve_database_url_falls_back_to_sqlite_when_unset():
-    result = _resolve_database_url(None)
+def test_resolve_database_url_returns_none_when_unset():
+    # The contract (_fragments/README.md): no DATABASE_URL means NO database, which
+    # the data routes surface as a 503. It must NOT silently become an in-memory
+    # SQLite database — that accepts writes at one replica and loses them at two.
+    result = _resolve_database_url(None, allow_memory=False)
 
-    assert result == "sqlite+pysqlite:///:memory:"
+    assert result is None
 
 
-def test_resolve_database_url_falls_back_to_sqlite_when_empty():
+def test_resolve_database_url_returns_none_when_empty():
     # DSN-002: a transiently EMPTY (not unset) value must degrade exactly like
     # unset, not reach create_engine() with "" and crash at import — this is the
     # env-injection race FIX-9 exists to close, reached by a different door.
-    result = _resolve_database_url("")
+    result = _resolve_database_url("", allow_memory=False)
 
-    assert result == "sqlite+pysqlite:///:memory:"
+    assert result is None
 
 
-def test_resolve_database_url_falls_back_to_sqlite_when_whitespace():
-    result = _resolve_database_url("   ")
+def test_resolve_database_url_returns_none_when_whitespace():
+    result = _resolve_database_url("   ", allow_memory=False)
 
-    assert result == "sqlite+pysqlite:///:memory:"
+    assert result is None
+
+
+def test_resolve_database_url_uses_memory_sqlite_only_when_opted_in():
+    # The in-memory database is still available for local test runs, but only as an
+    # EXPLICIT choice — never as the consequence of forgetting to set DATABASE_URL.
+    result = _resolve_database_url(None, allow_memory=True)
+
+    assert result == MEMORY_DATABASE_URL
+
+
+def test_resolve_database_url_prefers_real_dsn_over_memory_opt_in():
+    # The opt-in is a fallback, not an override: a real DATABASE_URL always wins.
+    result = _resolve_database_url(FAKE_MYSQL_URL, allow_memory=True)
+
+    assert result == FAKE_MYSQL_PYMYSQL_URL
+
+
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on", " on "])
+def test_memory_db_allowed_accepts_truthy_spellings(value):
+    assert _memory_db_allowed(value) is True
+
+
+@pytest.mark.parametrize("value", [None, "", "   ", "0", "false", "no", "off", "maybe", "2"])
+def test_memory_db_allowed_rejects_everything_else(value):
+    # Fails CLOSED: a typo must land on the 503, not open a silent in-memory database.
+    assert _memory_db_allowed(value) is False

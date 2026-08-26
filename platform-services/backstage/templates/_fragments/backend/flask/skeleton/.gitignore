@@ -1,0 +1,38 @@
+# Flask (Python) starter.
+# The repo root has a .gitignore too; this one covers this component's stack.
+
+# Byte-code and packaging
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Virtualenvs
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Coverage
+.coverage
+coverage.xml
+htmlcov/
+
+# Local SQLite scratch files
+*.sqlite3
+*.db
+
+# Flask instance folder (holds local-only config)
+instance/
+
+# Local env -- real secrets belong in Vault, not here
+.env
+.env.local
+!.env.example
+
+# Editor / OS cruft
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,30 @@
+# Angular starter.
+# The repo root has a .gitignore too; this one covers this component's stack.
+
+# Dependencies
+node_modules/
+
+# Angular build output and CLI cache
+dist/
+tmp/
+out-tsc/
+.angular/
+*.tsbuildinfo
+
+# Test / coverage
+coverage/
+
+# Local env -- real secrets belong in Vault, not here.
+# Remember that anything compiled into the bundle is PUBLIC.
+.env
+.env.local
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor / OS cruft
+.DS_Store
+.idea/
+.vscode/

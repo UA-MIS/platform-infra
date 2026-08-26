@@ -1,0 +1,25 @@
+# Plain HTML/CSS/JS starter (served by nginx straight out of public/).
+# The repo root has a .gitignore too; this one covers this component's stack.
+#
+# There is no build step here, so there is not much to ignore. If you later add
+# a bundler or a CSS toolchain, add its output directory below.
+
+# Dependencies (only if you add a toolchain later)
+node_modules/
+
+# Build output (only if you add a bundler later)
+dist/
+
+# Local env -- real secrets belong in Vault, not here.
+# This site is fully static: everything in public/ ships to every visitor.
+.env
+.env.local
+!.env.example
+
+# Logs
+*.log
+
+# Editor / OS cruft
+.DS_Store
+.idea/
+.vscode/
