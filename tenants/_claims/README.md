@@ -68,4 +68,13 @@ ESO plumbing, env/preview ApplicationSets).
 
 See the XRD: `platform-services/crossplane/apis/xrd.yaml`. Required: `team`,
 `appName`, `semester`. Optional (defaulted): `githubTeam`, `port`, `previewEnabled`,
-`domain`.
+`publicDevIngress`, `domain`, `database`, `maxRunners`, `externalEgress`.
+
+`externalEgress` defaults to **true** and is the only one of these that most teams
+should never touch: it renders the per-namespace NetworkPolicy that lets the app
+make outbound TCP/443 calls (Clerk/Auth0, an OAuth JWKS endpoint, Stripe, an LLM
+API, a CDN font). Set it to `false` only for a tenant that must be fenced off the
+internet, and know the failure mode you are choosing: a NetworkPolicy drop is a
+**timeout, not a `connection refused`**, so the team sees "the API is slow" rather
+than anything naming the platform. Only :443 is ever opened; :80 and all other
+ports stay closed at either setting.

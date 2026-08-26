@@ -128,6 +128,22 @@ spec:
                     empty. Enabling this is what lets a showcase app demonstrate
                     real traffic and real business metrics in ONE dashboard.
                   default: false
+                externalEgress:
+                  type: boolean
+                  description: >-
+                    Allow this tenant's pods to make OUTBOUND TCP/443 connections to
+                    the public internet. DEFAULT TRUE -- see the "why default true"
+                    block in composition.yaml at the allow-egress-external-https-default
+                    rule. Renders one additive, egress-only, port-443-only NetworkPolicy
+                    per environment namespace. Set to FALSE for a tenant that must be
+                    fenced off the internet (an air-gapped grading exercise, a team
+                    handling data that must not leave the cluster); that tenant then
+                    behaves exactly as EVERY tenant did before this field existed --
+                    DNS and in-namespace traffic still work, all outbound internet is
+                    dropped as a TIMEOUT, not a refusal.
+                    NOT granted at any setting: plaintext :80, SMTP, or any other port.
+                    There is deliberately no per-tenant port list -- see composition.yaml.
+                  default: true
                 domain:
                   type: string
                   description: Public base domain for ingress hosts.
