@@ -368,6 +368,30 @@ spec:
             # so ntfy renders readable firing/resolved notifications instead of raw
             # JSON. See that file + README "Notification channel" for the ntfy
             # dependency + phone-subscription instructions.
+            #
+            # ⚠ DELIBERATELY STILL A SINGLE ENTRY (board #156, dead man's switch).
+            # #156 suggests creating a SECOND secret (`alertmanager-deadmansswitch`)
+            # and adding it to this list. That construction has a merge-order
+            # footgun with a very bad blast radius: a name listed here becomes a
+            # VOLUME on the Alertmanager StatefulSet, and a volume whose Secret does
+            # not exist leaves the pod stuck in ContainerCreating — which means NO
+            # ALERT OF ANY KIND CAN BE DELIVERED until the seal lands. Merging the
+            # values change before the seal (or reverting the seal without reverting
+            # the values) takes the whole alerting path down.
+            #
+            # The dead man's switch URL is therefore a SECOND KEY inside this
+            # existing secret (`deadmansswitch-url`), read via url_file below. Same
+            # class of secret (a webhook capability URL), same consumer, no new
+            # mount. Failure mode if the key is missing: the file is absent, that
+            # ONE receiver logs a send error every 2 minutes, and everything else —
+            # including all real alerting — keeps working normally. Alertmanager does
+            # not stat url_file at config-load time, only at notify time, so the
+            # config still parses and reloads cleanly.
+            #
+            # That is the right trade for a control whose entire purpose is to make
+            # failure loud: an un-sealed switch complains in the logs instead of
+            # either (a) taking the platform's alerting offline, or (b) sitting there
+            # looking configured and doing nothing.
             secrets:
               - alertmanager-webhook
             # Resource-reclaim (VPA-driven, task follow-up): actual usage (`kubectl
@@ -407,9 +431,42 @@ spec:
               repeat_interval: 12h
               receiver: 'null'
               routes:
-                - receiver: 'null'
+                # ── DEAD MAN'S SWITCH (board #156) ───────────────────────────
+                # `Watchdog` is an alert that fires ALWAYS, forever, on purpose.
+                # Its only job is to prove the alerting pipeline works: while you
+                # keep receiving it, alerts can reach you; if it stops, something
+                # between Prometheus and a human phone is broken. It is a signal
+                # whose ABSENCE is the alarm.
+                #
+                # It used to be routed to `null` — thrown away. That made a DEAD
+                # MONITORING STACK INDISTINGUISHABLE FROM A QUIET NIGHT, which
+                # matters here because every link in the chain is a single point
+                # of failure: Prometheus is 1 replica, Alertmanager is 1 replica,
+                # ntfy is 1 replica AND is the only delivery path (note the
+                # circularity — the alert saying ntfy is down cannot be
+                # delivered), and board #70 has the subscriber count at 0.
+                #
+                # ⚠ THE THREE TIMING LINES BELOW ARE THE ENTIRE MECHANISM, not
+                # tuning. `repeat_interval` controls how often Alertmanager
+                # re-sends a still-firing alert, and the global default on this
+                # route tree is 12h. Without these overrides the heartbeat would
+                # arrive TWICE A DAY, so the external monitor's grace period
+                # would have to be ~13h — meaning up to half a day of dead
+                # monitoring before anyone knew. That version looks correct in
+                # the config, passes review, and is nearly useless. Do not
+                # "simplify" these away.
+                #
+                # Pair with a grace period of ~10 minutes on the external
+                # monitor: long enough that a rolling restart of Alertmanager
+                # does not wake anyone, short enough that a genuinely dead stack
+                # is caught within one coffee break.
+                - receiver: 'deadmansswitch'
                   matchers:
                     - alertname = "Watchdog"
+                  group_wait: 0s
+                  group_interval: 1m
+                  repeat_interval: 2m
+                  continue: false
                 # FIX-15/MON-009: kube-prometheus-stack's bundled KubeClientCertificate
                 # Expiration (both the warning and critical variant — same alertname,
                 # different `severity` label, so ONE matcher on alertname covers both)
@@ -455,6 +512,39 @@ spec:
                     - severity =~ "critical|warning"
             receivers:
               - name: 'null'
+              # ── Dead man's switch destination (board #156) ─────────────────
+              # An EXTERNAL cron-monitor / heartbeat URL (healthchecks.io,
+              # Cronitor, Better Stack — all have free tiers and all work the
+              # same way: you get a URL, you hit it on a schedule, they notify
+              # you when you stop). It MUST be outside this cluster: the whole
+              # point is to survive Prometheus, Alertmanager, ntfy, or the campus
+              # uplink dying, and an in-cluster destination survives none of
+              # those.
+              #
+              # ⚠ THE URL IS A SECRET — A CAPABILITY, NOT AN IDENTIFIER. Anyone
+              # holding it can keep the dead man's switch alive from the outside
+              # while the cluster is on fire, which is precisely the failure this
+              # control exists to prevent. Leaking it is WORSE than not having
+              # the control. Hence url_file against the mounted secret, never an
+              # inline `url:` — the same rule platform-oncall already follows.
+              #
+              # ⚠ THE KEY DOES NOT EXIST YET. The `deadmansswitch-url` key must
+              # be added to the alertmanager-webhook SealedSecret by a human who
+              # has created the monitor (see the PR description for the exact
+              # kubeseal command). Until then this receiver logs a send failure
+              # every 2 minutes and NOTHING ELSE IS AFFECTED — see the
+              # alertmanagerSpec.secrets comment above for why it is deliberately
+              # a second key in the existing secret rather than a second mount.
+              #
+              # send_resolved: false — Watchdog never resolves (that is the
+              # point), so a resolved-notification would only ever be noise.
+              - name: 'deadmansswitch'
+                webhook_configs:
+                  - url_file: /etc/alertmanager/secrets/alertmanager-webhook/deadmansswitch-url
+                    send_resolved: false
+                    # One alert, always the same one. No need for the max_alerts
+                    # truncation platform-oncall requires for its 128 KiB ntfy cap.
+                    max_alerts: 1
               - name: 'platform-oncall'
                 webhook_configs:
                   # url_file reads the endpoint from the mounted SealedSecret; the file
