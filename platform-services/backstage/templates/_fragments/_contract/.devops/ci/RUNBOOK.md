@@ -60,6 +60,9 @@ platform-infra, not here; it's referenced for context, not a working link.
 Examples (every component is built/bumped together — one tag for the whole repo):
 
 ```sh
+# NORMAL PATH — you do not run these by hand. `git tag v1.4.0 && git push --tags`
+# makes CI build :1.4.0 and its `bump-staging` job write staging's overlay for you.
+# These are the equivalent local/manual commands (recovery, or a pre-#210 repo):
 SEMVER=1.4.0 sh .devops/ci/build-and-push.sh staging   # build+push each component :1.4.0
 COMMIT=1 sh .devops/ci/bump-image.sh staging 1.4.0     # staging auto-syncs
 
@@ -154,12 +157,30 @@ pointing at a bump/seed commit too, not just that commit's own push.
 
 One `vX.Y.Z` git tag builds ONE **immutable** `:X.Y.Z` image; `main` pushes build a
 **mutable** `:<git-describe>` dev image. There is no second promotion artifact: the git
-tag names both the image and (via `bump-image.sh`) the manifest revision. After the
-first-deploy seed (above), **staging and prod do NOT auto-track a tag** — nothing writes
-their overlays except the **promote-to-prod gate** (`promote.sh`, run via the
-`promote-to-prod` workflow_dispatch): a human clicks to re-point `staging`→`prod` (or
-`dev`→`staging`) at whatever tag is CURRENTLY LIVE upstream. So a `vX.Y.Z` release builds
-the immutable image, and a human promotes it — a push never auto-deploys prod. The trigger→env→tag mapping is computed by
+tag names both the image and (via `bump-image.sh`) the manifest revision.
+
+The three rungs, after the first-deploy seed (above):
+
+| rung | trigger | who writes the overlay |
+|---|---|---|
+| **dev** | push to `main` | CI — the `bump-dev` job |
+| **staging** | push a `vX.Y.Z` tag | CI — the `bump-staging` job (board #210) |
+| **prod** | a human clicks **promote-to-prod** | `promote.sh`, via `workflow_dispatch` |
+
+`bump-staging` writes the SAME bare semver the build pushed (`v1.2.3` → image
+`:1.2.3`) into staging's overlay. **Prod does NOT auto-track a tag** — nothing
+writes prod's overlay except the promote-to-prod gate, where a human re-points
+prod at whatever tag is CURRENTLY LIVE in `staging` (or, as the deliberate
+emergency hatch, `dev`). So a `vX.Y.Z` release deploys itself to staging, and a
+human promotes it to prod — a push never auto-deploys prod.
+
+> **Backfilling an existing repo.** `bump-staging` was added to the contract on
+> 2026-08-26. A repo scaffolded before then has its own (copied) workflow with
+> only four jobs, so tagging will do nothing there until the job is copied in —
+> until then, advance staging by hand:
+> `COMMIT=1 sh .devops/ci/bump-image.sh staging <X.Y.Z> && git push`.
+
+The trigger→env→tag mapping is computed by
 `.devops/ci/resolve-image.sh` (reads `promotion.yaml`) and unit-tested by
 `.devops/ci/resolve-image.test.sh` — the SAME resolver, no drift.
 

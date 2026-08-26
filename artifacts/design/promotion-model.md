@@ -124,7 +124,32 @@ assumed. If the reviewer prefers to keep the second click, flip prod's `gate`
 back to `manual` — everything else in this PR (the script, the workflow, the
 decoupling from `tag:v*`) is unaffected either way.
 
-## 6. Known adjacent gap (not fixed here, flagged for the human)
+## 6. Known adjacent gap — CLOSED (board #210, 2026-08-26)
+
+> **STATUS: SHIPPED.** The "natural fast-follow" described below was never
+> picked up, and the consequence was worse than this section anticipated. It
+> was not merely that promoting required a manual staging bump first — it was
+> that **on a wizard-built tenant the middle rung of the ladder did not exist
+> at all**, silently. `git tag vX.Y.Z` built and pushed the immutable `:X.Y.Z`
+> image and then deployed it nowhere; staging stayed on whatever
+> `seed-initial-envs.sh` wrote on the first deploy, for the life of the repo,
+> with a green Actions run every time. Because `promote-to-prod` defaults to
+> `from: staging`, and `bump-image.sh` exits 0 with *"nothing to commit (tag
+> unchanged)"*, clicking Promote was a green no-op too. The two long-lived
+> reference tenants that appeared to prove the ladder (`ida-llm`,
+> `crimson-copies`) are both **hand-built** and do not use this contract —
+> which is why nobody saw it.
+>
+> `build-and-push.yaml` now carries a `bump-staging` job gated on
+> `startsWith(github.ref, 'refs/tags/v')`, mirroring `bump-dev` and consuming
+> the same `resolve` job `TAG` output the build pushed (so the overlay pins
+> `1.2.3`, the tag that actually exists in Harbor — not `v1.2.3`). It writes
+> **staging only**; prod remains behind the human gate. `promote-to-prod`
+> keeps its `from: staging` default — correct now that staging advances — and
+> additionally refuses to promote the `v0.0.0` sentinel and announces a no-op
+> instead of exiting quietly green. See §6.1 for the original text.
+
+### 6.1 Original text (kept for the record)
 
 `promote.sh staging prod` promotes whatever tag is **currently written** in
 staging's overlay `kustomization.yaml`. Today, nothing auto-writes that file
