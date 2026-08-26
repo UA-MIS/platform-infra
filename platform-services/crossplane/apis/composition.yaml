@@ -115,7 +115,12 @@ spec:
                    Vault `name` to read (that gap 401'd brand-new tenants). */}}
             {{- $robotPushUser := printf "robot$%s+%s-push" $team $team }}
             {{- $repoUrl := printf "https://github.com/UA-MIS/%s" $app }}
-            {{- $infraUrl := "https://github.com/UA-MIS/platform-infra" }}
+            {{- /* NOTE (SEC-024): there is deliberately NO $infraUrl here. A tenant
+                   AppProject must NOT list platform-infra in sourceRepos — see the
+                   sourceRepos block below for the full rationale. The tenant
+                   BOOTSTRAP Application that does read this repo lives in the
+                   `platform` project (applicationsets/tenants-appset.yaml pins
+                   `project: platform`), so nothing in a tenant project needs it. */}}
             {{- /* env quota tiers — dev/staging modest, prod higher.
                    ⚠ MUST STAY IN SYNC with tenants/_template/namespaces/{dev,staging,prod}.yaml.
                    Both are LIVE tenant-creation paths (this Composition serves the
@@ -467,11 +472,23 @@ spec:
                       - resources-finalizer.argocd.argoproj.io
                   spec:
                     description: {{ printf "Tenant project for team %s (%s)." $team $sem | quote }}
+                    {{- /* SEC-024: the team's OWN app repo, and nothing else.
+                           platform-infra used to be listed here. It was inert only
+                           because the `developer` role below bound a group Dex never
+                           emits (SEC-021) — i.e. nobody could reach the project at
+                           all. Once SEC-021 makes that role live, an allowlisted
+                           platform-infra becomes a real path for a tenant to render
+                           PLATFORM manifests (this whole cluster's definition) into
+                           its own namespace, needing only one further grant
+                           (`applications, create`/`update`) to fire. Two separately
+                           reasonable changes would combine into a tenancy break that
+                           neither would look responsible for, so the allowlist entry
+                           goes now, while it is still cheap.
+                           The tenant BOOTSTRAP App that legitimately reads this repo
+                           is in the `platform` project, not the tenant's. */}}
                     sourceRepos:
                       - {{ $repoUrl | quote }}
                       - {{ printf "%s.git" $repoUrl | quote }}
-                      - {{ $infraUrl | quote }}
-                      - {{ printf "%s.git" $infraUrl | quote }}
                     destinations:
                       {{- range $envs }}
                       - server: https://kubernetes.default.svc

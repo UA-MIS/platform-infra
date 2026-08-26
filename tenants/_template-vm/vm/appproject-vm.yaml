@@ -11,7 +11,8 @@
 # relaxation and the VM kinds travel together, fenced to one place.
 #
 # SECURITY CONTRACT (parallels tenants/_template/appproject.yaml):
-#   - sourceRepos: ONLY the team's app repo + platform-infra (same as container).
+#   - sourceRepos: ONLY the team's app repo (same as container; SEC-024 removed
+#     platform-infra from both).
 #   - destinations: ONLY __TEAM__-vm-* on the in-cluster API. Cannot target another
 #     team's namespace, the container namespaces, or another cluster.
 #   - clusterResourceWhitelist: EMPTY. VirtualMachine, VirtualMachineInstance, and
@@ -37,12 +38,15 @@ metadata:
 spec:
   description: "VM-tier project for team __TEAM__ (__SEMESTER__). KubeVirt workloads only; baseline-PSA namespaces; no cluster-scoped resources."
 
-  # --- source repos: the team's app repo + platform-infra (identical to container) ---
+  # --- source repos: the team's app repo ONLY (identical to container) -----------
+  # SEC-024: platform-infra removed here for the same reason as the container
+  # template — an allowlisted platform repo in a TENANT project becomes a live path
+  # to render platform manifests the moment the developer role below binds a group
+  # Dex actually emits (SEC-021). The bootstrap App that reads platform-infra runs
+  # in the `platform` project.
   sourceRepos:
     - https://github.com/UA-MIS/__APPNAME__
     - https://github.com/UA-MIS/__APPNAME__.git
-    - https://github.com/UA-MIS/platform-infra
-    - https://github.com/UA-MIS/platform-infra.git
 
   # --- destinations: ONLY this team's VM namespaces on the in-cluster API ---------
   # `vm-prod` is the default single VM home; the `__TEAM__-vm-*` wildcard also
