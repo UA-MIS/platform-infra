@@ -53,12 +53,50 @@ metadata:
     platform.capstone/component: platform
 data:
   # Org membership is enforced upstream by Dex (non-members never get a token), so
-  # any authenticated UA-MIS member's baseline is read-only. This IS the org-wide
+  # any authenticated UA-MIS member gets this baseline. This IS the org-wide
   # baseline (the bare-org group does not exist — see SEC-007 above).
-  policy.default: role:readonly
+  #
+  # SEC-022: this was `role:readonly`, ArgoCD's built-in, which is `get` on
+  # EVERYTHING. Two things in it were wrong for a student baseline:
+  #   - `logs, get` over every project — i.e. pod logs CLUSTER-WIDE, including
+  #     the platform namespaces. Platform-component logs are a well-known
+  #     incidental-secret channel; this is the serious half of the finding.
+  #   - `applications, get` on `platform/*` — every platform Application, its
+  #     live manifests and its sync history. That is the platform's own control
+  #     plane, not a dashboard.
+  # role:cohort-baseline below keeps the part that was deliberate and drops both
+  # of these. See the policy.csv block for the full reasoning.
+  policy.default: role:cohort-baseline
 
   # csv format: https://argo-cd.readthedocs.io/en/stable/operator-manual/rbac/
   policy.csv: |
+    # --- Cohort baseline: what ANY authenticated UA-MIS member gets (SEC-022) ---
+    # Replaces the built-in `role:readonly` as policy.default.
+    #
+    # KEPT (deliberate, not an oversight): read access to TENANT Applications
+    # across the cohort. The SEMESTER-PARENT note below records that a
+    # cohort-wide read baseline is the one intended cross-cutting grant — students
+    # seeing each other's app status is a teaching property of this platform, and
+    # D-017/§2.1 chose it on purpose. SEC-022 is not a reason to revisit it.
+    #
+    # DROPPED (the actual finding):
+    #   - pod logs. `role:readonly` grants logs-get over every project, i.e.
+    #     cluster-wide pod logs INCLUDING platform namespaces, where component
+    #     logs are a well-known incidental-secret channel. A team's own logs come
+    #     from its AppProject `developer` role instead (scoped to its own
+    #     project), so students lose nothing about their OWN app.
+    #   - the `platform` project. Its Applications, live manifests and sync
+    #     history describe the cluster's own control plane.
+    #   - clusters / repositories / certificates / gpgkeys / accounts, all of
+    #     which `role:readonly` also grants and none of which a student needs.
+    #     These leak infrastructure topology and credentials metadata.
+    #
+    # The explicit `deny` on platform/* is belt-and-braces: ArgoCD's casbin model
+    # is deny-overrides, so it holds even if a future edit widens the allow above.
+    p, role:cohort-baseline, applications, get, */*, allow
+    p, role:cohort-baseline, applications, get, platform/*, deny
+    p, role:cohort-baseline, projects, get, *, allow
+
     # --- Platform/lab admins: the `labmx` GitHub Team -> built-in admin ---
     g, UA-MIS:labmx, role:admin
 
