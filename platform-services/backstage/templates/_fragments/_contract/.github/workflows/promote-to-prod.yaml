@@ -28,6 +28,37 @@
 # leaves in prod's overlay is a raw commit sha (not a semver tag), which is
 # what makes an emergency promotion visually distinguishable from a normal
 # one when reading prod's overlay history.
+#
+# ---------------------------------------------------------------------------
+# THE `from` DEFAULT IS `staging`, DELIBERATELY (board #210).
+#
+# #210 is right that a `staging` default was WRONG while staging could never
+# advance: build-and-push.yaml had no `bump-staging` job, so on a wizard-built
+# tenant staging was frozen at the first-deploy seed forever, and promoting
+# from it re-wrote prod with the tag prod already had. bump-image.sh's commit
+# step ends in `|| echo "nothing to commit (tag unchanged)"` and exits 0, so
+# the student got a GREEN run and an unchanged prod. A green no-op button.
+#
+# The default stays `staging` because the missing rung is now built, in the
+# same change: build-and-push.yaml gained `bump-staging` (gated on refs/tags/v*),
+# so `git tag vX.Y.Z` genuinely advances staging. With that precondition true,
+# `staging` is the CORRECT default and `dev` would be the wrong one:
+#   - staging pins an IMMUTABLE `:X.Y.Z` semver built from a tag. dev pins a
+#     MUTABLE git-describe tag that the next push to main overwrites in Harbor.
+#     Defaulting a production gate to a tag whose bytes can change underneath it
+#     is precisely what a production gate exists to prevent.
+#   - staging -> prod is what every teaching artifact, the All-Hands deck, and
+#     promotion.yaml already describe: cut a release, verify it in staging, then
+#     promote that exact artifact. Re-pointing the default at `dev` would make
+#     the documented EMERGENCY hatch the default path and silently redefine what
+#     the Promote button means.
+# `dev` remains available in the dropdown — the deliberate, human-chosen hatch.
+#
+# The green-no-op hazard is closed directly instead, below: this workflow now
+# refuses to promote an env still sitting on the v0.0.0 sentinel (which would
+# point prod at an image no build ever produced), and reports the tag it
+# actually promoted — announcing a NO-OP loudly when prod already pinned that
+# tag, rather than letting a green check imply a deploy that did not happen.
 # ============================================================================
 name: promote-to-prod
 
@@ -74,13 +105,15 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
       - name: Promote — read ${{ inputs.from }}'s live tag, write it to prod, commit
+        id: promote
         env:
+          FROM: ${{ inputs.from }}
           GIT_AUTHOR_NAME: ua-mis-ci
           GIT_AUTHOR_EMAIL: ci@capstone.uamishub.com
           GIT_COMMITTER_NAME: ua-mis-ci
           GIT_COMMITTER_EMAIL: ci@capstone.uamishub.com
         run: |
-          set -eu
+          set -euo pipefail
           # promote.sh reads the live tag from `from`'s overlay and hands off to
           # bump-image.sh (COMMIT=1) for the write + commit — the SAME write path
           # every other env-bump goes through (see .devops/ci/promote.sh). The commit
@@ -88,11 +121,81 @@ jobs:
           # GIT_AUTHOR_EMAIL above is instead recognized and skipped by
           # build-and-push.yaml's `resolve` job `if:` guard, which (unlike
           # `[skip ci]`) never poisons a later TAG push pointing at this same commit.
-          COMMIT=1 sh .devops/ci/promote.sh "${{ inputs.from }}" "prod"
+          #
+          # The write + commit are LOCAL until the `git push` further down, so the two
+          # guards below can still refuse without leaving anything behind (the runner is
+          # ephemeral). We parse promote.sh/bump-image.sh's own stdout rather than
+          # re-reading the overlays here, so promotion.yaml stays the single source of
+          # truth for the env -> overlay mapping (#210: no second copy of that map).
+          COMMIT=1 sh .devops/ci/promote.sh "${FROM}" "prod" 2>&1 | tee /tmp/promote.log
+
+          # Matches promote.sh's `==> <env> is live at <TAG> — promoting to <env>` line. The
+          # capture stops at the first space (an image tag can never contain one), so this
+          # does NOT depend on the em-dash byte in that message surviving the runner locale.
+          PROMOTED_TAG="$(sed -n 's/^==> .* is live at \([^ ][^ ]*\) .*$/\1/p' /tmp/promote.log | head -n1)"
+          if [ -z "${PROMOTED_TAG}" ]; then
+            echo "::error::could not determine which tag was promoted from '${FROM}' —" \
+                 "refusing to push an unverified prod bump. See the step log above." >&2
+            exit 1
+          fi
+          echo "tag=${PROMOTED_TAG}" >> "$GITHUB_OUTPUT"
+
+          # GUARD 1 — never promote the first-deploy sentinel. v0.0.0 is the placeholder a
+          # freshly-scaffolded overlay ships (see .devops/ci/seed-initial-envs.sh); NO build
+          # ever produced that image. Promoting it would leave prod in ImagePullBackOff,
+          # which reads like a registry outage rather than a promotion of nothing.
+          if [ "${PROMOTED_TAG}" = "v0.0.0" ]; then
+            # promote.sh has already written + locally committed the overlay by this point,
+            # so throw that away before failing. The runner is ephemeral and nothing is
+            # pushed either way, but discarding it makes "prod was not touched" literally
+            # true of this checkout — not merely true by accident of the pod dying.
+            git reset --hard origin/main >/dev/null 2>&1 || true
+            echo "::error::'${FROM}' is still on the v0.0.0 placeholder — no build has ever" \
+                 "produced that image, so prod would fail to pull it. Push to main (dev), then" \
+                 "cut a release tag (git tag vX.Y.Z && git push --tags) to advance staging," \
+                 "then promote. prod was NOT updated and nothing was pushed." >&2
+            exit 1
+          fi
+
+          # GUARD 2 — a NO-OP must not read as a deploy. bump-image.sh ends its commit with
+          # `|| echo "nothing to commit (tag unchanged)"` and exits 0, so without this the
+          # run is green and indistinguishable from a real promotion (#210: exactly how the
+          # frozen-staging bug stayed invisible). Not an error — prod already running that
+          # tag IS a success — but it must SAY SO.
+          if grep -q 'nothing to commit (tag unchanged)' /tmp/promote.log; then
+            echo "noop=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::NO CHANGE — prod already pins ${PROMOTED_TAG} (the same tag" \
+                 "'${FROM}' is on). Nothing was committed and nothing will redeploy. If you" \
+                 "expected new code here, '${FROM}' has not advanced: push to main for dev," \
+                 "or cut a vX.Y.Z tag for staging, and check that build went green first."
+            exit 0
+          fi
+          echo "noop=false" >> "$GITHUB_OUTPUT"
           git push origin HEAD:main
       - name: Summary
+        # SUCCESS ONLY — deliberately NOT `always()`. The promote step sets its `tag`
+        # output before the sentinel guard runs, so an `always()` summary would render the
+        # "Promoted … at v0.0.0" branch on the very failure the guard exists to announce
+        # (noop is unset on that path, so it falls to the else). When promote fails, its
+        # ::error:: annotation is the message; a summary claiming a deploy would be worse
+        # than none — that is precisely the class of bug #210 is about.
+        if: ${{ success() && steps.promote.outputs.tag != '' }}
         run: |
           {
-            echo "### Promoted \`${{ inputs.from }}\` -> \`prod\`"
-            echo "ArgoCD will reconcile \`prod\` on its next sync (webhook/poll)."
+            if [ "${{ steps.promote.outputs.noop }}" = "true" ]; then
+              echo "### No change — \`prod\` already pins \`${{ steps.promote.outputs.tag }}\`"
+              echo ""
+              echo "\`${{ inputs.from }}\` is on the same tag prod already runs, so there was"
+              echo "nothing to promote and **nothing will redeploy**."
+              echo ""
+              echo "If you expected your latest code here, \`${{ inputs.from }}\` has not moved:"
+              echo "push to \`main\` to advance **dev**, or cut a release"
+              echo "(\`git tag vX.Y.Z && git push --tags\`) to advance **staging** — and check"
+              echo "that build finished green before promoting."
+            else
+              echo "### Promoted \`${{ inputs.from }}\` -> \`prod\` at \`${{ steps.promote.outputs.tag }}\`"
+              echo ""
+              echo "prod's overlay now pins image tag \`${{ steps.promote.outputs.tag }}\`."
+              echo "ArgoCD will reconcile \`prod\` on its next sync (webhook/poll)."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"

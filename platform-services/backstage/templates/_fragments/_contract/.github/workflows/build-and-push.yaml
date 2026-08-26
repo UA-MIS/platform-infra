@@ -7,7 +7,7 @@
 # per-team/per-component values come from .devops/promotion.yaml (registry/app) +
 # .devops/components.yaml (the components) + the git event.
 #
-# HOW IT WORKS (four jobs):
+# HOW IT WORKS (five jobs):
 #   1. resolve     — run ONCE. resolve-image.sh maps the git event -> env + the ONE tag
 #                    all components share (D-030); resolve-components.sh reads
 #                    components.yaml and emits the per-component build MATRIX (one image
@@ -30,6 +30,14 @@
 #                    push -> ArgoCD syncs all components into <team>-dev. (FIX-18/D-030:
 #                    loop prevention is the `resolve` job's `if:` guard below, not a
 #                    `[skip ci]` commit marker.)
+#   5. bump-staging — run ONCE after all matrix legs, on a `vX.Y.Z` TAG push only. Same
+#                    write path as bump-dev, aimed at the STAGING overlay, using the SAME
+#                    immutable `:X.Y.Z` tag the build just pushed. This is the middle rung
+#                    of the promotion ladder (promotion.yaml: staging.trigger = tag:v*,
+#                    gate: auto). It NEVER writes prod — prod stays behind the human gate
+#                    in promote-to-prod.yaml. (Board #210: this job did not exist, so a
+#                    student's `git tag v1.0.0` built an image nothing ever deployed and
+#                    staging stayed frozen on the first-deploy seed, silently, forever.)
 #
 # THE TAG IS THE PROMOTION MECHANISM (D-030 prod-gate), SAME as single-component:
 #   - push to main      -> :<git-describe>  (mutable; dev auto-syncs)        PUSH
@@ -506,3 +514,123 @@ jobs:
           #    and skips on its OWN triggered run — no bump loop, and unlike `[skip ci]`,
           #    a later `git tag vX.Y.Z` on this exact commit still triggers normally.
           git push origin HEAD:main
+
+  # ---- 5) bump-staging: the TAG rung of the promotion ladder -------------------
+  # THE MIDDLE RUNG (promotion.yaml: environments.staging.trigger = "tag:v*", gate: auto).
+  # Mirrors bump-dev exactly — same write path, same identity, same loop guard — but fires
+  # on a pushed `vX.Y.Z` tag instead of a push to main, and writes the STAGING overlay.
+  #
+  # WHY IT EXISTS (board #210 — LAUNCH BLOCKER, the ladder never worked on a wizard tenant):
+  # `on.push.tags: ["v*"]` above already builds + pushes the immutable `:X.Y.Z` image on a
+  # tag, and resolve-image.sh already computes that tag — but until this job, NOTHING wrote
+  # it into an overlay. bump-dev is gated to `refs/heads/main`, so a tag push matched no
+  # bump job at all. The result was silent: the student saw a green build, and staging kept
+  # serving whatever seed-initial-envs.sh wrote on the very first deploy — for the whole
+  # semester. Every teaching artifact promised otherwise. The gap was predicted verbatim in
+  # artifacts/design/promotion-model.md §6 ("a `bump-staging` job mirroring `bump-dev`,
+  # gated on `refs/tags/v*`") and never shipped. This is that fast-follow.
+  #
+  # THE TAG SOURCE IS THE RESOLVE JOB, NOT `github.ref_name` (#210 "what could go wrong"):
+  # we CONSUME needs.resolve.outputs.TAG — the exact string the build-and-push matrix used
+  # as the image tag. resolve-image.sh STRIPS the leading `v` (refs/tags/v1.2.3 -> TAG=1.2.3,
+  # see its `SEMVER="${REF#refs/tags/v}"`), so the Harbor artifact is `…:1.2.3`. Re-deriving
+  # the overlay value from `github.ref_name` would write `v1.2.3`, an image that does not
+  # exist in Harbor, and staging would ImagePullBackOff — a CI bug wearing a registry bug's
+  # clothes. One resolver, one tag, consumed everywhere.
+  #
+  # SCOPE — STAGING ONLY. This job does NOT touch prod, and must not be widened to. Prod's
+  # only writer is the human gate (promote-to-prod.yaml, workflow_dispatch); promotion.yaml
+  # records that as `prod.trigger: "manual:promote-to-prod"`. It also does NOT call
+  # seed-initial-envs.sh (bump-dev owns the one-time first-deploy seed) — calling it here
+  # would let a tag push write prod on a fresh tenant, removing the human step entirely.
+  #
+  # SECURITY (least privilege — SEPARATE job, same shape as bump-dev):
+  #   - The `if:` requires a real `push` event AND a ref under `refs/tags/v`. Deliberately
+  #     NOT a loose `github.ref != 'refs/heads/main'`: a guard that broad would advance
+  #     staging on any non-main push and destroy the "staging is frozen and safe to demo
+  #     from" property that is the entire reason staging exists. `pull_request` can never
+  #     match (its event name is not `push`), so untrusted PR code never reaches this
+  #     job's write token.
+  #   - Job-scoped `permissions: contents: write` — resolve/checks/build keep contents:read.
+  #   - Branch-protection Option A (D-030): main allowlists github-actions[bot] in its
+  #     PR-bypass so this GITHUB_TOKEN push lands on protected main. If the bypass is not
+  #     configured the push fails LOUD (set -e) — never a silent no-deploy.
+  #
+  # LOOP PREVENTION (FIX-18/D-030): identical to bump-dev. The overlay commit does NOT carry
+  # `[skip ci]` (commit-level, permanent, and the very thing that used to blackhole tag
+  # pushes); instead this commit is authored by ci@capstone.uamishub.com, which the `resolve`
+  # job's `if:` guard skips — but ONLY for a BRANCH push. That is exactly right here: this
+  # job's own push-to-main must not trigger a rebuild, while a later tag on the same commit
+  # still must.
+  bump-staging:
+    needs: [resolve, build-and-push]
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.resolve.outputs.PUSH == 'true' }}
+    runs-on: ${{ vars.RUNNER_SCALE_SET || 'ua-mis-kaniko' }}
+    # FULL node image (NOT -slim), same reason as bump-dev: bump-image.sh git-commits the
+    # overlay and this job `git push`es it — -slim ships no git (git: not found, exit 127).
+    container:
+      image: harbor.capstone.uamishub.com/dockerhub-proxy/library/node:24-trixie
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout main (writable; full history for a clean commit base)
+        # main, NOT the tagged ref. A tag can point at any commit, but the GitOps desired
+        # state lives on main — the staging overlay bump is a commit to main, exactly like
+        # bump-dev's. (Checking out the tag would produce a detached-HEAD commit that no
+        # branch references and ArgoCD would never see.)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Bump staging overlay -> the built semver -> commit + push
+        env:
+          TAG: ${{ needs.resolve.outputs.TAG }}
+          GIT_AUTHOR_NAME: ua-mis-ci
+          GIT_AUTHOR_EMAIL: ci@capstone.uamishub.com
+          GIT_COMMITTER_NAME: ua-mis-ci
+          GIT_COMMITTER_EMAIL: ci@capstone.uamishub.com
+        run: |
+          set -eu
+          # CONSUME the resolve job's TAG (no recompute — see the header note above).
+          # bump-image.sh (COMMIT=1) sets newTag on EVERY component's images[] entry and
+          # commits. Same script, same invariant, as dev's bump and prod's promote.
+          COMMIT=1 sh .devops/ci/bump-image.sh staging "${TAG}"
+
+          # PUSH WITH A BOUNDED REBASE-RETRY. bump-dev pushes to main too, and the tag build
+          # and the main build run in DIFFERENT concurrency groups (the group is keyed on
+          # github.ref, and a tag ref is not main's ref), so they can be in flight at once —
+          # the documented student flow (`git push` then
+          # `git pull && git tag vX.Y.Z`) makes that overlap the NORMAL case, not a rare one.
+          # A lost race here would reject this push non-fast-forward and re-freeze staging,
+          # which is the exact failure this job exists to remove. Rebase and retry a bounded
+          # number of times; if it still cannot land, fail LOUD rather than exit green.
+          # (UA-MIS/ida-llm's hand-built bump-staging — the production reference for this
+          # job — carries the same retry for the same reason. Kept deliberately in sync.)
+          for attempt in 1 2 3 4 5; do
+            if git push origin HEAD:main; then
+              echo "staging overlay bumped to ${TAG} and pushed (attempt ${attempt})."
+              exit 0
+            fi
+            echo "::notice::push rejected (main moved — likely a concurrent bump-dev);" \
+                 "rebasing and retrying (attempt ${attempt}/5)"
+            sleep 5
+            git fetch origin main
+            git rebase origin/main
+          done
+          echo "::error::could not push the staging overlay bump to main after 5 attempts." \
+               "staging is STILL at its previous tag — it was NOT advanced to ${TAG}." \
+               "Re-run this workflow, or bump by hand: COMMIT=1 sh .devops/ci/bump-image.sh staging ${TAG}" >&2
+          exit 1
+      - name: Summary
+        run: |
+          {
+            echo "### Staging advanced to \`${{ needs.resolve.outputs.TAG }}\`"
+            echo ""
+            echo "Tag \`${{ github.ref_name }}\` built image"
+            echo "\`${{ needs.resolve.outputs.REGISTRY }}/…:${{ needs.resolve.outputs.TAG }}\`"
+            echo "and pinned it in the **staging** overlay. ArgoCD reconciles staging on its"
+            echo "next sync."
+            echo ""
+            echo "Prod is unchanged — it moves only when a human runs **promote-to-prod**."
+          } >> "$GITHUB_STEP_SUMMARY"
