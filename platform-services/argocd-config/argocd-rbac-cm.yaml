@@ -34,9 +34,10 @@
 # SEMESTER PARENT = grouping only, NO role (deliberate). Binding a semester-wide
 # role would let any student in the cohort see/sync every SIBLING project's apps,
 # breaking tenant isolation (§2.1, four-layer model). Cohort members already get
-# the `policy.default: role:readonly` baseline; that is the only cross-cutting
-# grant. (If a semester-wide read-only "dashboard" is ever wanted, add it as an
-# explicit opt-in role then — flagged, not done now.)
+# the `policy.default: role:cohort-baseline` baseline (was `role:readonly` until
+# SEC-022); that is the only cross-cutting grant. (If a semester-wide read-only
+# "dashboard" is ever wanted, add it as an explicit opt-in role then — flagged,
+# not done now.)
 #
 # Break-glass: the local `admin` account (argocd-secret) is untouched (full access).
 #
