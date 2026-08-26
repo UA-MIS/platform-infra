@@ -12,6 +12,15 @@ Provisioned from the New Project wizard by a checkbox that is **on by default**.
 > client, same namespace — but that one is a single hand-written instance for the
 > platform team, and this is the per-team fleet. They are siblings, not rivals.
 
+> **`ida-llm` is not on this chart yet.** It is the last board still running the
+> pre-chart pattern — in its own tenant namespace, from an image the team builds,
+> which is how the platform GitHub App private key ended up somewhere students
+> can mount it (**SEC-037**, board item #134). Migrating it is not the four-line
+> file that onboarding a new team is: the board has live data in a different
+> database, its own Dex client, and a host that changes. See
+> [`MIGRATING-ida-llm.md`](MIGRATING-ida-llm.md). Run
+> `make audit-tenant-credentials` to see whether that is still true.
+
 ---
 
 ## The shape, in one paragraph
