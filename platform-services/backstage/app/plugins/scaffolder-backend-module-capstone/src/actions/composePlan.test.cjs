@@ -133,6 +133,59 @@ test('slot misuse is rejected (react cannot fill single)', () => {
 });
 
 /* ---------------------------------------------------------------------------------------
+ * ABSENT `database` (board #139).
+ *
+ * The bug: every test above passes `database` EXPLICITLY (usually 'none'), so the suite only
+ * ever exercised a shape the wizard does NOT send for DB-less stacks. `new-project/template.yaml`
+ * declares the `database` property ONLY inside the needsDB branches of its `singleFragment`
+ * schema-dependency, so Group (a) — frontend/angular, static/bare-html, static/react-static —
+ * submits with no `database` key at all, and the compose action's non-optional zod enum rejected
+ * it before anything was created. The action input is now `.optional()`; THIS is the planner-side
+ * half of that contract, pinned so the "test data did not match production data" failure mode
+ * cannot recur here.
+ * ------------------------------------------------------------------------------------- */
+test('#139: database ABSENT on a DB-less single (static) -> resolves to none, unwired', () => {
+  const p = planComposition({ projectType: 'web', layout: 'single', fragments: { single: reactStatic } });
+  assert.equal(p.database, 'none');
+  assert.equal(p.dbWired, false);
+  assert.equal(p.components.length, 1);
+  assert.equal(p.components[0].needsDb, false);
+});
+
+test('#139: database ABSENT on a DB-less single (frontend in the single slot) -> none, unwired', () => {
+  // A frontend fragment that has gained `single` (board #207 does exactly this for
+  // react/vue/solid). All are needsDB:false, so they land in Group (a) and send no `database`.
+  const reactSingle = { ...react, slots: ['frontend', 'single'] };
+  const p = planComposition({ projectType: 'web', layout: 'single', fragments: { single: reactSingle } });
+  assert.equal(p.database, 'none');
+  assert.equal(p.dbWired, false);
+  assert.equal(p.components[0].path, '/');
+});
+
+test('#139: an EMPTY-STRING database normalises to none too (unset Backstage parameter)', () => {
+  // `${{ parameters.database }}` for an unset parameter can arrive as '' rather than undefined
+  // depending on how the step input is serialised — both must mean "no database question asked".
+  const p = planComposition({ projectType: 'web', layout: 'single', fragments: { single: reactStatic }, database: '' });
+  assert.equal(p.database, 'none');
+  assert.equal(p.dbWired, false);
+});
+
+test('#139: database ABSENT on a needsDB fragment provisions nothing (no silent default engine)', () => {
+  // Defensive: absent must never be read as "give them a database". A DB-capable stack that
+  // somehow arrives without a choice gets no engine and no DATABASE_URL.
+  const p = planComposition({ projectType: 'web', layout: 'single', fragments: { single: express } });
+  assert.equal(p.database, 'none');
+  assert.equal(p.dbWired, false);
+});
+
+test('#139: a bogus database is STILL rejected (optional must not become permissive)', () => {
+  assert.throws(
+    () => planComposition({ projectType: 'web', layout: 'single', fragments: { single: reactStatic }, database: 'host-mysqlx' }),
+    /invalid database choice 'host-mysqlx'/,
+  );
+});
+
+/* ---------------------------------------------------------------------------------------
  * DEPLOY-TIME MIGRATION contract (D-123, board #48).
  *
  * The bug: four fragments (nextjs/django/laravel/rails) shipped migration assets, documented

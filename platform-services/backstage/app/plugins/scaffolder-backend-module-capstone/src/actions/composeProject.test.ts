@@ -155,6 +155,15 @@ const EXPRESS = [
   { path: 'fragment.yaml', content: 'id: express\ncategory: backend\nslots: [backend, single]\ndefaultPort: 8080\ningressPath: /api\nneedsDB: true\nbuildType: container\ndockerfile: Dockerfile\n' },
   { path: 'skeleton/src/index.ts', content: "const app = '${{ values.appName }}'\n" },
 ];
+/**
+ * A DB-LESS single-component fragment — the Group (a) shape (board #139). `static/bare-html`,
+ * `static/react-static` and `frontend/angular` are all needsDB:false, so the wizard hides the
+ * Database question for them and submits with NO `database` key at all.
+ */
+const BARE_HTML = [
+  { path: 'fragment.yaml', content: 'id: bare-html\ncategory: static\nslots: [static, single, frontend]\ndefaultPort: 8080\ningressPath: /\nneedsDB: false\nbuildType: static\ndockerfile: Dockerfile\n' },
+  { path: 'skeleton/index.html', content: '<title>${{ values.appName }}</title>\n' },
+];
 
 /**
  * A single-component fragment whose skeleton mixes ALL four delimiter classes in one file:
@@ -520,6 +529,90 @@ describe('capstone:compose-project', () => {
     expect(rendered).not.toContain('{#!');
     // Literal `{'{ … }'}` braces (a Svelte idiom for printing a literal brace) untouched.
     expect(rendered).toContain('literal={\'{ "name": "..." }\'}');
+  });
+
+  /* -------------------------------------------------------------------------------------
+   * ABSENT `database` — the Group (a) submission (board #139).
+   *
+   * WHY A SCHEMA TEST AND NOT ONLY A HANDLER TEST: `createMockActionContext` hands the input
+   * straight to `handler()`; it does NOT run the action's zod/JSON schema. The real scaffolder
+   * DOES — `createTemplateAction` runs the `z => …` map through zod-to-json-schema and the step
+   * input is validated against that JSON Schema before `handler()` is ever called. So a
+   * handler-only test that omits `database` passes even on the BROKEN code, which is exactly
+   * how a suite where "every test passes `database` explicitly" hid this for so long. The
+   * assertions below are on `action.schema.input` — the artefact that actually rejected the
+   * submission — so they fail on the pre-fix action and pass on the fixed one.
+   * ----------------------------------------------------------------------------------- */
+  describe('#139: the wizard omits `database` for DB-less stacks', () => {
+    const action = createComposeProjectAction({ reader: mockReader({}) });
+    // `schema.input` is the JSON Schema createTemplateAction() derived from the `z => …` map
+    // (zod-to-json-schema); narrow it to the two members these assertions read.
+    const inputSchema = action.schema?.input as unknown as {
+      required?: string[];
+      properties?: Record<string, { type?: string; enum?: string[] }>;
+    };
+
+    it('exposes a derived JSON Schema at all (guards the assertions below from vacuity)', () => {
+      expect(inputSchema).toBeDefined();
+      expect(Object.keys(inputSchema.properties ?? {})).toContain('database');
+    });
+
+    it('does NOT list `database` as required (Group (a) sends no `database` key)', () => {
+      // Pre-fix this array contains 'database', and the scaffolder rejects every
+      // frontend/angular, static/bare-html and static/react-static submission with
+      // "must have required property 'database'" before a single file is written.
+      expect(inputSchema.required ?? []).not.toContain('database');
+    });
+
+    it('still constrains `database` to the four valid choices when it IS supplied', () => {
+      // The enum is the guard that stops a typo'd DB choice reaching the CapstoneTenant claim
+      // (where it fails much later and far less legibly). Optional must not mean permissive —
+      // widening to z.string() would "fix" #139 by removing this.
+      expect(inputSchema.properties?.database?.enum).toEqual([
+        'host-mysql',
+        'host-postgres',
+        'bring-your-own',
+        'none',
+      ]);
+    });
+
+    it('keeps the genuinely-required identity inputs required', () => {
+      // Guard against a blanket `.optional()` sweep: only `database` moves.
+      expect(inputSchema.required ?? []).toEqual(
+        expect.arrayContaining(['fragmentsUrl', 'projectType', 'appName', 'team', 'semester']),
+      );
+    });
+
+    it('composes a static single-component project with NO database key at all', async () => {
+      const reader = mockReader({ '/_contract': CONTRACT, '/static/bare-html': BARE_HTML });
+      const staticAction = createComposeProjectAction({ reader });
+      const ws = mockDir.resolve('ws139');
+      await fs.ensureDir(ws);
+      // NOTE the shape: `database` is absent entirely, not `database: 'none'`. This is the
+      // literal step input the template produces for Group (a).
+      const ctx = createMockActionContext({
+        input: {
+          ...common,
+          projectType: 'web' as const,
+          layout: 'single' as const,
+          singleFragment: 'static/bare-html',
+        },
+        workspacePath: ws,
+      });
+
+      await staticAction.handler(ctx);
+
+      expect(await fs.readFile(path.join(ws, 'app/index.html'), 'utf8')).toBe(
+        '<title>notes-api</title>\n',
+      );
+      // The missing choice resolves to 'none' in the planner — no engine provisioned, nothing wired.
+      expect(await fs.readFile(path.join(ws, '.devops/app-metadata.yaml'), 'utf8')).toContain(
+        'database: none',
+      );
+      expect(ctx.output).toHaveBeenCalledWith('database', 'none');
+      expect(ctx.output).toHaveBeenCalledWith('dbWired', false);
+      expect(ctx.output).toHaveBeenCalledWith('single', true);
+    });
   });
 
   it('fails closed on a bad appName', async () => {

@@ -54,7 +54,11 @@ export interface ComposeInput {
     backend?: FragmentMeta;
     mobile?: FragmentMeta;
   };
-  database: string;
+  /** Wizard DB choice (VALID_DBCHOICES). OPTIONAL (board #139): the wizard omits the
+   *  `database` question entirely for DB-less stacks, so the compose action's input is
+   *  `.optional()` and this may legitimately be undefined — planComposition() normalises a
+   *  missing value to 'none'. */
+  database?: string;
   port?: number;
 }
 
