@@ -163,7 +163,18 @@ spec:
             cleanupPolicy: Skip
 
         physicalBackups:
-          - name: capstone-mariadb-nightly
+          # Keep this name SHORT. The operator names each backup Job
+          # "<MariaDB resource name>-<this name>-<14-char timestamp>" and stamps that
+          # name into spec.template.labels, where Kubernetes caps values at 63 chars.
+          # The MariaDB resource is "capstone-mariadb-mariadb-cluster" (32) + "-" (1)
+          # + timestamp (15) = 48 chars of fixed overhead, leaving 15 for this name.
+          # "capstone-mariadb-nightly" (24) produced a 72-char Job name, which the API
+          # server rejected outright -- so the Job was never created and the nightly
+          # backup silently never ran (board #151). "nightly" (7) -> 55 chars.
+          # Do NOT fix a future recurrence by shortening the MariaDB cluster/release
+          # name: that renames the StatefulSet and its PVCs, detaching the live
+          # database from its storage. This name is the only safe knob.
+          - name: nightly
             schedule:
               cron: "0 2 * * *"   # 02:00 daily
               suspend: false
