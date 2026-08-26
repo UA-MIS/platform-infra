@@ -634,6 +634,109 @@ Priorities are mapped so `critical` arrives as ntfy priority 5 (urgent, bypasses
 Do-Not-Disturb), other firing alerts as 4, and `resolved` as 2 (quiet — the all-clear
 should not wake anyone).
 
+### 🫀 Dead man's switch (`Watchdog` → external monitor) — ⚠ NEEDS ONE HUMAN STEP
+
+`Watchdog` is an alert kube-prometheus-stack ships that fires **always, forever, on
+purpose**. Its only job is to prove the pipeline works: while you keep receiving it,
+alerts can reach you; if it stops, something between Prometheus and a phone is
+broken. It is a signal whose **absence** is the alarm.
+
+It used to be routed to the `"null"` receiver — discarded. That made **a dead
+monitoring stack indistinguishable from a quiet night**, which matters because every
+link is a single point of failure: Prometheus (1 replica), Alertmanager (1 replica),
+ntfy (1 replica, and the only delivery path — note the circularity, the alert saying
+ntfy is down cannot be delivered), and a subscriber list that is currently empty.
+
+`kube-prometheus-stack-app.yaml` now routes it to a `deadmansswitch` receiver with
+`group_wait: 0s` / `group_interval: 1m` / `repeat_interval: 2m`. **Those three lines
+are the whole mechanism** — the global default `repeat_interval` is 12h, so without
+them the heartbeat arrives twice a day and the external grace period would have to be
+~13h, meaning up to half a day of dead monitoring before anyone knows. That version
+looks correct in the config and is nearly useless.
+
+**The one human step.** Create a heartbeat monitor on any external cron-monitor
+service (healthchecks.io, Cronitor, Better Stack — all have free tiers), set its
+grace period to **~10 minutes**, and seal its ping URL:
+
+> ⚠ **The URL is a secret — a capability, not an identifier.** Anyone holding it can
+> keep the switch alive from the outside while the cluster is on fire, which is the
+> exact failure this control exists to prevent. Leaking it is worse than not having
+> the control. Never commit it, never put it in the values.
+
+> ⚠ **Reseal BOTH keys or you will break real alerting.** `kubectl create secret
+> generic` builds the whole object from scratch, so a reseal that passes only
+> `deadmansswitch-url` silently drops the `url` key that `platform-oncall` reads —
+> and every real alert stops being delivered while the config still looks fine. The
+> generic runbook below (“Reseal runbook — the Alertmanager webhook URL”) passes
+> only `url`; do **not** use it as-is once this key exists.
+
+```fish
+# repo root of platform-infra, on a branch (never commit a reseal straight to main)
+
+# BOTH values, read without landing in shell history (fish: -s = silent)
+read -s -P "ntfy webhook URL (existing 'url' key): " AM_URL
+read -s -P "External dead-man's-switch ping URL:  " AM_DMS
+
+kubectl create secret generic alertmanager-webhook \
+    --namespace monitoring \
+    --from-literal=url=$AM_URL \
+    --from-literal=deadmansswitch-url=$AM_DMS \
+    --dry-run=client -o yaml \
+  | kubeseal --controller-namespace kube-system --controller-name sealed-secrets-controller \
+      --format yaml > platform-services/monitoring/sealedsecret-alertmanager-webhook.yaml
+
+set -e AM_URL AM_DMS      # clear both from the session
+```
+
+Recover the current `url` value first if you do not have it to hand:
+
+```bash
+kubectl -n monitoring get secret alertmanager-webhook -o jsonpath='{.data.url}' | base64 -d; echo
+```
+
+**Why a second key rather than a second secret.** Board #156 suggests a separate
+`alertmanager-deadmansswitch` secret added to `alertmanagerSpec.secrets`. A name in
+that list becomes a **volume**, and a volume whose Secret does not exist leaves the
+Alertmanager pod in `ContainerCreating` — no alert of any kind can be delivered until
+the seal lands. As a second key in the existing (already-mounted) secret, the failure
+mode of a missing value is instead: that one receiver logs a send error every 2
+minutes and everything else keeps working. Alertmanager does not stat `url_file` at
+config-load time, only at notify time — verified with
+`amtool check-config` against the post-change config (SUCCESS, 3 receivers).
+
+**Verifying it — the verification IS the feature.** Do not verify by reading the
+config:
+
+1. The **live** route tree changed (values files lie; this does not):
+   ```bash
+   curl -s localhost:9093/api/v2/status \
+     | python3 -c "import json,sys;print(json.load(sys.stdin)['config']['original'])" | grep -A4 Watchdog
+   ```
+2. The external monitor shows a ping within ~2 minutes. If not, stop — everything
+   below is meaningless.
+3. **Break the chain on purpose and confirm you get told.** This is the acceptance
+   criterion; a dead man's switch that has never been observed catching a dead man is
+   not a dead man's switch.
+   ```bash
+   kubectl scale -n monitoring statefulset alertmanager-kube-prometheus-stack-alertmanager --replicas=0
+   # ... wait out the grace period, confirm the external service notifies you ...
+   kubectl scale -n monitoring statefulset alertmanager-kube-prometheus-stack-alertmanager --replicas=1
+   ```
+   ⚠ **While Alertmanager is at zero, NO alert of any kind can be delivered** —
+   including a real one about something unrelated. Do it deliberately, in a quiet
+   window, and scale back up immediately. Do not walk away between the two commands,
+   and do not run it on a night when something else is already broken. There is no TA
+   to notice if something real fires during the window — check with Clayton Smith or
+   LabMx that it is a sensible moment.
+
+**Not a substitute for a subscriber.** This and the phone subscription above are
+different problems: that one is *"real alerts reach nobody"*, this one is *"we would
+not know if alerts stopped existing"*. Fixing this puts nobody on the receiving end
+of anything else. Routing `Watchdog` to a second **ntfy topic** would be strictly
+better than `"null"`, but it does not survive ntfy itself dying or the cluster losing
+its uplink — two of the failures this control exists to catch. It is a stepping
+stone, not the destination.
+
 ### ⚠ KNOWN UNMONITORED EXPIRY — Vault transit auto-unseal token (2026-09-16)
 
 Recorded here because it is a **monitoring gap**, not just a Vault one: this is a
