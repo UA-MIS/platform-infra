@@ -186,6 +186,36 @@ spec:
                   minimum: 1
                   maximum: 10
                   default: 5
+                cpuLimit:
+                  type: integer
+                  description: >-
+                    Per-tenant `limits.cpu` ceiling on the compute-quota ResourceQuota
+                    in EACH of this tenant's three environment namespaces
+                    (<team>-{dev,staging,prod}) — the Composition wires this into the
+                    quota's limits.cpu, platform-services/crossplane/apis/composition.yaml.
+                    Default 8, which is the value every tenant rendered when this was
+                    hardcoded, so leaving it unset changes nothing for anybody.
+                    ⚠ This is the COST FENCE, not a count guard. The composition's own
+                    D-187 note is explicit that pods/services are cheap count guards
+                    while cpu/memory are the real control on a 5-box cluster, and that
+                    a tenant should normally be sized to FIT the fence rather than move
+                    it. Raise it per-tenant only when a team's steady state genuinely
+                    approaches the ceiling and the workload has already been sized
+                    honestly (ida-llm pins 16 — prod sat at 6500m/8, 81%, with the
+                    3 nightly CronJobs and the Redis/MinIO sidecars all bursting
+                    against the same cap; owner-approved 2026-08-26, #563).
+                    This raises the BURST ceiling only. `requests.cpu` is a separate,
+                    UNCHANGED 4 per namespace — requests are what the scheduler actually
+                    reserves, so this field cannot make a tenant harder to place; it can
+                    only let already-placed pods burst higher before CFS throttles them.
+                    minimum is 8 (the platform default) DELIBERATELY: this knob is
+                    widen-only. A quota rendered BELOW a namespace's live usage does not
+                    evict anything, but it does make every subsequent pod creation fail
+                    admission, so rollouts stop dead while the running app looks healthy —
+                    a silent failure this floor forecloses entirely.
+                  minimum: 8
+                  maximum: 32
+                  default: 8
             status:
               type: object
               properties:

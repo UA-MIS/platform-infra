@@ -50,6 +50,37 @@ spec:
                    more pins it explicitly in its claim (crimson-copies, ida-llm: 8,
                    tenants/_claims/). */}}
             {{- $maxRunners := $spec.maxRunners | default 5 }}
+            {{- /* Per-tenant namespace CPU-LIMIT ceiling (xrd.yaml spec.cpuLimit).
+                   Default 8 == the value this file hardcoded for every tenant before
+                   the field existed, so an unset tenant renders byte-identical.
+                   Feeds $envs.cpuLim below (all three envs); requests.cpu is
+                   deliberately NOT derived from it — see the $envs note.
+
+                   ⚠ hasKey, NOT `$spec.cpuLimit | default 8`. This template sets
+                   missingkey=error, so a bare `$spec.cpuLimit` is a FATAL render error
+                   — not a fallback to the default — on any XR whose spec lacks the key.
+                   VERIFIED, not theorised: `crossplane render` against an XR without the
+                   field failed with
+                     template: manifests:20:22: executing "manifests" at <$spec.cpuLimit>:
+                     map has no entry for key "cpuLimit"
+                   and the same render passes with the construction below.
+                   In steady state the XRD's `default: 8` does populate the key (the API
+                   server defaults structural-schema fields, which is why every live XR
+                   already reports `externalEgress: true` without its claim setting it).
+                   But that makes correctness depend on APPLY ORDER: if this Composition
+                   revision goes live before the XRD default does, EVERY tenant render
+                   turns fatal at once — all 12 namespaces, not just the one being
+                   changed — and ArgoCD gives no ordering guarantee between the two files
+                   in this directory. It also breaks the repo's own documented offline
+                   check (`crossplane render`, platform-services/crossplane/README.md)
+                   for anyone testing a tenant XR that predates the field.
+                   hasKey costs two lines and removes the ordering dependency entirely.
+                   Same lesson as $externalEgress above, different trigger: that one is
+                   about sprig treating FALSE as empty, this one is about missingkey. */}}
+            {{- $cpuLimit := 8 }}
+            {{- if hasKey $spec "cpuLimit" }}
+            {{-   $cpuLimit = $spec.cpuLimit }}
+            {{- end }}
             {{- $domain := $spec.domain | default "capstone.uamishub.com" }}
             {{- $preview := $spec.previewEnabled | default false }}
             {{- /* SECURITY-GATED opt-out from the non-prod SSO forwardAuth, DEV ONLY.
@@ -94,7 +125,15 @@ spec:
                    These HAD drifted: prod here was cpu 4/8 + pods 20 while the blueprint
                    still said cpu 2/4 + pods 15, so a team's prod ceiling depended on which
                    onboarding path created it. Realigned 2026-08-15 (health audit / B5);
-                   the blueprint was moved UP to these values. Change BOTH or neither. */}}
+                   the blueprint was moved UP to these values. Change BOTH or neither.
+                   ⚠ ONE EXCEPTION, added with spec.cpuLimit (D-188): limits.cpu is now
+                   per-tenant here and has NO blueprint equivalent — the blueprint is a
+                   static YAML tree with no XR to read a field from. The two paths stay in
+                   sync at the DEFAULT (both render limits.cpu 8); they diverge only for a
+                   tenant that explicitly pins spec.cpuLimit, which is claim-path-only by
+                   construction. Do NOT "fix" that by hardcoding a raised value into the
+                   blueprint — that would move every blueprint tenant at once, which is
+                   the exact outcome the per-tenant field exists to avoid. */}}
             {{- /* D-175 — dev/staging CPU doubled to 2x (4/8), matching prod's existing
                    headroom. A RollingUpdate surge (old + new replica set both live) needs
                    quota ABOVE steady-state, not level with it; an exact-fit ceiling turns
@@ -158,10 +197,39 @@ spec:
                    256Mi rather than the 512Mi a naive reading would pick, and the whole
                    app fits inside prod's unchanged 4Gi requests.memory with surge room.
                    Raising a count guard is cheap; raising the cost fence is not. */}}
+            {{- /* D-188 — `cpuLim` is now the PER-TENANT $cpuLimit (xrd.yaml
+                   spec.cpuLimit, default 8) instead of a hardcoded "8". Unset tenants
+                   render exactly what they rendered before; only a tenant that pins the
+                   field moves. This is the same shape as spec.maxRunners (#535): let one
+                   tenant deviate WITHOUT moving the platform default, rather than raising
+                   the fence for all twelve namespaces to serve one team.
+
+                   ⚠ ONLY limits.cpu is per-tenant. `cpuReq` stays a hardcoded "4" for
+                   every tenant, DELIBERATELY, and the distinction is the whole reason
+                   this change is cheap:
+                     - requests.cpu is the SCHEDULER'S RESERVATION. Sum of requests is
+                       what must fit inside node allocatable, so raising it consumes real,
+                       finite cluster capacity and can make pods unplaceable.
+                     - limits.cpu is a BURST CEILING. CPU is a compressible resource: the
+                       kernel enforces limits by CFS-throttling a cgroup, not by evicting
+                       it. Limits are already overcommitted cluster-wide by design
+                       (measured 2026-08-26: ~72.3 of 79.85 allocatable cores committed as
+                       limits, with worker nodes at 241% and 135%), which is the normal
+                       and intended posture for a burstable workload mix.
+                   So this field lets a tenant burst higher into capacity that is already
+                   there and idle; it does NOT hand them a bigger reservation. The tenant
+                   that motivated it (ida-llm) was at 6500m of an 8-core LIMIT in prod —
+                   81% — while using only 950m of its 4-core REQUEST quota, i.e. 24%.
+                   Limits were unambiguously the binding constraint and requests were not
+                   close, so raising requests would have bought nothing and spent scarce
+                   schedulable capacity to do it.
+                   If a future tenant is ever genuinely request-bound, that is a DIFFERENT
+                   change with a real capacity cost — size the cluster first, and do not
+                   reach for this field. */}}
             {{- $envs := list
-                  (dict "name" "dev"     "cpuReq" "4" "memReq" "4Gi" "cpuLim" "8" "memLim" "8Gi"  "pods" "24" "storageReq" "5Gi"  "pvcs" "4")
-                  (dict "name" "staging" "cpuReq" "4" "memReq" "4Gi" "cpuLim" "8" "memLim" "8Gi"  "pods" "24" "storageReq" "5Gi"  "pvcs" "4")
-                  (dict "name" "prod"    "cpuReq" "4" "memReq" "4Gi" "cpuLim" "8" "memLim" "8Gi"  "pods" "28" "storageReq" "20Gi" "pvcs" "6") }}
+                  (dict "name" "dev"     "cpuReq" "4" "memReq" "4Gi" "cpuLim" $cpuLimit "memLim" "8Gi"  "pods" "24" "storageReq" "5Gi"  "pvcs" "4")
+                  (dict "name" "staging" "cpuReq" "4" "memReq" "4Gi" "cpuLim" $cpuLimit "memLim" "8Gi"  "pods" "24" "storageReq" "5Gi"  "pvcs" "4")
+                  (dict "name" "prod"    "cpuReq" "4" "memReq" "4Gi" "cpuLim" $cpuLimit "memLim" "8Gi"  "pods" "28" "storageReq" "20Gi" "pvcs" "6") }}
 
             {{- /* =====================================================================
                    GITHUB — DELIBERATELY EMPTY (ADR-035 §D2, human-approved).
