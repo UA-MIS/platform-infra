@@ -16,11 +16,26 @@ displayName: SolidJS (Vite + TypeScript + Tailwind) SPA
 category: frontend            # frontend | backend | static | fullstack | mobile
 language: typescript
 framework: solid              # framework name, or "none" for a bare/no-framework starter
-# Wizard slots this fragment can fill. A pure SPA that calls /api only makes sense PAIRED
-# with a backend, so it offers the `frontend` slot only (use a `static/*` fragment for a
-# standalone, backend-less site).
+# Wizard slots this fragment can fill (board #207).
+#
+# `single` is declared for TWO reasons, and the second is the load-bearing one:
+#   1. STUDENT-FACING: without it this fragment is absent from the wizard's single-component
+#      stack list entirely, so a student cannot pick Solid for a one-component app.
+#   2. CI COVERAGE: `slots` is ALSO the selector for green-check.py's boot-probe sweep
+#      (a fragment is boot-probed only when it resolves to the `single` layout). Declaring
+#      only `frontend` silently excluded this fragment from the one gate that proves the
+#      image BOOTS under the chart's real read-only-rootfs contract — the exact class of bug
+#      (FINDING-6, nginx unable to write under a read-only root) the probe was built for.
+#
+# ⚠ STANDALONE CAVEAT — see frontend/react/fragment.yaml for the full note. src/pages/Home.tsx
+# fetches `/api/health` + `/api/items` on mount; composed in the `single` slot there is no
+# backend and no ingress `/api` route, so nginx's SPA fallback answers those with index.html
+# and the app renders its error banner under an otherwise-working page. It boots and serves;
+# it does not yet degrade as cleanly as frontend/angular (which shows a "standalone mode"
+# note instead). Making "no backend" a first-class state here is tracked as follow-up work.
 slots:
   - frontend
+  - single
 defaultPort: 8080             # container port (PORT env + Service/Ingress target); wizard default
 ingressPath: /               # path when composed as a non-root component (a frontend owns "/")
 needsDB: false               # frontends never read DATABASE_URL

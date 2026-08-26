@@ -87,6 +87,23 @@ has a migration initContainer for exactly the components that declare one.
 
 1. `mkdir -p _fragments/<category>/<id>/skeleton` and drop your starter app + Dockerfile.
 2. Write `_fragments/<category>/<id>/fragment.yaml` per the table above.
-3. Regenerate the wizard choice lists: `node _tools/gen-wizard-enums.mjs` (updates the enums
-   in `../new-project/template.yaml` from the fragment set).
+3. Regenerate the wizard choice lists: `python3 _tools/gen-wizard-enums.py`. It **prints** the
+   `enum` / `enumNames` blocks derived from the fragment set — it does **not** write anything.
+   Paste the `enum` lists into `../new-project/template.yaml` yourself, keeping the existing
+   hand-curated `enumNames` for entries that already have one (several are more specific than
+   the fragment's `displayName`).
+4. If your fragment fills the `single` slot, also add it to exactly ONE of the `database`
+   groups under `singleFragment`'s `dependencies` block — the DB-less group when
+   `needsDB: false`, otherwise a group that offers the Database question.
+5. Verify with `python3 _tools/check_wizard_template.py`. It asserts the template's enums match
+   this generator's output exactly (order included) and that every fragment lands in exactly one
+   database group — so a half-finished step 3 or 4 fails loudly instead of silently dropping a
+   fragment's Database question.
+
 No engine code changes — the compose engine reads `fragment.yaml` at scaffold time.
+
+> **`slots` is not only a wizard list.** `green-check.py`'s boot-probe sweep selects fragments
+> by the same field: a fragment is built and booted under the chart's real read-only-rootfs
+> contract **only when it resolves to the `single` layout**. Omitting `single` therefore
+> removes the fragment from the one gate that proves its image BOOTS — the render/build checks
+> cannot see that class of failure (board #207).
