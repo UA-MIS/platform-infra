@@ -1,0 +1,144 @@
+# Cloudflare tunnel (edge reachability) alerting (board #157).
+#
+# THE FAILURE THIS CATCHES. cloudflared is the platform's only door to the
+# internet — the portal, ArgoCD, Grafana, every team's board, every tenant app.
+# If it drops, the entire platform is off the internet while every pod inside
+# stays perfectly healthy and every dashboard stays green. That combination is
+# the worst case for diagnosis: maximum user impact, zero internal signal, and an
+# on-call person whose first hypothesis will be a cluster problem that does not
+# exist.
+#
+# Metrics source: scrape-cloudflared.yaml + platform-services/cloudflared/
+# service-metrics.yaml (this same commit). Before those existed, ZERO
+# cloudflared_* series were in Prometheus, so no rule here could have fired
+# however it was written.
+#
+# BASELINE, verified live 2026-08-26 by port-forwarding a pod directly:
+#   cloudflared_tunnel_ha_connections 4     (per pod)
+#   2 replicas  =>  sum() == 8
+# Degradation is a slow slide — 8 -> 4 -> 1 — which is why there are two
+# thresholds rather than one. `< 6` catches the slide while it can still be fixed
+# calmly; `< 2` catches the outage.
+#
+# ⚠ DO NOT TEST THIS BY SCALING cloudflared. Taking the replicas to zero removes
+# the entire platform from the internet — including ArgoCD, every tool you would
+# use to put it back, and your own access unless you are on the local network.
+# This is the one genuinely dangerous action available in board #157. Test by
+# temporarily changing a threshold (e.g. `< 2` to `< 20`), confirming the alert
+# appears in /api/v1/alerts, and reverting. That is how the firing evidence for
+# this file was produced.
+#
+# ── WHY THE absent() CASE IS ITS OWN ALERT ────────────────────────────────────
+# #157 proposes `sum(...) < 2 or absent(...)` as one rule. Split here for the
+# same reason board #25 gives for Galera and alerts-velero.yaml applies to
+# Velero: the two conditions need different first moves. "The tunnel has lost its
+# edge connections" sends you to the cloudflared logs and the Cloudflare
+# dashboard. "We cannot see the tunnel" sends you to the ServiceMonitor and the
+# scrape — and, crucially, tells you NOT to trust the silence of the other two
+# rules. One alert cannot carry both sentences.
+#
+# The absent() arm is not optional in either form. Without it, the pods being
+# deleted, the namespace being drained, or the ServiceMonitor silently selecting
+# nothing makes the series vanish — and `sum(<nothing>) < 2` is EMPTY, not true.
+# The alert goes quiet precisely when it should be loudest. See the
+# VaultRaftSnapshotFailing comment block in alerts.yaml (~line 109) for this
+# platform's own write-up of getting exactly this wrong once already.
+#
+# ⚠ THIS IS NOT AN EXTERNAL PROBE. These rules tell you the tunnel PROCESS lost
+# its connections. They cannot tell you that Cloudflare's edge, DNS, or the campus
+# uplink is broken — from inside the cluster those are indistinguishable from
+# everything being fine. Board #67 (external synthetic probe) is the complement to
+# this file, not a duplicate of it.
+#
+# ⚠ REGISTERED in kustomization.yaml IN THIS SAME COMMIT — that list is explicit,
+# not globbed.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: platform-cloudflared
+  namespace: monitoring
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    platform.capstone/component: platform
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: cloudflared
+      rules:
+        # ── (a) At or near total loss of external reachability ────────────────
+        # `for: 2m` is short on purpose: this is a total-outage alert and there is
+        # no benefit to sitting on it. A rolling update briefly halves the count
+        # to 4, which is well above this threshold, so a deploy cannot trip it.
+        - alert: CloudflareTunnelDown
+          expr: sum(cloudflared_tunnel_ha_connections) < 2
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Cloudflare tunnel has fewer than 2 edge connections ({{ $value }} of 8)"
+            description: >-
+              Normal is 8 (2 pods x 4 connections); currently {{ $value }}. At or
+              below 2 the platform is at or near TOTAL loss of external
+              reachability while every pod inside stays healthy — nothing
+              in-cluster will look wrong, and dashboards will stay green. Do not
+              start by debugging the cluster. Check
+              `kubectl -n cloudflared logs -l app.kubernetes.io/name=cloudflared`
+              and the Cloudflare dashboard. Do NOT scale or restart cloudflared to
+              "test" anything while this is firing.
+
+        # ── (b) The slide, while it is still fixable calmly ───────────────────
+        # `for: 15m` absorbs a rolling update (which transiently shows 4) without
+        # paging. Warning, not critical: not yet user-visible.
+        - alert: CloudflareTunnelDegraded
+          expr: sum(cloudflared_tunnel_ha_connections) < 6
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Cloudflare tunnel running on reduced edge connections ({{ $value }} of 8)"
+            description: >-
+              {{ $value }} of the expected 8 edge connections, sustained for 15m —
+              longer than a rolling update takes, so this is not a deploy. Usually
+              one replica lost its edge connections and did not recover. Not yet
+              user-visible; the margin before an outage is gone. NOTE the pod will
+              likely show 0/1 Ready and NOTHING will fix it automatically: the
+              readinessProbe removes the pod from a Service endpoint list, and
+              there is no traffic-carrying Service and no livenessProbe, so a
+              wedged connector sits there indefinitely. Deleting the pod is
+              currently the recovery.
+
+        # ── (c) "We cannot see the tunnel" ────────────────────────────────────
+        # Fires when the series is gone entirely — pods deleted, namespace
+        # drained, Service selector typo'd, ServiceMonitor removed, or the file
+        # dropped from the kustomization `resources:` list. While this is true,
+        # (a) and (b) CANNOT fire, whatever the tunnel is actually doing.
+        #
+        # `for: 5m` rides out a rolling update (absent() needs ALL series gone,
+        # which only happens if both pods are simultaneously unscrapeable).
+        # Note service-metrics.yaml sets publishNotReadyAddresses: true, so pods
+        # failing /ready keep being scraped and report a real low number rather
+        # than disappearing into this alert — that is deliberate: a loud low
+        # number beats a silent absence.
+        - alert: CloudflareTunnelMetricsMissing
+          expr: absent(cloudflared_tunnel_ha_connections)
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Cloudflare tunnel is UNOBSERVABLE — no edge-connection metrics at all"
+            description: >-
+              This is NOT "the tunnel is down" — it is "we cannot tell whether the
+              tunnel is up", and it needs a different first move. While this
+              fires, CloudflareTunnelDown and CloudflareTunnelDegraded are
+              structurally unable to fire. If you can still reach this alert
+              through the portal, the tunnel itself is fine and the SCRAPE is
+              broken. Check, in this order:
+              `kubectl get endpoints -n cloudflared cloudflared-metrics`
+              (must list 2 addresses — this is where a selector typo surfaces, and
+              a ServiceMonitor selecting nothing produces no targets, no error and
+              a completely clean-looking apply), then the target's health in
+              Prometheus, then whether a NetworkPolicy was added to the
+              cloudflared namespace (a scrape TIMEOUT means packets are being
+              silently dropped; `connection refused` means nothing is listening).

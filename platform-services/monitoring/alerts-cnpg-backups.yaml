@@ -1,0 +1,211 @@
+# CloudNativePG (Postgres) backup + WAL-archiving alerting (board #152).
+#
+# THE GAP THIS CLOSES. Of the 276 alert rules loaded before this file, not one
+# mentioned a Postgres backup. On 2026-08-25T03:32:18Z a scheduled backup of
+# capstone-tenant-pg — the cluster holding tenant databases and the maintainers'
+# board — failed. Nothing fired; it surfaced by hand a day later during an audit.
+#
+# ── THE DECOY METRIC — DO NOT USE IT ──────────────────────────────────────────
+#   time() - cnpg_collector_last_available_backup_timestamp > 93600   # WRONG HERE
+#
+# That is the correct answer on almost every CNPG cluster in the world, and it is
+# wrong on this one. Verified live 2026-08-26 — the metric reads 0 on ALL SIX
+# Postgres pods:
+#   capstone-pg-1 => 0   capstone-pg-2 => 0   capstone-pg-3 => 0
+#   capstone-tenant-pg-1 => 0   -2 => 0   -3 => 0
+# time() - 0 is ~1.79e9, so that rule would fire immediately and permanently on
+# all six pods, about backups that are in fact succeeding nightly. Six standing
+# false criticals on day one is the fastest possible way to teach a team that
+# alerts are noise, and that habit costs far more than the gap this file closes.
+#
+# WHY IT IS 0. This platform runs CNPG 1.30 with the barman-cloud PLUGIN rather
+# than the older built-in spec.backup.barmanObjectStore. Under the plugin,
+# Cluster.status.firstRecoverabilityPoint and Cluster.status.lastSuccessfulBackup
+# are never populated — and that metric is derived from them. The real recovery
+# window lives on a different object entirely:
+#   kubectl get objectstores.barmancloud.cnpg.io -n db-tier \
+#     -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.serverRecoveryWindow}{"\n"}{end}'
+# which reports genuine nightly successes (lastSuccessfulBackupTime
+# 2026-08-26T03:00:44Z / 03:30:13Z). None of that is in Prometheus.
+#
+# Two further decoys in the same neighbourhood: both clusters report the
+# conditions LastBackupSucceeded=True and "Backup was successful" while
+# .status.lastSuccessfulBackup is empty. Ask any AI assistant "how do I alert on
+# CNPG backup age" and it will hand you the last_available_backup_timestamp rule
+# with complete confidence, because it is right everywhere else. This is the kind
+# of thing only the codebase knows.
+#
+# ── WHAT IS ACTUALLY LIVE (all four verified against Prometheus 2026-08-26) ───
+#   cnpg_collector_last_failed_backup_timestamp        — accurate. capstone-tenant-pg-1
+#       => 1787628738 = 2026-08-25T03:32:18Z, matching the CR exactly.
+#   cnpg_pg_stat_archiver_last_failed_time             — WAL-archiving failures.
+#   cnpg_pg_stat_archiver_seconds_since_last_archival  — POSITIVE freshness, see below.
+#   cnpg_collector_pg_wal_archive_status{value="ready"|"done"} — the unshipped backlog.
+#
+# ── THE HOLE #152 DOES NOT CLOSE, AND HOW THIS FILE CLOSES IT ─────────────────
+# #152 proposes two failure-keyed rules. Both are necessary and both are below.
+# But failure-keyed rules share a structural blind spot: they can only fire when
+# something reports a failure. If the ScheduledBackup is deleted, or the plugin
+# stops being invoked at all, no failure timestamp is ever written and BOTH rules
+# stay silent forever while the recovery window quietly rots. That is this
+# platform's signature failure shape — a success-shaped nothing — and it is
+# exactly what happened with the Vault snapshot job (see the VaultRaftSnapshot
+# Failing comment block in alerts.yaml, ~line 109).
+#
+# #152 states the freshness signal "simply is not in Prometheus". That is true of
+# BASE backups and false of WAL archiving:
+#   cnpg_pg_stat_archiver_seconds_since_last_archival
+#     capstone-pg-2 => 260.3    capstone-tenant-pg-1 => 171.7
+# a live, continuously-advancing, positive liveness signal for the half of the
+# recovery story that is actually continuous. PostgresWALArchivingStalled below
+# uses it, and it is the only rule here that can catch "backups silently stopped"
+# rather than "backups reported an error".
+#
+# It is NOT a full substitute: base-backup freshness genuinely has no Prometheus
+# signal on this cluster, so "the nightly base backup silently stopped running
+# while WAL kept shipping" remains uncovered. Closing that needs the ObjectStore
+# CR's status surfaced as a metric (kube-state-metrics CustomResourceState, the
+# same mechanism crossplane-mr-metrics.yaml already uses here). Deliberately left
+# as a follow-up rather than bodged — see the PR description.
+#
+# NOTE the archiver metrics exist ONLY on the primary of each cluster
+# (cnpg_pg_replication_in_recovery == 0); replicas do not archive. That is why the
+# rules below are not per-pod-symmetric and why absent() is scoped per `job`.
+#
+# ── SEPARATE FILE, NOT APPENDED TO alerts.yaml ────────────────────────────────
+# #152 says to add a group to alerts.yaml. That contradicts the convention the
+# repo settled on (alerts-crossplane-vault.yaml's header: one PrometheusRule file
+# per workstream, precisely to avoid merge conflicts on the 667-line shared file)
+# and several board items are adding rules concurrently right now. Following the
+# convention instead.
+#
+# ⚠ REGISTERED in kustomization.yaml IN THIS SAME COMMIT — that list is explicit,
+# not globbed. A file that is not listed renders nothing and deploys nothing while
+# the PR merges clean and ArgoCD reports Synced/Healthy.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: platform-cnpg-backups
+  namespace: monitoring
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    platform.capstone/component: platform
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: cnpg-backups
+      rules:
+        # ── (a) A base backup reported a failure, recently ────────────────────
+        # The `< 129600` recency bound is the whole design, not a refinement.
+        # `for: 10m` bounds how long the condition must HOLD, not how far in the
+        # past the failure was — so a bare `> 0` would never clear: the July 2026
+        # failure still sitting on capstone-pg-2 (1783652402) would pin this alert
+        # on forever. That is the exact standing-false-critical shape documented
+        # above VaultRaftSnapshotFailing in alerts.yaml, which claimed Vault DR
+        # was unrecoverable for weeks because it keyed on the EXISTENCE of a
+        # failed object rather than on recency.
+        #
+        # 129600s = 36h = one missed nightly run plus grace.
+        #
+        # EXPECTED SILENT AT MERGE TIME, and that is the correct result: verified
+        # 2026-08-26T23:30Z, the 2026-08-25 failure is ~44h old, outside the
+        # window. If this fires on day one the expression is wrong, not the
+        # platform (#152 acceptance criterion 2).
+        - alert: PostgresBackupFailed
+          expr: >-
+            cnpg_collector_last_failed_backup_timestamp > 0
+            and (time() - cnpg_collector_last_failed_backup_timestamp) < 129600
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Postgres backup FAILED on {{ $labels.pod }} in the last 36h"
+            description: >-
+              A base backup of {{ $labels.pod }} ({{ $labels.job }}) reported a
+              failure within the last 36h. Inspect with
+              `kubectl get backups.postgresql.cnpg.io -n db-tier` — ALWAYS fully
+              qualified; three CRDs on this cluster claim the plural `backups` and
+              the short form silently returns a different one (board #30).
+              Then confirm the REAL recovery window, which is not in Prometheus:
+              `kubectl get objectstores.barmancloud.cnpg.io -n db-tier
+              -o jsonpath='{.items[*].status.serverRecoveryWindow}'`.
+              Do NOT trust .status.lastSuccessfulBackup or the
+              LastBackupSucceeded condition on the Cluster — under the
+              barman-cloud plugin both are unpopulated/misleading here.
+
+        # ── (b) WAL archiving is actively erroring ────────────────────────────
+        # WAL (the append-only record of every change) shipped continuously to
+        # MinIO is what makes point-in-time recovery possible. Nightly base
+        # backups plus WAL is the whole recovery story and the two fail
+        # INDEPENDENTLY — PITR can be broken from now backwards while every
+        # nightly backup keeps succeeding.
+        #
+        # 3600s window: unlike a nightly backup, archiving is continuous, so a
+        # genuine ongoing failure keeps refreshing last_failed_time and stays
+        # inside the window. An hour-old failure that stopped recurring has
+        # self-resolved.
+        #
+        # EXPECTED SILENT AT MERGE TIME: both clusters' last archiver failure is
+        # ~43h old (capstone-pg-2 => 1787633685, capstone-tenant-pg-1 =>
+        # 1787629363), well outside the 1h window. Worth noting for whoever picks
+        # up board #152: both of those cluster around 2026-08-25 03:30-05:00, the
+        # same window as the failed base backup — they look like one incident, not
+        # two, and nothing recorded it at the time.
+        - alert: PostgresWALArchivingFailing
+          expr: >-
+            cnpg_pg_stat_archiver_last_failed_time > 0
+            and (time() - cnpg_pg_stat_archiver_last_failed_time) < 3600
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Postgres WAL archiving is failing on {{ $labels.pod }}"
+            description: >-
+              WAL segments from {{ $labels.pod }} ({{ $labels.job }}) are not
+              reaching object storage. Point-in-time recovery is broken from now
+              backwards even while nightly base backups keep succeeding — the two
+              fail independently. Usually the MinIO endpoint or its credentials.
+              Check `kubectl logs -n db-tier {{ $labels.pod }} -c postgres` and
+              the ObjectStore CR. Cross-check the unshipped backlog with
+              `cnpg_collector_pg_wal_archive_status{value="ready"}`.
+
+        # ── (c) WAL archiving silently STOPPED (the positive-liveness arm) ─────
+        # The only rule in this file that fires when nothing reports an error.
+        # seconds_since_last_archival advances continuously on a healthy primary
+        # (observed 172-260s on both clusters). A primary that has archived
+        # nothing for an hour is not archiving, whether or not anything called it
+        # a failure.
+        #
+        # The absent() arm is scoped per `job` (db-tier/capstone-pg and
+        # db-tier/capstone-tenant-pg) rather than globally, so losing the scrape
+        # of ONE cluster still fires — a global absent() would be satisfied by the
+        # other cluster's series still existing and would go quiet exactly when
+        # half the estate went dark.
+        #
+        # `for: 30m` on top of the 3600s threshold tolerates a failover: during a
+        # primary switchover the old primary's series disappears and the new one's
+        # starts fresh, which is a legitimate several-minute gap.
+        - alert: PostgresWALArchivingStalled
+          expr: >-
+            cnpg_pg_stat_archiver_seconds_since_last_archival > 3600
+            or absent(cnpg_pg_stat_archiver_seconds_since_last_archival{job="db-tier/capstone-pg"})
+            or absent(cnpg_pg_stat_archiver_seconds_since_last_archival{job="db-tier/capstone-tenant-pg"})
+          for: 30m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Postgres WAL archiving has produced nothing for over an hour"
+            description: >-
+              No WAL segment has been archived for {{ $labels.job }} in over an
+              hour, or the archiver series has vanished entirely. This is the
+              SILENT-STOP case: nothing has reported a failure, so
+              PostgresWALArchivingFailing above cannot see it. Either the primary
+              is not archiving, the cluster has no primary, or the db-tier scrape
+              is down. Note these metrics exist ONLY on the primary
+              (cnpg_pg_replication_in_recovery == 0), so a brief absence during a
+              failover is normal and is what the 30m `for` absorbs. Confirm the
+              real recovery window on the ObjectStore CR — it is not in Prometheus:
+              `kubectl get objectstores.barmancloud.cnpg.io -n db-tier
+              -o jsonpath='{.items[*].status.serverRecoveryWindow}'`.
