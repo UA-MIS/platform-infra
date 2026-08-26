@@ -1,0 +1,78 @@
+# Velero metrics scrape (board #158).
+#
+# THE GAP THIS CLOSES. Velero's server publishes velero_backup_* counters on
+# :8085 (`http-monitoring`) and NOTHING collected them — `velero` matched zero
+# entries in Prometheus's __name__ label values, so the 22-of-27 PartiallyFailed
+# streak board #29 recorded was invisible to Prometheus exactly as it was to
+# ArgoCD. Prometheus discovers nothing on its own: without a ServiceMonitor a
+# component can publish perfect metrics forever and no one reads them.
+#
+# ⚠ CORRECTION TO THE BOARD ITEM. #158 states there is "no Service and no
+# ServiceMonitor" for Velero. Only the second half is true. The Velero Helm
+# chart (velero-12.1.0) ALREADY ships a Service — `velero` in ns `velero`,
+# port 8085 named `http-monitoring`, targetPort `http-monitoring` — and it is
+# healthy: `kubectl get endpoints -n velero velero` lists 1 address
+# (10.244.5.197, pod velero-77d55cdb64-9x8rx). Verified live 2026-08-26. So this
+# file adds ONLY the ServiceMonitor; creating a second Service would have been a
+# duplicate scrape (every velero_* series doubled, silently breaking any sum()
+# or count() built on them later).
+#
+# ⚠ CORRECTION #2 — the `release: kube-prometheus-stack` label is NOT a
+# requirement on this cluster. #158 (and #157) both say Prometheus "only picks up
+# ServiceMonitors carrying the label release: kube-prometheus-stack". That is the
+# chart's DEFAULT, but this cluster overrides it — read live:
+#   kubectl get prometheus -n monitoring \
+#     -o jsonpath='{.items[0].spec.serviceMonitorSelector}'   -> {}
+#   ...serviceMonitorNamespaceSelector -> {}   ...ruleSelector -> {}
+# Empty selectors mean "select ALL ServiceMonitors/PrometheusRules in ALL
+# namespaces". The label is kept below anyway because every sibling in
+# servicemonitors.yaml carries it and it is what makes this file still correct if
+# someone later tightens the selector back to the chart default — but do not
+# believe a snippet that tells you the label is load-bearing here. Confirm
+# against a working one instead, as the board item rightly advises:
+#   kubectl get servicemonitor -n monitoring loki -o jsonpath='{.metadata.labels}'
+# (loki does NOT carry `release:` either, which is the tell.)
+#
+# SEPARATE FILE rather than appending to servicemonitors.yaml, for the same
+# merge-conflict reason alerts-crossplane-vault.yaml documents for alerts.yaml —
+# several board items are adding scrape wiring concurrently.
+#
+# ⚠ REGISTERED in kustomization.yaml IN THIS SAME COMMIT. That `resources:` list
+# is explicit, not globbed: a file that is not listed renders nothing, deploys
+# nothing, and reports Synced/Healthy while doing it.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: velero
+  namespace: monitoring
+  annotations:
+    # Sync-deadlock fix (#127) — see servicemonitors.yaml's
+    # argocd-application-controller entry for the full reasoning.
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    platform.capstone/component: platform
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames: ["velero"]
+  selector:
+    matchLabels:
+      # The chart's Service labels, read live from the object rather than copied
+      # from the chart source:
+      #   kubectl get svc -n velero velero -o jsonpath='{.metadata.labels}'
+      # -> app.kubernetes.io/{instance,name}=velero, managed-by=Helm, version,
+      #    helm.sh/chart. instance+name is the stable pair; the version/chart
+      #    labels change on every chart bump and must NOT be selected on.
+      #
+      # NOTE this selects the SERVICE's labels, not the pod's. The Service's own
+      # `spec.selector` (which additionally requires `name: velero`) is what
+      # excludes the 5 node-agent DaemonSet pods — they share
+      # app.kubernetes.io/{instance,name}=velero but carry `name: node-agent`.
+      # That is why scraping via the Service is correct here and a PodMonitor on
+      # app.kubernetes.io/name=velero would have wrongly picked up 6 pods.
+      app.kubernetes.io/instance: velero
+      app.kubernetes.io/name: velero
+  endpoints:
+    - port: http-monitoring
+      interval: 30s

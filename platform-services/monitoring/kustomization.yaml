@@ -45,6 +45,37 @@ resources:
   # despite the PR merging clean; caught during live post-merge verification.
   - alerts-crossplane-robot-race.yaml
   - alerts-ida-llm.yaml
+  # ── Reliability-audit alerting, 2026-08-26 (boards #158, #152, #25, #157) ────
+  # One PrometheusRule file per workstream, same convention and same
+  # merge-conflict reasoning as alerts-crossplane-vault.yaml above. All four were
+  # written together but are independent: each keys off different metrics and can
+  # be reverted on its own.
+  #
+  # Velero (#158): backup-freshness + partial-failure alerting. Before this,
+  # ZERO velero_* series existed in Prometheus — the 22-of-27 PartiallyFailed
+  # streak (board #29) was as invisible to Prometheus as it was to ArgoCD.
+  # scrape-velero.yaml is the ServiceMonitor that makes the series exist; the
+  # alerts are inert without it, so the two MUST stay registered together.
+  - scrape-velero.yaml
+  - alerts-velero.yaml
+  # CloudNativePG (#152): backup-failure + WAL-archiving alerting. Read that
+  # file's header before touching it — the obvious metric
+  # (cnpg_collector_last_available_backup_timestamp) reads 0 on all six PG pods
+  # under the barman-cloud plugin and the obvious rule would fire six permanent
+  # false criticals about healthy backups.
+  - alerts-cnpg-backups.yaml
+  # MariaDB Galera (#25, INC-0825 #3): quorum / NON_PRIM alerting. Rule-writing
+  # only, no new scrape — the wsrep_* metrics were already live throughout the
+  # 15-hour outage nobody was paged for.
+  - alerts-galera.yaml
+  # cloudflared (#157): edge-reachability alerting for the platform's ONLY door
+  # to the internet. scrape-cloudflared.yaml is the monitoring-side half; its
+  # partner headless Service lives in platform-services/cloudflared/
+  # service-metrics.yaml because it must sit in that namespace, and is registered
+  # in THAT app's kustomization.yaml — both halves are required, and the alerts
+  # are inert without either.
+  - scrape-cloudflared.yaml
+  - alerts-cloudflared.yaml
   # FIX-4: dedicated kube-state-metrics (CustomResourceState) exporting series for
   # the 11 Crossplane MR kinds the Composition creates — the metrics source
   # alerts-crossplane-vault.yaml's CrossplaneManagedResourceNotSynced/

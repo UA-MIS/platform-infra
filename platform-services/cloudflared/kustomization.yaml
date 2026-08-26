@@ -17,6 +17,19 @@ resources:
   - namespace.yaml
   - deployment.yaml
   - sealedsecret-tunnel-token.yaml
+  # Board #157: headless scrape handle for cloudflared's :2000 metrics endpoint.
+  # It lives in THIS app rather than platform-services/monitoring/ because it must
+  # be in the `cloudflared` namespace, which this app owns — the same split
+  # servicemonitors.yaml uses for argocd and cert-manager. Its partner
+  # ServiceMonitor is platform-services/monitoring/scrape-cloudflared.yaml and is
+  # registered in that app's kustomization; BOTH halves are required or
+  # cloudflared_* series never reach Prometheus and the alerts in
+  # monitoring/alerts-cloudflared.yaml are silently inert.
+  #
+  # ⚠ Like the monitoring app's, this `resources:` list is explicit, not globbed:
+  # a file dropped in this directory and not listed here renders nothing, deploys
+  # nothing, and reports Synced/Healthy while doing it.
+  - service-metrics.yaml
 
 labels:
   - pairs:

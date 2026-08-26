@@ -1,0 +1,182 @@
+# MariaDB Galera quorum alerting (board #25, INC-0825 #3).
+#
+# THE INCIDENT. The Galera cluster was down for 15 HOURS and nobody was paged. It
+# was found only because an unrelated e2e test tried to provision a MySQL project.
+# The metrics pod was up and exporting the whole time — the signal existed,
+# nothing consumed it.
+#
+# No new exporter or scrape is needed. All three signals are live, verified
+# against Prometheus 2026-08-26 (job="capstone-mariadb-mariadb-cluster-metrics",
+# namespace="db-tier"):
+#   mysql_global_status_wsrep_cluster_size   => 3, 3, 3
+#   mysql_global_status_wsrep_cluster_status => 1, 1, 1   (1 = Primary)
+#   mysql_global_status_wsrep_local_state    => 4, 4, 4   (4 = Synced)
+#   mysql_global_status_wsrep_ready          => 1, 1, 1
+#   mysql_up                                 => 1, 1, 1
+#
+# ── THE TRAP: WHY `< 3` ALONE IS NOT ENOUGH ───────────────────────────────────
+# All three instances' series come from ONE exporter pod. Confirmed from the
+# metric labels themselves, which is stronger evidence than reading the
+# Deployment: every one of the three `instance` values above carries the SAME
+#   pod="capstone-mariadb-mariadb-cluster-metrics-7b88f6f9-5cljn"
+# and there is no PodDisruptionBudget covering it. So if that single pod is
+# evicted, OOM-killed or drained, every mysql_* series disappears AT ONCE — and
+# `<nothing> < 3` evaluates to EMPTY, not to true. The alert goes QUIET rather
+# than firing.
+#
+# That matters specifically for this incident class: an outage severe enough to
+# take nodes NON_PRIM is exactly the kind of event that also disturbs the pod
+# running beside it. The original incident note says the metrics pod happened to
+# stay up — the corollary is that you cannot count on that next time, and the
+# rules must be written so the metrics pod dying is itself an alarm rather than a
+# silence.
+#
+# Alerting on mysql_up instead is NOT a shortcut around this: mysql_up vanishes
+# with the same exporter and inherits the identical flaw. Scaling the exporter to
+# 2 is also not the fix — two exporters scraping the same three database
+# instances produce duplicate series, changing what sum() and count() mean in
+# every rule and dashboard built on them (dashboard-mariadb-galera.yaml uses both
+# `max(...cluster_size)` and `sum(...wsrep_ready)`). absent() is the correct fix;
+# exporter redundancy is a separate conversation.
+#
+# ── WHY THE absent() CASE IS ITS OWN ALERT, NOT AN `or` ARM ───────────────────
+# #25 asks for the absent() case to carry its own annotation text, because
+# "Galera has lost quorum" and "we can no longer see whether Galera has quorum"
+# are different emergencies and being told the wrong one costs time at 3am. A
+# single alert with an `or absent(...)` arm cannot do that — one alert has one
+# summary. Hence GaleraMetricsMissing below is a separate rule. This is the same
+# split alerts-velero.yaml makes, for the same reason.
+#
+# ── WHY `!= 1` AND NOT `== 0` FOR cluster_status ──────────────────────────────
+# mysqld_exporter maps the string-valued wsrep_cluster_status onto a number, and
+# the exact encoding for the non-Primary states (0? -1? unmapped?) is a property
+# of the exporter build, not something this cluster can be made to demonstrate
+# without deliberately taking Galera NON_PRIM — which is not an acceptable test.
+# `!= 1` is correct under EVERY possible encoding, because only the healthy value
+# is known for certain (observed 1 on all three instances while the cluster is
+# Primary). `== 0` would silently miss a -1 or an unmapped NaN. Do not "tidy"
+# this into `== 0`.
+#
+# Rules are deliberately NOT aggregated (no min()/sum() wrapper): keeping the
+# per-instance labels means the annotation can name which node is wrong.
+# Alertmanager groups by [namespace, alertname] anyway, so three unhealthy nodes
+# still arrive as one notification, not three.
+#
+# ⚠ DELIVERY DEPENDENCY. Board #70: ntfy reports subscribers=0 against 18,636
+# published messages (read live 2026-08-26, up from the 16,826 in the audit).
+# Until a human subscribes, these rules improve a dashboard and nothing else —
+# they would NOT have paged anyone for the 15-hour outage. #70 is the gating
+# dependency for "we now get told", not this file.
+#
+# ⚠ REGISTERED in kustomization.yaml IN THIS SAME COMMIT — that list is explicit,
+# not globbed.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: platform-galera
+  namespace: monitoring
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    platform.capstone/component: platform
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: galera
+      rules:
+        # ── (a) Quorum lost — the headline INC-0825 condition ─────────────────
+        - alert: GaleraNotPrimary
+          expr: mysql_global_status_wsrep_cluster_status{namespace="db-tier"} != 1
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Galera node {{ $labels.instance }} is NOT in a Primary component"
+            description: >-
+              wsrep_cluster_status on {{ $labels.instance }} is not Primary
+              (healthy = 1). The node is in a non-Primary partition and will
+              REFUSE WRITES — applications see errors, not slowness. This is the
+              INC-0825 condition that ran unnoticed for 15 hours. Check
+              `kubectl get mariadb -n db-tier` and the wsrep state on each pod;
+              recovery usually means bootstrapping from the node with the highest
+              seqno. `for: 2m` is deliberately short — a real partition does not
+              self-heal in two minutes, and this is the alert that was missing.
+
+        # ── (b) Lost a node but still has quorum ──────────────────────────────
+        # Distinct from (a): the cluster is still writable, but has lost its
+        # failure headroom — one more node loss is a full outage. Warning, not
+        # critical, and a longer `for` so a rolling restart of the StatefulSet
+        # does not page anyone.
+        - alert: GaleraClusterDegraded
+          expr: mysql_global_status_wsrep_cluster_size{namespace="db-tier"} < 3
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Galera cluster is down to {{ $value }} of 3 nodes"
+            description: >-
+              {{ $labels.instance }} reports a cluster size of {{ $value }},
+              below the expected 3, for 10m+. Writes still work while a quorum
+              holds, but the headroom is gone: one more node loss takes the
+              cluster NON_PRIM (GaleraNotPrimary). 10m is long enough to ride out
+              a normal rolling restart — if this is firing, a node has genuinely
+              not come back. `kubectl get pods -n db-tier -l
+              app.kubernetes.io/instance=capstone-mariadb`.
+
+        # ── (c) A node is up in the cluster but its mysqld is unreachable ─────
+        - alert: GaleraNodeDown
+          expr: mysql_up{namespace="db-tier"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Galera node {{ $labels.instance }} is not answering"
+            description: >-
+              The exporter is running and scrapeable but cannot reach mysqld on
+              {{ $labels.instance }}. Note this is NOT a substitute for
+              GaleraMetricsMissing below — mysql_up disappears along with the
+              exporter, so it can only report a node that is down while the
+              exporter itself is healthy.
+
+        # ── (d) THE absent() ARM — "we can no longer see Galera at all" ───────
+        # Fires precisely when the single unprotected exporter pod is gone, or
+        # its scrape has broken, or someone deleted the ServiceMonitor. While
+        # this is true, alerts (a), (b) and (c) CANNOT fire — their series do not
+        # exist — so this rule is the only thing standing between a Galera outage
+        # and total silence. Its whole reason to exist is that the three rules
+        # above fail open.
+        #
+        # `for: 10m` tolerates a normal exporter reschedule (single replica, so
+        # any node drain moves it) without paging, while still catching a real
+        # loss inside the same coffee break the rest of this stack targets.
+        #
+        # absent() is true only when NO series matches, so a partial loss (one of
+        # three instances stops reporting) does not trigger this — that case is
+        # GaleraClusterDegraded's, which is correct: the remaining exporter output
+        # still tells you the cluster shrank.
+        - alert: GaleraMetricsMissing
+          expr: >-
+            absent(mysql_global_status_wsrep_cluster_size{namespace="db-tier"})
+            or absent(mysql_global_status_wsrep_cluster_status{namespace="db-tier"})
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Galera quorum is UNOBSERVABLE — the metrics exporter is gone"
+            description: >-
+              This is NOT "Galera lost quorum" — it is "we can no longer see
+              whether Galera has quorum", which needs a different first move.
+              Every mysql_* series comes from ONE exporter pod
+              (capstone-mariadb-mariadb-cluster-metrics, replicas=1, no
+              PodDisruptionBudget), so all three nodes' series vanish together
+              when it is evicted, OOM-killed or drained. While this fires,
+              GaleraNotPrimary / GaleraClusterDegraded / GaleraNodeDown are all
+              structurally unable to fire, whatever the database is actually
+              doing. FIRST check the database directly, do not assume it is fine:
+              `kubectl get mariadb -n db-tier` and
+              `kubectl exec -n db-tier capstone-mariadb-mariadb-cluster-0 --
+              mariadb -e "SHOW STATUS LIKE 'wsrep_cluster_status'"`.
+              THEN restore the exporter:
+              `kubectl get deploy -n db-tier
+              capstone-mariadb-mariadb-cluster-metrics`.

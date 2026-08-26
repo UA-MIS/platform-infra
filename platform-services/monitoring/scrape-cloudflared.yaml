@@ -1,0 +1,64 @@
+# cloudflared metrics scrape (board #157).
+#
+# Pairs with platform-services/cloudflared/service-metrics.yaml (the headless
+# Service, owned by the cloudflared app because it lives in that namespace). This
+# file is the half that belongs to platform-svc-monitoring — the same ownership
+# split servicemonitors.yaml already uses for argocd and cert-manager.
+#
+# THE GAP. Every request from a browser to anything on this platform arrives
+# through the cloudflared tunnel. It is the only door. cloudflared already exports
+# exactly the right metric on :2000 (verified live: cloudflared_tunnel_ha_connections
+# = 4 per pod, 2 pods, so 8 total) and NOTHING collected it — `cloudflared`
+# matched zero entries in Prometheus's __name__ values, and across all 276 alert
+# rules on this cluster zero mentioned Cloudflare, tunnels, or the edge.
+#
+# ⚠ THE `release: kube-prometheus-stack` LABEL IS NOT LOAD-BEARING HERE. #157 says
+# the ServiceMonitor "must carry" it because "that is how Prometheus on this
+# cluster decides which ServiceMonitors are its own". That is the chart default,
+# but this cluster overrides all four selectors to empty — read live:
+#   kubectl get prometheus -n monitoring -o jsonpath='{.items[0].spec.serviceMonitorSelector}'
+#   -> {}    (likewise serviceMonitorNamespaceSelector, ruleSelector, ruleNamespaceSelector)
+# Empty means "select everything, in every namespace". The item's own suggested
+# check proves the point rather than confirming the claim:
+#   kubectl get servicemonitor -n monitoring loki -o jsonpath='{.metadata.labels}'
+#   -> {"app.kubernetes.io/instance":"loki", ... }   # no `release:` at all
+# The label is set below anyway for consistency with every sibling in
+# servicemonitors.yaml, and so this file stays correct if the selector is ever
+# tightened back to the chart default. Verify through
+# `kubectl get endpoints` and the targets API — never by re-reading the YAML.
+#
+# NETWORKPOLICY: none in the cloudflared namespace as of 2026-08-26
+# (`kubectl get netpol,cnp -n cloudflared` -> no resources), so no policy rule is
+# needed for monitoring -> cloudflared:2000. If one is added later and this target
+# starts reporting `context deadline exceeded` rather than `connection refused`,
+# that is the tell: refused means nothing is listening, a TIMEOUT means something
+# is silently eating the packets — on this cluster, Cilium enforces policy for
+# real (proven by deny-test, SEC-011).
+#
+# ⚠ REGISTERED in kustomization.yaml IN THIS SAME COMMIT — that list is explicit,
+# not globbed.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: cloudflared
+  namespace: monitoring
+  annotations:
+    # Sync-deadlock fix (#127) — see servicemonitors.yaml's
+    # argocd-application-controller entry for the full reasoning.
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    platform.capstone/component: platform
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames: ["cloudflared"]
+  selector:
+    matchLabels:
+      # Selects the SERVICE cloudflared-metrics, not the pods. Matching on the
+      # Service's own name label keeps this from ever accidentally selecting a
+      # future traffic-carrying Service in the same namespace.
+      app.kubernetes.io/name: cloudflared-metrics
+  endpoints:
+    - port: metrics
+      interval: 30s

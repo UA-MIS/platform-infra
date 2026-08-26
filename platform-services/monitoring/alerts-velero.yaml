@@ -1,0 +1,193 @@
+# Velero backup alerting (board #158, companion to boards #26/#27/#28/#29).
+#
+# Metrics source: scrape-velero.yaml (this same commit). Before that ServiceMonitor
+# existed, ZERO velero_* series were in Prometheus, so none of these rules could
+# ever have fired regardless of how they were written.
+#
+# ── LABELS VERIFIED LIVE, NOT INFERRED ────────────────────────────────────────
+# #158 acceptance criterion 3 says the `schedule=` label is inferred and might
+# actually be `backup_name`. It is `schedule`. Read straight off the pod
+# 2026-08-26 (curl http://velero.velero.svc:8085/metrics):
+#   velero_backup_attempt_total{schedule=""}                        1
+#   velero_backup_attempt_total{schedule="velero-daily-full-backup"} 26
+#   velero_backup_success_total{schedule="velero-daily-full-backup"}  9
+#   velero_backup_partial_failure_total{schedule="velero-daily-full-backup"} 17
+#   velero_backup_failure_total{schedule="velero-daily-full-backup"}  0
+#   velero_backup_last_successful_timestamp{schedule="velero-daily-full-backup"}
+#                                                            1787720681
+# The `schedule=""` series (ad-hoc, non-scheduled backups) is REAL and must be
+# excluded by every rule below: it has no last_successful_timestamp at all, so a
+# rule that omitted the selector would drag an unrelated one-off backup into the
+# daily-backup freshness signal.
+#
+# ── WHY THE absent() ARM IS SPLIT OUT INTO ITS OWN ALERT ──────────────────────
+# #158 proposes `(time() - max(...) > 129600) or absent(...)` as one rule. The
+# arms are kept separate here for the same reason board #25 gives for Galera: the
+# operator response differs, and being handed the wrong sentence costs time at
+# 3am. "The last good backup is 40h old" and "Velero has no successful backup on
+# record at all" are different situations, and "Prometheus cannot see Velero" is a
+# third. One alert cannot carry three annotations.
+#
+# The split also removes a false-positive this platform would otherwise have
+# shipped. `velero_backup_last_successful_timestamp` is a process-lifetime gauge:
+# it is created when a backup succeeds, NOT reconstructed from existing Backup
+# objects at startup. So for up to ~24h after any velero pod restart the series is
+# legitimately absent while backups are perfectly healthy — a bare `or absent(...)`
+# would fire a standing false critical claiming the backup system had never
+# worked. That is precisely the shape the VaultRaftSnapshotFailing comment block
+# in alerts.yaml (~line 109) documents as having claimed Vault DR was
+# unrecoverable for weeks. VeleroBackupNeverSucceeded therefore gates its absent()
+# arm on velero's own uptime exceeding the same 36h window.
+#
+# ── THE THREE ARMS ARE MUTUALLY EXCLUSIVE (no double-paging) ──────────────────
+#   scrape broken/ServiceMonitor inert -> series gone AND process_start_time gone
+#                                      -> only VeleroMetricsScrapeDown can fire
+#   velero up >36h, no success ever    -> only VeleroBackupNeverSucceeded
+#   velero up, last success >36h ago   -> only VeleroBackupStale
+#
+# ⚠ REGISTERED in kustomization.yaml IN THIS SAME COMMIT — that list is explicit,
+# not globbed.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: platform-velero
+  namespace: monitoring
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    platform.capstone/component: platform
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: velero
+      rules:
+        # ── (a) The freshness signal ──────────────────────────────────────────
+        # PartiallyFailed backups do NOT advance last_successful_timestamp. That
+        # is the property that makes this the right metric: a partial backup is
+        # not something you can plan to restore from, so it should not count as
+        # "we have a backup". 129600s = 36h = one missed nightly run plus grace,
+        # matching VaultRaftSnapshotFailing's window in alerts.yaml.
+        #
+        # No max() wrapper: the selector already pins this to exactly one series,
+        # and aggregating would strip the `schedule` label out of the annotation.
+        - alert: VeleroBackupStale
+          expr: >-
+            time() - velero_backup_last_successful_timestamp{schedule="velero-daily-full-backup"}
+            > 129600
+          for: 30m
+          labels:
+            severity: critical
+          annotations:
+            summary: "No fully successful Velero backup of {{ $labels.schedule }} in over 36h"
+            description: >-
+              The last FULLY successful run of schedule {{ $labels.schedule }} is
+              more than 36h old. PartiallyFailed runs do not advance this
+              timestamp, and 22 of the last 27 runs were PartiallyFailed (board
+              #29) — so this firing most likely means the partial failures have
+              become total, not that backups stopped being scheduled. Inspect with
+              `kubectl get backups.velero.io -n velero` — ALWAYS fully qualified;
+              three CRDs on this cluster claim the plural `backups` and the short
+              form silently returns a different one (board #30) — then
+              `velero backup logs <name>`. Note board #26: no restore has ever
+              been performed, so a "successful" backup here has never been
+              contradicted by evidence either.
+
+        # ── (b) The absent() arm, uptime-gated ────────────────────────────────
+        # `and on()` joins on the empty label set: max() strips all labels from
+        # the right-hand side, so it matches the absent() vector unconditionally.
+        # If velero's scrape is down, process_start_time_seconds is absent too,
+        # the right side is empty, and this rule stays silent — that case belongs
+        # to VeleroMetricsScrapeDown below, not here.
+        - alert: VeleroBackupNeverSucceeded
+          expr: >-
+            absent(velero_backup_last_successful_timestamp{schedule="velero-daily-full-backup"})
+            and on()
+            (time() - max(process_start_time_seconds{job="velero", namespace="velero"})) > 129600
+          for: 30m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Velero has recorded NO successful backup since it started 36h+ ago"
+            description: >-
+              Velero is up and being scraped, has been running for more than 36h,
+              and has still never recorded a fully successful run of
+              velero-daily-full-backup. Either the schedule was deleted or
+              renamed, or every run since startup failed outright. Check
+              `kubectl get schedules.velero.io -n velero` and
+              `kubectl get backups.velero.io -n velero` (fully qualified — board
+              #30). If the schedule was deliberately renamed, the selector in
+              platform-services/monitoring/alerts-velero.yaml must be updated in
+              the same change, or this alert becomes permanent noise.
+
+        # ── (c) The "we have gone blind" arm ──────────────────────────────────
+        # This is the detector for the failure mode board #158 warns about most
+        # loudly: a ServiceMonitor that selects nothing produces no targets, no
+        # error, and a completely clean-looking apply. `up` exists for every
+        # CONFIGURED target, so absent(up{...}) is true precisely when the
+        # ServiceMonitor has stopped matching anything — including if someone
+        # deletes scrape-velero.yaml or drops it from the kustomization
+        # `resources:` list.
+        - alert: VeleroMetricsScrapeDown
+          expr: up{job="velero", namespace="velero"} == 0
+                or absent(up{job="velero", namespace="velero"})
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Prometheus cannot scrape Velero — backup alerting is blind"
+            description: >-
+              Either the velero:8085 target is failing (target present, up==0) or
+              no velero target is configured at all (absent). While this is true,
+              VeleroBackupStale and VeleroBackupNeverSucceeded CANNOT fire — their
+              series do not exist — so backups are unmonitored regardless of
+              whether they are working. If the target exists but errors every
+              scrape, note the distinction: `connection refused` means nothing is
+              listening; `context deadline exceeded` means a NetworkPolicy is
+              silently eating the packets. Check
+              `kubectl get servicemonitor -n monitoring velero` and
+              `kubectl get endpoints -n velero velero` (must list 1 address).
+
+        # ── (d) Partial failures ──────────────────────────────────────────────
+        # increase() over a counter, so it is reset-safe across velero restarts.
+        # 26h spans one nightly run plus grace, so a single bad night fires once
+        # and then clears — unlike a bare `> 0`, which would pin permanently on
+        # the 17 historical partial failures already on the counter.
+        #
+        # ⚠ EXPECTED TO BE SILENT FOR ITS FIRST ~26h. increase() can only measure
+        # what Prometheus has actually stored, and this series began existing the
+        # moment scrape-velero.yaml deployed. Until 26h of history accumulates the
+        # counter looks flat at its current value and increase() returns ~0. That
+        # is correct behaviour, not a broken rule — but it does mean this alert
+        # cannot be observed firing on the day it ships.
+        #
+        # ⚠ ALSO: #158's acceptance criterion 4 ("firing within the hour, because
+        # 22 of the last 27 backups partially failed") is NO LONGER ACHIEVABLE and
+        # the item is simply out of date. Verified 2026-08-26T23:30Z: the most
+        # recent run, velero-daily-full-backup-20260826040045, COMPLETED (0
+        # errors, 93 warnings). The last PartiallyFailed run was 2026-08-25
+        # 04:00:44Z — ~43.5h ago, outside the 26h window. So a correct rule is
+        # silent today. Do not widen the window to make it fire.
+        #
+        # Warnings are still climbing (72 -> 95 over the last week) and are NOT
+        # covered by this rule — Velero exports no warning counter. That drift is
+        # board #29's, and remains visible only by reading the Backup objects.
+        - alert: VeleroBackupPartiallyFailing
+          expr: >-
+            increase(velero_backup_partial_failure_total{schedule="velero-daily-full-backup"}[26h])
+            > 0
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "Velero backup {{ $labels.schedule }} completed with errors"
+            description: >-
+              A run of {{ $labels.schedule }} finished PartiallyFailed in the last
+              26h — some resources or volumes were not backed up, so this run is
+              not something to plan a restore around. 17 of the runs on record
+              were partial failures (board #29); expect this to fire on most
+              nights until that is resolved, which is correct — it should not have
+              been silent for a month. If it must be quietened while #29 is
+              worked, use a TIME-BOUNDED Alertmanager silence with an expiry,
+              never an edit to this rule: a rule edited to be quiet stays quiet
+              forever, a silence expires and the problem comes back into view.

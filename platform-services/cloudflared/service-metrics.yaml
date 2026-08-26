@@ -1,0 +1,73 @@
+# Headless scrape handle for cloudflared's metrics endpoint (board #157).
+#
+# WHY THIS LIVES HERE AND NOT IN platform-services/monitoring/. This Service must
+# be in the `cloudflared` namespace, which is owned by THIS app
+# (platform-svc-cloudflared). The matching ServiceMonitor lives in `monitoring`
+# and is owned by platform-svc-monitoring — the same split
+# servicemonitors.yaml already uses for argocd and cert-manager, where the
+# component's app owns the Service and the monitoring app owns the scrape config.
+#
+# WHY HEADLESS (clusterIP: None). This Service exists purely as a scrape handle —
+# one Prometheus target per pod — and must route no traffic. cloudflared makes
+# OUTBOUND connections to Cloudflare's edge; nothing in the cluster ever connects
+# INTO these pods, so a ClusterIP would be a load-balancing VIP for a workload
+# that receives no requests. Headless also means the pods' readinessProbe cannot
+# have a surprising new side effect (see the note below), because there is no
+# ClusterIP endpoint list steering real traffic.
+#
+# ⚠ THE PROBE STILL CONTROLS NOTHING — THIS DOES NOT FIX THAT. Board #157's second
+# half: cloudflared has a readinessProbe on /ready and no livenessProbe. The probe
+# is honest (/ready genuinely reports readyConnections), but readiness in
+# Kubernetes does exactly one thing — remove the pod from a Service's endpoint
+# list. With no traffic-carrying Service, a pod that has lost all four edge
+# connections goes to 0/1 Ready and then NOTHING HAPPENS: it is not restarted, no
+# traffic is steered away, and `kubectl get pods` showing 0/1 looks like
+# Kubernetes is handling it. Adding this headless Service does not change that
+# (and deliberately so — a NotReady pod dropping out of a scrape handle would make
+# the metrics vanish exactly when they matter, which is why
+# publishNotReadyAddresses is set to true below).
+#
+# The real fix for that half is a livenessProbe on /ready so a wedged connector
+# self-heals. That is a change to the Deployment of the platform's ONLY ingress
+# path and is deliberately NOT bundled into a monitoring PR — see the PR
+# description, where it is raised as a separate recommendation.
+apiVersion: v1
+kind: Service
+metadata:
+  name: cloudflared-metrics
+  namespace: cloudflared
+  labels:
+    # The ServiceMonitor in platform-services/monitoring/scrape-cloudflared.yaml
+    # selects on THIS label. It is deliberately `cloudflared-metrics`, not
+    # `cloudflared`: selecting on the bare component name would also match any
+    # future traffic-carrying Service in this namespace and silently add a second
+    # scrape of the same pods (every cloudflared_* series doubled, quietly
+    # breaking the sum() the alerts are built on).
+    app.kubernetes.io/name: cloudflared-metrics
+spec:
+  clusterIP: None
+  # Keep scraping a pod that has gone NotReady. This is the entire point: a
+  # cloudflared pod that has lost its edge connections FAILS /ready, and if that
+  # removed it from this Service the cloudflared_tunnel_ha_connections series
+  # would disappear rather than drop — turning a loud `sum(...) < 2` into a silent
+  # absent(). The alerts in monitoring/alerts-cloudflared.yaml have an absent()
+  # arm precisely because that class of mistake is easy to make; this setting
+  # keeps them from having to rely on it during the failure they exist to catch.
+  publishNotReadyAddresses: true
+  selector:
+    # Read live from the Deployment 2026-08-26, not copied from a chart:
+    #   kubectl get deploy -n cloudflared cloudflared -o jsonpath='{.spec.selector}'
+    #   -> {"matchLabels":{"app.kubernetes.io/name":"cloudflared"}}
+    # This is the ONLY pod label that is stable; platform.capstone/component is
+    # applied by the kustomization's `labels:` transformer with
+    # includeSelectors: false, so it must not be selected on here.
+    app.kubernetes.io/name: cloudflared
+  ports:
+    # containerPort 2000 name `metrics`, declared on the pod and confirmed
+    # serving: `curl localhost:2000/metrics` returns
+    # `cloudflared_tunnel_ha_connections 4`. targetPort references the NAME, so
+    # this survives a port renumber in the Deployment.
+    - name: metrics
+      port: 2000
+      protocol: TCP
+      targetPort: metrics
