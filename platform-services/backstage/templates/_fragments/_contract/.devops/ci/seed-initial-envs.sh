@@ -110,7 +110,13 @@ for env in ${SEED_ENVS}; do
   # when the shipped script lacks the execute bit — the compose action writes .devops/ci
   # verbatim at mode 644, and the workflow/RUNBOOK invoke every script as `sh …` too.
   # COMMIT (if set) is inherited by the child process's environment.
-  sh "${SCRIPT_DIR}/bump-image.sh" "${env}" "${TAG}"
+  # `bash`, NOT `sh`. bump-image.sh declares `#!/usr/bin/env bash` and uses
+  # `set -euo pipefail`; /bin/sh on Debian is dash, which rejects `-o pipefail`
+  # and exits 2 before doing any work ("set: Illegal option -o pipefail"). This
+  # is not theoretical -- it is why promote.test.sh and seed-initial-envs.test.sh
+  # fail 11 cases each the moment they are actually run. Still no +x bit is
+  # required, which is all the `sh` form was ever working around.
+  bash "${SCRIPT_DIR}/bump-image.sh" "${env}" "${TAG}"
   seeded_any=1
 done
 

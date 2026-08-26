@@ -48,7 +48,27 @@ jobs:
   sync-check:
     runs-on: ua-mis-kaniko
     container:
-      image: node:24-trixie-slim
+      # ⚠ FULL trixie, NOT -slim, AND PULLED THROUGH THE PLATFORM PROXY.
+      #
+      # -slim ships no git, so this job used to `apt-get install git` at runtime.
+      # That is unbuildable on these runners for TWO independent reasons, and
+      # fixing only one still leaves it broken:
+      #
+      #   1. NO IPv6 ROUTE. arc-runners pods have link-local IPv6 only, so every
+      #      deb.debian.org AAAA fails instantly:
+      #        "Cannot initiate the connection to deb.debian.org:80
+      #         (2a04:4e42::644). - connect (101: Network is unreachable)"
+      #   2. NO EGRESS ON :80. allow-egress-scoped permits external egress on
+      #      :443 ONLY, so even a successful IPv4 fallback would be dropped.
+      #
+      # apt then "succeeded" with warnings and failed at `E: Unable to locate
+      # package git`. The full image already carries git 2.47.3 (verified on the
+      # live image), so the fix is to need no network at all rather than to
+      # coax apt through a hole that is deliberately closed.
+      #
+      # The dockerhub-proxy prefix is the same path promote-to-prod pulls
+      # through -- it keeps this off Docker Hub's anonymous rate limit.
+      image: harbor.capstone.uamishub.com/dockerhub-proxy/library/node:24.16-trixie
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -75,8 +95,13 @@ jobs:
           set -eu
           cd platform-services/backstage/templates/_fragments/_contract/.devops/ci
           # git is needed by all three suites (they git-init throwaway fixture repos).
+          # It ships IN the image now -- see the container: block for why installing
+          # it at runtime is not possible on these runners. Assert rather than
+          # install, so a future image swap that drops git fails with this sentence
+          # instead of a confusing test error deep inside a suite.
           if ! command -v git >/dev/null 2>&1; then
-            apt-get update -qq && apt-get install -y -qq --no-install-recommends git >/dev/null
+            echo "::error::git is missing from this job's container image. It cannot be apt-get installed here: arc-runners pods have no IPv6 route and no :80 egress, so deb.debian.org is unreachable by design. Use an image that ships git (the full node:*-trixie does) rather than adding an install step."
+            exit 1
           fi
           for t in promote.test.sh bump-image.test.sh seed-initial-envs.test.sh; do
             echo "==> running ${t}"

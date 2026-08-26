@@ -100,4 +100,10 @@ echo "==> ${FROM} is live at ${LIVE_TAG} — promoting to ${TO}"
 # execute bit: the compose action ships .devops/ci VERBATIM via fs.outputFile at mode 644,
 # so a direct `"${SCRIPT_DIR}/bump-image.sh"` fails "Permission denied" in a real tenant
 # repo. The workflow + RUNBOOK invoke every script as `sh …` for the same reason.
-sh "${SCRIPT_DIR}/bump-image.sh" "${TO}" "${LIVE_TAG}"
+# `bash`, NOT `sh`. bump-image.sh declares `#!/usr/bin/env bash` and uses
+# `set -euo pipefail`; /bin/sh on Debian is dash, which rejects `-o pipefail`
+# and exits 2 before doing any work ("set: Illegal option -o pipefail"). This
+# is not theoretical -- it is why promote.test.sh and seed-initial-envs.test.sh
+# fail 11 cases each the moment they are actually run. Still no +x bit is
+# required, which is all the `sh` form was ever working around.
+bash "${SCRIPT_DIR}/bump-image.sh" "${TO}" "${LIVE_TAG}"

@@ -66,7 +66,19 @@ YAML
   printf '%s' "${root}"
 }
 
-count_tag() { local n; n="$(grep -c "newTag: $1" "$2" 2>/dev/null)" || n=0; printf '%s' "${n}"; }
+# ⚠ MATCH BOTH THE QUOTED AND UNQUOTED FORMS.
+# This helper used to grep for a bare `newTag: 1.2.3`, but bump-image.sh (and so
+# promote.sh, which delegates the write to it) ALWAYS emits the double-quoted
+# form `newTag: "1.2.3"` -- deliberately, because kustomize refuses a bare
+# numeric tag ("cannot unmarshal number into ... Image.images.newTag"). So two
+# assertions reported FAIL on a promotion that had in fact worked perfectly.
+# A suite that always shows 2 red is a suite people stop reading, which is worse
+# than no suite. Ported from the ida-llm copy, where this was already fixed.
+count_tag() {
+  local n
+  n="$(grep -cE "newTag: \"?$1\"?" "$2" 2>/dev/null)" || n=0
+  printf '%s' "${n}"
+}
 assert_eq() { if [ "$2" = "$3" ]; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); echo "FAIL [$1]: got '$2' want '$3'"; fi; }
 
 # Isolate the no-yq sed-fallback path (same pattern as bump-image.test.sh).
