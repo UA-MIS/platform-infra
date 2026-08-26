@@ -34,17 +34,24 @@ metadata:
 spec:
   description: "Tenant project for team __TEAM__ (__SEMESTER__). Team-scoped; no cluster-scoped resources."
 
-  # --- source repos: the team's app repo + platform-infra (for its tenant dir) ---
+  # --- source repos: the team's app repo, and ONLY the team's app repo ----------
   # App repo = UA-MIS/<appName> (the scaffolder creates the repo AS the app name,
   # no `-app` suffix — see template.yaml publish:github). __APPNAME__ is substituted
   # to the appName, NOT `__TEAM__-app` (those differ for any team whose app isn't
   # literally named `<team>-app`; the old `__TEAM__-app` form pointed ArgoCD at a
   # non-existent repo -> "repository not found").
+  #
+  # SEC-024: platform-infra was listed here and is deliberately gone. It was inert
+  # only because the `developer` role below bound a group Dex never emits
+  # (SEC-021), so nobody could reach this project at all. The moment that role
+  # goes live, an allowlisted platform-infra is a real path for a tenant to render
+  # PLATFORM manifests into its own namespace — one further grant
+  # (`applications, create`/`update`) away from firing. The tenant BOOTSTRAP App
+  # that legitimately reads platform-infra runs in the `platform` project
+  # (applicationsets/tenants-appset.yaml), never in a tenant project.
   sourceRepos:
     - https://github.com/UA-MIS/__APPNAME__
     - https://github.com/UA-MIS/__APPNAME__.git
-    - https://github.com/UA-MIS/platform-infra
-    - https://github.com/UA-MIS/platform-infra.git
 
   # --- destinations: ONLY this team's namespaces on the in-cluster API ---------
   # Stable envs are enumerated; preview namespaces (<team>-pr-<n>) are matched by
