@@ -786,6 +786,26 @@ validate: ## Static validation of tenant manifests (kubeconform + RBAC-name + st
 	@python3 platform-services/dex/gen-board-clients.py --check
 	@echo "validate: PASS"
 
+# ---- tenant credential audit (SEC-037) -------------------------------------
+# DELIBERATELY NOT PART OF `validate`. That target is cluster-independent by
+# design so it runs in CI and on a laptop with no kubeconfig; this one reads live
+# Secrets and is meaningless without a cluster. Keeping them separate is what
+# stops someone "fixing" a failing validate by deleting the check.
+#
+# WHAT IT CATCHES. A platform-shared credential sitting in a namespace a tenant
+# can schedule pods in. SEC-037 (#134): the `ua-mis-backstage` App private key --
+# org-wide administration/contents/workflows write, and a branch-protection
+# bypass on this repo's main -- was in `ida-llm-prod`, which ArgoCD reconciles
+# from a repository the students own, at HEAD. Any pod in a namespace may mount
+# any Secret in it, so that is org-admin GitHub from one ordinary commit.
+#
+# It matches by VALUE FINGERPRINT, not by name or path, because that is how the
+# finding was missed: the value had been copied into the tenant's OWN Vault
+# subtree, so every path looked correctly scoped. Nothing prints key material.
+.PHONY: audit-tenant-credentials
+audit-tenant-credentials: ## Find platform-shared credentials in tenant-reachable namespaces (needs a cluster)
+	@python3 hack/audit-tenant-credentials.py
+
 # ---- reversible tenant on/off switch ---------------------------------------
 # Pause a tenant (stop it running + make it VANISH from k9s) and bring it back,
 # WITHOUT touching git/repo/Harbor/Vault. Purely imperative kubectl against live
