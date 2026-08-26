@@ -1,6 +1,6 @@
 """pytest bootstrap for the FastAPI starter.
 
-Two jobs:
+Three jobs:
 
 1. Put THIS dir (the build context / package root) on sys.path so `import app...`
    resolves both locally and in CI (`cd app && pytest -q`).
@@ -10,9 +10,17 @@ Two jobs:
    key import is missing we pip-install requirements-dev.txt (which pulls in
    requirements.txt). Local dev with deps already installed is a no-op. Test deps are
    kept in requirements-dev.txt so the runtime image (requirements.txt) stays lean.
+
+3. Opt IN to the in-memory SQLite database for the test suite. app/db.py only uses it
+   when FASTAPI_ALLOW_MEMORY_DB is set; with no database and no opt-in, the data
+   routes return 503. That is the whole point of the opt-in — a test run WANTS a
+   throwaway database, a production pod with an unset DATABASE_URL does not, and the
+   two used to be indistinguishable. This must be set BEFORE app.db is first imported,
+   because it resolves DATABASE_URL at import time.
 """
 
 import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -20,6 +28,8 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
+
+os.environ.setdefault("FASTAPI_ALLOW_MEMORY_DB", "1")
 
 
 def _ensure_deps() -> None:

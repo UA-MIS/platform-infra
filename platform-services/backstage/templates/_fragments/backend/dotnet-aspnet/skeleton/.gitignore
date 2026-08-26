@@ -1,0 +1,35 @@
+# ASP.NET Core (.NET) starter.
+# The repo root has a .gitignore too; this one covers this component's stack.
+#
+# bin/ and obj/ are deliberately scoped to this file rather than the repo root:
+# a root-level rule would also hit other starters that commit a bin/ directory.
+
+# Build output
+bin/
+obj/
+
+# User-specific project settings
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Test results
+TestResults/
+[Cc]overage*/
+*.coverage
+*.trx
+
+# Local env -- real secrets belong in Vault, not here.
+# appsettings.json and appsettings.Development.json ARE committed; keep real
+# secrets out of them and use `dotnet user-secrets` locally.
+.env
+.env.local
+!.env.example
+appsettings.Local.json
+
+# Editor / OS cruft
+.DS_Store
+.idea/
+.vs/
+.vscode/

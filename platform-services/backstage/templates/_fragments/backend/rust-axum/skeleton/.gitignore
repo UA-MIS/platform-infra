@@ -1,0 +1,23 @@
+# Rust (axum) starter.
+# The repo root has a .gitignore too; this one covers this component's stack.
+#
+# `target/` is the big one: a debug build of this project is commonly 1-2 GB.
+# GitHub rejects any single file over 100 MB, so committing it does not just
+# bloat the repo, it blocks your push.
+
+# Cargo build output
+target/
+**/*.rs.bk
+
+# NOTE: Cargo.lock is COMMITTED for a binary crate (it pins the exact
+# dependency versions your image builds from). Do not add it here.
+
+# Local env -- real secrets belong in Vault, not here
+.env
+.env.local
+!.env.example
+
+# Editor / OS cruft
+.DS_Store
+.idea/
+.vscode/

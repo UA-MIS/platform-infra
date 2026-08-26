@@ -1,0 +1,16 @@
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.venv
+venv
+.coverage
+htmlcov
+.git
+.gitignore
+Dockerfile
+.dockerignore
+tests
+requirements-dev.txt
+conftest.py

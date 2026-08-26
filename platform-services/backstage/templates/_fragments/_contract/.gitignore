@@ -1,7 +1,88 @@
-# Go build output
+# Repo-root .gitignore for a UA-MIS capstone project.
+#
+# This file lands at the root of EVERY scaffolded repo and applies recursively,
+# so it is the safety net for your first `git add -A` whichever starter you
+# picked. Your starter ALSO ships its own .gitignore next to its code (in app/,
+# or in frontend/ + backend/) with the rules specific to that stack.
+#
+# Why this matters: `node_modules/` is routinely hundreds of megabytes and a
+# Rust `target/` is commonly 1-2 GB. GitHub hard-rejects any single file over
+# 100 MB, and once big files are in git history the fix is a history rewrite,
+# not a .gitignore edit. Prevention is five minutes; the cure is not.
+#
+# DELIBERATELY NOT LISTED HERE: bin/, obj/ and vendor/. They are correct for
+# .NET and Go, but a root-level rule applies to the whole tree, and the Rails
+# starter commits bin/rails, bin/rake, bin/setup and vendor/.keep -- a root rule
+# would silently drop them and leave a repo that cannot build. Those patterns
+# live in the .NET and Go starters' own .gitignore instead, scoped to their
+# component directory. Same reasoning for `.env.*`: the Laravel starter commits
+# a real .env.testing, so only the genuinely-secret .env files are matched below.
+
+# ---------------------------------------------------------------------------
+# Dependencies
+# ---------------------------------------------------------------------------
+node_modules/
+.pnp
+.pnp.*
+.yarn/cache
+.yarn/install-state.gz
+
+# ---------------------------------------------------------------------------
+# Build output
+# ---------------------------------------------------------------------------
+dist/
+build/
+target/
+out/
+.next/
+.nuxt/
+.output/
+.svelte-kit/
+.angular/
+# Go's compiled test binary (`go test -c`)
 *.test
 
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# ---------------------------------------------------------------------------
+# Test / coverage output
+# ---------------------------------------------------------------------------
+coverage/
+.coverage
+htmlcov/
+
+# ---------------------------------------------------------------------------
+# Local env and secrets -- NEVER commit these.
+# Real secrets belong in Vault and arrive as an ExternalSecret; see
+# .devops/secrets/README.md in this repo.
+# ---------------------------------------------------------------------------
+.env
+.env.local
+.env.*.local
+!.env.example
+*.pem
+
+# ---------------------------------------------------------------------------
+# Logs
+# ---------------------------------------------------------------------------
+*.log
+npm-debug.log*
+yarn-error.log*
+
+# ---------------------------------------------------------------------------
 # Editor / OS cruft
+# ---------------------------------------------------------------------------
 .DS_Store
+Thumbs.db
 .idea/
 .vscode/

@@ -1,0 +1,32 @@
+# Bring-your-own starter (ships a minimal Go placeholder you are expected to
+# replace). The repo root has a .gitignore too, and it already covers the
+# common build-output directories for every ecosystem -- node_modules/, dist/,
+# build/, target/, out/, __pycache__/, .venv/ and friends.
+#
+# When you replace the placeholder with your own stack, add whatever else that
+# stack generates here.
+
+# Compiled binary. `go build` with no -o writes a file named after this
+# directory, which is "app" (single-component layout) or "backend"
+# (frontend + backend layout).
+/app
+/backend
+*.exe
+
+# Test binaries and coverage
+*.test
+coverage.out
+
+# Dependency vendoring. Delete this line if you deliberately `go mod vendor`
+# and want the result committed.
+vendor/
+
+# Local env -- real secrets belong in Vault, not here
+.env
+.env.local
+!.env.example
+
+# Editor / OS cruft
+.DS_Store
+.idea/
+.vscode/

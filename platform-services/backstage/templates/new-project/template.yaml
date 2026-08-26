@@ -55,11 +55,23 @@ kind: Template
 metadata:
   name: new-project
   title: New Project
+  # This string renders at the top of the New Project form, so it is the FIRST sentence
+  # every capstone student reads about the platform. Board #205: it must name only
+  # choices the form actually offers. Two clauses were removed and must not come back
+  # without the feature coming back first:
+  #   - "(web app or mobile app)" — the projectType enum below is [web]; mobile is
+  #     quarantined (F-3/D-058, board #90) and unreachable.
+  #   - "per-PR preview environments are opt-in — enable them below" — previews are
+  #     DEFERRED and have never run for any tenant (docs/operator/tenant-preview-gaps.md);
+  #     this actively instructed students to turn on something that does not work.
+  # The GitHub-Team prerequisite is stated because the wizard silently skips granting
+  # repo push access when the team does not exist yet (board #51).
   description: >-
-    Create a new UA-MIS capstone project. Pick what you're building (web app or mobile app),
-    your frontend/backend language(s), and a database — The Process assembles a repo wired to
-    the platform golden path (merge -> dev, tag -> staging, manual gate -> prod; per-PR
-    preview environments are opt-in — enable them below).
+    Create a new UA-MIS capstone project. Pick your language and framework and a database —
+    The Process assembles a repo wired to the platform golden path: merge to `main` deploys
+    to dev, a version tag deploys to staging, and a manual workflow promotes to prod.
+    Before you start, make sure your GitHub Team already exists and everyone is in it —
+    the team slug below must match it exactly.
   tags:
     - capstone
     - golden-path

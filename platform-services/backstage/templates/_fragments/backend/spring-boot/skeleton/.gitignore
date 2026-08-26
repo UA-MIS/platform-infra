@@ -1,0 +1,31 @@
+# Spring Boot (Java + Maven) starter.
+# The repo root has a .gitignore too; this one covers this component's stack.
+
+# Maven build output
+target/
+*.class
+
+# Maven wrapper's downloaded distribution (the wrapper scripts themselves,
+# if you add them, stay committed)
+.mvn/wrapper/maven-wrapper.jar
+
+# IDE project metadata
+.idea/
+*.iml
+*.iws
+*.ipr
+.classpath
+.project
+.settings/
+.vscode/
+
+# Local env -- real secrets belong in Vault, not here
+.env
+.env.local
+!.env.example
+
+# Logs
+*.log
+
+# OS cruft
+.DS_Store
