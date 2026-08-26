@@ -128,22 +128,30 @@ spec:
         # Rollouts canary (25% -> pause -> 50% -> pause -> 100%). This is decided entirely in the
         # shared contract's chart overlays (_fragments/_contract/.devops/chart/overlays/prod),
         # so there is nothing for the student to choose. See docs/operator/progressive-delivery.md.
-        # Per-PR preview environments (opt-in, security-gated). Off by default: only the
-        # merge -> dev / tag -> staging / gate -> prod golden path runs, and NO preview
-        # ApplicationSet is created. Turning it on flips spec.previewEnabled=true on the
-        # emitted CapstoneTenant XR, which the Crossplane Composition gates the preview
-        # ApplicationSet behind (`{{- if $preview }}`, composition.yaml) — so every open PR
-        # is deployed to its own throwaway namespace (<team>-pr-<N>) and URL. Kept OFF by
-        # default because previews widen the tenant's exposure surface (SEC gate).
-        previewEnabled:
-          title: Per-PR preview environments
-          type: boolean
-          description: >-
-            Deploy every open pull request to its own throwaway preview environment at
-            https://<app-name>.pr-<N>.capstone.uamishub.com (torn down when the PR closes).
-            Security-gated and off by default — leave unchecked for the standard
-            merge -> dev / tag -> staging / manual-gate -> prod golden path.
-          default: false
+        # Per-PR preview environments: DELIBERATELY NOT A WIZARD FIELD (board #169).
+        # Previews are DEFERRED on security grounds by owner decision 2026-08-25 --
+        # see docs/operator/tenant-preview-gaps.md and the header of
+        # tenants/_template/applicationset-preview.yaml ("UNTIL B1 LANDS, PREVIEWS ARE
+        # UNFENCED -- do not enable"). The missing fence is a network boundary on the one
+        # environment that runs UNTRUSTED pull-request code.
+        #
+        # This was previously a checkbox here. Ticking it flipped spec.previewEnabled=true
+        # on the emitted CapstoneTenant XR, which the Composition gates the preview
+        # ApplicationSet behind (`{{- if $preview }}`) -- so the wizard offered self-service
+        # activation of a capability the platform's own docs say must not be enabled. A
+        # visible control that must not be used invites exactly the action it forbids, and
+        # the student who ticks it has done nothing wrong. Defaulting it to false was not
+        # enough: it already WAS false. The problem was reachability.
+        #
+        # The field is omitted rather than rendered read-only so no dead control remains.
+        # capstone:emit-tenant-claim takes `previewEnabled` as an OPTIONAL zod input and
+        # defaults it to false (`input.previewEnabled ?? false`, emitTenantClaim.ts), so
+        # omitting it emits `previewEnabled: false` with NO action change and NO portal
+        # image rebuild -- only a catalog refresh.
+        #
+        # RESTORE THIS FIELD ONLY AFTER the four gaps in tenant-preview-gaps.md close
+        # (B1 network fencing first). Re-add the parameter AND the matching
+        # `previewEnabled: ${{ parameters.previewEnabled }}` action input below.
         # Team sprint board (D-186). ON by default — this is the one wizard toggle that
         # is opt-OUT rather than opt-in, because a capstone team without a plan of record
         # is the common failure, not the rare one. Unticking it changes NOTHING else about
@@ -757,12 +765,12 @@ spec:
         # SLUG form (year-first, e.g. 2026-fall) — matches the XRD `semester` pattern.
         semester: ${{ parameters.year }}-${{ parameters.season | lower }}
         port: ${{ parameters.port }}
-        # Per-PR preview opt-in (security-gated, off by default). Passed straight through to
-        # the XR's spec.previewEnabled; the Crossplane Composition gates the preview
-        # ApplicationSet behind it (`{{- if $preview }}`). Without this input the action
-        # defaults previewEnabled=false, so NO tenant ever got previews (the wizard never
-        # exposed the switch). Zod input name `previewEnabled` — see emitTenantClaim.ts.
-        previewEnabled: ${{ parameters.previewEnabled }}
+        # previewEnabled is intentionally NOT passed (board #169). The wizard no longer
+        # exposes the toggle, so there is no `parameters.previewEnabled` to forward -- and
+        # forwarding a missing parameter would render an EMPTY STRING, which the action's
+        # `z.boolean().optional()` rejects, failing the whole scaffold. Omitting the input
+        # lets emitTenantClaim default it (`input.previewEnabled ?? false`) and emit
+        # `previewEnabled: false`. Re-add this line if the field is ever restored.
         # THE SEAM (ADR-035 §C): the wizard's RESOLVED DB mode (none|mysql|postgres) from compose ->
         # spec.database on the XR -> the Composition's auto-MySQL/PostgreSQL (ADR-033). NOT
         # parameters.database (the raw 4-way choice) — compose resolves the enum mapping.
@@ -859,7 +867,7 @@ spec:
         content: |
           Your repo **${{ parameters.appName }}** is live under UA-MIS. Now:
           1. Clone it and edit your code (`app/`, or `frontend/`+`backend/`) — leave `.devops/` alone.
-          {% if parameters.previewEnabled %}2. Open a PR -> a **preview** environment is built automatically at `https://${{ parameters.appName }}.pr-<N>.capstone.uamishub.com` (you enabled per-PR previews).{% else %}2. Open a PR -> CI builds and checks run (per-PR **preview** environments are off — you did not enable them in the wizard).{% endif %}
+          2. Open a PR -> CI builds and checks run (per-PR **preview** environments are not available yet).
           3. Merge to `main` -> **dev** auto-deploys.
           4. Tag `vX.Y.Z` -> **staging** auto-deploys; **prod** waits on the manual gate.
           Your app will be at `https://${{ parameters.appName }}.capstone.uamishub.com`.
