@@ -94,6 +94,124 @@ spec:
         runAsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
+{%- if c.migrate %}
+      # ---- DEPLOY-TIME SCHEMA MIGRATION (D-123, board #48) --------------------------------
+      # Rendered ONLY for a component whose fragment DECLARES a migrator (fragment.yaml
+      # `migrate: "<shell command>"` -> components.yaml `migrate`). Most needsDb fragments
+      # self-migrate at boot (CREATE TABLE IF NOT EXISTS / EnsureCreated) and MUST NOT get
+      # this block: an initContainer running a command their image does not have would turn
+      # a working pod into a permanent Init:Error. See composePlan.mjs migrateFor().
+      #
+      # WHY AN initContainer AND NOT THE APP PROCESS: migrating from the running server races
+      # every replica against every other, re-runs on every restart, and needs DDL rights in
+      # the serving process. Init ordering gives us exactly one guarantee we want and cannot
+      # get any other way: the app container does not start until migrations exited 0.
+      #
+      # FAILURE MODE (deliberate, D-123): a failing migration leaves the pod in
+      # Init:Error/CrashLoopBackOff and it NEVER becomes Ready. On a rolling update that means
+      # the OLD ReplicaSet keeps serving and the bad revision takes no traffic; on a brand-new
+      # env it means a loud, obvious stop. Both beat the alternative this replaces — a Healthy,
+      # Ready, 200-reporting pod serving "table does not exist" to every request.
+      #
+      # ZERO-CONFIG IS PRESERVED: DATABASE_URL is optional:true (a fresh repo with nothing in
+      # Vault still starts, M4). The guard below EXITS 0 when it is unset, so a not-yet-wired
+      # app boots exactly as it does today instead of wedging in Init forever. When ESO later
+      # materializes the Secret, the Reloader annotation above restarts the pod and this
+      # initContainer runs for real. That ordering is load-bearing — do not drop the guard.
+      initContainers:
+        - name: migrate
+          # SAME image as the app container below, by design (§4.1): the overlay's kustomize
+          # `images:` override rewrites initContainers[] as well as containers[], so the
+          # migration always runs the EXACT build being deployed. No second image, no second
+          # build step, nothing extra to push.
+          image: ${{ values.appName }}-${{ c.name }}:latest
+          imagePullPolicy: IfNotPresent
+          # /bin/sh -c so the guard can short-circuit on an unset DATABASE_URL. A fragment on
+          # a shell-less base (scratch/distroless) therefore must NOT declare `migrate`.
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              if [ -z "${DATABASE_URL:-}" ]; then
+                echo "[migrate] DATABASE_URL is unset - skipping migrations (zero-config path)."
+                exit 0
+              fi
+              # BOUNDED RETRY (3 x 5s). Two transient causes are EXPECTED and must not wedge
+              # a deploy: (1) replicas racing the same migration on a fresh env - measured,
+              # not assumed: 3 concurrent migrators on an empty database produce
+              # ActiveRecord::ConcurrentMigrationError (rails) or `1050 Table ... already
+              # exists` (django/laravel) in the losers, while the winner completes and the
+              # final schema is correct; a serial retry then exits 0. (prisma is the
+              # exception - it takes a MySQL advisory lock and all three exit 0.) (2) the DB
+              # briefly unreachable while the tier settles. Retrying HERE rather than leaning
+              # on kubelet's Init backoff keeps a healthy deploy from flashing Init:Error.
+              # A migration that is genuinely broken still fails all 3 attempts and the pod
+              # stays in Init - which is the point (D-123): a loud stop beats a Ready pod
+              # serving "table does not exist".
+              attempt=1
+              until [ "$attempt" -gt 3 ]; do
+                echo "[migrate] attempt $attempt/3: ${{ c.migrate }}"
+                if ${{ c.migrate }}; then
+                  echo "[migrate] done."
+                  exit 0
+                fi
+                echo "[migrate] attempt $attempt failed."
+                attempt=$((attempt + 1))
+                [ "$attempt" -gt 3 ] || sleep 5
+              done
+              echo "[migrate] FAILED after 3 attempts - the app container will NOT start."
+              exit 1
+          env:
+            # MIRRORS the app container's env below. The migrator needs the same DSN and the
+            # same app secret (a framework may read it while booting its config).
+            - name: APP_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: ${{ values.appName }}-secret
+                  key: APP_SECRET
+                  optional: true
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+{%- if values.database == 'mysql' or values.database == 'postgres' %}
+                  name: ${{ values.appName }}-db       # auto-DB: DSN assembled by database.externalsecret.yaml (ADR-033)
+{%- else %}
+                  name: ${{ values.appName }}-secret   # bring-your-own: DATABASE_URL set via the Secrets tab
+{%- endif %}
+                  key: DATABASE_URL
+                  optional: true
+          resources:
+            # An init container does NOT add to the pod's steady-state REQUESTS: the scheduler
+            # charges max(largest initContainer, sum(containers)), so these requests are free.
+            # The memory LIMIT is 512Mi, not the app container's 256Mi. Measured (D-123): all
+            # four shipped migrators complete inside a hard 256Mi cgroup limit, so 512Mi is
+            # deliberate HEADROOM for a team-authored data migration (a backfill that walks
+            # rows is the realistic way to exceed 256Mi), where an OOMKill would be
+            # indistinguishable from a failed migration. Cost is bounded and quantified: the
+            # pod's quota-charged limits.memory goes 256Mi -> 512Mi, i.e. prod's 3 replicas
+            # charge 1.5Gi of the 8Gi per-env limits.memory quota instead of 768Mi, and 512Mi
+            # is inside the tenant LimitRange max (1Gi).
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          # Surface the migration's own output in `kubectl describe pod` when it fails,
+          # instead of only in the logs of a container that is already gone.
+          terminationMessagePolicy: FallbackToLogsOnError
+          volumeMounts:
+            # Same writable /tmp the app container gets — migration CLIs write temp files
+            # (prisma engine, bundler, pip) and the root fs is read-only.
+            - name: tmp
+              mountPath: /tmp
+{%- endif %}
       containers:
         - name: ${{ c.name }}
           # SEAM: overlays override registry + tag via kustomize images: (entry name

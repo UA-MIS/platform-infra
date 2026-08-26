@@ -19,6 +19,17 @@ drift) into a temp repo and asserts the repo is buildable exactly as the tenant 
         no .apk/.ipa is ever built, silently. See compose_lib.mobile_workflow_reachability.
   (b) KUSTOMIZE — `kustomize build` succeeds on ALL FOUR overlays (dev/staging/prod/preview),
         i.e. ArgoCD can render the chart the wizard emitted.
+  (b2) MIGRATION CONTRACT (D-123, board #48) — every overlay renders a migration
+        initContainer for EXACTLY the components whose fragment declares `migrate`, running
+        the SAME image as the app container. This is the check that would have caught the
+        board-#48 blocker: fullstack/nextjs shipped a pinned Prisma CLI and DOCUMENTED that
+        "the chart's migration initContainer runs prisma migrate deploy on every deploy",
+        while the contract had no initContainers key at all — so four fragments deployed
+        Healthy and served "table does not exist" on every data route, invisibly to (a)-(c).
+        It fails BOTH ways: a declared migrator missing from any overlay (the prod-only twin:
+        overlays/prod substitutes rollout.yaml's Rollout, which carries its own pod template),
+        and a spurious initContainer on a self-migrating fragment (a command its image does
+        not have would wedge the pod in Init). See compose_lib.migration_initcontainers.
   (c) DOCKERFILE LINT / BUILD (optional, --docker-build) — actually `docker build` each
         container/static component's Dockerfile. Off by default (heavy + network); the build-file
         + kustomize checks are the durable, hermetic gate.
@@ -73,7 +84,8 @@ import boot_probe
 import compose_lib
 from compose_lib import (ComposeError, compose, discover_fragments,
                          expected_build_artifacts, kustomize_overlays,
-                         kustomize_tool, mobile_workflow_reachability,
+                         kustomize_tool, migration_initcontainers,
+                         mobile_workflow_reachability,
                          scenario_for, load_meta)
 
 # QUARANTINE (F-3/D-058) — fragments with a KNOWN, TRACKED red finding that the wizard no
@@ -194,6 +206,18 @@ def check_fragment(rel, workdir, *, do_docker=False, kz_tool=None, mariadb=None)
     except ComposeError as e:
         add("kustomize", False, str(e))
 
+    # (b2) DEPLOY-TIME MIGRATION CONTRACT (D-123, board #48) — every overlay renders a
+    # migration initContainer for EXACTLY the components that declare a migrator, running the
+    # same image as the app container. Catches the desync that shipped the bug (a fragment
+    # documenting an initContainer the chart never had) and its prod-only twin (a block added
+    # to base/deployments.yaml but not to overlays/prod/rollout.yaml, whose Rollout carries
+    # its own copy of the pod template). Hermetic — no docker needed.
+    try:
+        for env, ok, detail in migration_initcontainers(out, tool=kz_tool):
+            add(f"migrate-initcontainer[{env}]", ok, detail)
+    except ComposeError as e:
+        add("migrate-initcontainer", False, str(e))
+
     # (c) optional real docker build of each container/static Dockerfile.
     if do_docker:
         for comp in composed.plan["components"]:
@@ -214,10 +238,17 @@ def check_fragment(rel, workdir, *, do_docker=False, kz_tool=None, mariadb=None)
             add("boot-probe", False, "no 'app' component in the single-slot plan (unexpected)")
         else:
             try:
-                ok, detail = boot_probe.boot_probe_component(app, out, mariadb)
+                # Read the migration initContainer's real script out of the rendered chart, so
+                # GATE-1 runs the literal bytes the cluster runs (D-123). None => no migrator.
+                migrate_script = compose_lib.rendered_migration_script(
+                    out, app["name"], tool=kz_tool)
+                ok, detail = boot_probe.boot_probe_component(
+                    app, out, mariadb, migrate_script=migrate_script)
                 add("boot-probe", ok, detail)
             except boot_probe.BootProbeError as e:
                 add("boot-probe", False, f"environment error: {e}")
+            except ComposeError as e:
+                add("boot-probe", False, f"could not read the rendered migration script: {e}")
 
     result["ok"] = all(c["ok"] for c in result["checks"])
     return result

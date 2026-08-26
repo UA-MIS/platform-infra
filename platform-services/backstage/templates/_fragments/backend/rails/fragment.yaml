@@ -12,6 +12,16 @@ slots:
 defaultPort: 8080
 ingressPath: /api
 needsDB: true
+# DEPLOY-TIME MIGRATION (D-123, board #48) — this is MIGRATIONS.md's own words ("at deploy
+# time - as a one-shot Job or an init-container - NOT from the running app process"), now
+# actually executed by the chart's migration initContainer. Puma (the CMD) never migrates.
+# The gems + db/migrate are already in the runtime image. Applied versions are recorded in
+# schema_migrations, so re-running on every deploy is a no-op. RAILS_ENV=production (image ENV)
+# means the schema file is NOT dumped afterwards, which matters under readOnlyRootFilesystem.
+# CONCURRENCY (measured, D-123): Active Record takes an advisory lock but does NOT queue on it
+# — a losing replica raises ActiveRecord::ConcurrentMigrationError and exits 1. That is safe
+# (it refuses rather than double-applying) and the chart's bounded retry absorbs it.
+migrate: bundle exec rails db:migrate
 buildType: container
 dockerfile: Dockerfile
 healthPath: /healthz

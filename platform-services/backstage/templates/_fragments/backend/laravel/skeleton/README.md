@@ -29,4 +29,5 @@ php artisan test    # in-memory SQLite (.env.testing); no MySQL needed
 
 ## Database migrations
 
-See [`MIGRATIONS.md`](./MIGRATIONS.md). Run `php artisan migrate` at deploy time.
+See [`MIGRATIONS.md`](./MIGRATIONS.md). The platform runs `php artisan migrate --force` for you
+on every deploy, in a migration initContainer — you do not have to apply them yourself.

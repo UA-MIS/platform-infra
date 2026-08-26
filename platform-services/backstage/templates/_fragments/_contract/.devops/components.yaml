@@ -17,6 +17,12 @@
 # FIELDS per component: name/kind/context/dockerfile/image/port/path/needsDb/buildType.
 #   needsDb   — the component reads DATABASE_URL (the chart envs it, optional; auto-DB
 #               provisions it when the tenant `database: mysql`).
+#   migrate   — DEPLOY-TIME SCHEMA MIGRATION command (D-123, board #48). Empty string = this
+#               component needs none (it self-migrates at boot, or ships no DB code). Non-empty
+#               = the chart renders a migration initContainer that runs THIS shell command in
+#               THIS component's own image, before the app container starts, on every deploy.
+#               Set from the fragment's `migrate:` declaration; edit it here to change what
+#               your deploy-time migration runs (e.g. add `&& npm run db:seed`).
 #   buildType — container | static | mobile-artifact. A `mobile-artifact` component is a
 #               build product (.ipa/.apk), NOT a k8s workload: the chart loops SKIP it
 #               (no Deployment/Service/Ingress); it is built by its own mobile workflow.
@@ -32,5 +38,6 @@ components:
     port: ${{ c.port }}             # container port (PORT env + Service targetPort + Ingress backend port)
     path: ${{ c.path }}              # Ingress path routed to this component (longest-prefix wins)
     needsDb: ${{ c.needsDb }}          # reads DATABASE_URL (chart envs it; auto-DB provisions when database: mysql)
+    migrate: ${{ c.migrate | dump }}   # deploy-time migration command run by the chart's initContainer ("" = none)
     buildType: ${{ c.buildType }}      # container | static | mobile-artifact (mobile = no k8s workload)
 {%- endfor %}

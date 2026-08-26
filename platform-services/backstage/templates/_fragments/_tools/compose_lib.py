@@ -309,6 +309,116 @@ def kustomize_tool():
 OVERLAYS = ("dev", "staging", "prod", "preview")
 
 
+def migration_initcontainers(out, tool=None):
+    """Per-env check that the DEPLOY-TIME MIGRATION contract (D-123, board #48) actually
+    renders — in EVERY overlay, for EXACTLY the components that declare a migrator.
+
+    Returns [(env, ok, detail), ...], one entry per overlay.
+
+    Why this is a gate and not a code review note. The bug D-123 fixes was precisely a
+    contract/fragment DESYNC: `fullstack/nextjs` shipped a purpose-built Prisma CLI and both
+    it and prisma/schema.prisma documented "the chart's migration initContainer runs
+    `prisma migrate deploy` on every deploy" — while the chart had no initContainers key at
+    all. Nothing failed; every static check passed; every tenant on an affected stack deployed
+    Healthy and served "table does not exist" on every data route. Only a check that reads the
+    RENDERED manifests can see that.
+
+    It asserts BOTH directions, because both are real failure modes:
+      - MISSING — a component whose fragment declares `migrate` but whose rendered workload has
+        no migration initContainer. The nastiest instance is PROD-ONLY: overlays/prod
+        `$patch: delete`s the base Deployment and substitutes rollout.yaml's Rollout, which
+        carries its OWN copy of the pod template. A migration block added to
+        base/deployments.yaml and not to rollout.yaml renders correctly in dev/staging/preview
+        and silently skips migrations in production alone.
+      - SPURIOUS — an initContainer on a component that declares no migrator. For the 11+
+        self-migrating fragments that is not a harmless no-op: a command their image does not
+        have turns a working pod into a permanent Init:Error.
+
+    It also asserts the migrator runs the SAME image as the app container in that workload —
+    the overlay's kustomize `images:` override must reach initContainers[], or the migration
+    would run some other (or untagged) build than the one being deployed.
+    """
+    prefix = tool or kustomize_tool()
+    if prefix is None:
+        raise ComposeError("kustomize/kubectl not found")
+    out = Path(out)
+    comps = {}
+    try:
+        model = yaml.safe_load((out / ".devops/components.yaml").read_text())
+    except Exception as e:  # noqa: BLE001
+        raise ComposeError(f"could not read composed components.yaml: {e}") from e
+    for c in (model or {}).get("components") or []:
+        if c.get("buildType") != "mobile-artifact":
+            comps[c["name"]] = (c.get("migrate") or "").strip()
+    expected = {n for n, m in comps.items() if m}
+
+    results = []
+    for env in OVERLAYS:
+        r = subprocess.run(prefix + [str(out / ".devops/chart/overlays" / env)],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            results.append((env, False, f"kustomize build failed: {r.stderr.strip()[:300]}"))
+            continue
+        found, problems = set(), []
+        for doc in yaml.safe_load_all(r.stdout):
+            if not doc or doc.get("kind") not in ("Deployment", "Rollout"):
+                continue
+            spec = doc["spec"]["template"]["spec"]
+            name = (doc.get("metadata", {}).get("labels", {})
+                    .get("app.kubernetes.io/component"))
+            inits = [c for c in (spec.get("initContainers") or []) if c.get("name") == "migrate"]
+            if not inits:
+                continue
+            found.add(name)
+            app_images = {c.get("image") for c in spec.get("containers") or []}
+            if inits[0].get("image") not in app_images:
+                problems.append(
+                    f"{doc['kind']} {doc['metadata']['name']}: migrate initContainer image "
+                    f"{inits[0].get('image')!r} != app container image {app_images!r} — the "
+                    f"overlay's images: override did not reach initContainers[]")
+        for missing in sorted(expected - found):
+            problems.append(
+                f"component {missing!r} declares migrate={comps[missing]!r} but the rendered "
+                f"{env} workload has NO migration initContainer (D-123 desync)")
+        for extra in sorted(found - expected):
+            problems.append(
+                f"component {extra!r} declares no migrator but the rendered {env} workload HAS "
+                f"a migration initContainer — a command its image may not have would wedge the "
+                f"pod in Init")
+        results.append((env, not problems, "; ".join(problems)[:600] if problems
+                        else (f"migrator on {sorted(expected)}" if expected else "none declared")))
+    return results
+
+
+def rendered_migration_script(out, component, env="dev", tool=None):
+    """The migration initContainer's actual shell script for `component`, read back out of the
+    RENDERED chart — or None when that component has no migrator.
+
+    Read back rather than re-derived on purpose. "Copy-not-reference is the bug generator" is
+    this project's own retro lesson, and D-123 is a case in point: the bug was a fragment
+    describing a chart mechanism that had drifted away from it. A runtime gate that rebuilt the
+    wrapper itself would test its own copy, stay green, and miss exactly that class of drift.
+    Reading the rendered manifest means the gate runs the bytes the tenant's cluster will run.
+    """
+    prefix = tool or kustomize_tool()
+    if prefix is None:
+        raise ComposeError("kustomize/kubectl not found")
+    r = subprocess.run(prefix + [str(Path(out) / ".devops/chart/overlays" / env)],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise ComposeError(f"kustomize build failed: {r.stderr.strip()[:300]}")
+    for doc in yaml.safe_load_all(r.stdout):
+        if not doc or doc.get("kind") not in ("Deployment", "Rollout"):
+            continue
+        labels = doc.get("metadata", {}).get("labels", {})
+        if labels.get("app.kubernetes.io/component") != component:
+            continue
+        for c in doc["spec"]["template"]["spec"].get("initContainers") or []:
+            if c.get("name") == "migrate":
+                return (c.get("args") or [None])[0]
+    return None
+
+
 def kustomize_overlays(out, tool=None):
     """Build all four overlays of a composed repo. Returns [(env, ok, err), ...].
 

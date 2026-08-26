@@ -36,7 +36,38 @@ _fragments/
 | `buildType` | `container` \| `static` \| `mobile-artifact` (mobile-artifact = no Deployment) |
 | `dockerfile` | Dockerfile path within `skeleton/` (mobile: empty; use `buildWorkflow`) |
 | `healthPath` | the probe path the container serves (`/healthz`) |
+| `migrate` | **optional.** A single shell command applying DB migrations at deploy time. Non-empty => the chart runs it in a migration initContainer, in THIS image, before the app container starts. See below. |
 | `notes` | free text for humans + fan-out builders |
+
+### `migrate` — declare it only if your starter does NOT create its own schema
+
+Most starters here create their sample table at boot (`CREATE TABLE IF NOT EXISTS`, or
+`EnsureCreated()`), and **must not** declare `migrate`. Declare it when your framework
+applies migrations from a CLI that the app process never runs — Prisma, Django, Laravel,
+Rails, and the like. Getting this wrong in either direction is a real bug:
+
+- **Declared but shouldn't be:** the initContainer runs a command your runtime image may not
+  contain, and every pod wedges in `Init` — a working stack turned broken.
+- **Should be but isn't:** your app deploys Healthy and serves "table does not exist" on
+  every data route, silently, in all three environments. That is the bug this field exists
+  to fix (board #48).
+
+Rules:
+
+- The migration tooling must already be in the **runtime** image. Don't add a build step for
+  it if you can avoid one; `fullstack/nextjs` builds a dedicated, pinned CLI in a `migrator`
+  stage and copies it in.
+- The command runs under `/bin/sh -c` as UID 65532 with a **read-only root filesystem**
+  (only `/tmp` and `/dev/shm` are writable) — the same contract as the app container. A
+  scratch/distroless image with no shell cannot declare `migrate`.
+- It must be **idempotent** — it runs on every deploy of every environment.
+- It must be safe to run **concurrently**: replicas start together on a fresh environment.
+  The chart retries 3x/5s, which is enough for the "lost the race" errors these tools raise,
+  but a migration that corrupts under concurrency is not acceptable.
+- `needsDB: true` is required alongside it (the chart only wires `DATABASE_URL` there).
+
+`green-check.py` asserts, for every fragment and every overlay, that the rendered workload
+has a migration initContainer for exactly the components that declare one.
 
 ## Wiring conventions (load-bearing — fan-out builders MUST follow)
 

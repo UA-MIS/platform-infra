@@ -22,6 +22,19 @@ defaultPort: 3000
 # owns the whole origin (UI at /, its API under /api/*).
 ingressPath: /
 needsDB: true              # reads DATABASE_URL (mysql://...) — the wizard offers the DB question
+# DEPLOY-TIME MIGRATION (D-123, board #48). Prisma does NOT create tables from the running
+# app, so without this the chart deploys a Healthy pod whose every data route 500s with
+# "The table 'Note' does not exist" — which is exactly what shipped before D-123. Declaring
+# `migrate` makes the chart render a migration initContainer that runs this command in THIS
+# image before the app container starts (see _contract/.devops/chart/base/deployments.yaml).
+# The CLI is the PINNED v6 tree the Dockerfile's `migrator` stage builds at /app/prisma-cli —
+# never `npx prisma` (npx resolves to v7, which rejects this v6 `url = env(...)` schema).
+# --schema is explicit so the command does not depend on the container's working directory.
+# `migrate deploy` is idempotent (it applies only unapplied migrations, recorded in
+# _prisma_migrations) and takes a MySQL advisory lock, so concurrent replicas serialize.
+migrate: >-
+  node /app/prisma-cli/node_modules/prisma/build/index.js migrate deploy
+  --schema=/app/prisma/schema.prisma
 buildType: container
 dockerfile: Dockerfile
 healthPath: /healthz
