@@ -223,8 +223,27 @@ export function createComposeProjectAction(deps: ComposeProjectDeps) {
         // here so this action's contract stays a superset of the wizard (no image rebuild
         // forced by the per-stack enum shrink, and any future Postgres-capable fragment can be
         // wired to it as a catalog-refresh-only change on the template side).
+        //
+        // OPTIONAL (board #139): the wizard does not merely narrow this enum per stack — for
+        // DB-LESS stacks it OMITS the `database` question entirely. `new-project/template.yaml`
+        // says so ("`database` is intentionally NOT required at this level … absent entirely for
+        // DB-less frontend/static fragments"): the property exists ONLY in the needsDB branches
+        // of the `singleFragment` schema-dependency, so Group (a) — frontend/angular,
+        // static/bare-html, static/react-static — sends NO `database` key at all. Declared
+        // non-optional, this input made zod-to-json-schema emit `database` in the step schema's
+        // `required` list, and the scaffolder rejected every one of those submissions before a
+        // single file was written. `.optional()` is what makes this input the genuine SUPERSET of
+        // the wizard the comment above claims it is.
+        //
+        // The missing value is resolved to 'none' in the PURE planner, NOT here — composePlan.mjs
+        // `planComposition()` already normalises `input.database || 'none'` and then re-derives
+        // the provisioned engine from `needsDb` anyway, so a schema-level `.default('none')` would
+        // duplicate a decision that has exactly one home. Keep the ENUM (never widen to
+        // z.string()): it is what stops a typo'd DB choice reaching the CapstoneTenant claim,
+        // where it fails far later and far less legibly. `.optional()` keeps that guard fully
+        // intact — a PRESENT `database` is still checked against all four members.
         database: z =>
-          z.enum(['host-mysql', 'host-postgres', 'bring-your-own', 'none']),
+          z.enum(['host-mysql', 'host-postgres', 'bring-your-own', 'none']).optional(),
         // NOTE: progressive delivery is now an ENV-BASED chart default (prod overlay renders a
         // single-component web app as an Argo Rollouts canary — ADR-037), NOT a compose input.
         // The old `progressiveDelivery` boolean input was removed here. It is accepted-but-ignored
