@@ -85,3 +85,28 @@ spec:
   # it in the claim is what keeps this tenant from silently regressing to the
   # new 5 default.
   maxRunners: 8
+
+  # Raised 8 -> 16 (2026-08-26, owner-decided, #563). The platform default for
+  # spec.cpuLimit stays 8; this is a per-tenant deviation in exactly the same
+  # shape as maxRunners above, so no other tenant's quota moves.
+  #
+  # WHY: prod's compute-quota was at 6500m of an 8-core limits.cpu ceiling — 81%
+  # — with dev at 4800m and staging at 4000m. This app bursts wider than most:
+  # six components in prod (frontend/api/runner/redis/minio/agile) plus three
+  # nightly CronJobs that can overlap a rollout, all sharing one namespace cap.
+  # An exact-fit CPU ceiling is the same trap D-175/D-176/#526/D-187 hit four
+  # times on cpu, memory and pods — quota rejection is silent, so the rollout
+  # just crawls and reads as "the cluster is slow today".
+  #
+  # LIMITS ONLY — requests.cpu stays at the platform's 4 and is NOT raised.
+  # Prod uses 950m of that 4 (24%), so requests were never the binding
+  # constraint; limits were. requests.cpu is the scheduler's reservation and
+  # costs real cluster capacity, while limits.cpu is a burst ceiling the kernel
+  # enforces by CFS throttling. Raising the reservation would have consumed
+  # scarce schedulable capacity to fix a problem it does not touch.
+  #
+  # AGGREGATE CHECK (2026-08-26): cluster allocatable 79.85 cores across 5
+  # nodes; current CPU *requests* commitment 33.8 cores (42%), leaving ~46 cores
+  # of real headroom. This tenant's requests ceiling is unchanged at 4/ns, so
+  # that headroom is untouched by this change.
+  cpuLimit: 16
