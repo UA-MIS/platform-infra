@@ -183,6 +183,7 @@ def main() -> int:
                 projects[name] = {
                     "sourceRepos": [str(r) for r in (spec.get("sourceRepos") or [])],
                     "path": rel,
+                    "description": str(spec.get("description") or ""),
                 }
             elif kind == "Application":
                 apps.append({"name": name, "path": rel, "project": str(spec.get("project", "")),
@@ -212,6 +213,40 @@ def main() -> int:
             print(f"       - {d}/ exists but yielded ZERO Argo resources")
         print("      A per-directory count, not a repo-wide total: the total stays healthy")
         print("      while one directory silently empties.")
+        return 1
+
+    # ---- CRD FIELD-LENGTH LIMITS (offline half of the server-dry-run lesson) ----
+    # `AppProject.spec.description` may not exceed 255 characters. That is a constraint in
+    # the CRD's own openAPIV3Schema, and STRUCTURAL VALIDATION CANNOT SEE IT: a 337-char
+    # description passed `make validate`, passed `kubectl apply --dry-run=client`, and was
+    # then REJECTED by the API server on apply — after the PR had merged.
+    # (kubeconform is doubly blind here: guard [1/8] only scans */namespaces/*.yaml, and
+    # pointed at an AppProject it errors "could not find schema for AppProject" anyway.)
+    #
+    # The AUTHORITATIVE check is `make verify-argocd-apply` (--dry-run=server), which needs
+    # a cluster and so cannot live in this offline gate. This is the cheap offline half:
+    # it catches the one class that actually cost a merge, in CI, with no kubeconfig.
+    #
+    # The value is not a guess — it is every maxLength in the live CRDs, read with
+    #   kubectl get crd appprojects.argoproj.io -o json
+    # which yields exactly one: .spec.description = 255. The Application CRD has none.
+    # If ArgoCD adds more, this list goes stale silently; the server dry-run is what
+    # covers that, which is why both exist.
+    MAX_LEN = {"AppProject.spec.description": 255}
+    too_long = []
+    for pname, p in projects.items():
+        limit = MAX_LEN["AppProject.spec.description"]
+        if len(p["description"]) > limit:
+            too_long.append((pname, p["path"], len(p["description"]), limit))
+    if too_long:
+        print(f"FAIL: {len(too_long)} AppProject(s) exceed a CRD field-length limit.")
+        print("      The API server REJECTS these on apply; structural validation cannot")
+        print("      see CRD field constraints, so nothing else here catches them.")
+        for pname, ppath, n, limit in too_long:
+            print(f"    - {ppath} :: {pname}")
+            print(f"      spec.description is {n} characters, limit is {limit}")
+            print(f"      Move the reasoning into a YAML COMMENT above the field — comments")
+            print(f"      have no length limit; only the field does.")
         return 1
 
     # ---- the three outcomes ---------------------------------------------------
