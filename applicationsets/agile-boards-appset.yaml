@@ -78,7 +78,7 @@ spec:
               # ── THE SHARED IMAGE TAG. Bump here; every board moves together. ──
               # Immutable tag, never `latest` (Kyverno disallow-latest-tag is Enforce
               # and this namespace is not excluded). The chart refuses `latest` too.
-              tag: "ec0fc6325cccca8742a03b5ef87d30ae09765629"
+              tag: "e2d6960e4ee2ba47ada7f6f149817e9b0adfdd53"
       destination:
         server: https://kubernetes.default.svc
         # EVERY board lands in this ONE platform namespace — never the team's own
