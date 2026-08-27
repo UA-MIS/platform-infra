@@ -71,6 +71,12 @@
 # Guards [1][2][3] over rendered tenant manifests have NO such mirror: a
 # malformed render lands on main unchecked today. That is what this covers.
 #
+#   (Guard [1/6] only genuinely covers that path as of this PR. Its file list was
+#   the glob `tenants/*/namespaces/*.yaml`, one directory too shallow — it matched
+#   the four `_template` files and never the VM tier's `*/vm/namespaces/*.yaml`,
+#   so the repo's only real tenant namespace manifest went unvalidated. Now built
+#   with `find`. [2] and [3] already recursed, via `grep -r` and `find`.)
+#
 # ⚠ Guard [4/6] (SEC-006) needs no push-on-main coverage: argocd-rbac-cm.yaml is
 #   only ever edited by humans in PRs. The PR trigger is a complete gate for it.
 #
