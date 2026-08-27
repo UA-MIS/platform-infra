@@ -261,17 +261,29 @@ jobs:
 
       - name: Node/TypeScript — install + lint + typecheck + test
         if: ${{ steps.detect.outputs.lang == 'node' }}
-        # Digest-pinned (SEC). node:24-trixie-slim. lint + typecheck run only --if-present
-        # (a bare starter without them is not blocked); `npm test` runs only when a test
-        # script exists (npm test hard-errors on a missing script otherwise). A real lint /
-        # tsc / test failure BLOCKS.
+        # Digest-pinned (SEC). node:24-trixie-slim. Install uses `npm ci` only when a lockfile
+        # (package-lock.json / npm-shrinkwrap.json) is committed — otherwise `npm install`, so a
+        # lockfile-less starter installs cleanly with no `npm ci` EUSAGE error wall. lint +
+        # typecheck run only --if-present (a bare starter without them is not blocked); `npm test`
+        # runs only when a test script exists (npm test hard-errors on a missing script otherwise).
+        # A real lint / tsc / test failure BLOCKS.
+        #
+        # NOT `npm ci || npm install` (drift; the platform copy in .github/workflows/
+        # tenant-build.yaml has always had the if/else and this tenant-facing copy did not).
+        # That fallback swallows the exact failure `npm ci` EXISTS to produce: a lockfile
+        # desynced from package.json makes `npm ci` fail by design, `|| npm install` then
+        # silently REWRITES the lockfile and the gate goes green. The condition being tested
+        # is "is a lockfile committed", which is a file test — so test the file, and let a
+        # genuine `npm ci` failure fail.
         uses: docker://node@sha256:366fdef91728b1b7fa18c84fba63b6e79ed77b7e10cc206878e9705da4d7b169 # 24-trixie-slim
         with:
           entrypoint: /bin/sh
           args: >-
             -c 'set -eu;
             cd "$GITHUB_WORKSPACE/${{ matrix.context }}";
-            echo "==> install deps"; npm ci || npm install;
+            if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then echo "==> npm ci (lockfile present)";
+            npm ci || { echo "::error::package-lock.json is OUT OF SYNC with package.json, so npm ci stopped. That is what npm ci is for, and CI will not rewrite your lockfile for you. TO FIX — both steps, and the second is the one people miss: (1) run  npm install  locally, which updates package-lock.json; (2) COMMIT it —  git add package-lock.json && git commit -m \"sync lockfile\" && git push. If you run npm install but do not commit the lockfile, the next build fails with this same message."; exit 1; };
+            else echo "==> npm install (no lockfile — commit one to switch to fast reproducible npm ci)"; npm install; fi;
             echo "==> lint (if present)"; npm run lint --if-present;
             echo "==> typecheck (if present)"; npm run typecheck --if-present;
             if npm run | grep -qE "^[[:space:]]+test"; then echo "==> npm test"; npm test;
@@ -304,13 +316,20 @@ jobs:
             PIP="python -m pip install --quiet --root-user-action=ignore";
             if [ -f requirements.txt ]; then echo "==> pip install -r requirements.txt"; $PIP -r requirements.txt; fi;
             if [ -f requirements-dev.txt ]; then echo "==> pip install -r requirements-dev.txt"; $PIP -r requirements-dev.txt; fi;
+            proj_install=skipped;
             if [ -f pyproject.toml ]; then echo "==> pip install .";
-            $PIP . || echo "::warning::pip install . failed — a pyproject.toml that only carries tool config (no [build-system]) is not installable, so this stays non-blocking; a real packaging error will surface at image build"; fi;
+            if $PIP .; then proj_install=ok; else proj_install=FAILED;
+            echo "::warning::pip install . failed — a pyproject.toml that only carries tool config (no [build-system]) is not installable, so this stays non-blocking; a real packaging error will surface at image build"; fi; fi;
             echo "==> pip install pytest ruff"; $PIP pytest ruff;
             echo "==> ruff (advisory)";
             ruff check . || echo "::warning::ruff reported findings — ADVISORY ONLY, this does not fail the build and is not test coverage";
             echo "==> pytest"; set +e; pytest -q; rc=$?; set -e;
-            if [ "$rc" = "5" ]; then echo "::notice::pytest collected no tests — nothing to run. Every dependency install above SUCCEEDED (errexit would have stopped this step otherwise), so this is a repo with no tests, not a broken environment."; rc=0; fi;
+            if [ "$rc" = "5" ]; then
+            if [ "$proj_install" = "FAILED" ]; then
+            echo "::warning::pytest collected no tests AND 'pip install .' failed above. Those two together mean nothing here was verified: there is no test result, and the package did not install. Not failing the gate (a tool-config-only pyproject is legitimately not installable) — but do NOT read this green tick as a working environment.";
+            else
+            echo "::notice::pytest collected no tests — nothing to run. Every BLOCKING dependency install above succeeded (errexit would have stopped this step otherwise), so this is a repo with no tests, not a broken environment.";
+            fi; rc=0; fi;
             exit $rc'
 
       - name: Java (Maven) — compile + test
@@ -387,8 +406,15 @@ jobs:
             if bundle install --quiet; then ok=1; break; fi;
             echo "::warning::bundle install attempt $n of 3 failed"; n=$((n+1)); sleep $((n*5)); done;
             if [ "$ok" != "1" ]; then
-            if [ "${{ vars.CI_STRICT_TOOLCHAIN }}" = "1" ]; then
-            echo "::error::bundle install failed 3 times and CI_STRICT_TOOLCHAIN=1 — failing the checks gate"; exit 1; fi;
+            strict_raw="${{ vars.CI_STRICT_TOOLCHAIN }}";
+            strict=0;
+            case "$(printf %s "$strict_raw" | tr "[:upper:]" "[:lower:]")" in
+            1|true|yes|on) strict=1 ;;
+            ""|0|false|no|off) strict=0 ;;
+            *) echo "::warning::CI_STRICT_TOOLCHAIN is set to \"$strict_raw\", which is not a recognised boolean (1/true/yes/on or 0/false/no/off) — treating it as OFF. If you meant to enforce, use 1." ;;
+            esac;
+            if [ "$strict" = "1" ]; then
+            echo "::error::bundle install failed 3 times and CI_STRICT_TOOLCHAIN is enabled — failing the checks gate"; exit 1; fi;
             echo "::warning::bundle install failed 3 times (native-ext toolchain / DB headers not in the stock ruby image) — RUBY TESTS DID NOT RUN for this component. This step is reporting success WITHOUT having tested anything. Harden the toolchain image, or set repository variable CI_STRICT_TOOLCHAIN=1 to make this a hard failure."; exit 0; fi;
             if [ -f bin/rails ]; then echo "==> bin/rails test"; bin/rails test;
             elif bundle exec rake -T 2>/dev/null | grep -q "rake test"; then echo "==> rake test"; bundle exec rake test;
@@ -419,8 +445,15 @@ jobs:
             if composer install --no-interaction --no-progress --prefer-dist --ignore-platform-reqs; then ok=1; break; fi;
             echo "::warning::composer install attempt $n of 3 failed"; n=$((n+1)); sleep $((n*5)); done;
             if [ "$ok" != "1" ]; then
-            if [ "${{ vars.CI_STRICT_TOOLCHAIN }}" = "1" ]; then
-            echo "::error::composer install failed 3 times and CI_STRICT_TOOLCHAIN=1 — failing the checks gate"; exit 1; fi;
+            strict_raw="${{ vars.CI_STRICT_TOOLCHAIN }}";
+            strict=0;
+            case "$(printf %s "$strict_raw" | tr "[:upper:]" "[:lower:]")" in
+            1|true|yes|on) strict=1 ;;
+            ""|0|false|no|off) strict=0 ;;
+            *) echo "::warning::CI_STRICT_TOOLCHAIN is set to \"$strict_raw\", which is not a recognised boolean (1/true/yes/on or 0/false/no/off) — treating it as OFF. If you meant to enforce, use 1." ;;
+            esac;
+            if [ "$strict" = "1" ]; then
+            echo "::error::composer install failed 3 times and CI_STRICT_TOOLCHAIN is enabled — failing the checks gate"; exit 1; fi;
             echo "::warning::composer install failed 3 times (PHP extensions not in the stock composer image) — PHP TESTS DID NOT RUN for this component. This step is reporting success WITHOUT having tested anything. Harden the toolchain image, or set repository variable CI_STRICT_TOOLCHAIN=1 to make this a hard failure."; exit 0; fi;
             if composer run-script --list 2>/dev/null | grep -qE "^[[:space:]]+test"; then echo "==> composer test"; composer test;
             elif [ -x vendor/bin/phpunit ]; then echo "==> phpunit"; vendor/bin/phpunit;
