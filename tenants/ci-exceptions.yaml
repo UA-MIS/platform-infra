@@ -1,15 +1,25 @@
-# Tenants deliberately NOT on the reusable CI pipeline (D-202 §5.6).
+# Tenants deliberately NOT on the reusable CI pipeline (D-202 §5.6 / ADR-061).
 #
 # Read by hack/ci-fleet-drift-report.py. This file is the ONLY way a tenant is
-# excluded from the fleet drift report — there is no list of exempt repos inside
-# the report itself, deliberately: a hardcoded list is the copy-not-reference
-# shape this whole design exists to delete.
+# excluded from the fleet drift report — there is no exempt-list inside the
+# report itself, deliberately: a hardcoded list is the copy-not-reference shape
+# this whole design exists to delete.
+#
+# ── SCHEMA ───────────────────────────────────────────────────────────────────
+#   exempt:
+#     - repo: <github repo name, no org prefix>
+#       reason: <why this tenant is deliberately off the pipeline>   # REQUIRED
+#       review_by: YYYY-MM-DD                                        # REQUIRED
 #
 # ── THE RULES ────────────────────────────────────────────────────────────────
 #   * An entry WITH a reason is excluded and shown as EXEMPT.
 #   * An entry WITHOUT a reason is reported as OPT-OUT-NO-REASON. Opting out is
 #     allowed; opting out silently is not. "We turned it off in June and nobody
 #     remembers why" is precisely the state this file exists to prevent.
+#   * An entry PAST its `review_by` is reported as EXEMPT-EXPIRED. ADR-061:
+#     deliberate divergence should be "dated and reviewable rather than
+#     indistinguishable from neglect". An exemption with no expiry becomes
+#     neglect the moment the person who wrote it forgets it.
 #   * If this file is MISSING, the report applies NO exclusions and evaluates
 #     every tenant. Absence can only ever over-report, which is the safe
 #     direction — a missing exceptions file must never be able to hide drift.
@@ -18,25 +28,18 @@
 #     it as total would silently hide real drift. Neither is acceptable on a
 #     report whose only job is to be believed.
 #
-# ── WHY THE VM TENANTS LIVE HERE AND NOT IN THE SCRIPT ───────────────────────
-# VM-tier tenants have no container build, so the reusable image pipeline does
-# not apply to them. That is a real, permanent exemption — but it is a PLATFORM
-# DECISION, not a property the report can safely infer. Inferring it (say, "any
-# repo whose pipeline is short") would silently exempt a tenant whose pipeline
-# broke, which is the failure mode this report exists to catch. Writing them
-# down costs one line each and makes the exemption reviewable in a diff.
+# ── WHY THIS FILE IS CURRENTLY EMPTY ─────────────────────────────────────────
+# It previously listed `testing`, `swami-student` and `swami-student2` as the VM
+# tenants (design §5.4). Measured against the live org, **none of those three
+# carry the `capstone-tenant` topic**, so the report never sees them and the
+# entries were inert — a stale exclusion is a comment that answers the reader's
+# question inaccurately, so they are removed rather than left to rot.
 #
-# ⚠ VERIFY BEFORE MERGE: the three repos below were named by the board item as
-# the VM tenants, but they do NOT currently carry the `capstone-tenant` topic, so
-# the report never sees them and these entries are inert. The repos that DO carry
-# the topic and look VM-shaped are `tenantvm`, `swamiapp` and `swami-student3`.
-# Someone who knows the fleet should confirm which set is correct — an entry
-# naming a repo that does not exist is harmless, but a MISSING entry for a real
-# VM tenant shows up as false drift every day until someone fixes it.
-exempt:
-  - repo: testing
-    reason: "VM-tier tenant — no container build, so the reusable image pipeline does not apply (board #184)."
-  - repo: swami-student
-    reason: "VM-tier tenant — no container build, so the reusable image pipeline does not apply (board #184)."
-  - repo: swami-student2
-    reason: "VM-tier tenant — no container build, so the reusable image pipeline does not apply (board #184)."
+# The topic-carrying repos that look VM-shaped are `tenantvm`, `swamiapp` and
+# `swami-student3`. They are deliberately NOT exempted here: VM-ness is not
+# inferred from pipeline shape, because "this pipeline is short" is
+# indistinguishable from "this pipeline broke", and silently exempting a tenant
+# whose pipeline merely broke is the exact failure this report exists to catch.
+# If any of them is genuinely a deliberate VM-layout tenant, it earns an entry
+# below — with a reason and a review date — which is the mechanism §5.6 is for.
+exempt: []

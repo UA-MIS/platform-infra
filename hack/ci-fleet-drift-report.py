@@ -138,8 +138,22 @@ def load_exceptions(root):
     for e in entries:
         if not isinstance(e, dict) or "repo" not in e:
             raise Fatal(f"{EXCEPTIONS}: every entry needs a 'repo' key; got {e!r}")
-        reason = (e.get("reason") or "").strip()
-        out[e["repo"]] = reason
+        raw = e.get("review_by")
+        review_by = None
+        if raw is not None:
+            # Accept a real date or an ISO string; anything else is a typo that
+            # would otherwise silently become "no expiry".
+            if isinstance(raw, datetime.date):
+                review_by = raw.isoformat()
+            else:
+                try:
+                    review_by = datetime.date.fromisoformat(str(raw).strip()).isoformat()
+                except ValueError:
+                    raise Fatal(f"{EXCEPTIONS}: repo {e['repo']!r} has review_by="
+                                f"{raw!r}, which is not YYYY-MM-DD. An unparseable "
+                                f"expiry would read as 'never expires'.")
+        out[e["repo"]] = {"reason": (e.get("reason") or "").strip(),
+                          "review_by": review_by}
     return out, None
 
 
@@ -159,30 +173,56 @@ def classify(repo, current_ref):
         return {"repo": repo, "state": "NO-WORKFLOWS",
                 "detail": ".github/workflows exists but holds no workflow files"}
 
+    import base64
     for wf in names:
         blob = gh_maybe(f"repos/{ORG}/{repo}/contents/.github/workflows/{wf}")
         if blob is None:
             continue
-        import base64
         body = base64.b64decode(blob["content"]).decode("utf8", "replace")
         m = USES_RE.search(body)
         if m and m.group(1) == "tenant-build.yaml":
             ref = m.group(2)
             state = "CURRENT" if ref == current_ref else "BEHIND-TAG"
             return {"repo": repo, "state": state, "ref": ref, "workflow": wf,
+                    "perms": caller_permissions(body),
                     "detail": f"calls the reusable workflow @{ref}"}
 
     build = next((n for n in names if n.startswith("build-and-push")), None)
     if build:
+        blob = gh_maybe(f"repos/{ORG}/{repo}/contents/.github/workflows/{build}")
+        lines = (len(base64.b64decode(blob["content"]).decode("utf8", "replace")
+                     .splitlines()) if blob else None)
         commits = gh(f"repos/{ORG}/{repo}/commits?path=.github/workflows/{build}"
                      f"&per_page=1")
         frozen = (commits[0]["commit"]["committer"]["date"] if commits else None)
         return {"repo": repo, "state": "LOCAL-COPY", "workflow": build,
-                "frozen_at": frozen,
-                "detail": f"carries its own {build}; does not call the platform "
-                          f"pipeline"}
+                "frozen_at": frozen, "lines": lines,
+                "detail": f"carries its own {build} ({lines} lines); does not "
+                          f"call the platform pipeline"}
     return {"repo": repo, "state": "NO-PIPELINE",
             "detail": f"workflows present ({', '.join(names)}) but no build pipeline"}
+
+
+# The §4 silent-failure trap, asserted rather than assumed (ADR-061 §2).
+# A caller that omits these still BUILDS GREEN — and then `bump-dev` cannot write
+# the overlay, so the build deploys nothing. Same defect class as the malformed
+# promotion.yaml of 2026-08-26: a success signal covering a no-op.
+REQUIRED_CALLER_PERMS = ("contents", "id-token")
+
+
+def caller_permissions(body):
+    """Which of the required permissions does this caller's workflow grant?
+
+    Deliberately conservative: anything we cannot positively confirm is reported
+    as missing, never assumed present. A permissions block we failed to parse
+    must not read as 'granted'.
+    """
+    found = {}
+    for perm in REQUIRED_CALLER_PERMS:
+        m = re.search(rf"^\s*{perm}:\s*(write|read|none)\s*$", body, re.M)
+        found[perm] = m.group(1) if m else None
+    missing = [p for p, v in found.items() if v != "write"]
+    return {"granted": found, "missing": missing}
 
 
 # ── §6.3 tag staleness ───────────────────────────────────────────────────────
@@ -287,13 +327,28 @@ def main():
         current_ref = "v1"
         rows = [classify(r, current_ref) for r in tenants]
 
+        today = datetime.date.today().isoformat()
         for r in rows:
-            if r["repo"] in exempt:
-                if exempt[r["repo"]]:
-                    r["state"], r["exempt_reason"] = "EXEMPT", exempt[r["repo"]]
-                else:
+            e = exempt.get(r["repo"])
+            if e is not None:
+                if not e["reason"]:
                     # An opt-out nobody justified is itself a finding.
                     r["state"] = "OPT-OUT-NO-REASON"
+                elif e["review_by"] and e["review_by"] < today:
+                    # Dated and reviewable, not indistinguishable from neglect.
+                    r["state"] = "EXEMPT-EXPIRED"
+                    r["exempt_reason"] = f"{e['reason']} (review_by {e['review_by']} PASSED)"
+                else:
+                    r["state"] = "EXEMPT"
+                    r["exempt_reason"] = e["reason"] + (
+                        f" (review_by {e['review_by']})" if e["review_by"] else
+                        " (no review_by set)")
+            # The silent-failure trap: a caller missing these builds green and
+            # deploys nothing. It is drift even when the ref is CURRENT.
+            miss = (r.get("perms") or {}).get("missing")
+            if miss and r["state"] in ("CURRENT", "BEHIND-TAG"):
+                r["state"] = "CALLER-MISSING-PERMS"
+                r["detail"] += f" — but does NOT grant: {', '.join(miss)}"
         report["fleet"] = rows
         report["exceptions_warning"] = warn
 
@@ -305,13 +360,19 @@ def main():
             if warn:
                 print(f"  NOTE: {warn}\n")
             order = {"CURRENT": 0, "EXEMPT": 1, "BEHIND-TAG": 2, "LOCAL-COPY": 3,
-                     "NO-PIPELINE": 4, "NO-WORKFLOWS": 5, "OPT-OUT-NO-REASON": 6}
+                     "NO-PIPELINE": 4, "NO-WORKFLOWS": 5, "EXEMPT-EXPIRED": 6,
+                     "OPT-OUT-NO-REASON": 7, "CALLER-MISSING-PERMS": 8}
             for r in sorted(rows, key=lambda x: (order.get(x["state"], 9),
                                                  x["repo"])):
-                extra = r.get("exempt_reason") or r.get("frozen_at") or ""
                 if r.get("frozen_at"):
-                    extra = f"frozen {r['frozen_at'][:10]}"
-                print(f"  {r['state']:<18} {r['repo']:<18} {extra}")
+                    extra = f"frozen {r['frozen_at'][:10]}  {r.get('lines','?')} lines"
+                elif (r.get("perms") or {}).get("missing"):
+                    extra = f"@{r.get('ref')}  MISSING: {', '.join(r['perms']['missing'])}"
+                elif r.get("ref"):
+                    extra = f"@{r['ref']}"
+                else:
+                    extra = r.get("exempt_reason") or ""
+                print(f"  {r['state']:<21} {r['repo']:<18} {extra}")
             counts = {}
             for r in rows:
                 counts[r["state"]] = counts.get(r["state"], 0) + 1
