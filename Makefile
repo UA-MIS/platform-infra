@@ -759,11 +759,27 @@ validate: ## Static validation of tenant manifests (kubeconform + RBAC-name + st
 	  if [ -n "$$stray" ]; then echo "FAIL: non-manifest files in tenants/ (would break recurse sync):"; echo "$$stray"; exit 1; fi; \
 	  echo "  OK — no stray non-manifest files"
 	@echo "==> [4/6] argocd-rbac project guard: every project token in a 'p, role:...' policy must be an existing AppProject (SEC-006)..."
-	@projects="platform $$(grep -rhA2 '^kind: AppProject' tenants/*/appproject.yaml bootstrap/platform-appproject.yaml 2>/dev/null | grep -E '^\s+name:' | awk '{print $$2}' | sort -u | tr '\n' ' ')"; \
-	  refs=$$(grep -hE '^\s*p,\s*role:' platform-services/argocd-config/argocd-rbac-cm.yaml | sed -E 's#.*,\s*([a-z0-9-]+)/[^,]*,\s*(allow|deny)\s*$$#\1#' | grep -vE ',|allow|deny' | sort -u); \
-	  fail=0; for r in $$refs; do echo " $$projects " | grep -q " $$r " || { echo "FAIL: argocd-rbac policy references project '$$r' with no matching AppProject (inert role, SEC-006)"; fail=1; }; done; \
-	  if [ "$$fail" = "1" ]; then echo "  known AppProjects: $$projects"; exit 1; fi; \
-	  echo "  OK — all argocd-rbac policy projects ($$refs) resolve to AppProjects"
+	@# NOTE on the `|| true` guards below: this Makefile runs recipes under
+	@# `-eu -o pipefail` (see SHELL/.SHELLFLAGS at the top). A `grep` that selects
+	@# NOTHING exits 1, and with pipefail that poisons the whole pipeline, so the
+	@# `refs=$$(...)` assignment aborts the recipe with NO message at all. That is
+	@# not hypothetical: it is what this step did the moment the dead `role:sample`
+	@# block was removed — the guard could not pass, only fail silently. A guard
+	@# whose empty case is an unexplained exit 1 is a guard nobody can act on.
+	@projects="platform $$({ grep -rhA2 '^kind: AppProject' tenants/*/appproject.yaml bootstrap/platform-appproject.yaml 2>/dev/null || true; } | { grep -E '^\s+name:' || true; } | awk '{print $$2}' | sort -u | tr '\n' ' ')"; \
+	  refs=$$({ grep -hE '^\s*p,\s*role:' platform-services/argocd-config/argocd-rbac-cm.yaml || true; } | sed -E 's#.*,\s*([a-z0-9-]+)/[^,]*,\s*(allow|deny)\s*$$#\1#' | { grep -vE ',|allow|deny' || true; } | sort -u); \
+	  if [ -z "$$refs" ]; then \
+	    echo "  OK (vacuous) — argocd-rbac-cm.yaml declares no per-project 'p, role:' policy,"; \
+	    echo "                 so this guard had nothing to resolve. Per-project roles now live"; \
+	    echo "                 in each tenant's own AppProject, rendered by the Crossplane"; \
+	    echo "                 composition; the equivalent check for those is a separate lint."; \
+	    echo "                 Deliberately reported as VACUOUS, not as a clean pass: an empty"; \
+	    echo "                 check list is not evidence of correctness (SEC-006)."; \
+	  else \
+	    fail=0; for r in $$refs; do echo " $$projects " | grep -q " $$r " || { echo "FAIL: argocd-rbac policy references project '$$r' with no matching AppProject (inert role, SEC-006)"; fail=1; }; done; \
+	    if [ "$$fail" = "1" ]; then echo "  known AppProjects: $$projects"; exit 1; fi; \
+	    echo "  OK — all argocd-rbac policy projects ($$refs) resolve to AppProjects"; \
+	  fi
 	@echo "==> [5/6] claim-uniqueness guard: at most ONE CapstoneTenant claim per team+semester..."
 	@dups=$$(for f in tenants/_claims/*.yaml; do \
 	    [ -f "$$f" ] || continue; \
