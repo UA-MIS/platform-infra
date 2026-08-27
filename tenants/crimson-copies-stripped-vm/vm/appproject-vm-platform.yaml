@@ -72,11 +72,14 @@ metadata:
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
-  description: >-
-    PLATFORM-owned project for the crimson-copies-stripped VM workload whose manifests live
-    platform-side (tenants/_vm-workloads/crimson-copies-stripped). Permits platform-infra
-    ONLY, into that team's VM namespace ONLY, VM kinds ONLY, and binds NO tenant role —
-    so the platform-infra grant is never reachable from a tenant project (SEC-024).
+  # ⚠ HARD LIMIT: AppProject.spec.description may not exceed 255 CHARACTERS. That is a
+  # CRD-level constraint on the FIELD; the comment block above has no such limit, so the
+  # reasoning lives there and this stays one sentence. The first version of this file put
+  # the full rationale here (337 chars): `make validate` passed and `kubeconform -strict`
+  # passed, because structural schema validation cannot see a CRD's own field constraints
+  # — and the API server rejected it on apply. `make verify-argocd-apply` (added with this
+  # fix) is what actually catches that.
+  description: "PLATFORM-owned project for the crimson-copies-stripped VM workload (manifests under tenants/_vm-workloads/). Permits platform-infra only, into crimson-copies-stripped-vm-prod only, VM kinds only, and binds no tenant role (SEC-024)."
 
   # --- source repos: the PLATFORM repo only -------------------------------------
   # Both spellings, matching the convention every other sourceRepos list in this repo

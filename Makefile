@@ -879,6 +879,47 @@ audit-tenant-credentials: ## Find platform-shared credentials in tenant-reachabl
 verify-appproject-groups: ## Check every live AppProject role group resolves to a real GitHub team with members
 	@python3 hack/verify-appproject-groups.py
 
+# ---- server-side apply check (online companion to validate [8/8]) -----------
+# THE LESSON THIS TARGET EXISTS FOR. An AppProject merged with a 337-character
+# spec.description. `make validate` passed. `kubeconform -strict` passed. `kubectl apply
+# --dry-run=CLIENT` passed. The API server then REJECTED it:
+#     spec.description: Too long: may not be longer than 255
+# so the object was never created, and the Application that had already been repointed at
+# it named a project that did not exist. Structural schema validation is BLIND to a CRD's
+# own field constraints — and kubeconform cannot even load a schema for AppProject
+# ("could not find schema for AppProject"). Only --dry-run=SERVER sees it, because only
+# the API server runs the CRD's validation.
+#
+# DELIBERATELY NOT PART OF `validate`, for the same reason as verify-appproject-groups
+# above: `validate` is cluster-independent by design so it runs in CI and on a laptop with
+# no kubeconfig. This one needs a live API server. validate [8/8] carries the cheap offline
+# half (the known 255-char limit, read out of the live CRD); this is the authoritative
+# check that also covers constraints nobody has hardcoded yet.
+#
+# Read-only: --dry-run=server changes nothing. Override KUBE_CONTEXT for Talos.
+.PHONY: verify-argocd-apply
+verify-argocd-apply: ## Server-side dry-run every ArgoCD Application/AppProject (catches CRD field limits kubeconform cannot). Needs a cluster.
+	@echo "==> server-side dry-run of ArgoCD manifests (context: $(KUBE_CONTEXT))"
+	@# `tenants/_*` is EXCLUDED, and not arbitrarily: those are the un-rendered blueprints
+	@# (tenants/_template, tenants/_template-vm) carrying `__TEAM__` / `__APPNAME__`
+	@# placeholders, which the API server rejects as invalid RFC-1123 names. The exclusion
+	@# is the SAME rule ArgoCD itself applies — applicationsets/tenants-appset.yaml
+	@# excludes `path: tenants/_*` from the tenant sync — so this checks exactly the set
+	@# that actually reaches a cluster, and nothing that never could.
+	@files=$$(grep -rl -E '^kind: (Application|AppProject)$$' --include='*.yaml' \
+	    tenants applicationsets bootstrap 2>/dev/null | grep -v '^tenants/_' | sort); \
+	  [ -n "$$files" ] || { echo "FAIL: found no Application/AppProject manifests to check —"; \
+	    echo "      a dry-run over nothing is not a pass."; exit 1; }; \
+	  n=0; bad=0; \
+	  for f in $$files; do \
+	    n=$$((n+1)); \
+	    out=$$(kubectl --context "$(KUBE_CONTEXT)" apply --dry-run=server -f "$$f" 2>&1) || { \
+	      echo "FAIL: $$f"; echo "$$out" | sed 's/^/        /'; bad=$$((bad+1)); }; \
+	  done; \
+	  echo "  checked $$n manifest(s), $$bad rejected by the API server"; \
+	  [ "$$bad" -eq 0 ] || exit 1; \
+	  echo "  OK — every Application/AppProject is accepted by the live API server"
+
 # ---- reversible tenant on/off switch ---------------------------------------
 # Pause a tenant (stop it running + make it VANISH from k9s) and bring it back,
 # WITHOUT touching git/repo/Harbor/Vault. Purely imperative kubectl against live
