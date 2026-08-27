@@ -1,0 +1,126 @@
+# ============================================================================
+# PLATFORM-OWNED VM-workload AppProject for crimson-copies-stripped. *** GATE ***
+#
+# WHY THIS EXISTS — and why the obvious one-line fix was NOT taken.
+#
+# THE DEFECT. `crimson-copies-stripped-vm-prod` sat Unknown/Unknown in ArgoCD:
+#     InvalidSpecError — application repo https://github.com/UA-MIS/platform-infra
+#     is not permitted in project 'crimson-copies-stripped-vm'
+# The VM stayed up and `lastOp` still read "Succeeded", because the app had already
+# synced once before the restriction started biting. So the workload was fine and ArgoCD
+# simply could no longer RECONCILE it — future changes would not deploy, drift would not
+# be corrected, silently.
+#
+# THE COLLISION. Two commits, five days apart, each correct on its own:
+#   - 7d954b7 (#505, 2026-08-21) created this tenant by hand-copying tenants/_template-vm/.
+#     At that moment the template's sourceRepos DID include platform-infra, so
+#     application-vm.yaml's header comment ("the VM AppProject already whitelists
+#     platform-infra") was TRUE when written.
+#   - 1175d4b (#569, 2026-08-26) removed platform-infra from all four tenant-AppProject
+#     generators for SEC-024 — and named THIS tenant's file explicitly: "(the one
+#     materialized VM tenant; not template-generated, so it needs the edit directly or it
+#     keeps the entry)". It did not touch application-vm.yaml, which depended on the entry.
+# Neither change was wrong. The Application's comment simply went stale.
+#
+# WHY NOT JUST PUT platform-infra BACK IN THE TENANT PROJECT. That is a one-line fix and
+# it REVERSES SEC-024 for this tenant, four days after it landed. SEC-024's rationale is
+# specifically that "it is inert today" is not a reason to keep the grant: #569's own
+# message says two separately reasonable changes ("fix student sync", "leave sourceRepos
+# alone, it's inert") "would combine into a tenancy break that neither would look
+# responsible for on its own". Re-adding it here would also re-diverge this file from
+# tenants/_template-vm/, which is the drift #569 was cleaning up. Reversing an accepted
+# security decision is the owner's call, not a side effect of fixing a sync error — so it
+# is NOT done here. See the PR body for that option, spelled out, if the owner prefers it.
+#
+# WHY NOT project: platform. bootstrap/platform-appproject.yaml already permits
+# platform-infra legitimately, so moving the Application there would work. But `platform`
+# is deliberately unrestricted — destinations `namespace: '*'`, and both
+# clusterResourceWhitelist and namespaceResourceWhitelist are `'*'/'*'`. That trades a
+# tight tenancy fence for none at all, which is a strictly worse outcome than the bug.
+# It is also INSTALL-OWNED (`make bootstrap-reapply`), not GitOps-reconciled.
+#
+# WHAT THIS IS. A platform-owned project that permits exactly one repo (platform-infra),
+# targets exactly one namespace (crimson-copies-stripped-vm-prod), and whitelists exactly
+# the VM kinds — and, critically, HAS NO `roles:` BLOCK. The SEC-024 threat is a TENANT
+# reaching platform-infra through a project its developer role can touch. No tenant role
+# is bound here, and the tenant's own developer policies are scoped
+# `crimson-copies-stripped-vm/*`, so no tenant can reach this project at all. The
+# platform-infra grant and the tenant-reachable role are kept in different objects, which
+# is the property SEC-024 is actually protecting.
+#
+# It lives under tenants/<team>/ because that directory is synced by the per-team
+# bootstrap Application in applicationsets/tenants-appset.yaml, which itself runs in
+# `project: platform` with `recurse: true` — so this file is GitOps-reconciled and needs
+# no `make bootstrap-reapply`, unlike anything added to bootstrap/.
+#
+# NOT ADDED TO tenants/_template-vm/. The blueprint's normal path sources the VM chart
+# from the TEAM's app repo and needs none of this; only a tenant whose app repo is
+# deliberately kept bare (a student-start template) needs a platform-side workload dir.
+# Adding it to the blueprint would hand every future VM tenant a platform-infra-permitting
+# project it does not need.
+# ============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: crimson-copies-stripped-vm-platform
+  namespace: argocd
+  labels:
+    platform.capstone/team: crimson-copies-stripped
+    platform.capstone/semester: 2026-fall
+    platform.capstone/component: platform-workload
+    platform.capstone/tier: vm
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: >-
+    PLATFORM-owned project for the crimson-copies-stripped VM workload whose manifests live
+    platform-side (tenants/_vm-workloads/crimson-copies-stripped). Permits platform-infra
+    ONLY, into that team's VM namespace ONLY, VM kinds ONLY, and binds NO tenant role —
+    so the platform-infra grant is never reachable from a tenant project (SEC-024).
+
+  # --- source repos: the PLATFORM repo only -------------------------------------
+  # Both spellings, matching the convention every other sourceRepos list in this repo
+  # uses (bare + .git): ArgoCD compares the Application's repoURL literally, so a project
+  # listing only one form rejects the other.
+  sourceRepos:
+    - https://github.com/UA-MIS/platform-infra
+    - https://github.com/UA-MIS/platform-infra.git
+
+  # --- destinations: this team's VM namespace ONLY --------------------------------
+  # Deliberately NOT the `crimson-copies-stripped-vm-*` wildcard the tenant project uses.
+  # This project exists for exactly one Application; there is no reason for it to be able
+  # to reach a namespace that Application does not target.
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: crimson-copies-stripped-vm-prod
+
+  # --- cluster-scoped resources: NONE, same hard boundary as the tenant project ----
+  clusterResourceWhitelist: []
+
+  # --- namespaced resources: the VM kinds, mirroring the tenant VM project ---------
+  namespaceResourceWhitelist:
+    - group: kubevirt.io
+      kind: VirtualMachine
+    - group: kubevirt.io
+      kind: VirtualMachineInstance
+    - group: cdi.kubevirt.io
+      kind: DataVolume
+    - group: ''
+      kind: ConfigMap
+    - group: ''
+      kind: Service
+    - group: ''
+      kind: ServiceAccount
+    - group: networking.k8s.io
+      kind: Ingress
+    # cloud-init userdata Secret — KubeVirt's cloudInitNoCloud.secretRef needs a RAW
+    # Secret (key `userdata`) and cannot take a ConfigMap. Same grant, and the same
+    # tradeoff, as the tenant VM project documents at length.
+    - group: ''
+      kind: Secret
+
+  # --- roles: NONE, and that is the whole point -----------------------------------
+  # The tenant VM project binds a `developer` role to a GitHub group. This project binds
+  # nothing, so there is no path by which a team member reaches a platform-infra-permitting
+  # project. If anyone ever adds a role here, they re-create the exact SEC-024 hole this
+  # object exists to avoid — do not.

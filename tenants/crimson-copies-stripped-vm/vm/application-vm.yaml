@@ -14,10 +14,26 @@
 #
 # So the VM's manifests live PLATFORM-side instead, under
 # tenants/_vm-workloads/crimson-copies-stripped/, and a plain Application syncs
-# them. This stays inside the existing fence rather than widening it: the VM
-# AppProject already whitelists https://github.com/UA-MIS/platform-infra as a
-# sourceRepo (identical to the container project), and the destination is still
-# only crimson-copies-stripped-vm-prod. Nothing about the tenancy boundary moves.
+# them. The destination is still only crimson-copies-stripped-vm-prod; nothing about
+# the tenancy boundary moves.
+#
+# ⚠ THE PARAGRAPH THAT USED TO BE HERE WAS TRUE WHEN WRITTEN AND IS NOT ANY MORE.
+# It said "the VM AppProject already whitelists platform-infra as a sourceRepo". That
+# held on 2026-08-21 (7d954b7, #505), when this tenant was rendered from a
+# tenants/_template-vm/ that still carried the entry. On 2026-08-26, 1175d4b (#569)
+# removed platform-infra from every tenant AppProject for SEC-024 — naming THIS
+# tenant's file explicitly — and this Application, which depended on that entry, was
+# not updated with it. The result was silent: ArgoCD refused to reconcile with
+#     InvalidSpecError — application repo .../platform-infra is not permitted
+#     in project 'crimson-copies-stripped-vm'
+# while the already-synced VM kept running and lastOp still read "Succeeded". A
+# comment asserting a fact about ANOTHER file is a claim that goes stale without
+# telling anyone; `make validate` guard [8/8] now checks the relation for real.
+#
+# The project below is therefore NOT the tenant VM project. It is a PLATFORM-owned
+# project that permits platform-infra and binds no tenant role — see
+# appproject-vm-platform.yaml for why that, rather than re-adding platform-infra to
+# the tenant fence and reversing SEC-024.
 #
 # Single environment, matching the blueprint's model: one lifted VM, one live home,
 # no dev/staging/prod fan-out.
@@ -34,7 +50,7 @@ metadata:
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
-  project: crimson-copies-stripped-vm
+  project: crimson-copies-stripped-vm-platform
   source:
     repoURL: https://github.com/UA-MIS/platform-infra
     targetRevision: HEAD
