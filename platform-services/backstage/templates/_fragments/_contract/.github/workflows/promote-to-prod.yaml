@@ -127,7 +127,7 @@ jobs:
           # ephemeral). We parse promote.sh/bump-image.sh's own stdout rather than
           # re-reading the overlays here, so promotion.yaml stays the single source of
           # truth for the env -> overlay mapping (#210: no second copy of that map).
-          COMMIT=1 sh .devops/ci/promote.sh "${FROM}" "prod" 2>&1 | tee /tmp/promote.log
+          COMMIT=1 bash .devops/ci/promote.sh "${FROM}" "prod" 2>&1 | tee /tmp/promote.log
 
           # Matches promote.sh's `==> <env> is live at <TAG> — promoting to <env>` line. The
           # capture stops at the first space (an image tag can never contain one), so this

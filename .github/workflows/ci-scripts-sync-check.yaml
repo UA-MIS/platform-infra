@@ -29,16 +29,34 @@
 name: ci-scripts-sync-check
 
 on:
+  # The WORKFLOW paths were added for the interpreter check below (#189): that check
+  # reads the workflows, so it has to run when a workflow moves. Without them someone
+  # could reintroduce `sh <a-bash-script>` in promote-to-prod.yaml — the exact defect
+  # #189 was filed for — and nothing would look.
+  #
+  # A `paths:` filter that never matches is indistinguishable from a check that passes,
+  # so this was verified by REPLAY rather than by reading it. Over all 120 commits on
+  # main since this check was created (6e5b8db..HEAD), the OLD filter would have fired
+  # on 2 commits and this one fires on 4 — the two it adds are 79c3f9d
+  # ("fix(promote-to-prod): lock promotion target to prod", #53x) and 2e6e319
+  # ("fix(scaffolder): catalog:register colon bug + dockerhub-proxy"), both of which
+  # edited a contract workflow with no sync-check run at all.
   push:
     branches: [main]
+    # NB: listed twice on purpose. GitHub's workflow parser does not resolve YAML
+    # anchors/aliases, so `&x` / `*x` here would be a silent no-op, not DRY.
     paths:
       - ".github/actions/tenant-ci-scripts/scripts/**"
       - "platform-services/backstage/templates/_fragments/_contract/.devops/ci/**"
+      - "platform-services/backstage/templates/_fragments/_contract/.github/workflows/**"
+      - ".github/workflows/tenant-build.yaml"
       - ".github/workflows/ci-scripts-sync-check.yaml"
   pull_request:
     paths:
       - ".github/actions/tenant-ci-scripts/scripts/**"
       - "platform-services/backstage/templates/_fragments/_contract/.devops/ci/**"
+      - "platform-services/backstage/templates/_fragments/_contract/.github/workflows/**"
+      - ".github/workflows/tenant-build.yaml"
       - ".github/workflows/ci-scripts-sync-check.yaml"
 
 permissions:
@@ -90,7 +108,75 @@ jobs:
           [ "${fail}" -eq 0 ] || exit 1
           echo "canonical and scaffold CI scripts are in sync."
 
+      - name: Interpreter check — no bash script may be invoked with `sh`
+        # #187/#189. bump-image.sh, promote.sh and build-and-push.sh declare
+        # `#!/usr/bin/env bash` and `set -euo pipefail`. `pipefail` is NOT POSIX: run any
+        # of them as `sh script.sh` and dash exits 2 on the `set` line before doing
+        # anything ("set: Illegal option -o pipefail"). promote-to-prod.yaml did exactly
+        # that. It did not break prod ONLY because that job runs in node:24-trixie, whose
+        # dash happens to implement pipefail — click-to-promote worked by accident of one
+        # base image's shell, and was broken for anyone following .devops/ci/RUNBOOK.md
+        # on Ubuntu or macOS. resolve-image.sh / resolve-components.sh /
+        # seed-initial-envs.sh are REAL `#!/usr/bin/env sh` + `set -eu` scripts, so
+        # invoking those with `sh` is correct and this check leaves them alone — it reads
+        # each script's actual shebang rather than hardcoding a list.
+        run: |
+          set -euo pipefail
+          SCAFFOLD="platform-services/backstage/templates/_fragments/_contract"
+          bash_scripts=""
+          for f in "${SCAFFOLD}"/.devops/ci/*.sh; do
+            case "$(head -n1 "${f}")" in
+              *bash) bash_scripts="${bash_scripts} $(basename "${f}")" ;;
+            esac
+          done
+          echo "bash-shebang scripts:${bash_scripts}"
+          # `|| true` on grep is DELIBERATE and load-bearing under pipefail: grep exits 1
+          # when it matches NOTHING, which is the SUCCESS case here. Without it the clean
+          # tree — the normal state — would kill this step with no message at all.
+          violations=""
+          for s in ${bash_scripts}; do
+            hits="$(grep -rn "\bsh \.devops/ci/${s}\b" \
+                      "${SCAFFOLD}/.github/workflows" \
+                      "${SCAFFOLD}/.devops/ci/RUNBOOK.md" \
+                      .github/workflows/tenant-build.yaml 2>/dev/null || true)"
+            [ -n "${hits}" ] && violations="${violations}${hits}"$'\n'
+          done
+          if [ -n "${violations}" ]; then
+            printf '%s' "${violations}"
+            echo "::error::A bash script (set -euo pipefail) is invoked with 'sh' above. dash has no 'pipefail' and exits 2 immediately. Use 'bash <script>' — do NOT remove pipefail, it is load-bearing."
+            exit 1
+          fi
+          echo "OK: 0 violations — every bash-shebang script is invoked with bash."
+
+      - name: Install yq (pinned + checksum-verified)
+        # The three scripts under test each have TWO implementations of every read/write:
+        # a yq path and a sed/awk fallback. This job's image has no yq, so until this step
+        # only the FALLBACK was ever executed and the yq path was untested. Demonstrated
+        # by mutation: changing bump-image.sh's yq write from `.images[].newTag` to
+        # `.images[0].newTag` — which silently breaks the bump for every multi-component
+        # tenant — leaves the suites 42/42 GREEN without yq, and turns them RED (12 passed,
+        # 4 failed) with it. The yq path is the one tenant-build.yaml's bump jobs actually
+        # take, since they install yq exactly like this.
+        #
+        # Same version + digest as tenant-build.yaml's install steps. Over :443 from GitHub
+        # releases, so it is fine on the runner's :443-only egress — unlike apt, which is
+        # what made this job unrunnable before #565 (deb.debian.org is :80 and AAAA-only).
+        env:
+          YQ_VERSION: v4.44.3
+          YQ_SHA256: a2c097180dd884a8d50c956ee16a9cec070f30a7947cf4ebf87d5f36213e9ed7
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /usr/local/bin/yq \
+            "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+          echo "${YQ_SHA256}  /usr/local/bin/yq" | sha256sum -c -
+          chmod +x /usr/local/bin/yq
+          yq --version
+
       - name: Run promote.sh / bump-image.sh / seed-initial-envs.sh unit tests
+        # Run the whole set TWICE — once with yq on PATH, once with it hidden — because
+        # the scripts branch on `command -v yq` and the two branches are independent
+        # implementations. Running only one of them is half a test suite reporting as a
+        # whole one. See the yq install step above for the mutation that proves it.
         run: |
           set -eu
           cd platform-services/backstage/templates/_fragments/_contract/.devops/ci
@@ -103,7 +189,15 @@ jobs:
             echo "::error::git is missing from this job's container image. It cannot be apt-get installed here: arc-runners pods have no IPv6 route and no :80 egress, so deb.debian.org is unreachable by design. Use an image that ships git (the full node:*-trixie does) rather than adding an install step."
             exit 1
           fi
+          command -v yq >/dev/null 2>&1 || {
+            echo "::error::yq is not on PATH — the install step above must run before this one. Without it only the sed/awk fallback branch of each script is exercised and the yq branch silently goes untested."
+            exit 1
+          }
+          # A directory that shadows yq with nothing, to force the fallback branch.
+          NOYQ="$(mktemp -d)"
           for t in promote.test.sh bump-image.test.sh seed-initial-envs.test.sh; do
-            echo "==> running ${t}"
+            echo "==> running ${t} [yq path]"
             bash "${t}"
+            echo "==> running ${t} [sed/awk fallback path — yq hidden]"
+            env PATH="${NOYQ}:/usr/bin:/bin" bash "${t}"
           done
