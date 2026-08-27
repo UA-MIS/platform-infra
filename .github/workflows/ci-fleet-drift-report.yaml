@@ -1,0 +1,109 @@
+# Fleet CI drift report + reusable-tag staleness (D-202 §6.2/§6.3, board #184).
+#
+# ── WHY THIS CAN SEE WHAT ci-scripts-sync-check CANNOT ───────────────────────
+# `ci-scripts-sync-check` compares platform-infra against ITSELF, because
+# `actions/checkout` cannot reach another repository. That is not a bug in it —
+# it is the boundary of the tool. An org-wide GitHub App INSTALLATION TOKEN,
+# however, reads any tenant's files over the API. This workflow exists to use
+# that one capability, and nothing else.
+#
+# ── CREDENTIAL: READ-ONLY, AND DELIBERATELY NOT THE POWERFUL APP ─────────────
+# The report needs exactly `contents: read` across the org. It performs NO
+# writes: it opens no PRs, pushes no branches, and touches no tenant repository.
+#
+# ⚠ DO NOT reuse `secrets.APP_ID` here. That pair is the dedicated least-privilege
+# CI App scoped `contents: write` on platform-infra ONLY (see
+# backstage-process-build-push.yaml) — it cannot read tenant repos at all, and
+# would fail with a confusing 404-shaped error rather than a permissions one.
+#
+# ⚠ AND: do not paste `ua-mis-backstage` (App 4097147) in here either, even
+# though it is org-wide and would work. That App carries `administration: write`,
+# `contents: write`, `workflows: write` and a branch-protection bypass on
+# platform-infra main — it is the credential SEC-037 (#134) was about. Putting
+# its private key in Actions secrets to power a READ-ONLY report widens that
+# blast radius into CI for no benefit. Mint a separate App with `contents: read`
+# + `metadata: read`, installed org-wide, and store it as the two secrets below.
+#
+# `permission-contents: read` narrows the minted installation token regardless of
+# what the App itself could do — so even a mis-provisioned App yields a read-only
+# token here. Belt and suspenders.
+#
+# ── ALERTING (§6.3) ──────────────────────────────────────────────────────────
+# There is no Prometheus pushgateway in this cluster, and this workflow makes no
+# cluster writes, so the alert is the SCHEDULED RUN FAILING plus a job summary
+# carrying the numbers. That is a real alert (GitHub notifies on scheduled-run
+# failure) and it needs no new infrastructure. If the numbers are later wanted as
+# a Prometheus series, the `--json` output is the seam to scrape.
+name: ci-fleet-drift-report
+
+on:
+  schedule:
+    # Daily, early. Drift is a slow-moving property; hourly would only add noise.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+  pull_request:
+    # Validate the report's own code when it changes — but see the `continue-on-error`
+    # note below: on a PR this must not fail the PR for pre-existing fleet drift.
+    paths:
+      - ".github/workflows/ci-fleet-drift-report.yaml"
+      - "hack/ci-fleet-drift-report.py"
+      - "tenants/ci-exceptions.yaml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-fleet-drift-report
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Mint a READ-ONLY org-wide installation token
+        id: apptoken
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ secrets.FLEET_READ_APP_ID }}
+          private-key: ${{ secrets.FLEET_READ_APP_PRIVATE_KEY }}
+          owner: UA-MIS
+          # Narrow the token itself, not just our intentions.
+          permission-contents: read
+          permission-metadata: read
+
+      - name: Fleet drift report
+        id: run
+        env:
+          GH_TOKEN: ${{ steps.apptoken.outputs.token }}
+        run: |
+          set -uo pipefail
+          python3 hack/ci-fleet-drift-report.py | tee /tmp/report.txt
+          echo "rc=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the report to the job summary
+        if: always()
+        run: |
+          {
+            echo '## Fleet CI drift (D-202 §6.2/§6.3)'
+            echo '```'
+            cat /tmp/report.txt 2>/dev/null || echo '(no report produced)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail on drift, and fail LOUDER when the report could not run
+        # rc 0 = ran, clean · 1 = ran, drift · 2 = could not be trusted.
+        # 2 is deliberately distinguished: "could not run" must never be quietly
+        # equivalent to "clean", which is the exact defect this report is about.
+        if: always() && github.event_name != 'pull_request'
+        run: |
+          rc="${{ steps.run.outputs.rc }}"
+          case "$rc" in
+            0) echo "clean" ;;
+            1) echo "::error::Fleet CI drift detected — see the job summary."; exit 1 ;;
+            2) echo "::error::The drift report COULD NOT RUN and its result is not \
+          trustworthy (enumeration, token, or exceptions file). This is NOT a clean \
+          fleet — treat it as an outage of the check itself."; exit 1 ;;
+            *) echo "::error::Unexpected exit code '$rc' from the report."; exit 1 ;;
+          esac
