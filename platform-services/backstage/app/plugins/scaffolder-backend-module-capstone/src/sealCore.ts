@@ -201,14 +201,60 @@ function parseEsDataKeys(yaml: string): string[] {
 }
 
 /**
- * Read the Vault `remoteRef.key` already used by the shipped ExternalSecret (the per-env Vault
- * object all the env's keys share). We REUSE the rendered value verbatim rather than
- * reconstructing it, so the Secrets tab always writes to exactly the path the scaffolder
- * declared. Falls back to the conventional tenants/<team>/<env>/app if the file has none yet.
+ * Read the Vault `remoteRef.key` declared by the shipped ExternalSecret and CHECK IT AGAINST the
+ * path derived from the caller's own verified team (SEC-057, #183).
+ *
+ * ── THE BUG THIS CLOSES ──────────────────────────────────────────────────────────────────────
+ * This file lives in the TENANT'S OWN REPOSITORY. Returning `m[1]` verbatim made the Vault write
+ * destination attacker-controlled: a student edits one line of
+ * `.devops/chart/overlays/<env>/app-secret.externalsecret.yaml` to
+ * `key: tenants/<victim>/prod/app`, uses the Secrets tab normally, and OVERWRITES (or, via
+ * deleteSecret, DELETES) another team's live credentials. The Vault policy backing this path is
+ * `secret/data/tenants/*` with create/update/patch — correct-looking, and it matches
+ * `tenants/victim/...` exactly as well as it matches the caller's own subtree.
+ * The IDENTITY was already verified (authorizeAndResolveTarget: permission check + owner
+ * intersection, teamSlug derived from the CATALOG entity's owner). The DESTINATION was not.
+ *
+ * ── WHY EQUALITY AND NOT A `tenants/<team>/` PREFIX CHECK ────────────────────────────────────
+ * A prefix check stops cross-tenant writes but still lets a tampered file aim this at the team's
+ * OWN platform-managed siblings — `tenants/<team>/<env>/database`, `/harbor-pull`,
+ * `/ci/harbor-push` (43 such objects live today). Those are written by Crossplane/the platform,
+ * not by the student, and clobbering one breaks their app in a way the Secrets tab should not be
+ * able to cause. Equality also removes the traversal surface entirely: we compare against a
+ * string WE constructed, so `..`, `%2e%2e`, `//` and friends have nothing to slip through.
+ *
+ * ── WHY NOT JUST IGNORE THE FILE (the tempting, MORE DANGEROUS fix) ──────────────────────────
+ * Dropping the lookup and always writing vaultPathFor() looks simpler and is worse. The lookup
+ * exists to keep the WRITE path identical to the READ path. Ignore the file and a divergent
+ * declaration means we write to a path ESO never reads — and because the shipped ES sets
+ * `deletionPolicy: Delete` and the base Deployment marks APP_SECRET `optional: true`, a missing
+ * value is NOT an error: the ExternalSecret stays healthy, no Secret is created, the pod starts
+ * and reports Ready without the credential. The student sees "saved" and a PR. That converts a
+ * loud security bug needing deliberate malice into a SILENT correctness bug on the credential
+ * path, firing on ordinary use. Verifying the two agree — and refusing loudly when they do not —
+ * keeps the coupling the original code was protecting.
+ *
+ * Falls back to the conventional path when the file declares none yet (unchanged).
  */
-function esVaultKey(yaml: string, teamSlug: string, env: string): string {
+function esVaultKey(
+  yaml: string,
+  teamSlug: string,
+  env: string,
+  esPath: string,
+): string {
+  const expected = vaultPathFor(teamSlug, env);
   const m = yaml.match(/^\s*key:\s*["']?([^"'\s]+)["']?\s*$/m);
-  return m ? m[1] : vaultPathFor(teamSlug, env);
+  if (m && m[1] !== expected) {
+    throw new NotAllowedError(
+      `Nothing was written and no secret was changed. ` +
+        `This app's ${env} secrets live in Vault at "${expected}", but ` +
+        `${esPath} declares "remoteRef.key: ${m[1]}". The Secrets tab only writes an app's ` +
+        `own Vault object, so it stopped rather than write somewhere else. ` +
+        `Fix that one line back to "key: ${expected}" and try again — ` +
+        `if you did not change it, revert that file to the version the template generated.`,
+    );
+  }
+  return expected;
 }
 
 /** The indent (in spaces) of the first `- secretKey:` entry, so inserts match the file's style. */
@@ -715,7 +761,7 @@ export async function sealAndPublish(
           `Only apps scaffolded with the capstone template (M4) support the Secrets tab.`,
       );
     }
-    vaultKeyByEnv[env] = esVaultKey(existing, teamSlug, env);
+    vaultKeyByEnv[env] = esVaultKey(existing, teamSlug, env, esPath);
     baseContentByEnv[env] = existing;
   }
 
@@ -1048,6 +1094,10 @@ export async function deleteSecret(
     const esPath = overlayEsPath(cfg, env);
     const existing = await getFileContent(octokit, owner, repo, baseBranch, esPath);
     if (existing && parseEsDataKeys(existing).includes(key)) {
+      // Validate the declared destination HERE, in the read-only pass, so a tampered file in
+      // ONE env cannot let an earlier env's Vault delete land before the refusal (SEC-057).
+      // sealAndPublish already fails closed this way; delete now matches it.
+      esVaultKey(existing, teamSlug, env, esPath);
       envEntries.push({ env, esPath, existing });
     }
   }
@@ -1076,7 +1126,7 @@ export async function deleteSecret(
   //    — never overwrites a concurrent writer's change with a payload computed from a stale read.
   let anyWrite = false;
   for (const { env, esPath, existing } of envEntries) {
-    const vaultKey = esVaultKey(existing, teamSlug, env);
+    const vaultKey = esVaultKey(existing, teamSlug, env, esPath);
     await vault.deleteKey(vaultKey, key);
 
     const wrote = await casUpdateFile(
