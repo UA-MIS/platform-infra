@@ -78,6 +78,19 @@ spec:
         kubevirt.io/domain: ${{ values.appName }}
         app.kubernetes.io/name: ${{ values.appName }}
     spec:
+      # DNS — NOT optional, and NOT the cluster default. A VM's traffic leaves the
+      # guest through the masquerade interface and never passes through a host
+      # socket, so Cilium's socket load-balancer never runs and the kube-dns
+      # ClusterIP (10.96.0.10) is never translated. The guest resolves NOTHING
+      # while every pod in the same namespace resolves fine, and no NetworkPolicy
+      # can fix it — a policy can allow an address, it cannot translate one.
+      # Public resolvers + dnsPolicy:None is the shape the live reference VM runs.
+      # See tenants/_template-vm/vm/namespaces/vm-prod.yaml, NetworkPolicy 4/5.
+      dnsPolicy: None
+      dnsConfig:
+        nameservers:
+          - 1.1.1.1
+          - 1.0.0.1
       domain:
         cpu:
           # vCPUs RESERVED for the VM's whole lifetime (no overcommit). Mirror in
@@ -88,6 +101,12 @@ spec:
             # Guest RAM, reserved for the VM's whole lifetime (ADR-032 §5).
             memory: ${{ values.memoryGi }}Gi
         devices:
+          # virtio-rng. The cluster runs KubeVirt with useEmulation:true (QEMU TCG,
+          # no hardware virt), where guest entropy accrues slowly. sshd generates its
+          # host keys on first boot; starved of entropy that can stall for minutes,
+          # which presents as "SSH is broken" rather than "SSH is not up yet". The
+          # live reference VM carries this device.
+          rng: {}
           disks:
             - name: rootdisk
               disk:

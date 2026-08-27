@@ -16,13 +16,27 @@
 # (key `userdata`), which the VirtualMachine references via cloudInitNoCloud.secretRef.
 # ============================================================================
 
-# ── TEAM ACCESS — key-based SSH (ADR-032a) ──────────────────────────────────
-# A VM tenant is a PET dev-VM: you SSH in from any laptop with a STANDARD ssh
-# client, clone your app repo, and run your stack here. cloud-init installs your
-# team's SSH PUBLIC key (the scaffolder `sshPubKey` input) into the default cloud
-# user's ~/.ssh/authorized_keys, and password login is turned OFF (key-only — no
-# `changeme` password to leak). The default user is distro-specific: `fedora` on the
-# default Fedora cloud image, `ubuntu`/`debian` on those images.
+# ── TEAM ACCESS — two paths, one guest (ADR-032a + ADR-039) ──────────────────
+# A VM tenant is a PET dev-VM. There are TWO ways in, and this cloud-init wires BOTH.
+#
+#   1. SSH-over-Cloudflare-Access (the PRIMARY path, browser + CLI) — ADR-039.
+#      The guest sshd trusts Cloudflare's per-Access-app SSH CA (written to
+#      /etc/ssh/cf_access_ca.pub below). After a user passes the Access login for
+#      <team>-ssh.<domain>, Cloudflare mints a SHORT-LIVED SSH certificate signed by
+#      that CA; sshd accepts it, so the user needs NO password and NO personal key
+#      in the guest. Without this block the guest is key-only and BOTH Cloudflare
+#      paths fail — Cloudflare presents a cert, not a key.
+#      The CA is created + logged by the cf-vm-access reconciler once this VM's ssh
+#      Service exists (ADR-038); the operator pastes it in during onboarding.
+#      Until it is pasted, cert auth is simply inactive and path 2 still works —
+#      VERIFIED: sshd starts cleanly with a CA file that contains only comments,
+#      and with no CA file at all.
+#
+#   2. Key-based SSH (the FALLBACK / break-glass) — ADR-032a. cloud-init installs
+#      your team's SSH PUBLIC key (the scaffolder `sshPubKey` input) into the default
+#      cloud user's ~/.ssh/authorized_keys. Password login stays OFF (key-only — no
+#      `changeme` password to leak). The default user is distro-specific: `fedora` on
+#      the default Fedora cloud image, `ubuntu`/`debian` on those images.
 #
 #   ssh <cloud-user>@<your public SSH endpoint>        # see the repo README
 #
@@ -45,6 +59,54 @@ ssh_authorized_keys:
 # Fedora/Ubuntu cloud images — distro-agnostic, no package install needed). Swap this
 # for your real app's install + service.
 write_files:
+  # ── Cloudflare Access SSH CA trust (ADR-039) ────────────────────────────────
+  # The per-Access-app SSH CA public key. sshd trusts certs signed by this CA, so
+  # Cloudflare Access can mint short-lived SSH certs for authorized users with NO
+  # user key in the guest.
+  #
+  # This is a TrustedUserCAKeys file (authorized_keys format): `#` comments and blank
+  # lines are ignored. With no CA line present (the default), cert auth is inactive
+  # and the VM is reachable only via the authorized_keys fallback above — sshd still
+  # starts cleanly (verified against a real OpenSSH 9.6 sshd, both for a
+  # comments-only file and for a missing file).
+  #
+  # OPERATOR: paste this VM's Access-app CA public key on the line below the comments
+  # (the value the cf-vm-access reconciler logs). It is a PUBLIC key — safe to commit.
+  - path: /etc/ssh/cf_access_ca.pub
+    permissions: '0644'
+    content: |
+      # Cloudflare Access SSH CA for ${{ values.appName }}.
+      # Paste the CA public key below (one line, ends `open-ssh-ca@cloudflareaccess.org`).
+      # Blank = cert auth off, key-only.
+      ${{ values.cfAccessCaPub }}
+  # sshd drop-in: trust the CA above, and accept whatever principal Cloudflare puts
+  # on the cert. This matters and is NOT optional — a Cloudflare Access cert carries
+  # the user's EMAIL PREFIX as its principal (e.g. `ccsmith33`), which does NOT equal
+  # the guest's cloud user (`ubuntu`/`fedora`). With plain TrustedUserCAKeys and no
+  # principals mapping, sshd rejects the cert with
+  #     Certificate invalid: name is not a listed principal
+  # — verified by execution against a real sshd. The command below echoes the cert's
+  # own principals back to sshd, which accepts them.
+  #
+  # SECURITY NOTE, stated plainly: this delegates ALL user-level authorization to
+  # Cloudflare Access. Any cert signed by this CA authenticates as the login user.
+  # That is the intended design — Access (the team's email allowlist on
+  # <team>-ssh.<domain>) is the gate — and it is contained because the CA is PER-APP,
+  # so a cert minted for another VM's app does not authenticate here. It does mean an
+  # over-broad Access policy is an over-broad shell. Review the policy, not the sshd.
+  #
+  # /bin/sh (not bash) is deliberate: verified working under dash, so this does not
+  # depend on bash being present in the base image.
+  - path: /etc/ssh/sshd_config.d/10-cf-access-ca.conf
+    permissions: '0644'
+    content: |
+      # Managed by cloud-init (ADR-039). Cloudflare Access short-lived SSH certs.
+      PubkeyAuthentication yes
+      PasswordAuthentication no
+      PermitRootLogin no
+      TrustedUserCAKeys /etc/ssh/cf_access_ca.pub
+      AuthorizedPrincipalsCommand /bin/sh -c "echo '%t %k' | ssh-keygen -L -f - | grep -A1 Principals"
+      AuthorizedPrincipalsCommandUser nobody
   - path: /var/www/app/index.html
     permissions: '0644'
     content: |
@@ -78,6 +140,16 @@ write_files:
       WantedBy=multi-user.target
 
 runcmd:
+  # EXPLICITLY enable sshd. Cloud images normally ship it enabled, but "normally" is
+  # not a guarantee, and a VM with no listening sshd is indistinguishable from a
+  # broken tunnel route from the student's laptop — the exact ADR-032 gap. Enabling
+  # it here makes it a property of the guest BUILD rather than of the base image.
+  # The unit is `ssh` on Debian/Ubuntu and `sshd` on Fedora/RHEL, so try both and
+  # never fail the boot on this step.
+  - [ sh, -c, "systemctl enable --now ssh 2>/dev/null || systemctl enable --now sshd 2>/dev/null || true" ]
+  # Load the Cloudflare Access CA drop-in written above (ADR-039). try-restart only
+  # bounces sshd if it is already running.
+  - [ sh, -c, "systemctl try-restart ssh 2>/dev/null || systemctl try-restart sshd 2>/dev/null || true" ]
   # Bring up the starter service (your "app"). Replace with your own install/start steps.
   - [ systemctl, daemon-reload ]
   - [ systemctl, enable, --now, capstone-app.service ]
