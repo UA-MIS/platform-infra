@@ -443,7 +443,7 @@ jobs:
             echo "==> pytest"; set +e; pytest -q; rc=$?; set -e;
             if [ "$rc" = "5" ]; then
             if [ "$proj_install" = "FAILED" ]; then
-            echo "::warning::pytest collected no tests AND 'pip install .' failed above. Those two together mean nothing here was verified: there is no test result, and the package did not install. Not failing the gate (a tool-config-only pyproject is legitimately not installable) — but do NOT read this green tick as a working environment.";
+            echo "::warning::pytest collected no tests AND pip install . failed above. Those two together mean nothing here was verified: there is no test result, and the package did not install. Not failing the gate (a tool-config-only pyproject is legitimately not installable) — but do NOT read this green tick as a working environment.";
             else
             echo "::notice::pytest collected no tests — nothing to run. Every BLOCKING dependency install above succeeded (errexit would have stopped this step otherwise), so this is a repo with no tests, not a broken environment.";
             fi; rc=0; fi;
