@@ -207,10 +207,14 @@ spec:
           #     Prometheus (kube-prometheus-stack, ~469m CPU / 2.6GB RAM,
           #     fsync-heavy TSDB on the same Ceph RBD path) at once — raft
           #     snapshots stalled 2s -> 23min and ESO logins timed out. The 3 Vault
-          #     server pods already get one-per-node via the hard rule above (which,
-          #     with only 3 Mac-Mini-class workers on 4c/8GB currently eligible,
-          #     structurally means each Mac Mini hosts exactly one Vault pod at all
-          #     times — see kube-prometheus-stack-app.yaml and
+          #     server pods already get one-per-node via the hard rule above.
+          #     (SUPERSEDED detail: this note previously said the eligible nodes were
+          #     3 Mac-Mini-class workers, so "each Mac Mini hosts exactly one Vault
+          #     pod". That is no longer true and was itself part of the board #199
+          #     regression — pod anti-affinity only guarantees DIFFERENT hosts, never
+          #     WHICH hosts, so Vault drifted onto the Tailscale-addressed workers.
+          #     The nodeAffinity below now pins the eligible set to the 3 control-
+          #     plane nodes; see kube-prometheus-stack-app.yaml and
           #     platform-services/cnpg/cluster/cluster.yaml for the matching
           #     Prometheus-side and CNPG-side rules). This SOFT (preferred) term
           #     adds the other half: steer Vault itself away from any node already
@@ -222,7 +226,53 @@ spec:
           #     the full rationale
           #     and the safe apply order (Prometheus moves first; Vault is NOT
           #     force-failed-over by this change).
+          # --- NODE AFFINITY (board #199 — raft instability root cause). HARD
+          #     requirement: all 3 Vault server pods run on the 3 control-plane
+          #     OptiPlex nodes (capstone-n1/n2/n3).
+          #
+          #     WHY THIS EXISTS. Cilium runs in TUNNEL mode (routing-mode: tunnel,
+          #     tunnel-protocol: vxlan), so every pod-to-pod packet is VXLAN-
+          #     encapsulated to the DESTINATION NODE'S InternalIP. The two Debian
+          #     workers advertise a TAILSCALE InternalIP (capstone-w1
+          #     100.114.190.45, capstone-w2 100.81.94.114) while the control-plane
+          #     nodes advertise LAN addresses (10.237.171.0/24). So the moment a
+          #     Vault pod lands on w1/w2, its raft peer traffic is forced through
+          #     the tailscale0 WireGuard tunnel (MTU 1280) instead of the physical
+          #     LAN (MTU 1500) — even though w1/w2 sit on that same LAN (w1 is
+          #     10.237.171.22 on eno2).
+          #
+          #     That tunnel drops packets in bursts: tailscale0 shows tens of
+          #     millions of tx_dropped on every node (w1 45.9M, w2 51.0M, n1 88.4M)
+          #     while the LAN NICs show ~0, and the qdisc reports `dropped 0`
+          #     (so the loss is at the TUN device, NOT qdisc congestion).
+          #     Measured correlation: 15 of 15 raft "failed to contact" episodes
+          #     coincided with a tailscale0 drop burst — median 1613 drops/s at
+          #     the events vs 2.2 drops/s away from them (7% control base rate).
+          #     Result was ~6 leader elections/day and forwarded-RPC cancellations
+          #     that surfaced to tenants as ESO/Crossplane `context deadline
+          #     exceeded`, CI push 401s and ImagePullBackOff.
+          #
+          #     Pinning to the control plane puts the whole raft mesh back on the
+          #     LAN: n1<->n2<->n3 are all `dev enp0s31f6`/`dev eno2` (verified with
+          #     `ip route get`), zero Tailscale hops, MTU 1500.
+          #
+          #     SAFE TO REQUIRE: the control-plane taint is PreferNoSchedule (NOT
+          #     NoSchedule), so no toleration is needed — vault-0 already runs on
+          #     capstone-n1 today with no special toleration. Headroom checked:
+          #     n2 30% CPU / 36% mem, n3 29% / 39%.
+          #
+          #     NOTE: this does NOT fix the underlying Tailscale/overlay loss, which
+          #     still degrades every other cross-node workload on w1/w2. It removes
+          #     Vault's raft quorum from that failure domain. The overlay itself is
+          #     tracked separately — do NOT close that investigation on the basis of
+          #     Vault going quiet.
           affinity: |
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: node-role.kubernetes.io/control-plane
+                        operator: Exists
             podAntiAffinity:
               requiredDuringSchedulingIgnoredDuringExecution:
                 - labelSelector:
