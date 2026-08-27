@@ -245,6 +245,7 @@ jobs:
           # matches what the preview ApplicationSet pulls. Empty for push/tag builds
           # (resolver falls back to GITHUB_SHA).
           SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
         run: |
           # `set -o pipefail` IS LOAD-BEARING, DO NOT DROP IT. A bare `run:` block is
           # executed by the runner as `bash --noprofile --norc -e {0}` — errexit but
@@ -255,6 +256,13 @@ jobs:
           # them produced a GREEN step with empty outputs, and the build then proceeded
           # with an empty ENV/TAG/REGISTRY. This step decides which environment is being
           # built and what tag the image gets — it must be able to fail. (#189)
+          #
+          # `shell: bash` above is the other half and is NOT redundant. Left to itself the
+          # runner picks `sh -e {0}` for a container job (observed in run 33027282352), and
+          # `set -o pipefail` then works only because Debian trixie's dash happens to
+          # implement it — the SAME "works by accident of one base image's shell" trap this
+          # change exists to remove. `shell: bash` pins the interpreter to
+          # `bash --noprofile --norc -eo pipefail {0}` whatever /bin/sh turns out to be.
           set -euo pipefail
           sh .devops/ci/resolve-image.sh | tee -a "$GITHUB_OUTPUT"
 
