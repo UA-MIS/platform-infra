@@ -96,10 +96,78 @@ spec:
           # vCPUs RESERVED for the VM's whole lifetime (no overcommit). Mirror in
           # .devops/vm-metadata.yaml.
           cores: ${{ values.cpuCores }}
+        # ── RESOURCES — all four values, deliberately. ────────────────────────
+        # SETTING ONLY `requests.memory` HERE DOES NOT PRODUCE A VM THAT RUNS SLOWLY.
+        # IT PRODUCES A VM THAT NEVER STARTS — and it inflates the ask while doing it.
+        #
+        # OBSERVED LIVE on paper-papas, 2026-08-27, with exactly this spec (an 8Gi
+        # guest declaring a memory REQUEST and no limits):
+        #
+        #   Error creating pod: pods "virt-launcher-paper-papas-hv7dh" is forbidden:
+        #   [maximum cpu usage per Container is 4, but limit is 8,
+        #    maximum memory usage per Container is 6Gi, but limit is 17064Mi]
+        #
+        # Note the 17064Mi. When a memory LIMIT is absent, KubeVirt does not simply
+        # pass the request through — it derives a launcher limit of roughly TWICE the
+        # guest RAM. The same 8Gi guest on the reference VM, which DOES declare
+        # `limits.memory`, produces an 8532Mi container (guest + ~340Mi overhead).
+        # So declaring the limit does not merely add a field; it HALVES what the
+        # namespace is asked for, from 17064Mi to 8532Mi. A tier ceiling sized for a
+        # correct manifest will still reject an incorrect one.
+        #
+        # The failure is also invisible in the usual places: the VirtualMachine sits
+        # at `Starting` and the VMI at `Pending` with no pod to inspect, because the
+        # launcher is rejected at admission and never created. Only the namespace
+        # EVENTS carry the reason, and KubeVirt retries in a loop that buries them.
+        #
+        # WHY request == limit for BOTH, rather than the reference VM's cpu 6/8 split:
+        #   * Memory is incompressible and KubeVirt reserves the whole guest RAM for
+        #     the VM's lifetime (ADR-032 §5), so request MUST equal limit. The
+        #     vm-prod.yaml quota enforces exactly this with requests.memory ==
+        #     limits.memory. This half is not a choice.
+        #   * For CPU it IS a choice, and the obvious reason to prefer equality —
+        #     Guaranteed QoS — turns out not to exist here. The launcher pod is
+        #     Burstable no matter what this file says, because KubeVirt itself adds
+        #     an `ephemeral-storage: 50M` REQUEST with no matching limit, and one
+        #     unmatched resource is enough to disqualify the pod. Measured on the
+        #     live reference VM:
+        #         qosClass=Burstable
+        #         compute req={cpu 6, ephemeral-storage 50M, memory 8532Mi}
+        #                 lim={cpu 8,                        memory 8532Mi}
+        #     So a 6/8 split buys nothing in eviction protection, and equality
+        #     costs nothing in it either. The blueprint's "we WANT requests==limits
+        #     (Guaranteed QoS)" aspiration is unreachable for VMs; do not re-derive
+        #     a CPU split in pursuit of it.
+        #   * What equality DOES buy is that this template stays arithmetic-free.
+        #     A 75% split needs `cpuCores * 0.75` rounded, evaluated by the
+        #     scaffolder's templating engine, in a resource field — and a silent
+        #     templating error in a resource field is precisely the failure class
+        #     this whole change exists to remove. An integer that is already an
+        #     input cannot be miscomputed.
+        #   * It also makes the quota arithmetic checkable rather than guessed:
+        #     requests.cpu and limits.cpu are the same number, so a tier sized for N
+        #     VMs of C cores is exactly N×C plus importer headroom. That is what
+        #     hack/lint-vm-tier-bounds.py relies on.
+        # The cost is honest: an idle VM reserves its full core count against the
+        # namespace quota. On this 5-node/80-core cluster with
+        # count/virtualmachines capped at 1 per team, that is affordable; if it
+        # stops being affordable, lower the wizard's cpuCores maximum — the guard
+        # will make the quota follow — rather than re-splitting here.
+        #
+        # KubeVirt adds its own overhead ON TOP of these numbers when it builds the
+        # launcher pod — measured at ~340Mi of RAM and ~5m of CPU on the live
+        # reference VM (an 8Gi guest becomes an 8532Mi container). The namespace
+        # quota and LimitRange in tenants/_template-vm/vm/namespaces/vm-prod.yaml are
+        # sized WITH that overhead included; do not size them from these numbers
+        # directly.
         resources:
           requests:
             # Guest RAM, reserved for the VM's whole lifetime (ADR-032 §5).
             memory: ${{ values.memoryGi }}Gi
+            cpu: "${{ values.cpuCores }}"
+          limits:
+            memory: ${{ values.memoryGi }}Gi
+            cpu: "${{ values.cpuCores }}"
         devices:
           # virtio-rng. The cluster runs KubeVirt with useEmulation:true (QEMU TCG,
           # no hardware virt), where guest entropy accrues slowly. sshd generates its

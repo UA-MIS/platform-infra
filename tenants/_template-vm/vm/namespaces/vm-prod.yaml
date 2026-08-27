@@ -101,12 +101,52 @@ spec:
     # and the VMI then sits ErrorUnschedulable behind a MISLEADING secondary
     # condition -- "PVC ... does not exist, waiting for it to appear" -- while the
     # DataVolume has in fact imported cleanly. Learned on crimson-copies-stripped.
-    requests.cpu: "3"
-    limits.cpu: "4"
-    # requests == limits => no RAM overcommit. 6Gi fits one ~4Gi-guest VM +
-    # launcher overhead + a transient importer. Guest > ~5Gi needs a quota bump.
-    requests.memory: 6Gi
-    limits.memory: 6Gi
+    # ⚠ THESE NUMBERS ARE A FUNCTION OF THE WIZARD'S MAXIMA. Do not tune them in
+    # isolation. The scaffolder (platform-services/backstage/templates/vm-app/
+    # template.yaml) lets a student ask for up to cpuCores: 8 and memoryGi: 16. A
+    # quota below that is not a "tighter default" — it is a wizard input that is
+    # accepted by the form and then guaranteed to fail in the namespace, which is
+    # exactly how paper-papas was scaffolded dead on 2026-08-27. Either these
+    # numbers cover the wizard maximum, or the wizard maximum comes down to meet
+    # them. hack/lint-vm-tier-bounds.py enforces that they agree; it fails CI if
+    # they drift apart again.
+    #
+    # A quota is a CEILING, not a reservation: a team that scaffolds the default
+    # 2-core/4Gi VM consumes 4Gi, not 18Gi. Sizing the ceiling to the wizard maximum
+    # therefore costs nothing until a team actually asks for a big guest, while
+    # sizing it below the maximum costs that team a VM that never starts.
+    #
+    # THESE ARE THE PROVEN REFERENCE'S NUMBERS, not a fresh derivation.
+    # crimson-copies-stripped-vm-prod is the only configuration on this cluster
+    # demonstrated to actually host an 8GiB guest, and it carries exactly:
+    #     requests.cpu 8   limits.cpu 12   requests.memory 12Gi   limits.memory 12Gi
+    #     LimitRange max:  cpu 12,  memory 12Gi
+    # Copied deliberately rather than re-derived tighter. The measured overhead
+    # explains why the ceiling sits well above the guest instead of just above it:
+    # an 8Gi guest becomes an 8532Mi CONTAINER once KubeVirt's ~340Mi lands, so a
+    # 12Gi ceiling carries ~3.5Gi of genuine headroom. A ceiling computed to just
+    # fit is one KubeVirt version bump — one overhead change — from breaking every
+    # VM on the cluster at once.
+    #
+    # This is also the direct fix for the old 6Gi value, which could not host even
+    # a 6Gi guest: 6Gi guest + 340Mi overhead = 6484Mi > 6144Mi. The tier could not
+    # run a guest sized at its own advertised ceiling.
+    #
+    # ONE DELIBERATE DEVIATION from the reference: requests.cpu is 12 here, not 8.
+    # The reference VM asks for cpu request 6 / limit 8 (a 75% split); the skeleton
+    # now emits request == limit == cores so the template stays arithmetic-free
+    # (see the rationale in the skeleton's virtualmachine.yaml). An 8-core guest
+    # therefore REQUESTS 8 cores, and 8 + KubeVirt overhead + a transient CDI
+    # importer does not fit in a requests.cpu ceiling of exactly 8. Raising it to
+    # match limits.cpu is strictly more headroom, never less, and cannot invalidate
+    # what the reference proved.
+    #
+    # requests.memory == limits.memory is the no-RAM-overcommit invariant
+    # (ADR-032 §5) and is enforced by hack/lint-vm-tier-bounds.py.
+    requests.cpu: "12"
+    limits.cpu: "12"
+    requests.memory: 12Gi
+    limits.memory: 12Gi
     pods: "4"                       # virt-launcher + CDI importer + ≤2 helpers
     services: "3"
     # A CDI registry/http disk import transiently creates THREE PVCs at once: the
@@ -161,9 +201,15 @@ spec:
       defaultRequest:
         cpu: 250m
         memory: 512Mi
+      # `max` is per-CONTAINER, and the virt-launcher compute container is a single
+      # container carrying the whole guest. So this must be >= the largest legal
+      # guest plus KubeVirt overhead, or the launcher pod is rejected with
+      #   maximum memory usage per Container is 6Gi, but limit is 8Gi
+      # even when the namespace quota would have allowed it. Sized to the same
+      # wizard maximum as the quota above (8 cores / 16Gi + overhead).
       max:
-        cpu: "4"
-        memory: 6Gi        # accommodates a ~4-5Gi guest + virt-launcher overhead
+        cpu: "12"
+        memory: 12Gi
 ---
 # NetworkPolicy 1/5 — DEFAULT-DENY ingress + egress. Same posture as every tenant
 # tier: selects all pods (KubeVirt passes VM labels through to the virt-launcher
