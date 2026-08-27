@@ -182,9 +182,18 @@ def classify(repo, current_ref):
         m = USES_RE.search(body)
         if m and m.group(1) == "tenant-build.yaml":
             ref = m.group(2)
-            state = "CURRENT" if ref == current_ref else "BEHIND-TAG"
+            # NB: "CALLS-REUSABLE", deliberately not "CURRENT". Step 0 has not
+            # passed — the contract's build-and-push fails on a throwaway and
+            # bump-dev, the actual success criterion, has never executed. Until
+            # it goes green, calling the reusable workflow is the INTENDED state,
+            # not a proven-healthy one, and this report must not imply otherwise.
+            state = "CALLS-REUSABLE" if ref == current_ref else "BEHIND-TAG"
+            agree, declared, why = contract_ref_agreement(body, ref)
             return {"repo": repo, "state": state, "ref": ref, "workflow": wf,
                     "perms": caller_permissions(body),
+                    "contract_ref": declared, "ref_agreement": agree,
+                    "ref_mismatch_why": why,
+                    "sh_bump": bool(SH_BUMP_RE.search(body)),
                     "detail": f"calls the reusable workflow @{ref}"}
 
     build = next((n for n in names if n.startswith("build-and-push")), None)
@@ -195,8 +204,11 @@ def classify(repo, current_ref):
         commits = gh(f"repos/{ORG}/{repo}/commits?path=.github/workflows/{build}"
                      f"&per_page=1")
         frozen = (commits[0]["commit"]["committer"]["date"] if commits else None)
+        copy_body = (base64.b64decode(blob["content"]).decode("utf8", "replace")
+                     if blob else "")
         return {"repo": repo, "state": "LOCAL-COPY", "workflow": build,
                 "frozen_at": frozen, "lines": lines,
+                "sh_bump": bool(SH_BUMP_RE.search(copy_body)),
                 "detail": f"carries its own {build} ({lines} lines); does not "
                           f"call the platform pipeline"}
     return {"repo": repo, "state": "NO-PIPELINE",
@@ -208,6 +220,62 @@ def classify(repo, current_ref):
 # the overlay, so the build deploys nothing. Same defect class as the malformed
 # promotion.yaml of 2026-08-26: a success signal covering a no-op.
 REQUIRED_CALLER_PERMS = ("contents", "id-token")
+
+# ── THE uses:/contract_ref CROSS-CHECK — this report is the ONLY place it is
+#    visible, so it is required rather than advisory ──────────────────────────
+# §3.4 could not be implemented as designed: a reusable workflow cannot discover
+# its own version. Measured on runner 2.335.1, `github.job_workflow_sha` and
+# `github.job_workflow_ref` are BOTH EMPTY; a local `./.github/actions/...` path
+# resolves against the CALLER's workspace (tenants have no `.github/actions/`, so
+# it 404s); and `uses:` forbids expressions, so `@${{ github.sha }}` is out.
+#
+# The fix is an explicit `contract_ref` input defaulting to `v1`. The cost is that
+# a caller can now disagree with itself: workflow from one ref, canonical scripts
+# from another — a MIXED-VERSION run. Nothing inside the contract can detect that,
+# because the workflow cannot see the ref it was called at. Only an outside
+# observer comparing the two strings can, which is this report.
+#
+# For scale: the reusable workflow pins `@v1` at FOUR sites on main today —
+# prepare (tenant-ci-scripts), build-and-push (supply-chain-verify), bump-dev and
+# bump-staging (tenant-ci-scripts). The last two WRITE to tenant repos, so a
+# mixed-version run does not merely build oddly; it commits with the wrong script.
+CONTRACT_REF_RE = re.compile(r"^\s*contract_ref:\s*[\"']?([^\"'\s#]+)", re.M)
+
+# bump-image.sh is `#!/usr/bin/env bash` + `set -euo pipefail`. Invoked via `sh`
+# it dies at "Illegal option -o pipefail" under a dash /bin/sh — it works today
+# only by accident of the base image. Fixed on main (the fragment now uses
+# `bash`), so any tenant copy still saying `sh` has simply not picked the fix up:
+# that is drift, and it is free to detect because we already hold the file body.
+SH_BUMP_RE = re.compile(r"(?<![-\w])sh\s+[^\s;|&]*bump-image\.sh")
+
+
+def contract_ref_agreement(body, uses_ref):
+    """Does the caller's `contract_ref` input agree with the ref it calls at?
+
+    FAIL CLOSED, exactly as with the permissions form: anything we cannot
+    positively confirm to agree is reported as a MISMATCH, never as agreeing.
+    A mixed-version run is invisible everywhere else in the system.
+    """
+    m = CONTRACT_REF_RE.search(body)
+    if m is None:
+        # No input passed -> the contract's default (v1) supplies the scripts.
+        # That agrees ONLY if the workflow is also called at v1.
+        return (uses_ref == "v1", None,
+                None if uses_ref == "v1" else
+                f"calls @{uses_ref} but passes no contract_ref, so scripts come "
+                f"from the v1 default — mixed version")
+    declared = m.group(1)
+    if "${{" in declared:
+        # Do not echo the captured token: it stops at whitespace, so an
+        # expression renders as a bare "${{" and reads like a parser bug.
+        return (False, "<expression>",
+                f"calls @{uses_ref} but contract_ref is a GitHub expression, "
+                f"which cannot be statically confirmed — treated as mismatched")
+    if declared != uses_ref:
+        return (False, declared,
+                f"calls @{uses_ref} but passes contract_ref={declared} — "
+                f"workflow and scripts come from different refs")
+    return True, declared, None
 
 
 def caller_permissions(body):
@@ -344,11 +412,18 @@ def main():
                         f" (review_by {e['review_by']})" if e["review_by"] else
                         " (no review_by set)")
             # The silent-failure trap: a caller missing these builds green and
-            # deploys nothing. It is drift even when the ref is CURRENT.
+            # deploys nothing. It is drift even when the ref is the current one.
             miss = (r.get("perms") or {}).get("missing")
-            if miss and r["state"] in ("CURRENT", "BEHIND-TAG"):
+            if miss and r["state"] in ("CALLS-REUSABLE", "BEHIND-TAG"):
                 r["state"] = "CALLER-MISSING-PERMS"
                 r["detail"] += f" — but does NOT grant: {', '.join(miss)}"
+            # The mixed-version run. Nothing inside the contract can see this,
+            # so it outranks the permissions finding: a run whose scripts and
+            # workflow disagree is not meaningfully "missing a permission".
+            if r.get("ref_agreement") is False and r["state"] in (
+                    "CALLS-REUSABLE", "BEHIND-TAG", "CALLER-MISSING-PERMS"):
+                r["state"] = "REF-MISMATCH"
+                r["detail"] += f" — {r['ref_mismatch_why']}"
         report["fleet"] = rows
         report["exceptions_warning"] = warn
 
@@ -357,14 +432,22 @@ def main():
             print(f"§6.2  FLEET CI DRIFT — {len(rows)} live tenants "
                   f"(topic:{TENANT_TOPIC})")
             print("=" * 74)
+            print("  CAVEAT: Step 0 has not passed. The contract's build-and-push")
+            print("  fails on a throwaway and bump-dev — the actual success")
+            print("  criterion — has never executed. So CALLS-REUSABLE is the")
+            print("  INTENDED state, not a proven-working one. This report measures")
+            print("  convergence on the target pipeline, not the health of it.\n")
             if warn:
                 print(f"  NOTE: {warn}\n")
-            order = {"CURRENT": 0, "EXEMPT": 1, "BEHIND-TAG": 2, "LOCAL-COPY": 3,
-                     "NO-PIPELINE": 4, "NO-WORKFLOWS": 5, "EXEMPT-EXPIRED": 6,
-                     "OPT-OUT-NO-REASON": 7, "CALLER-MISSING-PERMS": 8}
-            for r in sorted(rows, key=lambda x: (order.get(x["state"], 9),
+            order = {"CALLS-REUSABLE": 0, "EXEMPT": 1, "BEHIND-TAG": 2,
+                     "LOCAL-COPY": 3, "NO-PIPELINE": 4, "NO-WORKFLOWS": 5,
+                     "EXEMPT-EXPIRED": 6, "OPT-OUT-NO-REASON": 7,
+                     "CALLER-MISSING-PERMS": 8, "REF-MISMATCH": 9}
+            for r in sorted(rows, key=lambda x: (order.get(x["state"], 10),
                                                  x["repo"])):
-                if r.get("frozen_at"):
+                if r["state"] == "REF-MISMATCH":
+                    extra = r.get("ref_mismatch_why") or ""
+                elif r.get("frozen_at"):
                     extra = f"frozen {r['frozen_at'][:10]}  {r.get('lines','?')} lines"
                 elif (r.get("perms") or {}).get("missing"):
                     extra = f"@{r.get('ref')}  MISSING: {', '.join(r['perms']['missing'])}"
@@ -372,7 +455,17 @@ def main():
                     extra = f"@{r['ref']}"
                 else:
                     extra = r.get("exempt_reason") or ""
-                print(f"  {r['state']:<21} {r['repo']:<18} {extra}")
+                flag = "  [sh bump-image.sh]" if r.get("sh_bump") else ""
+                print(f"  {r['state']:<21} {r['repo']:<18} {extra}{flag}")
+            shb = [r["repo"] for r in rows if r.get("sh_bump")]
+            if shb:
+                print(f"\n  ADVISORY — invokes bump-image.sh with `sh`: "
+                      f"{', '.join(shb)}")
+                print("    That script is `#!/usr/bin/env bash` + `set -euo "
+                      "pipefail`; under a dash /bin/sh it dies at")
+                print("    'Illegal option -o pipefail'. It works only by accident "
+                      "of the base image. main uses `bash`,")
+                print("    so a copy still saying `sh` has simply not picked the fix up.")
             counts = {}
             for r in rows:
                 counts[r["state"]] = counts.get(r["state"], 0) + 1
