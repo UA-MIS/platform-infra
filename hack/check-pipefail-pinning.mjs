@@ -23,6 +23,49 @@ import { join, relative } from "node:path";
 
 const ROOT = process.argv[2] ?? ".";
 
+// THIS CHECK MUST NOT PASS ON A CORPUS IT CANNOT READ (B1).
+//
+// The first version of this file scanned whatever `walk()` happened to find and reported
+// OK on an empty result: delete, empty or move `.github/workflows` and it printed
+// "scanned 0 workflow files ... OK" and exited 0. That is exactly the defect this file
+// was written to prevent -- a guard that passes vacuously when its input goes missing --
+// reproduced INSIDE the guard, and the same one already fixed in the sibling step
+// ("Deriving the list introduces its OWN vacuous-pass risk ... Assert a non-zero count
+// first", which is where `n_canon` came from). The reasoning was written down and then
+// not applied here. So: assert the corpus, by name, before trusting any result from it.
+//
+// Named directories rather than only a count, because a count alone still passes if some
+// unrelated directory of workflows survives while the one that matters is gone.
+const REQUIRED_DIRS = [
+  ".github/workflows",
+  "platform-services/backstage/templates/_fragments/_contract/.github/workflows",
+];
+
+// The count is asserted PER REQUIRED DIRECTORY, not globally. A global total is not a
+// guard: emptying `.github/workflows` while the contract's directory still holds two
+// files leaves the total non-zero, so a repo-wide `files.length > 0` passes while the
+// half that matters goes unread. (Caught by running the corpus-missing matrix against
+// this very function: DELETED and MOVED went red, EMPTIED stayed green.)
+function assertCorpus(files) {
+  const problems = [];
+  for (const d of REQUIRED_DIRS) {
+    let isDir = false;
+    try { isDir = statSync(join(ROOT, d)).isDirectory(); } catch { isDir = false; }
+    if (!isDir) { problems.push(`${d} -- not a readable directory (deleted, moved, or renamed)`); continue; }
+    const n = files.filter((f) => f.startsWith(join(ROOT, d) + "/") || f.startsWith(d + "/")).length;
+    if (n === 0) problems.push(`${d} -- exists but contains no .yml/.yaml workflow files`);
+  }
+  if (problems.length) {
+    for (const p of problems) console.log(`  corpus: ${p}`);
+    console.log(
+      `::error::${problems.length} required workflow location(s) above yielded nothing to check. ` +
+      `If they moved, update REQUIRED_DIRS in hack/check-pipefail-pinning.mjs -- a pinning check ` +
+      `that cannot read the workflows must FAIL, not report a clean tree.`
+    );
+    process.exit(1);
+  }
+}
+
 function walk(dir, out = []) {
   for (const e of readdirSync(dir, { withFileTypes: true })) {
     if (e.name === ".git" || e.name === "node_modules") continue;
@@ -74,6 +117,7 @@ function auditFile(file) {
 }
 
 const files = walk(ROOT);
+assertCorpus(files);
 const all = files.flatMap(auditFile);
 const blocking = all.filter((f) => f.container);
 const advisory = all.filter((f) => !f.container);

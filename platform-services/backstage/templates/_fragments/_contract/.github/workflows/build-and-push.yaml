@@ -261,17 +261,27 @@ jobs:
 
       - name: Node/TypeScript — install + lint + typecheck + test
         if: ${{ steps.detect.outputs.lang == 'node' }}
-        # Digest-pinned (SEC). node:24-trixie-slim. lint + typecheck run only --if-present
-        # (a bare starter without them is not blocked); `npm test` runs only when a test
-        # script exists (npm test hard-errors on a missing script otherwise). A real lint /
-        # tsc / test failure BLOCKS.
+        # Digest-pinned (SEC). node:24-trixie-slim. Install uses `npm ci` only when a lockfile
+        # (package-lock.json / npm-shrinkwrap.json) is committed — otherwise `npm install`, so a
+        # lockfile-less starter installs cleanly with no `npm ci` EUSAGE error wall. lint +
+        # typecheck run only --if-present (a bare starter without them is not blocked); `npm test`
+        # runs only when a test script exists (npm test hard-errors on a missing script otherwise).
+        # A real lint / tsc / test failure BLOCKS.
+        #
+        # NOT `npm ci || npm install` (drift; the platform copy in .github/workflows/
+        # tenant-build.yaml has always had the if/else and this tenant-facing copy did not).
+        # That fallback swallows the exact failure `npm ci` EXISTS to produce: a lockfile
+        # desynced from package.json makes `npm ci` fail by design, `|| npm install` then
+        # silently REWRITES the lockfile and the gate goes green. The condition being tested
+        # is "is a lockfile committed", which is a file test — so test the file, and let a
+        # genuine `npm ci` failure fail.
         uses: docker://node@sha256:366fdef91728b1b7fa18c84fba63b6e79ed77b7e10cc206878e9705da4d7b169 # 24-trixie-slim
         with:
           entrypoint: /bin/sh
           args: >-
             -c 'set -eu;
             cd "$GITHUB_WORKSPACE/${{ matrix.context }}";
-            echo "==> install deps"; npm ci || npm install;
+            if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then echo "==> npm ci (lockfile present)"; npm ci; else echo "==> npm install (no lockfile — commit one to switch to fast reproducible npm ci)"; npm install; fi;
             echo "==> lint (if present)"; npm run lint --if-present;
             echo "==> typecheck (if present)"; npm run typecheck --if-present;
             if npm run | grep -qE "^[[:space:]]+test"; then echo "==> npm test"; npm test;
