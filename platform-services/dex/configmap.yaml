@@ -221,7 +221,6 @@ data:
           - https://alhands-agile.capstone.uamishub.com/api/auth/callback
           - https://capstone-demo-agile.capstone.uamishub.com/api/auth/callback
           - https://wizarddress-agile.capstone.uamishub.com/api/auth/callback
-          - https://wizardtest-agile.capstone.uamishub.com/api/auth/callback
           # ── END GENERATED team board redirect URIs ──
 
     oauth2:
