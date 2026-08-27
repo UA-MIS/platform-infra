@@ -116,7 +116,7 @@ one human action in board provisioning, and a board whose redirect URI is missin
 
 Steps 1–2 are reversible. Step 5 is the cutover.
 
-### 0. Confirm the containment landed
+### 0. Confirm the containment landed — ✅ VERIFIED CLOSED 2026-08-27
 
 ```bash
 kubectl -n ida-llm-prod get secret ida-llm-agile-secret -o json | jq -r '.data|keys[]'
@@ -125,6 +125,35 @@ kubectl -n ida-llm-prod get secret ida-llm-agile-secret -o json | jq -r '.data|k
 Expect **no** `GITHUB_APP_*`. If they are present, merge `UA-MIS/ida-llm#27`
 first — the migration does not need to be finished for the exposure to be closed,
 and the exposure should not wait for the migration.
+
+**Re-verified against the live cluster on 2026-08-27, three independent ways:**
+
+```
+kubectl -n ida-llm-prod get secret ida-llm-agile-secret   ->  GITHUB_POLL_TOKEN,
+    GITHUB_WEBHOOK_SECRET, OIDC_CLIENT_SECRET, SESSION_SECRET   (no GITHUB_APP_*)
+kubectl -n ida-llm-prod get externalsecret ida-llm-agile-secret
+    -> requests only those same four properties; no GITHUB_APP_* remote refs
+python3 hack/audit-tenant-credentials.py
+    -> "0 value match(es), 4 path-scope note(s)"   [exit 0]
+```
+
+So the **critical, student-reachable exposure is closed**: the App key is no
+longer materialized in the tenant namespace, and the ExternalSecret no longer
+asks for it. Everything below is defence-in-depth plus feature restoration, and
+should be scheduled on its merits rather than as an incident response.
+
+⚠ **One residual is NOT covered by the checks above.** They inspect Kubernetes,
+not Vault. If the three App properties are still present at
+`tenants/ida-llm/prod/agile`, the value remains *re-referencable* — that subtree
+is writable by the team through the portal's Secrets tab, and the team owns the
+repo that declares ExternalSecrets, so three lines restore the exposure with no
+platform involvement. Step 1 below closes that, and until it is done the
+containment depends on nobody re-adding the property. Confirm with:
+
+```bash
+vault kv get -mount=secret -format=json tenants/ida-llm/prod/agile | jq -r '.data.data|keys[]'
+# expect exactly: GITHUB_POLL_TOKEN, GITHUB_WEBHOOK_SECRET, OIDC_CLIENT_SECRET, SESSION_SECRET
+```
 
 ### 1. Delete the App properties from the tenant Vault subtree
 
@@ -202,10 +231,27 @@ hand-edit `schema_migrations` to paper over the gap.
 python3 platform-services/dex/gen-board-clients.py --check
 ```
 
-Add `tenants/_boards/ida-llm.yaml` (below), let the scheduled workflow open its
-redirect-URI PR, and **merge it before cutover**. `make validate` guard 6 fails
-on drift, so this cannot be lost silently — but it can be lost *late*, which
-presents as a board that works until someone clicks Sign in.
+**No longer a separate step — folded into the migration PR.** The original plan
+was to add `tenants/_boards/ida-llm.yaml`, let the scheduled workflow open a
+second redirect-URI PR, and merge that before cutover. That leaves a window in
+which the board file is merged and the callback is not, which presents as a
+board that works until someone clicks Sign in.
+
+The migration PR instead carries **both** — the board file and the generated
+redirect URI — so they land in the same merge and the window cannot exist. The
+generator output is a single additive line inside the delimited block:
+
+```diff
+           - https://capstone-demo-agile.capstone.uamishub.com/api/auth/callback
++          - https://ida-llm-agile.capstone.uamishub.com/api/auth/callback
+```
+
+`make validate` guard 6 passes on that PR rather than failing:
+
+```bash
+python3 platform-services/dex/gen-board-clients.py --check
+# dex board clients: up to date (5 board(s))
+```
 
 ### 5. Cut over
 
@@ -227,9 +273,27 @@ Then, in this order:
    board shows **53 work items**, not zero.
 2. Only then remove `agile.yaml`, `agile-config.yaml` and
    `agile-secret.externalsecret.yaml` from `UA-MIS/ida-llm`'s prod overlay.
-   **Order matters:** that ExternalSecret has `deletionPolicy: Delete`, so
-   removing it deletes `ida-llm-agile-secret` and with it `SESSION_SECRET`. Doing
-   this before step 1 logs out every user of a board that has nowhere to go yet.
+   **Order matters:** that ExternalSecret has `deletionPolicy: Delete` (confirmed
+   live — `target.deletionPolicy: Delete`, and the Secret it owns does carry
+   `SESSION_SECRET`), so removing it deletes `ida-llm-agile-secret` and with it
+   `SESSION_SECRET`.
+
+   **Be precise about what the ordering does and does not buy.** It does *not*
+   preserve anyone's session. `templates/session-secret.yaml` mints a **new**
+   per-board `SESSION_SECRET` from an in-cluster `Password` generator
+   (`refreshPolicy: CreatedOnce`); the chart never reads the tenant's existing
+   one. Combined with the host change, **every signed-in user re-authenticates at
+   cutover no matter what order you use.** What the ordering buys is that they
+   re-authenticate *somewhere*: delete-first logs them out of a board that has
+   nowhere to go yet, and leaves the old board broken rather than merely retired.
+
+   ⚠ **Nothing can enforce this ordering, because the two steps are in different
+   repositories** — step 1 merges in `platform-infra`, step 2 in `UA-MIS/ida-llm`.
+   They are inherently separate syncs; no single commit can make them atomic and
+   no CI guard in either repo can see the other. The order is a human sequencing
+   constraint, so treat "step 1 merged AND the new board shows 53 work items" as
+   an explicit precondition recorded on the `UA-MIS/ida-llm` PR, not as something
+   the tooling will catch.
 3. Leave `ida_llm_prod.agile` in place as the rollback. Drop it only once the new
    board has been used for a sprint. Mirrors the README's stance on board
    removal: an automatic `DROP SCHEMA CASCADE` is not a power a file deletion

@@ -1,0 +1,25 @@
+# Sprint board for team `ida-llm`. MIGRATED off the pre-chart pattern (SEC-037,
+# board #134) — it was the last board still running in a TENANT namespace
+# (`ida-llm-prod`) from manifests in `UA-MIS/ida-llm` @ HEAD.
+#
+# Rendered by applicationsets/agile-boards-appset.yaml into the platform-owned
+# `agile` namespace, from the ONE shared image. Host is derived:
+# ida-llm-agile.capstone.uamishub.com  (NOT the old `ida-agile` — the chart
+# derives host, APP_URL and the Dex redirect URI from one helper so the three
+# cannot disagree; there is no host override by design).
+#
+# ⚠ MERGING THIS FILE IS THE CUTOVER, NOT A PREPARATION STEP.
+#   The chart sets AGILE_DB_SCHEMA=ida-llm and the app CREATES that schema on
+#   startup, so merging this before the data move produces a working, EMPTY
+#   board at the new URL while the real one still serves the old one. An empty
+#   board is indistinguishable from a wiped board to the team looking at it.
+#   Preconditions are in platform-services/agile-boards/MIGRATING-ida-llm.md;
+#   the short form is: data copied into agile_boards.ida_llm (53 work items),
+#   Dex redirect-URI PR MERGED, and the pinned image tag contains migration
+#   004_clear_stale_branch_metadata.sql.
+#
+# De-provision = `git rm` this file.
+team: ida-llm
+repos: UA-MIS/ida-llm
+title: IDA Agile
+accent: "#9e1b32"
