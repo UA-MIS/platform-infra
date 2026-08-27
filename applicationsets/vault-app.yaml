@@ -255,6 +255,29 @@ spec:
           #     path it is re-electing. Peers are DIRECT (not DERP-relayed) and
           #     their endpoints oscillate between each peer's LAN IPv4 address
           #     and its public IPv6 GUA many times per hour, all night.
+          #
+          #     WHAT DRIVES THE RE-PINS (confirmed against 24h of w1 tailscaled
+          #     logs, 1803 re-pins, peer ids resolved from nodekeys and
+          #     cross-checked against an endpoint-derived table):
+          #     tailscaled advertises the node's `cilium_host` address as a
+          #     candidate WireGuard endpoint. That address (n1 10.244.2.139,
+          #     w2 10.244.8.17 — verified live) is reachable ONLY via Cilium's
+          #     VXLAN overlay, which on w1/w2 is itself carried over Tailscale.
+          #     Tailscale reaching a peer through an address only reachable
+          #     through Tailscale is circular and cannot work. Measured:
+          #       * pod-CIDR endpoints are 5.6x ENRICHED among the re-pins that
+          #         coincide with a raft loss (28.9% vs 5.2% background), while
+          #         LAN (0.87x) and IPv6 (0.63x) picks are DEPLETED
+          #       * 22 of 72 episodes (31%) implicate a pod-CIDR re-pin of the
+          #         very peer that went silent
+          #       * dwell before the next re-pin: LAN 258s, pod-CIDR 68s — the
+          #         bogus pick is abandoned ~4x faster, i.e. it fails
+          #       * permutation test (2000 circular shifts, preserving re-pin
+          #         burstiness): w2 obs 48 vs null median 13, p<0.0005;
+          #         n1 obs 15 vs null median 6, p=0.0015
+          #     So the flap is not ambient noise co-located with the failures —
+          #     it is time-locked to them (+/-30s) and disproportionately lands
+          #     on an endpoint that is structurally unreachable.
           #     Measured correlation: 15 of 15 raft "failed to contact" episodes
           #     coincided with a tailscale0 drop burst — median peak 1613 drops/s
           #     at the events vs 2.2 drops/s away from them (7% control base
