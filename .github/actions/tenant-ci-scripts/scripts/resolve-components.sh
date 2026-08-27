@@ -54,7 +54,27 @@ emit_obj() {
 }
 
 # ---- single-component fallback (no components.yaml) -------------------------
-if [ ! -f "${COMPONENTS}" ]; then
+# ABSENT is the only condition that means "single-component". A components.yaml that
+# EXISTS but cannot be read as a regular file -- a directory, a broken symlink, a
+# mode-000 file -- is a BROKEN multi-component repo, and silently falling back would
+# build component #1 and ship the rest of the tenant's app unbuilt, green (A5). `-e` is
+# false for a broken symlink, so test the symlink case explicitly with `-L`.
+if [ -e "${COMPONENTS}" ] || [ -L "${COMPONENTS}" ]; then
+  if [ ! -f "${COMPONENTS}" ]; then
+    if [ -d "${COMPONENTS}" ]; then reason="it is a directory"
+    elif [ -L "${COMPONENTS}" ]; then reason="it is a dangling symlink -> $(readlink "${COMPONENTS}" 2>/dev/null || echo '?')"
+    else reason="it is not a regular file"
+    fi
+    echo "components.yaml exists at ${COMPONENTS} but cannot be used: ${reason}. Refusing to fall back to a single-component build -- that would silently ship every other component of this repo unbuilt. Fix or remove the file." >&2
+    exit 1
+  fi
+  if [ ! -r "${COMPONENTS}" ]; then
+    echo "components.yaml exists at ${COMPONENTS} but is not readable (check its mode). Refusing to fall back to a single-component build -- that would silently ship every other component of this repo unbuilt." >&2
+    exit 1
+  fi
+fi
+
+if [ ! -e "${COMPONENTS}" ] && [ ! -L "${COMPONENTS}" ]; then
   [ -f "${PROMOTION}" ] || { echo "no components.yaml and promotion.yaml not found at ${PROMOTION}" >&2; exit 1; }
   APP="$(yread "${PROMOTION}" app)"
   [ -n "${APP}" ] && [ "${APP}" != "null" ] || { echo "no components.yaml and promotion.yaml missing 'app'" >&2; exit 1; }

@@ -51,6 +51,8 @@ on:
       - "platform-services/backstage/templates/_fragments/_contract/.github/workflows/**"
       - ".github/workflows/tenant-build.yaml"
       - ".github/workflows/ci-scripts-sync-check.yaml"
+      - "hack/check-pipefail-pinning.mjs"
+      - "hack/toolchain-strictness.test.mjs"
   pull_request:
     paths:
       - ".github/actions/tenant-ci-scripts/scripts/**"
@@ -58,6 +60,8 @@ on:
       - "platform-services/backstage/templates/_fragments/_contract/.github/workflows/**"
       - ".github/workflows/tenant-build.yaml"
       - ".github/workflows/ci-scripts-sync-check.yaml"
+      - "hack/check-pipefail-pinning.mjs"
+      - "hack/toolchain-strictness.test.mjs"
 
 permissions:
   contents: read
@@ -99,7 +103,23 @@ jobs:
           CANON=".github/actions/tenant-ci-scripts/scripts"
           SCAFFOLD="platform-services/backstage/templates/_fragments/_contract/.devops/ci"
           fail=0
-          for s in resolve-image.sh resolve-components.sh bump-image.sh; do
+          # queue-status.mjs was in the canonical directory but NOT in this list, so it
+          # was the one shared file free to drift unpoliced (A6). The list is now DERIVED
+          # from the canonical directory rather than hand-maintained, because a
+          # hand-maintained list of things to check is the same class of bug as the
+          # hand-applied rule that missed promote-to-prod.yaml: it silently omits whatever
+          # nobody remembered to add. A new canonical file is now covered on arrival.
+          #
+          # Deriving the list introduces its OWN vacuous-pass risk: if CANON moved or is
+          # empty, `ls` yields nothing, the loop body never runs and the step reports
+          # "in sync" having compared nothing. Assert a non-zero count first. (Same defect
+          # this PR fixes in the interpreter check; it is not going in here at the same time.)
+          [ -d "${CANON}" ] || { echo "::error::canonical script directory ${CANON} does not exist. If it moved, update this workflow; a sync check that cannot find one side must not pass."; exit 1; }
+          n_canon="$(cd "${CANON}" && ls -1 | wc -l)"
+          [ "${n_canon}" -gt 0 ] || { echo "::error::canonical script directory ${CANON} is EMPTY — refusing to report 'in sync' after comparing zero files."; exit 1; }
+          echo "comparing ${n_canon} canonical file(s) against the scaffold copy"
+          for s in $(cd "${CANON}" && ls); do
+            [ -e "${SCAFFOLD}/${s}" ] || { echo "::error::${s} exists in the canonical copy but is MISSING from the scaffold copy (${SCAFFOLD}/${s}). A fresh tenant would ship without it."; fail=1; continue; }
             if ! diff -u "${CANON}/${s}" "${SCAFFOLD}/${s}"; then
               echo "::error::${s} has DRIFTED between the canonical copy (${CANON}/${s}, installed into every tenant's CI at runtime) and the scaffold copy (${SCAFFOLD}/${s}, what a fresh tenant repo actually commits). These must stay byte-identical -- see this workflow's header for why. Sync them before merging (FIX-24)."
               fail=1
@@ -131,15 +151,45 @@ jobs:
             esac
           done
           echo "bash-shebang scripts:${bash_scripts}"
-          # `|| true` on grep is DELIBERATE and load-bearing under pipefail: grep exits 1
-          # when it matches NOTHING, which is the SUCCESS case here. Without it the clean
-          # tree — the normal state — would kill this step with no message at all.
+
+          # THE INPUT PATHS MUST EXIST. A guard whose input path moves is a guard that
+          # passes vacuously: `git mv tenant-build.yaml tenant-build-v2.yaml` used to
+          # leave this step printing "0 violations" and exiting 0 while the file it was
+          # supposed to police sat unread. Assert the corpus first, so a rename fails
+          # here — loudly, naming the missing path — instead of quietly disarming the
+          # check. This is the failure mode that has caught us every time; it is not
+          # hypothetical.
+          TARGETS="${SCAFFOLD}/.github/workflows
+          ${SCAFFOLD}/.devops/ci/RUNBOOK.md
+          .github/workflows/tenant-build.yaml"
+          missing=0
+          for t in ${TARGETS}; do
+            [ -e "${t}" ] || { echo "::error::interpreter check corpus is missing '${t}'. If it moved, update this list; do not let the check pass on a corpus it can no longer read."; missing=1; }
+          done
+          [ "${missing}" -eq 0 ] || exit 1
+
+          # grep's THREE exit codes are three different things and must not be collapsed:
+          #   0 = matched   -> a violation
+          #   1 = no match  -> SUCCESS, the normal state; `|| true` alone would be right
+          #   2 = ERROR     -> unreadable file / bad pattern. #578 swallowed this along
+          #                    with 1, and `2>/dev/null` hid the reason, so the check
+          #                    failed OPEN on its own malfunction. The neighbouring
+          #                    `diff -u` step fails CLOSED; match it.
+          # stderr is deliberately NOT discarded — if grep has something to say about why
+          # it could not read the corpus, that sentence is the whole diagnosis.
           violations=""
           for s in ${bash_scripts}; do
+            set +e
             hits="$(grep -rn "\bsh \.devops/ci/${s}\b" \
                       "${SCAFFOLD}/.github/workflows" \
                       "${SCAFFOLD}/.devops/ci/RUNBOOK.md" \
-                      .github/workflows/tenant-build.yaml 2>/dev/null || true)"
+                      .github/workflows/tenant-build.yaml)"
+            rc=$?
+            set -e
+            if [ "${rc}" -ge 2 ]; then
+              echo "::error::grep failed with exit ${rc} while scanning for '${s}' (see its stderr above). Refusing to report a clean tree from a scan that did not complete."
+              exit 1
+            fi
             [ -n "${hits}" ] && violations="${violations}${hits}"$'\n'
           done
           if [ -n "${violations}" ]; then
@@ -148,6 +198,29 @@ jobs:
             exit 1
           fi
           echo "OK: 0 violations — every bash-shebang script is invoked with bash."
+
+      - name: "Pipefail-pinning check — container steps must pin `shell: bash`"
+        # A2. #578 applied this rule by hand to three files and missed a fourth --
+        # promote-to-prod.yaml, the PROD promotion path. A rule applied by memory has now
+        # been the hole twice, so it is a check. See hack/check-pipefail-pinning.mjs for
+        # why container jobs specifically (the runner gives them `sh -e {0}`, so pipefail
+        # rides on whatever /bin/sh the image ships).
+        shell: bash
+        run: |
+          set -euo pipefail
+          node hack/check-pipefail-pinning.mjs .
+
+      - name: Toolchain-strictness tests — CI_STRICT_TOOLCHAIN + the retry
+        # A4. CI_STRICT_TOOLCHAIN accepted only the literal "1", so `true` silently meant
+        # permissive; the reviewer's point was that NOTHING TESTED IT, which is what made
+        # it latent rather than known. This executes the real Ruby/PHP step bodies from
+        # both workflow twins against a stubbed package manager. It also pins the #189.4
+        # retry property — a transient install failure must still end with the tests HAVING
+        # RUN — which nothing else covers.
+        shell: bash
+        run: |
+          set -euo pipefail
+          node hack/toolchain-strictness.test.mjs .
 
       - name: Install yq (pinned + checksum-verified)
         # The three scripts under test each have TWO implementations of every read/write:
