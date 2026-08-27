@@ -10,6 +10,51 @@ The reference tenant used throughout is `tenants/crimson-copies-stripped-vm/`.
 
 ---
 
+> ## ⛔ READ THIS FIRST — `cloudflared access ssh` CANNOT tell you what is wrong
+>
+> When SSH does not work you will reach for this, because it is the obvious thing:
+>
+> ```
+> cloudflared access ssh --hostname <team>-ssh.uamishub.com
+> websocket: bad handshake
+> ```
+>
+> **That output tells you nothing.** It is byte-identical for a hostname with a
+> correct tunnel route and for a hostname that has never existed. So is `curl`:
+>
+> | Probe | route added by hand | invented hostname, no route |
+> |---|---|---|
+> | `curl https://…/` | HTTP/2 404, `content-length: 19` | **byte-identical** |
+> | `cloudflared access ssh …` | `websocket: bad handshake` | **identical** |
+>
+> Both measured, 2026-08-27, against a route the owner had just added.
+>
+> **Why:** `cloudflared access ssh` does not open a raw socket. It fetches an Access
+> token and upgrades to a websocket on an **Access-provided** endpoint. With no Access
+> application on the hostname there is nothing to upgrade against, so the edge answers
+> as ordinary HTTP — regardless of what is behind it. `bad handshake` also has several
+> unrelated documented causes.
+>
+> **Two consequences:**
+>
+> 1. **A tunnel route alone is necessary but NOT sufficient.** The Access application
+>    is required for the transport to exist at all. Adding one half by hand produces a
+>    state that cannot be tested and does not work. `cf-vm-access` provisions both
+>    together for exactly this reason.
+> 2. **Do not debug Cloudflare from these two commands.** Use the probe below first —
+>    it splits guest-side from Cloudflare-side in one shot:
+>
+> ```bash
+> # from a pod in the `cloudflared` namespace (the tenant netpol admits it on :22)
+> ssh -i <break-glass-key> ubuntu@<app>-ssh.<team>-vm-prod.svc.cluster.local
+> ```
+>
+> - **succeeds**, external still fails → guest and netpol are proven; the fault is
+>   Cloudflare-side (route and/or Access app). Stop looking at the VM.
+> - **fails** → the fault is in the guest. Stop looking at Cloudflare.
+
+---
+
 ## 0. What a student gets, and what has to be true for that
 
 A student opens `https://<team>-ssh.uamishub.com` in a browser (or runs
@@ -405,8 +450,31 @@ kubectl -n <team>-vm-prod get pvc            # zero prime- PVCs should remain
 kubectl get pv <pv> -o jsonpath='{.spec.claimRef.namespace}/{.spec.claimRef.name}'
 ```
 
-Worth knowing separately: these PVs are `persistentVolumeReclaimPolicy: Delete`. The
-semester's work goes away with the PVC.
+### ⚠ Deleting the PVC destroys the semester's work
+
+These PVs are `persistentVolumeReclaimPolicy: Delete`, and that is a **deliberate,
+accepted choice** — not an oversight to be fixed. It is written down here so nobody
+discovers it during a teardown.
+
+The VM is a pet on RWO ceph. Everything a team does lives on that one disk: the repo
+they cloned, the database they seeded, the config they hand-edited. There is no
+backup of it and no snapshot class for `ceph-block` (`volumeSnapshotStatuses` reports
+`No VolumeSnapshotClass`). **When the PVC goes, the PV goes with it, immediately and
+irreversibly.**
+
+What that means in practice:
+
+- Deleting the **VMI** is safe — it does not touch the PVC. That is the
+  `RestartRequired` remedy above.
+- Deleting the **VirtualMachine** takes the `dataVolumeTemplates`-owned PVC with it.
+  This is the "rebuild the VM to re-run cloud-init" path, and it is destructive to
+  everything the team has done. Fine during onboarding, before students have state;
+  never casually afterwards.
+- Deleting the **namespace**, or tearing the tenant down, is the same thing with a
+  wider blast radius.
+
+If a team's work needs to survive a rebuild, copy it off the guest first — there is no
+platform mechanism that will do it for you.
 
 ### ArgoCD `Suspended` is not terminal
 
