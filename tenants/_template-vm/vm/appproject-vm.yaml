@@ -123,6 +123,13 @@ spec:
       policies:
         - p, proj:__TEAM__-vm:developer, applications, get, __TEAM__-vm/*, allow
         - p, proj:__TEAM__-vm:developer, applications, sync, __TEAM__-vm/*, allow
+        # Pod logs for THIS project's apps only — scoped replacement for the
+        # cluster-wide `logs, get, */*` that SEC-022 removes from policy.default.
+        - p, proj:__TEAM__-vm:developer, logs, get, __TEAM__-vm/*, allow
         # Explicitly NO delete, NO override, NO action/* — least privilege.
       groups:
-        - __TEAM__-developers
+        # SEC-021: the group Dex actually emits is `<org>:<team-slug>`, never
+        # `__TEAM__-developers`. NOTE the project is `__TEAM__-vm` but the GitHub
+        # team is just `__TEAM__` — the VM tier is the SAME team, so the group
+        # carries no `-vm` suffix. Format mirrors the container template.
+        - UA-MIS:__TEAM__
