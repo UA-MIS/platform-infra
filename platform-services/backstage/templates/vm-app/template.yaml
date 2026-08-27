@@ -166,6 +166,18 @@ spec:
             cloud-init. Override with your own image; for an http(s) cloud-image URL,
             edit the DataVolume source in .devops/chart/base/virtualmachine.yaml.
           default: docker://quay.io/containerdisks/fedora:40
+        # ⚠ THESE MAXIMA ARE DERIVED FROM THE VM TIER'S CEILING, NOT CHOSEN.
+        # They must stay <= what tenants/_template-vm/vm/namespaces/vm-prod.yaml's
+        # ResourceQuota and LimitRange will actually admit, with KubeVirt's own
+        # overhead counted. hack/lint-vm-tier-bounds.py enforces that and fails CI
+        # if the two drift apart.
+        #
+        # This is not theoretical: on 2026-08-27 this form advertised maximum 16 GiB
+        # against a tier whose ceiling was 6 GiB. paper-papas was scaffolded at
+        # 8 GiB — accepted by the form, merged, synced, disk imported — and the
+        # virt-launcher pod was then refused outright. The form is the last place a
+        # student can be told "no" cheaply; after this point the failure costs a
+        # provision cycle.
         cpuCores:
           title: vCPUs
           type: integer
@@ -174,6 +186,8 @@ spec:
             like a container). Sized for a real app; keep modest on the shared cluster.
           default: 2
           minimum: 1
+          # 8 + KubeVirt overhead + a transient CDI importer fits the tier's
+          # requests.cpu/limits.cpu of 12 with room to spare.
           maximum: 8
         memoryGi:
           title: Memory (GiB)
@@ -183,7 +197,13 @@ spec:
             not overcommit; the VM-tier quota caps this). Sized for a real app.
           default: 4
           minimum: 1
-          maximum: 16
+          # LOWERED from 16, which the tier could never have run. The tier ceiling is
+          # 12Gi; a guest costs guest + ~340Mi KubeVirt overhead, and a transient CDI
+          # importer (~600Mi) coexists during the disk import, so the largest guest
+          # that actually fits is ~11Gi. Set to 10 to keep a GiB of slack, on the
+          # same principle as the quota itself: a bound that only just fits is one
+          # overhead change away from breaking every VM at once.
+          maximum: 10
         diskGi:
           title: Root disk (GiB)
           type: integer
