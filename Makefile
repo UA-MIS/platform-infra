@@ -748,8 +748,36 @@ vault-ca-manifest: ## (ESO+Vault) Emit the per-tenant `vault-ca` ConfigMap (publ
 .PHONY: validate
 validate: ## Static validation of tenant manifests (kubeconform + RBAC-name + stray-file + argocd-rbac-project + claim-uniqueness + dex-board-client guards)
 	@command -v kubeconform >/dev/null || { echo "ERROR: kubeconform not found (install to ~/.local/bin)."; exit 1; }
+	@# ---- preflight: assert every guard can actually READ its own subject ------
+	@# Each guard below reduces to a `grep`/`find`/glob over a path. If that path
+	@# is missing or renamed, every one of them finds nothing — and "found nothing"
+	@# is indistinguishable from "nothing is wrong" unless someone checks. That is
+	@# a third failure mode, distinct from the happy path and the defect path: not
+	@# "the input is clean" and not "the input is bad", but "I could not read the
+	@# input at all". It fails OPEN by default, which is the worst direction for a
+	@# security guard, so it is asserted here once rather than six times.
+	@fail=0; for p in tenants tenants/_claims tenants/_boards \
+	    platform-services/argocd-config/argocd-rbac-cm.yaml \
+	    platform-services/dex/configmap.yaml \
+	    platform-services/dex/gen-board-clients.py \
+	    hack/lint-argocd-rbac-projects.py; do \
+	    [ -e "$$p" ] || { echo "FAIL: guard input missing: $$p"; fail=1; }; \
+	  done; \
+	  if [ "$$fail" = "1" ]; then \
+	    echo "  A guard cannot pass over a subject it cannot find. If a path moved,"; \
+	    echo "  update this preflight and the guard that reads it — do not let the"; \
+	    echo "  guard silently check nothing."; exit 1; fi
 	@echo "==> [1/6] kubeconform -strict on tenant namespace bundles..."
-	@kubeconform -strict -summary -kubernetes-version 1.31.5 tenants/*/namespaces/*.yaml
+	@# The file list is built with `find`, NOT the glob `tenants/*/namespaces/*.yaml`
+	@# this used to use. That glob is one directory too shallow: it matched only
+	@# tenants/_template/namespaces/*.yaml and never saw the VM tier's
+	@# tenants/*/vm/namespaces/*.yaml, so the only REAL tenant namespace manifest in
+	@# the repo was never validated — `+ notAField: boom` in it passed cleanly.
+	@files=$$(find tenants -path '*/namespaces/*.yaml' -type f | sort); \
+	  [ -n "$$files" ] || { echo "FAIL: no tenant namespace manifests found under tenants/ —"; \
+	    echo "      guard [1/6] had nothing to validate, which is not a pass."; exit 1; }; \
+	  echo "$$files" | sed 's/^/      + /'; \
+	  kubeconform -strict -summary -kubernetes-version 1.31.5 $$files
 	@echo "==> [2/6] RBAC-name guard: every Role/RoleBinding name must be 'team-developer'..."
 	@bad=$$(grep -rnE '^\s+name:\s+team-[a-z0-9-]+eloper\b' tenants/ | grep -v 'team-developer' || true); \
 	  if [ -n "$$bad" ]; then echo "FAIL: malformed RBAC names (SEC-001 regression):"; echo "$$bad"; exit 1; fi; \
@@ -759,11 +787,15 @@ validate: ## Static validation of tenant manifests (kubeconform + RBAC-name + st
 	  if [ -n "$$stray" ]; then echo "FAIL: non-manifest files in tenants/ (would break recurse sync):"; echo "$$stray"; exit 1; fi; \
 	  echo "  OK — no stray non-manifest files"
 	@echo "==> [4/6] argocd-rbac project guard: every project token in a 'p, role:...' policy must be an existing AppProject (SEC-006)..."
-	@projects="platform $$(grep -rhA2 '^kind: AppProject' tenants/*/appproject.yaml bootstrap/platform-appproject.yaml 2>/dev/null | grep -E '^\s+name:' | awk '{print $$2}' | sort -u | tr '\n' ' ')"; \
-	  refs=$$(grep -hE '^\s*p,\s*role:' platform-services/argocd-config/argocd-rbac-cm.yaml | sed -E 's#.*,\s*([a-z0-9-]+)/[^,]*,\s*(allow|deny)\s*$$#\1#' | grep -vE ',|allow|deny' | sort -u); \
-	  fail=0; for r in $$refs; do echo " $$projects " | grep -q " $$r " || { echo "FAIL: argocd-rbac policy references project '$$r' with no matching AppProject (inert role, SEC-006)"; fail=1; }; done; \
-	  if [ "$$fail" = "1" ]; then echo "  known AppProjects: $$projects"; exit 1; fi; \
-	  echo "  OK — all argocd-rbac policy projects ($$refs) resolve to AppProjects"
+	@# Was a `grep | sed | grep -v` pipeline. It parsed only the `<project>/<app>`
+	@# object form with a `[a-z0-9-]+` token and DISCARDED everything else, so an
+	@# underscore or uppercase letter in a slug — or the bare-project object form
+	@# `p, role:x, projects, get, x, allow`, which is one of the very lines this
+	@# guard was written to catch — vanished silently and the step reported OK.
+	@# Unparseable input was indistinguishable from absent input, which is the
+	@# SEC-006 defect wearing the guard's own uniform. Now parsed per line, in a
+	@# script that can be read and tested. See its docstring.
+	@python3 hack/lint-argocd-rbac-projects.py
 	@echo "==> [5/6] claim-uniqueness guard: at most ONE CapstoneTenant claim per team+semester..."
 	@dups=$$(for f in tenants/_claims/*.yaml; do \
 	    [ -f "$$f" ] || continue; \

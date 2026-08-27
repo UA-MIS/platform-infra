@@ -7,9 +7,21 @@
 # URIs, so the board's callback must also be listed in
 # platform-services/dex/configmap.yaml.
 #
-# Because the wizard's commit bypasses PRs, `make validate` (which runs on PRs)
-# would not notice the gap until somebody opened an unrelated PR — possibly days
-# later. And the failure is the quiet kind: the board deploys, goes Ready, serves
+# Because the wizard's commit bypasses PRs, a PR-only gate would not notice the
+# gap until somebody opened an unrelated PR — possibly days later.
+#
+# ⚠ CORRECTION (board #186, 2026-08-27): this header used to say "`make validate`
+#   (which runs on PRs)". It did not run anywhere. `make validate` occurred in NO
+#   workflow in this repo; the parenthetical was the only mention of it under
+#   .github/, and it asserted an enforcement that did not exist.
+#   `.github/workflows/validate.yaml` now runs it on pull_request AND on push to
+#   main, so guard [6/6] is CI-enforced on the wizard's direct-to-main path too.
+#   This workflow is still the better instrument for that path and stays: a red X
+#   tells you a board is broken, whereas this opens the fix pre-written, and its
+#   10-minute schedule also catches a hand-edit of the generated region that no
+#   commit-triggered gate would see.
+#
+# The failure is the quiet kind: the board deploys, goes Ready, serves
 # its landing page, and only dies when a student clicks "Sign in", with an opaque
 # OIDC error. A board that looks healthy and cannot be logged into is worse than
 # one that never came up.

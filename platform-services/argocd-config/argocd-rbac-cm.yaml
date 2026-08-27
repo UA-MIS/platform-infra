@@ -29,7 +29,9 @@
 # Bindings:
 #   - `UA-MIS:labmx` GitHub Team         -> role:admin (platform/lab admins)
 #   - any authenticated UA-MIS member    -> role:readonly (policy.default baseline)
-#   - `UA-MIS:<project-slug>` GitHub Team -> role:<project-slug> (scoped to AppProject)
+#   - `UA-MIS:<project-slug>` GitHub Team -> that project's AppProject `developer`
+#     role. Declared in the TENANT's AppProject (rendered by the Crossplane
+#     composition), NOT in this file — see the policy.csv note below.
 #
 # SEMESTER PARENT = grouping only, NO role (deliberate). Binding a semester-wide
 # role would let any student in the cohort see/sync every SIBLING project's apps,
@@ -62,21 +64,29 @@ data:
     # --- Platform/lab admins: the `labmx` GitHub Team -> built-in admin ---
     g, UA-MIS:labmx, role:admin
 
-    # --- Per-PROJECT scoped role. Project = a nested GitHub team; its slug is the
-    #     canonical `<name>` = AppProject name (D-026). Scoped to the team's OWN
-    #     AppProject + apps (<name>/<name>-*) only. `sample` below is the EXAMPLE/
-    #     template instance (binds when a `sample`-slug project team exists; inert +
-    #     harmless otherwise). Instantiate one block + binding per onboarded project,
-    #     using the project's child-team slug (e.g. walmart-s26, davita-s26). ---
-    # Mirrors the team AppProject `developer` role's least-privilege stance
-    # (tenants/team-sample/appproject.yaml): get + sync ONLY — explicitly NO
-    # action/*, delete, or override (SEC consistency note on PR #3). logs/get and
-    # projects/get are read-only adjuncts ArgoCD needs for the UI to function.
-    p, role:sample, applications, get, sample/*, allow
-    p, role:sample, applications, sync, sample/*, allow
-    p, role:sample, logs, get, sample/*, allow
-    p, role:sample, projects, get, sample, allow
-    g, UA-MIS:sample, role:sample
+    # --- Per-PROJECT scoped roles are NOT declared here (SEC-010, D-026) ---
+    # This file used to carry a `role:sample` template block plus its
+    # `g, UA-MIS:sample` binding, as the worked EXAMPLE of a per-project grant,
+    # to be copied once per onboarded team. That never happened: onboarding was
+    # automated instead, and the per-project `developer` role is now RENDERED
+    # into each tenant's own AppProject by the Crossplane composition
+    # (platform-services/crossplane/apis/composition.yaml -> spec.roles), keyed
+    # on the CapstoneTenant claim. There is no hand-maintained per-project block
+    # left to copy, and there never will be.
+    #
+    # The `sample` block was therefore dead scaffolding, and — because no
+    # `sample` AppProject exists in this repo — it was ALSO the exact defect
+    # SEC-006 is about: a policy naming a project that does not exist, which
+    # ArgoCD accepts silently and enforces as nothing. `make validate` [4/6]
+    # is the render-time guard SEC-006 asked for, and it had been correctly
+    # failing on clean `main` on this very block. SEC-010 called for deleting
+    # it once real teams were onboarded ("REPLACE the sample block rather than
+    # leaving both"); real teams are onboarded, so it is deleted here.
+    #
+    # DO NOT re-add a per-project `p, role:<team>, ...` block to this file. If a
+    # team needs a scoped grant, it belongs in that team's AppProject `roles:`
+    # (rendered by the composition), where the guard can see it and where it
+    # travels with the tenant's lifecycle.
 
   # Treat the `groups` scope as the source of role bindings.
   scopes: '[groups]'
