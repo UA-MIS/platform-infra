@@ -261,6 +261,47 @@ not cattle. To re-run, delete the VirtualMachine and let ArgoCD recreate it. Bud
 for the re-import: the namespace transiently holds four PVCs (~85Gi), which is why
 the quota is 120Gi and not 80Gi.
 
+### The fourth load-bearing line: declare BOTH requests and limits
+
+A chart that declares `requests.memory` and nothing else produces a VM that **never
+starts**, and inflates its own ask while doing it. With no memory limit in the spec,
+KubeVirt derives the pod limit itself — `WithAutoMemoryLimits` multiplies
+(guest + overhead) by a ratio that defaults to **2**:
+
+| chart declares | pod asks the namespace for |
+|---|---|
+| `requests.memory: 8Gi` only | **17064Mi** — (8Gi + ~340Mi) × 2 |
+| requests **and** limits | **8532Mi** — 8Gi + ~340Mi |
+
+Declaring the limit **halves** the ask. The ratio is overridable per namespace via the
+label `alpha.kubevirt.io/auto-memory-limits-ratio` (must be ≥ 1.0), but the right fix
+is the manifest, not the label.
+
+The skeleton now emits all four values. If you hand-build a chart, do the same:
+
+```yaml
+        resources:
+          requests: { memory: <N>Gi, cpu: "<C>" }
+          limits:   { memory: <N>Gi, cpu: "<C>" }
+```
+
+**How much does the guest actually need?** Measured, not estimated — the lab app
+(Node 22 + MariaDB + nginx + two Next.js 15 apps) under a cgroup v2 cap:
+
+| Phase | `memory.peak` |
+|---|---|
+| after `pnpm install` | **2203 MiB** |
+| after both Next builds (serial) | **2203 MiB** — not exceeded |
+
+The peak is **install**, not build. So 8Gi is comfortable and even 4Gi would build.
+Note the measurement is native x86-64: TCG emulation changes build **time**
+dramatically, not heap.
+
+**And the ceiling has to agree with the form.** `hack/lint-vm-tier-bounds.py`
+(`make validate` gate [9/9]) fails if the wizard's maxima exceed what the tier's quota
+and LimitRange will admit. It exists because those two documents disagreed silently
+and the disagreement only surfaced as a rejected pod ten minutes into a provision.
+
 ---
 
 ## 6. The failure-mode table — read this before debugging
@@ -278,6 +319,109 @@ cheapest-first:
 
 A 404 is the *good* failure: it proves DNS, TLS and the tunnel are all working and
 only the route is missing.
+
+### A 404 does NOT prove the route is missing, and `cloudflared` does not either
+
+Measured on 2026-08-27 against a hostname the owner had **just added a tunnel route
+for by hand**, alongside a control hostname invented on the spot that certainly had
+no route:
+
+| Probe | `<team>-ssh.uamishub.com` (route added) | `zz-definitely-no-route-ssh.uamishub.com` |
+|---|---|---|
+| `curl https://…/` | HTTP/2 404, `content-length: 19`, `404 page not found` | **byte-identical** |
+| `cloudflared access ssh --hostname …` | `websocket: bad handshake` | **identical** |
+
+**Neither probe discriminates.** Do not conclude "the route is missing" from a 404,
+and do not conclude anything from `bad handshake` — that error has several
+documented causes and route-absence is not reliably one of them.
+
+The reason `cloudflared access ssh` cannot work on a route alone: it does not open a
+raw TCP socket to the edge. It fetches an Access token and upgrades to a websocket on
+an **Access-provided** endpoint. With no Access application on the hostname there is
+no endpoint to upgrade against, so the edge answers as ordinary HTTP and the client
+reports `bad handshake` whether or not an `ssh://` route exists behind it.
+
+**Practical consequence: a hand-added tunnel route is necessary but not sufficient.
+The Access application is required for the transport to exist at all.** This is why
+`cf-vm-access` provisions both together and why hand-adding one half does not
+produce a testable state.
+
+**The probe that does discriminate** is from inside the cluster, and it splits
+guest-side from Cloudflare-side in one shot:
+
+```bash
+# from a pod in the `cloudflared` namespace (the netpol admits it on :22)
+ssh -i <break-glass-key> ubuntu@<app>-ssh.<team>-vm-prod.svc.cluster.local
+```
+
+- succeeds, external still fails → guest and netpol are proven; the fault is
+  Cloudflare-side (route and/or Access app)
+- fails → the fault is in the guest; stop looking at Cloudflare
+
+---
+
+## 6a. Boot-time traps — all three seen on the first wizard-scaffolded VM
+
+### The stale VMI: fixing git is not enough
+
+A `VirtualMachineInstance` spec is **immutable**. Correcting the chart and letting
+ArgoCD sync updates the `VirtualMachine` template but leaves any in-flight VMI on the
+old spec forever. KubeVirt says so and then waits:
+
+```
+RestartRequired=True   "a non-live-updatable field was changed in the template spec"
+Synchronized=False     FailedCreate ... limit is 17064Mi
+```
+
+The cluster cannot converge on its own. Delete the VMI and the VM controller recreates
+it from the corrected template:
+
+```bash
+kubectl -n <team>-vm-prod delete vmi <app>
+```
+
+Safe when the guest has never booted: it touches neither the DataVolume nor the PVC
+(check `DataVolumesReady=True` first), so it does **not** re-run the disk import. On a
+guest that HAS booted this is a cold restart — student state on the disk survives,
+anything in RAM does not.
+
+### `ClaimMisbound` during import is benign
+
+```
+ClaimMisbound: Two claims are bound to the same volume, this one is bound incorrectly
+  <app>-rootdisk  and  prime-<uuid>
+```
+
+This is CDI's **volume-populator handover**, not corruption. The importer writes into a
+`prime-` PVC and CDI then hands the underlying PV to the real PVC — the annotation is
+literally `cdi.kubevirt.io/allowClaimAdoption: true`, next to `storage.usePopulator:
+true` and `storage.populator.pvcPrime`. Both claims transiently reference one PV and
+the PV controller complains about whichever does not match `pv.spec.claimRef`.
+
+Confirm it cleared rather than assuming:
+
+```bash
+kubectl -n <team>-vm-prod get pvc            # zero prime- PVCs should remain
+kubectl get pv <pv> -o jsonpath='{.spec.claimRef.namespace}/{.spec.claimRef.name}'
+```
+
+Worth knowing separately: these PVs are `persistentVolumeReclaimPolicy: Delete`. The
+semester's work goes away with the PVC.
+
+### ArgoCD `Suspended` is not terminal
+
+ArgoCD's built-in KubeVirt health check reads the VM's `printableStatus`:
+
+| VM status | ArgoCD health |
+|---|---|
+| Stopped / Halted / Paused | **Suspended** |
+| Provisioning / Starting | **Progressing** |
+| Running + Ready | **Healthy** |
+
+A running VM tenant genuinely reaches `Synced / Healthy` — the reference tenant does.
+So `Suspended` means "the VM is not running", which for a `runStrategy: Always` VM is
+transient. Persistent `Suspended` is worth investigating; seeing it during a provision
+is not.
 
 ---
 
