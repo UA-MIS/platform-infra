@@ -27,10 +27,10 @@ $EDITOR backend/main.go frontend/main.go
 ( cd backend && go test ./... ) && ( cd frontend && go test ./... )   # keep tests green
 
 # 2. BUILD + PUSH — builds EVERY component (one image each); tag from promotion.yaml
-sh .devops/ci/build-and-push.sh dev      # prints IMAGE=... per component, then TAG/ENV
+bash .devops/ci/build-and-push.sh dev      # prints IMAGE=... per component, then TAG/ENV
 
 # 3. BUMP — write the new tag into ALL components in the dev overlay + commit (the signal)
-COMMIT=1 sh .devops/ci/bump-image.sh dev <tag>
+COMMIT=1 bash .devops/ci/bump-image.sh dev <tag>
 
 # 4. ArgoCD SYNCS — the dev Application sees the changed overlay and reconciles. Watch:
 argocd app get <app>-dev                 # or the ArgoCD UI
@@ -63,13 +63,13 @@ Examples (every component is built/bumped together — one tag for the whole rep
 # NORMAL PATH — you do not run these by hand. `git tag v1.4.0 && git push --tags`
 # makes CI build :1.4.0 and its `bump-staging` job write staging's overlay for you.
 # These are the equivalent local/manual commands (recovery, or a pre-#210 repo):
-SEMVER=1.4.0 sh .devops/ci/build-and-push.sh staging   # build+push each component :1.4.0
-COMMIT=1 sh .devops/ci/bump-image.sh staging 1.4.0     # staging auto-syncs
+SEMVER=1.4.0 bash .devops/ci/build-and-push.sh staging   # build+push each component :1.4.0
+COMMIT=1 bash .devops/ci/bump-image.sh staging 1.4.0     # staging auto-syncs
 
 # PROMOTE staging -> prod: no fresh build, no new tag — re-point prod at
 # whatever tag is CURRENTLY LIVE in staging's overlay. In practice this runs as
 # the promote-to-prod GitHub Action (workflow_dispatch), not by hand:
-COMMIT=1 sh .devops/ci/promote.sh staging prod         # reads staging's live tag, writes+commits it to prod
+COMMIT=1 bash .devops/ci/promote.sh staging prod         # reads staging's live tag, writes+commits it to prod
 ```
 
 ## How the seam works (for reviewers)
@@ -178,7 +178,7 @@ human promotes it to prod — a push never auto-deploys prod.
 > 2026-08-26. A repo scaffolded before then has its own (copied) workflow with
 > only four jobs, so tagging will do nothing there until the job is copied in —
 > until then, advance staging by hand:
-> `COMMIT=1 sh .devops/ci/bump-image.sh staging <X.Y.Z> && git push`.
+> `COMMIT=1 bash .devops/ci/bump-image.sh staging <X.Y.Z> && git push`.
 
 The trigger→env→tag mapping is computed by
 `.devops/ci/resolve-image.sh` (reads `promotion.yaml`) and unit-tested by

@@ -245,7 +245,25 @@ jobs:
           # matches what the preview ApplicationSet pulls. Empty for push/tag builds
           # (resolver falls back to GITHUB_SHA).
           SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
         run: |
+          # `set -o pipefail` IS LOAD-BEARING, DO NOT DROP IT. A bare `run:` block is
+          # executed by the runner as `bash --noprofile --norc -e {0}` — errexit but
+          # NOT pipefail — so in `resolve-image.sh | tee`, only tee's exit status
+          # reaches the runner and tee always succeeds. resolve-image.sh has EIGHT
+          # distinct failure exits (missing promotion.yaml, unmapped ref, unsupported
+          # event, missing env key, non-semver tag, ...); before this line every one of
+          # them produced a GREEN step with empty outputs, and the build then proceeded
+          # with an empty ENV/TAG/REGISTRY. This step decides which environment is being
+          # built and what tag the image gets — it must be able to fail. (#189)
+          #
+          # `shell: bash` above is the other half and is NOT redundant. Left to itself the
+          # runner picks `sh -e {0}` for a container job (observed in run 33027282352), and
+          # `set -o pipefail` then works only because Debian trixie's dash happens to
+          # implement it — the SAME "works by accident of one base image's shell" trap this
+          # change exists to remove. `shell: bash` pins the interpreter to
+          # `bash --noprofile --norc -eo pipefail {0}` whatever /bin/sh turns out to be.
+          set -euo pipefail
           sh .devops/ci/resolve-image.sh | tee -a "$GITHUB_OUTPUT"
 
       - name: Discover component matrix (resolve-components.sh)
@@ -391,20 +409,35 @@ jobs:
         # Digest-pinned (SEC). python:3-slim. Installs requirements(.txt|-dev.txt) + the app
         # (if pyproject) + pytest/ruff over :443. ruff is advisory; pytest is BLOCKING. A
         # pytest exit 5 (no tests collected) degrades to a notice, not a failure.
+        #
+        # `set -eu`, NOT `set -u` (#189). Without errexit a failing `pip install -r
+        # requirements.txt` did not stop the script: pytest then collected nothing, exited
+        # 5, and the `rc=0` rewrite below turned that into a PASS. A repo with an
+        # unresolvable dependency and a repo with genuinely no tests were the same green
+        # tick. With errexit the install failure stops here, so reaching the exit-5 branch
+        # now PROVES every install above succeeded — which is what makes the surviving
+        # no-tests-is-fine allowance honest rather than a blanket amnesty.
+        #
+        # The `[ -f x ] && cmd;` idiom CANNOT survive errexit — a missing file makes the
+        # whole && list return 1 and kills the script — which is exactly why the original
+        # could only use `set -u`. Each one is therefore rewritten as a real `if` block.
+        # Do not fold them back into && lists.
         uses: docker://python@sha256:63a4c7f612a00f92042cbdcc7cdc6a306f38485af0a200b9c89de7d9b1607d15 # 3-slim
         with:
           entrypoint: /bin/sh
           args: >-
-            -c 'set -u;
+            -c 'set -eu;
             cd "$GITHUB_WORKSPACE/${{ matrix.context }}" || exit 1;
             PIP="python -m pip install --quiet --root-user-action=ignore";
-            [ -f requirements.txt ] && $PIP -r requirements.txt;
-            [ -f requirements-dev.txt ] && $PIP -r requirements-dev.txt;
-            [ -f pyproject.toml ] && $PIP . || true;
-            $PIP pytest ruff;
-            echo "==> ruff (advisory)"; ruff check . || true;
-            echo "==> pytest"; pytest -q; rc=$?;
-            if [ "$rc" = "5" ]; then echo "::notice::pytest collected no tests — skipped"; rc=0; fi;
+            if [ -f requirements.txt ]; then echo "==> pip install -r requirements.txt"; $PIP -r requirements.txt; fi;
+            if [ -f requirements-dev.txt ]; then echo "==> pip install -r requirements-dev.txt"; $PIP -r requirements-dev.txt; fi;
+            if [ -f pyproject.toml ]; then echo "==> pip install .";
+            $PIP . || echo "::warning::pip install . failed — a pyproject.toml that only carries tool config (no [build-system]) is not installable, so this stays non-blocking; a real packaging error will surface at image build"; fi;
+            echo "==> pip install pytest ruff"; $PIP pytest ruff;
+            echo "==> ruff (advisory)";
+            ruff check . || echo "::warning::ruff reported findings — ADVISORY ONLY, this does not fail the build and is not test coverage";
+            echo "==> pytest"; set +e; pytest -q; rc=$?; set -e;
+            if [ "$rc" = "5" ]; then echo "::notice::pytest collected no tests — nothing to run. Every dependency install above SUCCEEDED (errexit would have stopped this step otherwise), so this is a repo with no tests, not a broken environment."; rc=0; fi;
             exit $rc'
 
       - name: Java (Maven) — compile + test
@@ -446,7 +479,8 @@ jobs:
           args: >-
             -c 'set -eu;
             cd "$GITHUB_WORKSPACE/${{ matrix.context }}";
-            echo "==> cargo fmt --check (advisory)"; cargo fmt --check || true;
+            echo "==> cargo fmt --check (advisory)";
+            cargo fmt --check || echo "::warning::cargo fmt --check reported findings — ADVISORY ONLY, this does not fail the build and is not test coverage";
             echo "==> cargo test (compile + tests)";
             if [ -f Cargo.lock ]; then cargo test --locked; else cargo test; fi'
 
@@ -455,15 +489,34 @@ jobs:
         # Digest-pinned (SEC). ruby:3.3. BEST-EFFORT: a bundle install failure (native-ext
         # build deps / DB client headers the stock image lacks, e.g. mysql2) degrades to a
         # warning-skip; a real test failure still BLOCKS. Harden the image to make strict.
+        #
+        # #189: this install could not fail, so a TRANSIENT blip on the runner's :443-only
+        # egress permanently skipped a student's entire suite and reported success. Two
+        # changes, neither of which breaks a legitimately-unbuildable Gemfile:
+        #   1. RETRY 3x with backoff. That is the whole fix for the transient case — the
+        #      failure mode actually named in the finding. A network wobble no longer
+        #      silently deletes the test gate.
+        #   2. `vars.CI_STRICT_TOOLCHAIN == '1'` promotes a PERSISTENT install failure from
+        #      warning-skip to a hard failure, per-repo, opt-in.
+        # The default stays permissive DELIBERATELY: mysql2/pg/nokogiri need build deps the
+        # stock ruby image does not ship, and hard-failing would break every Rails tenant
+        # for a toolchain-image gap that is not the student's bug. The real fix is a
+        # hardened toolchain image; until then this is a KNOWN, LOUD hole, not a silent one.
         uses: docker://ruby@sha256:8d62d05359e370f55c2710645c976d7f04c9f5811378c7acc340ff416986da1e # 3.3
         with:
           entrypoint: /bin/sh
           args: >-
             -c 'set -eu;
             cd "$GITHUB_WORKSPACE/${{ matrix.context }}";
-            echo "==> bundle install";
-            if ! bundle install --quiet; then
-              echo "::warning::bundle install failed (native-ext toolchain / DB headers not in the stock ruby image) — skipping ruby checks; harden the toolchain image to enforce"; exit 0; fi;
+            echo "==> bundle install (up to 3 attempts)";
+            ok=0; n=1;
+            while [ "$n" -le 3 ]; do
+            if bundle install --quiet; then ok=1; break; fi;
+            echo "::warning::bundle install attempt $n of 3 failed"; n=$((n+1)); sleep $((n*5)); done;
+            if [ "$ok" != "1" ]; then
+            if [ "${{ vars.CI_STRICT_TOOLCHAIN }}" = "1" ]; then
+            echo "::error::bundle install failed 3 times and CI_STRICT_TOOLCHAIN=1 — failing the checks gate"; exit 1; fi;
+            echo "::warning::bundle install failed 3 times (native-ext toolchain / DB headers not in the stock ruby image) — RUBY TESTS DID NOT RUN for this component. This step is reporting success WITHOUT having tested anything. Harden the toolchain image, or set repository variable CI_STRICT_TOOLCHAIN=1 to make this a hard failure."; exit 0; fi;
             if [ -f bin/rails ]; then echo "==> bin/rails test"; bin/rails test;
             elif bundle exec rake -T 2>/dev/null | grep -q "rake test"; then echo "==> rake test"; bundle exec rake test;
             elif [ -d spec ]; then echo "==> rspec"; bundle exec rspec;
@@ -474,15 +527,28 @@ jobs:
         # Digest-pinned (SEC). composer:2. BEST-EFFORT: a composer install failure (PHP
         # extensions the runtime Dockerfile provides but a stock image lacks) degrades to a
         # warning-skip; a real test failure still BLOCKS. Harden the image to make strict.
+        #
+        # #189: same defect and same fix as the Ruby step above — retry 3x so a transient
+        # :443 egress blip stops silently deleting the test gate, and honour the opt-in
+        # `vars.CI_STRICT_TOOLCHAIN == '1'` to turn a persistent failure hard. Default
+        # stays permissive for the same reason (missing PHP extensions are a toolchain-image
+        # gap, not the student's bug) and the skip message now says outright that nothing
+        # was tested.
         uses: docker://composer@sha256:5946476338742b200bb9ff88f8be56275ddae4b3949c72305cb0dbf10cfcb760 # 2
         with:
           entrypoint: /bin/sh
           args: >-
             -c 'set -eu;
             cd "$GITHUB_WORKSPACE/${{ matrix.context }}";
-            echo "==> composer install";
-            if ! composer install --no-interaction --no-progress --prefer-dist --ignore-platform-reqs; then
-              echo "::warning::composer install failed (PHP extensions not in the stock composer image) — skipping php checks; harden the toolchain image to enforce"; exit 0; fi;
+            echo "==> composer install (up to 3 attempts)";
+            ok=0; n=1;
+            while [ "$n" -le 3 ]; do
+            if composer install --no-interaction --no-progress --prefer-dist --ignore-platform-reqs; then ok=1; break; fi;
+            echo "::warning::composer install attempt $n of 3 failed"; n=$((n+1)); sleep $((n*5)); done;
+            if [ "$ok" != "1" ]; then
+            if [ "${{ vars.CI_STRICT_TOOLCHAIN }}" = "1" ]; then
+            echo "::error::composer install failed 3 times and CI_STRICT_TOOLCHAIN=1 — failing the checks gate"; exit 1; fi;
+            echo "::warning::composer install failed 3 times (PHP extensions not in the stock composer image) — PHP TESTS DID NOT RUN for this component. This step is reporting success WITHOUT having tested anything. Harden the toolchain image, or set repository variable CI_STRICT_TOOLCHAIN=1 to make this a hard failure."; exit 0; fi;
             if composer run-script --list 2>/dev/null | grep -qE "^[[:space:]]+test"; then echo "==> composer test"; composer test;
             elif [ -x vendor/bin/phpunit ]; then echo "==> phpunit"; vendor/bin/phpunit;
             else echo "::notice::no composer test script / phpunit — skipped"; fi'
@@ -739,7 +805,7 @@ jobs:
           # (COMMIT=1) rewrites the dev overlay newTag(s) + git-commits with a
           # "[skip ci]" message (so this push does NOT re-trigger build), and marks
           # the workspace a safe.directory (CI checks out as a different uid).
-          COMMIT=1 sh .devops/ci/bump-image.sh dev "${TAG}"
+          COMMIT=1 bash .devops/ci/bump-image.sh dev "${TAG}"
           git push origin HEAD:main
 
   # ============================================================================
@@ -820,5 +886,5 @@ jobs:
           # CONSUME prepare's TAG (the bare semver resolve-image.sh stripped from the
           # pushed vX.Y.Z tag; no recompute). bump-image.sh (COMMIT=1) rewrites the
           # staging overlay newTag(s) + git-commits with a "[skip ci]" message.
-          COMMIT=1 sh .devops/ci/bump-image.sh staging "${TAG}"
+          COMMIT=1 bash .devops/ci/bump-image.sh staging "${TAG}"
           git push origin HEAD:main
