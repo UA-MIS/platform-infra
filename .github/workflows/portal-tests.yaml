@@ -154,14 +154,24 @@ jobs:
         # `node --test` (no Backstage toolchain needed), so the load-bearing routing logic
         # is proven offline." node --test exits non-zero on any failing subtest.
         shell: bash
+        #
+        # `--test-reporter=tap` IS REQUIRED, do not drop it. node's DEFAULT reporter is
+        # version-dependent: node 22 emits TAP (`# pass 26`), node 24 emits `spec`
+        # (`ℹ pass 26`). The first run of this workflow failed for exactly that reason —
+        # all 26 tests PASSED and the summary parser read 0, because it was written against
+        # the local node 22 output and the job container runs node 24. Pinning the reporter
+        # pins the format, instead of parsing whatever this node version happens to print.
         run: |
           set -euo pipefail
-          out="$(node --test plugins/scaffolder-backend-module-capstone/src/actions/composePlan.test.cjs 2>&1)"
+          out="$(node --test --test-reporter=tap plugins/scaffolder-backend-module-capstone/src/actions/composePlan.test.cjs 2>&1)"
           echo "${out}"
-          # node --test prints a TAP summary; assert a non-zero pass count for the same
-          # reason as the jest step -- a runner that finds no tests must not read as success.
+          # Assert a non-zero pass count for the same reason as the jest step: a runner that
+          # finds no tests must not read as success.
           pass="$(printf '%s' "${out}" | sed -n 's/^# pass \([0-9][0-9]*\)$/\1/p' | head -n1)"
-          : "${pass:=0}"
+          if [ -z "${pass}" ]; then
+            echo "::error::could not find a '# pass <n>' line in the TAP output above. node's reporter format changed under --test-reporter=tap, so this assertion can no longer read the result — fix the parser rather than removing the check. Refusing to report success from output I cannot parse."
+            exit 1
+          fi
           echo "node --test reported ${pass} passing test(s)"
           [ "${pass}" -ge 26 ] || {
             echo "::error::composePlan.test.cjs reported ${pass} passing tests, expected at least 26. Either coverage was deleted or node --test collected nothing — a runner that finds no tests must not report success."
