@@ -281,7 +281,9 @@ jobs:
           args: >-
             -c 'set -eu;
             cd "$GITHUB_WORKSPACE/${{ matrix.context }}";
-            if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then echo "==> npm ci (lockfile present)"; npm ci; else echo "==> npm install (no lockfile — commit one to switch to fast reproducible npm ci)"; npm install; fi;
+            if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then echo "==> npm ci (lockfile present)";
+            npm ci || { echo "::error::package-lock.json is OUT OF SYNC with package.json, so npm ci stopped. That is what npm ci is for, and CI will not rewrite your lockfile for you. TO FIX — both steps, and the second is the one people miss: (1) run  npm install  locally, which updates package-lock.json; (2) COMMIT it —  git add package-lock.json && git commit -m \"sync lockfile\" && git push. If you run npm install but do not commit the lockfile, the next build fails with this same message."; exit 1; };
+            else echo "==> npm install (no lockfile — commit one to switch to fast reproducible npm ci)"; npm install; fi;
             echo "==> lint (if present)"; npm run lint --if-present;
             echo "==> typecheck (if present)"; npm run typecheck --if-present;
             if npm run | grep -qE "^[[:space:]]+test"; then echo "==> npm test"; npm test;
