@@ -1,0 +1,34 @@
+# cf-vm-access NON-SECRET config (ADR-038). These three values are NOT secrets
+# (two account/tunnel identifiers plus the public domain) — the SECRET is the
+# Cloudflare API token, sealed separately (see README.md). Until CF_ACCOUNT_ID and
+# CF_TUNNEL_ID are filled in, the reconciler no-ops (graceful, exit 0).
+#
+# WHERE EACH VALUE COMES FROM (operator, one-time):
+#   PLATFORM_DOMAIN — the zone the SSH hosts live in. `uamishub.com` (the APEX),
+#     because the requested host shape is `<team>-ssh.uamishub.com` — a single
+#     label under the apex, which the live `*.uamishub.com` certificate covers.
+#     Do NOT set this to `capstone.uamishub.com`: that would emit
+#     `<team>-ssh.capstone.uamishub.com`, still one label and still cert-valid,
+#     but not the host the course materials tell students to use.
+#   CF_ACCOUNT_ID   — Cloudflare account tag. Both this AND CF_TUNNEL_ID are already
+#     encoded in the EXISTING tunnel token: the `cloudflared-tunnel-token` Secret's
+#     `token` key is base64(JSON) = {"a":"<accountTag>","t":"<tunnelID>","s":"..."},
+#     so `a` = CF_ACCOUNT_ID and `t` = CF_TUNNEL_ID. Recover them with:
+#       kubectl -n cloudflared get secret cloudflared-tunnel-token \
+#         -o jsonpath='{.data.token}' | base64 -d | base64 -d
+#   CF_TUNNEL_ID    — the platform tunnel's UUID (`t` above, or Zero Trust →
+#     Networks → Tunnels → the platform tunnel → its ID). This is the SAME tunnel
+#     that carries every public platform hostname — see the safety notes in
+#     reconcile.py before letting anything write to it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cf-vm-access-config
+  namespace: cloudflared
+  labels:
+    platform.capstone/component: platform
+data:
+  PLATFORM_DOMAIN: "uamishub.com"
+  # OPERATOR: fill these two in (see header). Empty => reconciler no-ops.
+  CF_ACCOUNT_ID: ""
+  CF_TUNNEL_ID: ""
