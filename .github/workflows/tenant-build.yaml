@@ -180,11 +180,55 @@ jobs:
           # `git describe --tags` (Deploy Model A readable dev tag).
           fetch-depth: 0
 
-      - name: Install canonical CI scripts (central @v1 — overrides per-repo copies)
-        # Pulls resolve-image.sh / resolve-components.sh / bump-image.sh from platform-infra
-        # @v1 into .devops/ci, so CI runs the ONE central, component-aware script set — a
-        # script fix ships once (no per-repo drift). No cross-repo token (composite action).
-        uses: UA-MIS/platform-infra/.github/actions/tenant-ci-scripts@v1
+      - name: Assert this workflow knows its own commit (fail closed)
+        # `github.job_workflow_sha` is the commit of THIS reusable workflow file. It is
+        # the ONLY handle a called workflow has on its own version: `github.sha` is the
+        # CALLER's commit, and `uses:` cannot take an expression at all.
+        #
+        # If it is ever empty, the checkout below would silently fall back to the DEFAULT
+        # BRANCH — i.e. straight back to running scripts from a different commit than the
+        # pipeline running them, which is the exact skew this block exists to delete. An
+        # unknown script version is not a safe default, so assert rather than assume.
+        env:
+          CONTRACT_SHA: ${{ github.job_workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CONTRACT_SHA:-}" ]; then
+            echo "::error::github.job_workflow_sha is empty, so tenant-build.yaml cannot identify its own commit and cannot guarantee the canonical CI scripts match this pipeline. Refusing to run against an unknown script version."
+            exit 1
+          fi
+          echo "contract commit: ${CONTRACT_SHA}"
+
+      - name: Fetch the canonical CI scripts from THIS workflow's own commit
+        # WHY NOT `uses: .../tenant-ci-scripts@v1` (what this was): that `@v1` is written
+        # INSIDE the reusable workflow, so a caller pinned to `@main` — which the canary
+        # is — ran main's pipeline with v1's scripts. Silent version skew, and it made the
+        # canary test something other than what it appears to (ADR-059, design §3.4).
+        #
+        # WHY NOT the relative `./.github/actions/tenant-ci-scripts` the design suggests:
+        # a local `./` action inside a REUSABLE workflow resolves against the CALLER's
+        # workspace, not this repo. A tenant has no `.github/actions/`, so it 404s.
+        # WHY NOT `@${{ github.sha }}`: `uses:` forbids expressions outright. Both of the
+        # suggested fixes are unimplementable; this is the shape that works.
+        #
+        # WHY A SECOND CHECKOUT IS OK NOW: this action's own header rejected exactly this,
+        # because checking out another repo "needs a PAT/GitHub-App token". That was true
+        # when platform-infra was assumed private. It is PUBLIC (design §0.1), so the
+        # caller's own GITHUB_TOKEN reads it with no cross-repo secret at all — the same
+        # measured fact that unblocks the rest of ADR-059.
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: UA-MIS/platform-infra
+          ref: ${{ github.job_workflow_sha }}
+          path: .platform-contract
+          fetch-depth: 1
+          sparse-checkout: .github/actions/tenant-ci-scripts
+          # Do not leave a credential in this nested checkout; the tenant checkout at the
+          # workspace root owns the push credential for the bump jobs.
+          persist-credentials: false
+
+      - name: Install canonical CI scripts (version-matched to this pipeline)
+        uses: ./.platform-contract/.github/actions/tenant-ci-scripts
 
       - name: Ensure the `preview` label is on the PR (12h hard-death revival hook)
         # PREVIEW LIFECYCLE (operator contract): a preview env exists IFF its PR carries
@@ -810,10 +854,55 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Install canonical CI scripts (central @v1 — overrides per-repo copies)
-        # Same central bump-image.sh every tenant runs (the component-aware version that
-        # bumps EVERY overlay images[] entry; single-component = the one entry).
-        uses: UA-MIS/platform-infra/.github/actions/tenant-ci-scripts@v1
+      - name: Assert this workflow knows its own commit (fail closed)
+        # `github.job_workflow_sha` is the commit of THIS reusable workflow file. It is
+        # the ONLY handle a called workflow has on its own version: `github.sha` is the
+        # CALLER's commit, and `uses:` cannot take an expression at all.
+        #
+        # If it is ever empty, the checkout below would silently fall back to the DEFAULT
+        # BRANCH — i.e. straight back to running scripts from a different commit than the
+        # pipeline running them, which is the exact skew this block exists to delete. An
+        # unknown script version is not a safe default, so assert rather than assume.
+        env:
+          CONTRACT_SHA: ${{ github.job_workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CONTRACT_SHA:-}" ]; then
+            echo "::error::github.job_workflow_sha is empty, so tenant-build.yaml cannot identify its own commit and cannot guarantee the canonical CI scripts match this pipeline. Refusing to run against an unknown script version."
+            exit 1
+          fi
+          echo "contract commit: ${CONTRACT_SHA}"
+
+      - name: Fetch the canonical CI scripts from THIS workflow's own commit
+        # WHY NOT `uses: .../tenant-ci-scripts@v1` (what this was): that `@v1` is written
+        # INSIDE the reusable workflow, so a caller pinned to `@main` — which the canary
+        # is — ran main's pipeline with v1's scripts. Silent version skew, and it made the
+        # canary test something other than what it appears to (ADR-059, design §3.4).
+        #
+        # WHY NOT the relative `./.github/actions/tenant-ci-scripts` the design suggests:
+        # a local `./` action inside a REUSABLE workflow resolves against the CALLER's
+        # workspace, not this repo. A tenant has no `.github/actions/`, so it 404s.
+        # WHY NOT `@${{ github.sha }}`: `uses:` forbids expressions outright. Both of the
+        # suggested fixes are unimplementable; this is the shape that works.
+        #
+        # WHY A SECOND CHECKOUT IS OK NOW: this action's own header rejected exactly this,
+        # because checking out another repo "needs a PAT/GitHub-App token". That was true
+        # when platform-infra was assumed private. It is PUBLIC (design §0.1), so the
+        # caller's own GITHUB_TOKEN reads it with no cross-repo secret at all — the same
+        # measured fact that unblocks the rest of ADR-059.
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: UA-MIS/platform-infra
+          ref: ${{ github.job_workflow_sha }}
+          path: .platform-contract
+          fetch-depth: 1
+          sparse-checkout: .github/actions/tenant-ci-scripts
+          # Do not leave a credential in this nested checkout; the tenant checkout at the
+          # workspace root owns the push credential for the bump jobs.
+          persist-credentials: false
+
+      - name: Install canonical CI scripts (version-matched to this pipeline)
+        uses: ./.platform-contract/.github/actions/tenant-ci-scripts
 
       - name: Bump dev overlay newTag -> built tag + commit + push
         env:
@@ -892,10 +981,55 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Install canonical CI scripts (central @v1 — overrides per-repo copies)
-        # Same central bump-image.sh every tenant runs (the component-aware version that
-        # bumps EVERY overlay images[] entry; single-component = the one entry).
-        uses: UA-MIS/platform-infra/.github/actions/tenant-ci-scripts@v1
+      - name: Assert this workflow knows its own commit (fail closed)
+        # `github.job_workflow_sha` is the commit of THIS reusable workflow file. It is
+        # the ONLY handle a called workflow has on its own version: `github.sha` is the
+        # CALLER's commit, and `uses:` cannot take an expression at all.
+        #
+        # If it is ever empty, the checkout below would silently fall back to the DEFAULT
+        # BRANCH — i.e. straight back to running scripts from a different commit than the
+        # pipeline running them, which is the exact skew this block exists to delete. An
+        # unknown script version is not a safe default, so assert rather than assume.
+        env:
+          CONTRACT_SHA: ${{ github.job_workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CONTRACT_SHA:-}" ]; then
+            echo "::error::github.job_workflow_sha is empty, so tenant-build.yaml cannot identify its own commit and cannot guarantee the canonical CI scripts match this pipeline. Refusing to run against an unknown script version."
+            exit 1
+          fi
+          echo "contract commit: ${CONTRACT_SHA}"
+
+      - name: Fetch the canonical CI scripts from THIS workflow's own commit
+        # WHY NOT `uses: .../tenant-ci-scripts@v1` (what this was): that `@v1` is written
+        # INSIDE the reusable workflow, so a caller pinned to `@main` — which the canary
+        # is — ran main's pipeline with v1's scripts. Silent version skew, and it made the
+        # canary test something other than what it appears to (ADR-059, design §3.4).
+        #
+        # WHY NOT the relative `./.github/actions/tenant-ci-scripts` the design suggests:
+        # a local `./` action inside a REUSABLE workflow resolves against the CALLER's
+        # workspace, not this repo. A tenant has no `.github/actions/`, so it 404s.
+        # WHY NOT `@${{ github.sha }}`: `uses:` forbids expressions outright. Both of the
+        # suggested fixes are unimplementable; this is the shape that works.
+        #
+        # WHY A SECOND CHECKOUT IS OK NOW: this action's own header rejected exactly this,
+        # because checking out another repo "needs a PAT/GitHub-App token". That was true
+        # when platform-infra was assumed private. It is PUBLIC (design §0.1), so the
+        # caller's own GITHUB_TOKEN reads it with no cross-repo secret at all — the same
+        # measured fact that unblocks the rest of ADR-059.
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: UA-MIS/platform-infra
+          ref: ${{ github.job_workflow_sha }}
+          path: .platform-contract
+          fetch-depth: 1
+          sparse-checkout: .github/actions/tenant-ci-scripts
+          # Do not leave a credential in this nested checkout; the tenant checkout at the
+          # workspace root owns the push credential for the bump jobs.
+          persist-credentials: false
+
+      - name: Install canonical CI scripts (version-matched to this pipeline)
+        uses: ./.platform-contract/.github/actions/tenant-ci-scripts
 
       - name: Bump staging overlay newTag -> built (tagged) semver + commit + push
         env:
