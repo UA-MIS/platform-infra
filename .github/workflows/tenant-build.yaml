@@ -784,9 +784,37 @@ jobs:
             echo "HARBOR_PROJECT=${REGISTRY#*/}"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Validate the declared contract ref (fail closed)
+        if: ${{ needs.prepare.outputs.PUSH == 'true' }}
+        env:
+          CONTRACT_REF: ${{ inputs.contract_ref }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CONTRACT_REF:-}" ]; then
+            echo "::error::contract_ref is empty. The supply-chain gate (Trivy + cosign + SBOM) cannot be version-matched to this pipeline, and running an unknown version of a SECURITY gate is worse than not running one, because it reports success either way."
+            exit 1
+          fi
+          echo "contract ref: ${CONTRACT_REF}"
+
+      - name: Fetch the supply-chain action from THIS pipeline's version
+        if: ${{ needs.prepare.outputs.PUSH == 'true' }}
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: UA-MIS/platform-infra
+          ref: ${{ inputs.contract_ref }}
+          path: .platform-contract
+          fetch-depth: 1
+          sparse-checkout: .github/actions/supply-chain-verify
+          persist-credentials: false
+
       - name: Supply-chain verify (Harbor Trivy gate + cosign sign + syft SBOM)
         if: ${{ needs.prepare.outputs.PUSH == 'true' }}
-        uses: UA-MIS/platform-infra/.github/actions/supply-chain-verify@v1
+        # Was `supply-chain-verify@v1`. A grep for `tenant-ci-scripts` does not find
+        # this line — it is a DIFFERENT action — which is why the site count for the
+        # §3.4 trap was quoted as 1, then 3, then 4 over the course of one night.
+        # It is the Trivy/cosign/SBOM gate, so a canary pinned to `@main` was running
+        # main's pipeline against v1's SECURITY gate. Same skew, higher stakes.
+        uses: ./.platform-contract/.github/actions/supply-chain-verify
         with:
           image-ref: ${{ steps.digest.outputs.IMAGE_REF }}
           harbor-project: ${{ steps.digest.outputs.HARBOR_PROJECT }}
