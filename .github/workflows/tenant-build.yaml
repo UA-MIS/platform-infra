@@ -180,24 +180,49 @@ jobs:
           # `git describe --tags` (Deploy Model A readable dev tag).
           fetch-depth: 0
 
-      - name: Assert this workflow knows its own commit (fail closed)
-        # `github.job_workflow_sha` is the commit of THIS reusable workflow file. It is
-        # the ONLY handle a called workflow has on its own version: `github.sha` is the
-        # CALLER's commit, and `uses:` cannot take an expression at all.
+      - name: Resolve this workflow's own version (fail closed)
+        id: contract
+        # A called workflow has no direct handle on its own version: `github.sha` is the
+        # CALLER's commit and `uses:` cannot take an expression at all. Two context values
+        # claim to provide one, and they are NOT equally available:
         #
-        # If it is ever empty, the checkout below would silently fall back to the DEFAULT
-        # BRANCH — i.e. straight back to running scripts from a different commit than the
-        # pipeline running them, which is the exact skew this block exists to delete. An
-        # unknown script version is not a safe default, so assert rather than assume.
+        #   github.job_workflow_sha  the reusable workflow's COMMIT. Documented, and
+        #                            MEASURED EMPTY on these ARC runners (2026-08-27,
+        #                            v1verify run 33033930813). Preferred when present.
+        #   github.job_workflow_ref  `<owner>/<repo>/.github/workflows/<file>@<ref>`.
+        #                            The fallback, and the one that actually carries a
+        #                            value here.
+        #
+        # Owner/repo is parsed from the ref rather than hardcoded, so a fork of
+        # platform-infra pulls its OWN scripts instead of silently reaching back here.
         env:
-          CONTRACT_SHA: ${{ github.job_workflow_sha }}
+          JOB_WORKFLOW_SHA: ${{ github.job_workflow_sha }}
+          JOB_WORKFLOW_REF: ${{ github.job_workflow_ref }}
         run: |
           set -euo pipefail
-          if [ -z "${CONTRACT_SHA:-}" ]; then
-            echo "::error::github.job_workflow_sha is empty, so tenant-build.yaml cannot identify its own commit and cannot guarantee the canonical CI scripts match this pipeline. Refusing to run against an unknown script version."
+          echo "job_workflow_sha = [${JOB_WORKFLOW_SHA:-}]"
+          echo "job_workflow_ref = [${JOB_WORKFLOW_REF:-}]"
+
+          repo=""
+          ref=""
+          if [ -n "${JOB_WORKFLOW_REF:-}" ]; then
+            # Strip from `/.github/` on for the repo; take everything after the last `@`
+            # for the ref (a ref may contain `/`, e.g. refs/heads/feat/foo).
+            repo="${JOB_WORKFLOW_REF%%/.github/*}"
+            ref="${JOB_WORKFLOW_REF##*@}"
+          fi
+          # A commit beats a ref when we have one: it cannot move under us mid-run.
+          if [ -n "${JOB_WORKFLOW_SHA:-}" ]; then
+            ref="${JOB_WORKFLOW_SHA}"
+          fi
+
+          if [ -z "${repo}" ] || [ -z "${ref}" ]; then
+            echo "::error::tenant-build.yaml cannot identify its own version — both github.job_workflow_sha and github.job_workflow_ref are empty or unparseable (sha=[${JOB_WORKFLOW_SHA:-}] ref=[${JOB_WORKFLOW_REF:-}]). Without it the canonical CI scripts cannot be version-matched to this pipeline, and checking out a default branch instead would silently reintroduce the very skew this step exists to remove. Refusing to run against an unknown script version."
             exit 1
           fi
-          echo "contract commit: ${CONTRACT_SHA}"
+          echo "contract source: ${repo}@${ref}"
+          echo "repo=${repo}" >> "$GITHUB_OUTPUT"
+          echo "ref=${ref}"   >> "$GITHUB_OUTPUT"
 
       - name: Fetch the canonical CI scripts from THIS workflow's own commit
         # WHY NOT `uses: .../tenant-ci-scripts@v1` (what this was): that `@v1` is written
@@ -218,8 +243,8 @@ jobs:
         # measured fact that unblocks the rest of ADR-059.
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          repository: UA-MIS/platform-infra
-          ref: ${{ github.job_workflow_sha }}
+          repository: ${{ steps.contract.outputs.repo }}
+          ref: ${{ steps.contract.outputs.ref }}
           path: .platform-contract
           fetch-depth: 1
           sparse-checkout: .github/actions/tenant-ci-scripts
@@ -854,24 +879,49 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Assert this workflow knows its own commit (fail closed)
-        # `github.job_workflow_sha` is the commit of THIS reusable workflow file. It is
-        # the ONLY handle a called workflow has on its own version: `github.sha` is the
-        # CALLER's commit, and `uses:` cannot take an expression at all.
+      - name: Resolve this workflow's own version (fail closed)
+        id: contract
+        # A called workflow has no direct handle on its own version: `github.sha` is the
+        # CALLER's commit and `uses:` cannot take an expression at all. Two context values
+        # claim to provide one, and they are NOT equally available:
         #
-        # If it is ever empty, the checkout below would silently fall back to the DEFAULT
-        # BRANCH — i.e. straight back to running scripts from a different commit than the
-        # pipeline running them, which is the exact skew this block exists to delete. An
-        # unknown script version is not a safe default, so assert rather than assume.
+        #   github.job_workflow_sha  the reusable workflow's COMMIT. Documented, and
+        #                            MEASURED EMPTY on these ARC runners (2026-08-27,
+        #                            v1verify run 33033930813). Preferred when present.
+        #   github.job_workflow_ref  `<owner>/<repo>/.github/workflows/<file>@<ref>`.
+        #                            The fallback, and the one that actually carries a
+        #                            value here.
+        #
+        # Owner/repo is parsed from the ref rather than hardcoded, so a fork of
+        # platform-infra pulls its OWN scripts instead of silently reaching back here.
         env:
-          CONTRACT_SHA: ${{ github.job_workflow_sha }}
+          JOB_WORKFLOW_SHA: ${{ github.job_workflow_sha }}
+          JOB_WORKFLOW_REF: ${{ github.job_workflow_ref }}
         run: |
           set -euo pipefail
-          if [ -z "${CONTRACT_SHA:-}" ]; then
-            echo "::error::github.job_workflow_sha is empty, so tenant-build.yaml cannot identify its own commit and cannot guarantee the canonical CI scripts match this pipeline. Refusing to run against an unknown script version."
+          echo "job_workflow_sha = [${JOB_WORKFLOW_SHA:-}]"
+          echo "job_workflow_ref = [${JOB_WORKFLOW_REF:-}]"
+
+          repo=""
+          ref=""
+          if [ -n "${JOB_WORKFLOW_REF:-}" ]; then
+            # Strip from `/.github/` on for the repo; take everything after the last `@`
+            # for the ref (a ref may contain `/`, e.g. refs/heads/feat/foo).
+            repo="${JOB_WORKFLOW_REF%%/.github/*}"
+            ref="${JOB_WORKFLOW_REF##*@}"
+          fi
+          # A commit beats a ref when we have one: it cannot move under us mid-run.
+          if [ -n "${JOB_WORKFLOW_SHA:-}" ]; then
+            ref="${JOB_WORKFLOW_SHA}"
+          fi
+
+          if [ -z "${repo}" ] || [ -z "${ref}" ]; then
+            echo "::error::tenant-build.yaml cannot identify its own version — both github.job_workflow_sha and github.job_workflow_ref are empty or unparseable (sha=[${JOB_WORKFLOW_SHA:-}] ref=[${JOB_WORKFLOW_REF:-}]). Without it the canonical CI scripts cannot be version-matched to this pipeline, and checking out a default branch instead would silently reintroduce the very skew this step exists to remove. Refusing to run against an unknown script version."
             exit 1
           fi
-          echo "contract commit: ${CONTRACT_SHA}"
+          echo "contract source: ${repo}@${ref}"
+          echo "repo=${repo}" >> "$GITHUB_OUTPUT"
+          echo "ref=${ref}"   >> "$GITHUB_OUTPUT"
 
       - name: Fetch the canonical CI scripts from THIS workflow's own commit
         # WHY NOT `uses: .../tenant-ci-scripts@v1` (what this was): that `@v1` is written
@@ -892,8 +942,8 @@ jobs:
         # measured fact that unblocks the rest of ADR-059.
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          repository: UA-MIS/platform-infra
-          ref: ${{ github.job_workflow_sha }}
+          repository: ${{ steps.contract.outputs.repo }}
+          ref: ${{ steps.contract.outputs.ref }}
           path: .platform-contract
           fetch-depth: 1
           sparse-checkout: .github/actions/tenant-ci-scripts
@@ -981,24 +1031,49 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Assert this workflow knows its own commit (fail closed)
-        # `github.job_workflow_sha` is the commit of THIS reusable workflow file. It is
-        # the ONLY handle a called workflow has on its own version: `github.sha` is the
-        # CALLER's commit, and `uses:` cannot take an expression at all.
+      - name: Resolve this workflow's own version (fail closed)
+        id: contract
+        # A called workflow has no direct handle on its own version: `github.sha` is the
+        # CALLER's commit and `uses:` cannot take an expression at all. Two context values
+        # claim to provide one, and they are NOT equally available:
         #
-        # If it is ever empty, the checkout below would silently fall back to the DEFAULT
-        # BRANCH — i.e. straight back to running scripts from a different commit than the
-        # pipeline running them, which is the exact skew this block exists to delete. An
-        # unknown script version is not a safe default, so assert rather than assume.
+        #   github.job_workflow_sha  the reusable workflow's COMMIT. Documented, and
+        #                            MEASURED EMPTY on these ARC runners (2026-08-27,
+        #                            v1verify run 33033930813). Preferred when present.
+        #   github.job_workflow_ref  `<owner>/<repo>/.github/workflows/<file>@<ref>`.
+        #                            The fallback, and the one that actually carries a
+        #                            value here.
+        #
+        # Owner/repo is parsed from the ref rather than hardcoded, so a fork of
+        # platform-infra pulls its OWN scripts instead of silently reaching back here.
         env:
-          CONTRACT_SHA: ${{ github.job_workflow_sha }}
+          JOB_WORKFLOW_SHA: ${{ github.job_workflow_sha }}
+          JOB_WORKFLOW_REF: ${{ github.job_workflow_ref }}
         run: |
           set -euo pipefail
-          if [ -z "${CONTRACT_SHA:-}" ]; then
-            echo "::error::github.job_workflow_sha is empty, so tenant-build.yaml cannot identify its own commit and cannot guarantee the canonical CI scripts match this pipeline. Refusing to run against an unknown script version."
+          echo "job_workflow_sha = [${JOB_WORKFLOW_SHA:-}]"
+          echo "job_workflow_ref = [${JOB_WORKFLOW_REF:-}]"
+
+          repo=""
+          ref=""
+          if [ -n "${JOB_WORKFLOW_REF:-}" ]; then
+            # Strip from `/.github/` on for the repo; take everything after the last `@`
+            # for the ref (a ref may contain `/`, e.g. refs/heads/feat/foo).
+            repo="${JOB_WORKFLOW_REF%%/.github/*}"
+            ref="${JOB_WORKFLOW_REF##*@}"
+          fi
+          # A commit beats a ref when we have one: it cannot move under us mid-run.
+          if [ -n "${JOB_WORKFLOW_SHA:-}" ]; then
+            ref="${JOB_WORKFLOW_SHA}"
+          fi
+
+          if [ -z "${repo}" ] || [ -z "${ref}" ]; then
+            echo "::error::tenant-build.yaml cannot identify its own version — both github.job_workflow_sha and github.job_workflow_ref are empty or unparseable (sha=[${JOB_WORKFLOW_SHA:-}] ref=[${JOB_WORKFLOW_REF:-}]). Without it the canonical CI scripts cannot be version-matched to this pipeline, and checking out a default branch instead would silently reintroduce the very skew this step exists to remove. Refusing to run against an unknown script version."
             exit 1
           fi
-          echo "contract commit: ${CONTRACT_SHA}"
+          echo "contract source: ${repo}@${ref}"
+          echo "repo=${repo}" >> "$GITHUB_OUTPUT"
+          echo "ref=${ref}"   >> "$GITHUB_OUTPUT"
 
       - name: Fetch the canonical CI scripts from THIS workflow's own commit
         # WHY NOT `uses: .../tenant-ci-scripts@v1` (what this was): that `@v1` is written
@@ -1019,8 +1094,8 @@ jobs:
         # measured fact that unblocks the rest of ADR-059.
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          repository: UA-MIS/platform-infra
-          ref: ${{ github.job_workflow_sha }}
+          repository: ${{ steps.contract.outputs.repo }}
+          ref: ${{ steps.contract.outputs.ref }}
           path: .platform-contract
           fetch-depth: 1
           sparse-checkout: .github/actions/tenant-ci-scripts
