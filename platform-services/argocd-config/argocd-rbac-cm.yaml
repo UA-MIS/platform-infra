@@ -63,6 +63,9 @@ data:
   policy.csv: |
     # --- Platform/lab admins: the `labmx` GitHub Team -> built-in admin ---
     g, UA-MIS:labmx, role:admin
+    p, role:ghostteam, applications, get, ghostteam/*, allow
+    p, role:ghostteam, applications, sync, ghostteam/*, allow
+    g, UA-MIS:ghostteam, role:ghostteam
 
     # --- Per-PROJECT scoped roles are NOT declared here (SEC-010, D-026) ---
     # This file used to carry a `role:sample` template block plus its
