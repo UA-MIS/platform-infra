@@ -37,19 +37,48 @@
 # a changed manifest re-runs it and an unchanged re-sync leaves the completed Job in
 # place.
 #
-# SAFETY (verified live, 2026-07-09, read-only queries against the running Harbor —
-# no mutating call was made while checking this):
-#   - backstage/backstage-process has 21 tagged artifacts; the CURRENTLY DEPLOYED tag
-#     f35301221b05 is the MOST RECENTLY PUSHED (rank 1 of 21) -> always inside "keep
-#     last 10", by push-time, for any push cadence where deploys follow builds.
-#   - swami/swamiapp-app has 5 tagged artifacts total -> "keep last 10" prunes
-#     nothing there today.
+# SAFETY (re-verified live 2026-08-27, read-only queries only — no mutating call was
+# made while checking this):
 #   - GC's delete_untagged:true only removes UNTAGGED artifacts (manifests with zero
 #     tag references) or blobs orphaned once retention removes a tag — never a
 #     tagged, in-use image.
-#   - No project today carries a long-lived "stable"/pinned tag that would fall
-#     outside "last 10 pushed" — if one is added later, give it its own `always`
-#     retain rule (see the Harbor UI or POST /retentions rule array) so it survives.
+#   - Every currently-running image tag in the cluster (checked against live pod,
+#     deployment, statefulset and cronjob specs — NOT against assumption) falls in
+#     the retained set under the rules below.
+#
+# 2026-08-27 — WHY THERE IS NOW A SECOND, "always" RULE (board #127/#136).
+# The original single `latestPushedK` rule cannot tell a throwaway dev build from a
+# promoted release, because on this platform they are lexically indistinguishable:
+# every dev tag is a bare git short-SHA (7 or 12 hex chars) and every release tag is
+# bare semver with no prefix. Ranked purely by push time, a release sinks as dev
+# builds land on top of it and is eventually pruned while still deployed.
+#
+# This is not hypothetical. Retention execution 792 (policy 6 / ida-llm, 02:00 on
+# 2026-08-26, a REAL run, not a dry run) deleted 42 tags — 14 from each of the three
+# ida-llm repositories. Release tag 0.1.0 survived that run at rank 10 of 24, by a
+# single position. Six pushes later it sits at rank 16 and only a hand-applied,
+# git-invisible `disabled:true` on the live policy stopped the next run from taking
+# it, along with 0.1.1.
+#
+# The protection rule keys on RETENTION_PROTECT_TAGS. `*.*.*` matches any tag with at
+# least two dots — every semver release, and also a future `v`-prefixed or
+# `-rc`-suffixed one — while never matching a bare hex SHA, which has no dots. Under
+# `"algorithm": "or"` a tag survives if EITHER rule retains it, so this can only ever
+# retain MORE than before; it can never cause a deletion that was not already going
+# to happen.
+#
+# HONEST LIMIT OF THIS PATTERN: "contains two dots" is a heuristic, not a release
+# marker. It holds only because of two conventions that nothing actually enforces —
+# dev tags are hex, releases are semver. It silently fails for a release tagged `v2`
+# or `release-1`, and it would pin a dev build tagged `2026.08.27.1` forever. The
+# durable fix is to make releases structurally distinguishable rather than
+# inferrable — an explicit `v` prefix emitted by the release workflow, or a Harbor
+# immutable-tag rule on `*.*.*` (project has none today: GET /immutabletagrules
+# returns [] for every project). Both are cross-repo changes to the release/CI path
+# and are filed as follow-ups, not done here. `latest` is carried in the default
+# pattern list because slidedeck/slidedeck genuinely has one, pushed 2026-07-24 and
+# long since outside any "last 10", which the previous header wrongly asserted did
+# not exist anywhere.
 #
 # SECRETS NEVER ON ARGV: same pattern as harbor-configure-oidc.yaml — admin password
 # is injected as env via secretKeyRef; curl reads it with `-u` from
@@ -98,27 +127,38 @@ spec:
                   key: HARBOR_ADMIN_PASSWORD
             - name: HARBOR_CORE
               value: "http://harbor-core.harbor.svc:80"
-            # Space-separated project names to apply the "keep last N pushed tags"
-            # retention rule to. Adding a project = adding it here (no code change).
-            # `swami` was removed 2026-08 -- its Harbor project was deleted (tenant
-            # teardown, ~22d before this fix) and, with the Job's `-f`-on-404 curl
-            # previously aborting the whole script (see the project-resolution loop
-            # below for the tolerance fix that now also covers this case for any
-            # FUTURE torn-down project left in this list).
-            # `ida-llm` added: a tenant that builds THREE images on every push to
-            # main accumulates tags fast, and registry-wide GC alone does not bound
-            # that -- GC only reclaims UNTAGGED manifests, so without a retention
-            # rule pruning old tags first, every tag ever pushed is kept forever
-            # and GC has nothing to collect. This was the gap: crimson-copies is
-            # not in this list either, so no tenant currently gets tag retention.
-            # Adding ida-llm here fixes it for the tenant being provisioned;
-            # widening it to every tenant project is a follow-up worth doing, but
-            # it is a change to OTHER teams' registries and should be its own
-            # decision rather than a side effect of this onboarding.
-            - name: RETENTION_PROJECTS
-              value: "backstage ida-llm"
+            # Projects are ENUMERATED from the Harbor API, not listed here. The old
+            # hand-typed RETENTION_PROJECTS ("backstage ida-llm") was the copy-not-
+            # reference shape this project's own retro names as its #1 bug generator:
+            # every new team was a fresh chance to forget, and the result was that on
+            # 2026-08-27 only 3 of 16 projects had any retention policy at all — one
+            # of which (dockerhub-proxy) this Job never created. crimson-copies, the
+            # reference application with 6 repositories, had none. For 13 of 16
+            # projects the nightly GC therefore ran, reported Success, and reclaimed
+            # essentially nothing: GC only frees blobs belonging to UNTAGGED
+            # manifests, and nothing untags anything without a retention rule.
+            #
+            # This list is the inverse — the projects to LEAVE ALONE:
+            #   dockerhub-proxy — a pull-through proxy-cache whose retention (policy
+            #     id 5, `nDaysSinceLastPull: 7`) is NOT managed by this Job and does
+            #     not appear anywhere in git; it was set by hand. Enumerating without
+            #     this exclusion would PUT over it and replace "keep whatever was
+            #     pulled in the last 7 days" with "keep the last 10 pushed" — which
+            #     for a cache of 17 upstream repos would evict base images that are
+            #     in active use. That policy needs its own declarative home; until it
+            #     has one, this Job must not touch it.
+            #   library — Harbor's built-in default project, 0 repositories, never
+            #     pushed to.
+            - name: RETENTION_EXCLUDE_PROJECTS
+              value: "dockerhub-proxy library"
             - name: RETENTION_KEEP_LAST_N
               value: "10"
+            # Space-separated doublestar patterns; each becomes its own `always`
+            # retain rule, unioned with the keep-last-N rule by "algorithm": "or".
+            # See the header for why `*.*.*` separates releases from dev builds here
+            # and where that reasoning stops being true.
+            - name: RETENTION_PROTECT_TAGS
+              value: "*.*.* latest"
           command: ["/bin/sh", "-eu", "-c"]
           args:
             - |
@@ -133,9 +173,82 @@ spec:
               done
               echo "==> core is up."
 
+              # --- 0) enumerate every project from Harbor, minus the exclusions. ---
+              # The container has no jq, so this is grep parsing, which means it has
+              # to be checked rather than trusted. Two keys occur exactly once per
+              # project object in the /projects payload: `"name":` and `"repo_count":`
+              # (`project_id` does NOT — it appears twice, once at top level and once
+              # nested inside cve_allowlist, verified against the live payload). If
+              # those two counts ever disagree, the response shape has changed under
+              # us and silently dropping a project would recreate exactly the bug this
+              # change exists to fix — so that case is a hard failure, not a skip.
+              echo "==> enumerating projects ..."
+              : > /tmp/all_projects.txt
+              page=1
+              while : ; do
+                curl -fsS -u "$AUTH" "$CORE/api/v2.0/projects?page=${page}&page_size=100" -o /tmp/pp.json
+                n_name=$(grep -o '"name":' /tmp/pp.json | wc -l | tr -d ' ')
+                n_repo=$(grep -o '"repo_count":' /tmp/pp.json | wc -l | tr -d ' ')
+                if [ "$n_name" != "$n_repo" ]; then
+                  echo "FAIL: /projects page $page parsed inconsistently (${n_name} name keys vs ${n_repo} repo_count keys)."
+                  echo "      Refusing to continue: a missed project silently gets no retention."
+                  exit 1
+                fi
+                [ "$n_name" = "0" ] && break
+                grep -o '"name":"[^"]*"' /tmp/pp.json | sed 's/^"name":"//; s/"$//' >> /tmp/all_projects.txt
+                [ "$n_name" -lt 100 ] && break
+                page=$((page+1))
+              done
+
+              RETENTION_PROJECTS=""
+              while IFS= read -r cand; do
+                [ -n "$cand" ] || continue
+                skip=0
+                for X in $RETENTION_EXCLUDE_PROJECTS; do
+                  [ "$cand" = "$X" ] && skip=1 && break
+                done
+                if [ "$skip" = "1" ]; then
+                  echo "    - $cand (EXCLUDED)"
+                else
+                  echo "    + $cand"
+                  RETENTION_PROJECTS="$RETENTION_PROJECTS $cand"
+                fi
+              done < /tmp/all_projects.txt
+              n_total=$(wc -l < /tmp/all_projects.txt | tr -d ' ')
+              echo "==> $n_total projects found; applying retention to:$RETENTION_PROJECTS"
+              [ -n "$RETENTION_PROJECTS" ] || { echo "FAIL: enumeration produced no projects"; exit 1; }
+
+              # --- 0b) build the protection rules once: one `always` retain rule per
+              #         pattern in RETENTION_PROTECT_TAGS. Unioned with the
+              #         keep-last-N rule below by "algorithm": "or", so a tag is kept
+              #         if EITHER rule keeps it. Adding these can only retain more.
+              PROTECT_RULES=""
+              n_protect=0
+              for PAT in $RETENTION_PROTECT_TAGS; do
+                n_protect=$((n_protect+1))
+                PROTECT_RULES="${PROTECT_RULES},
+                  {
+                    \"disabled\": false,
+                    \"action\": \"retain\",
+                    \"template\": \"always\",
+                    \"params\": {},
+                    \"tag_selectors\": [
+                      { \"kind\": \"doublestar\", \"decoration\": \"matches\", \"pattern\": \"${PAT}\" }
+                    ],
+                    \"scope_selectors\": {
+                      \"repository\": [
+                        { \"kind\": \"doublestar\", \"decoration\": \"repoMatches\", \"pattern\": \"**\" }
+                      ]
+                    }
+                  }"
+              done
+              n_rules_expected=$((n_protect+1))
+              echo "==> protection patterns: $RETENTION_PROTECT_TAGS ($n_protect always-rules, $n_rules_expected rules total per policy)"
+
               # --- 1) per-project tag retention: keep the N most recently PUSHED
               #        tags across every repository in the project (doublestar "**"
-              #        matches all repos, including backstage/cache). -------------
+              #        matches all repos, including backstage/cache), PLUS the
+              #        always-retain protection rules built above. -------------
               for P in $RETENTION_PROJECTS; do
                 echo "==> retention: resolving project '$P' ..."
                 proj_code=$(curl -sS -o "/tmp/proj_${P}.json" -w '%{http_code}' -u "$AUTH" "$CORE/api/v2.0/projects/$P")
@@ -147,9 +260,21 @@ spec:
                   echo "FAIL: GET /projects/$P returned HTTP $proj_code"; cat "/tmp/proj_${P}.json"; exit 1
                 fi
                 proj=$(cat "/tmp/proj_${P}.json")
-                PID=$(printf '%s' "$proj" | grep -o '"project_id":[0-9]*' | head -1 | grep -o '[0-9]*')
-                if [ -z "$PID" ]; then
-                  echo "FAIL: could not resolve project_id for '$P'"; echo "$proj"; exit 1
+                # `project_id` occurs TWICE in this payload: once at top level and
+                # once nested inside cve_allowlist. Harbor serialises keys
+                # alphabetically, so cve_allowlist comes FIRST -- meaning a bare
+                # `head -1` reads the allowlist's copy, not the project's. Those two
+                # happen to be equal for all 16 projects today (verified live), but
+                # nothing guarantees it: a project reusing the system CVE allowlist
+                # could carry a different id there, and this id is what scopes an
+                # irreversible deletion policy. So: take every occurrence, and if
+                # they are not unanimous, refuse rather than guess.
+                PID=$(printf '%s' "$proj" | grep -o '"project_id":[0-9]*' | grep -o '[0-9]*$' | sort -u)
+                n_pid=$(printf '%s\n' "$PID" | grep -c '[0-9]' || true)
+                if [ -z "$PID" ] || [ "$n_pid" != "1" ]; then
+                  echo "FAIL: could not unambiguously resolve project_id for '$P' (got: $(printf '%s' "$PID" | tr '\n' ' '))"
+                  echo "      Refusing to scope a deletion policy to a guessed project id."
+                  echo "$proj"; exit 1
                 fi
                 RID=$(printf '%s' "$proj" | grep -o '"retention_id":"[0-9]*"' | head -1 | grep -o '[0-9]*' || true)
 
@@ -170,7 +295,7 @@ spec:
                         { "kind": "doublestar", "decoration": "repoMatches", "pattern": "**" }
                       ]
                     }
-                  }
+                  }${PROTECT_RULES}
                 ],
                 "trigger": { "kind": "Schedule", "settings": { "cron": "0 0 2 * * *" }, "references": {} },
                 "scope": { "level": "project", "ref": ${PID} }
@@ -199,10 +324,26 @@ spec:
                   fi
                 fi
 
+                # Read-back verification. The previous version of this check grepped
+                # ONLY for "latestPushedK", which meant it passed whether or not the
+                # rest of the policy made it in -- a green Job that proved nothing
+                # about the rule that actually protects releases. Every rule is now
+                # checked individually, and the total rule count is asserted, so a
+                # partially-applied policy fails loudly instead of reporting Success.
                 echo "==> retention: verifying policy $RID for '$P' (read-back) ..."
                 verify=$(curl -fsS -u "$AUTH" "$CORE/api/v2.0/retentions/$RID")
                 echo "$verify" | grep -qF '"latestPushedK"' || { echo "FAIL: policy $RID for '$P' missing latestPushedK after apply"; echo "$verify"; exit 1; }
-                echo "==> retention: OK for '$P' (policy id $RID, keep last $RETENTION_KEEP_LAST_N pushed tags, all repos)."
+                for PAT in $RETENTION_PROTECT_TAGS; do
+                  echo "$verify" | grep -qF "\"pattern\":\"${PAT}\"" \
+                    || { echo "FAIL: policy $RID for '$P' missing protection rule for pattern '$PAT' after apply"; echo "$verify"; exit 1; }
+                done
+                n_always=$(echo "$verify" | grep -o '"template":"always"' | wc -l | tr -d ' ')
+                [ "$n_always" = "$n_protect" ] \
+                  || { echo "FAIL: policy $RID for '$P' has $n_always always-rules, expected $n_protect"; echo "$verify"; exit 1; }
+                n_got=$(echo "$verify" | grep -o '"template":"' | wc -l | tr -d ' ')
+                [ "$n_got" = "$n_rules_expected" ] \
+                  || { echo "FAIL: policy $RID for '$P' has $n_got rules, expected $n_rules_expected"; echo "$verify"; exit 1; }
+                echo "==> retention: OK for '$P' (policy id $RID, $n_got rules: keep last $RETENTION_KEEP_LAST_N pushed + always[$RETENTION_PROTECT_TAGS], all repos)."
               done
 
               # --- 2) system-wide GC schedule, nightly, delete_untagged so retention
