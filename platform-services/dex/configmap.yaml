@@ -220,6 +220,7 @@ data:
           # ── BEGIN GENERATED team board redirect URIs (gen-board-clients.py) ──
           - https://curb-agile.capstone.uamishub.com/api/auth/callback
           - https://lab-team-3-agile.capstone.uamishub.com/api/auth/callback
+          - https://nextup-agile.capstone.uamishub.com/api/auth/callback
           - https://paper-papas-agile.capstone.uamishub.com/api/auth/callback
           - https://ss-evan-and-emily-agile.capstone.uamishub.com/api/auth/callback
           # ── END GENERATED team board redirect URIs ──
