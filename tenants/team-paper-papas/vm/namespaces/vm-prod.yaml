@@ -1,0 +1,464 @@
+# ============================================================================
+# <team>-vm-prod namespace bundle — VM WORKLOAD tier (ADR-032).  *** SECURITY GATE ***
+# Tokens: paper-papas, 2026-fall.  Bundles, in dependency order:
+#   Namespace -> ResourceQuota -> LimitRange -> NetworkPolicies -> Role/RoleBinding
+#
+# WHAT THIS IS. A dedicated, OPT-IN namespace for teams that deploy a real VM via
+# KubeVirt (ADR-032 layout: vm) — a whole legacy project "lifted" into one
+# self-contained VM (often bundling its own DB/services) because it can't/won't be
+# containerized. VMs run as a QEMU/KVM process inside a `virt-launcher` pod, which
+# needs MORE privilege than the `restricted` Pod Security profile every container
+# tenant namespace enforces. So the VM tier runs at PSA **baseline** (NOT
+# restricted, NOT privileged) — the tightest profile that still lets virt-launcher
+# run. See artifacts/reviews/kubevirt-vm-tier-security-review.md for the full gate.
+#
+# WHY A SEPARATE TIER (not relaxing dev/staging/prod): the container tenancy
+# guarantee (restricted PSA) must stay intact for the ~80% of teams who only run
+# containers. Privilege is opt-in and CONTAINED to this tier — mirroring the
+# rook-ceph precedent (platform-services/rook-ceph/namespace.yaml is privileged),
+# but a full step LESS privileged (baseline, no hostPath, no host namespaces).
+#
+# WHY ONE NAMESPACE (vm-prod) BY DEFAULT: a lifted whole-project VM is a single
+# heavyweight artifact and usually needs ONE live home, not a dev/staging/prod
+# fan-out. `prod` = that live home. A team that genuinely needs a second VM env
+# copies this file to vm-dev.yaml (s/prod/dev/); the AppProject destination is a
+# `paper-papas-vm-*` wildcard so no AppProject edit is needed.
+#
+# OPT-IN: this `vm/` subtree is rendered into a team dir ONLY for layout: vm teams
+# (scaffolder render-tenant — follow-up). It is NOT part of the default container
+# tenant copy, so container-only teams never get a baseline-PSA namespace.
+#
+# Every object carries the mandatory platform.capstone/{team,semester,env} labels
+# plus platform.capstone/tier: vm so the VM tier is selectable for audits/quotas.
+# ============================================================================
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: paper-papas-vm-prod
+  labels:
+    app.kubernetes.io/managed-by: argocd
+    platform.capstone/team: paper-papas
+    platform.capstone/semester: 2026-fall
+    platform.capstone/env: prod
+    platform.capstone/tier: vm
+    # Pod Security Admission: BASELINE, not restricted (ADR-032 §2a, open Q2).
+    # `restricted` forbids exactly what virt-launcher needs (it mandates
+    # runAsNonRoot + drop:["ALL"] caps with only NET_BIND_SERVICE add-back +
+    # seccompProfile:RuntimeDefault). KubeVirt's virt-launcher accesses /dev/kvm
+    # via a DEVICE PLUGIN (resource devices.kubevirt.io/kvm) — NOT a privileged
+    # container and NOT a hostPath mount — and runs non-root (qemu uid 107), so it
+    # does NOT need `privileged` (unlike rook-ceph). `baseline` is the deliberate
+    # floor: it still FORBIDS privileged, hostPath, host namespaces (hostNetwork/
+    # PID/IPC), hostPort, /proc mounts, and adding caps beyond the baseline set —
+    # while tolerating the VM feature surface without per-feature PSA tuning.
+    # Tightening to `restricted` is a tracked post-install follow-up (verify the
+    # virt-launcher pod is restricted-compliant under our pinned KubeVirt CR; see
+    # the security review). Escalate to `privileged` ONLY if baseline proves
+    # insufficient under our CR — that is a re-review event, not a silent change.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: v1.31
+    # warn/audit at restricted so we SEE how far the real virt-launcher pods are
+    # from restricted (informs the tighten-to-restricted follow-up) without
+    # blocking them. This is the canary for open Q2.
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: v1.31
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: v1.31
+---
+# ResourceQuota — VM-tier sizing (ADR-032 §2d / open Q4). VMs reserve their FULL
+# guest RAM for their entire lifetime (no overcommit, no scale-to-zero), so RAM is
+# the scarce resource on this 3-node / 16GB-per-node (~30GB free) homelab.
+#
+# SIZED FOR ONE substantial whole-project VM (~2-4 GiB guest + ~0.5 GiB launcher
+# overhead + a transient CDI importer). requests.memory == limits.memory enforces
+# NO OVERCOMMIT at the aggregate level (a VM whose launcher requests < limits could
+# otherwise let the scheduler oversubscribe RAM the guest will actually pin).
+# count/virtualmachines caps the tier at ONE VM — a hard ceiling so a team cannot
+# silently spin up multiple guests and exhaust cluster headroom.
+#
+# Capacity math: ~2 of 10 teams use VMs; at 6Gi reserved each that is ~12Gi of the
+# ~30Gi free — comfortable. A team needing a bigger guest (or a 2nd VM) requires an
+# explicit quota bump + a platform capacity review, NOT a default.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: vm-compute-quota
+  namespace: paper-papas-vm-prod
+  labels:
+    platform.capstone/team: paper-papas
+    platform.capstone/semester: 2026-fall
+    platform.capstone/env: prod
+    platform.capstone/tier: vm
+spec:
+  hard:
+    # SIZE CPU ABOVE THE GUEST REQUEST, NEVER LEVEL WITH IT. KubeVirt adds a small
+    # per-VM overhead to the virt-launcher pod on top of the guest's
+    # domain.resources.requests.cpu, so a guest asking for N cores makes a pod that
+    # asks for slightly more (observed: a 6-core guest -> 6005m). A ceiling set to
+    # exactly the guest request rejects the launcher outright:
+    #   exceeded quota: vm-compute-quota, requested: requests.cpu=6005m, limited: 6
+    # and the VMI then sits ErrorUnschedulable behind a MISLEADING secondary
+    # condition -- "PVC ... does not exist, waiting for it to appear" -- while the
+    # DataVolume has in fact imported cleanly. Learned on crimson-copies-stripped.
+    requests.cpu: "3"
+    limits.cpu: "4"
+    # requests == limits => no RAM overcommit. 6Gi fits one ~4Gi-guest VM +
+    # launcher overhead + a transient importer. Guest > ~5Gi needs a quota bump.
+    requests.memory: 6Gi
+    limits.memory: 6Gi
+    pods: "4"                       # virt-launcher + CDI importer + ≤2 helpers
+    services: "3"
+    # A CDI registry/http disk import transiently creates THREE PVCs at once: the
+    # populator "prime" PVC + a "scratch" PVC + the final rootdisk. 3 is the exact
+    # working minimum; 4 leaves margin for retry churn (a stale prime not yet GC'd
+    # while a new one is created) so a second stall can't happen on PVC count.
+    persistentvolumeclaims: "4"
+    # CDI import PEAK, not the disk size: each of those 3 PVCs is sized to the
+    # image's *virtual* size, not the request — a 20Gi ask on the Fedora-40 base
+    # inflates to ~21.2Gi. Peak ≈ 3 × 21.2Gi ≈ 64Gi, so 60Gi DENIED the scratch PVC
+    # ("exceeded quota: requests.storage" → importer stuck Pending forever). 80Gi
+    # covers the default import + headroom; prime+scratch are freed once the import
+    # finishes, leaving only the rootdisk. A bigger guest disk still needs an
+    # explicit quota bump + a platform capacity review (not a silent default).
+    # 80Gi covers a FIRST import (rootdisk + prime + scratch, each at the image's
+    # VIRTUAL size). It does NOT cover a REBUILD, which is the supported way to
+    # re-run a failed cloud-init (see README "Rebuilding a VM"): the replacement
+    # disk imports alongside the old one, so the namespace transiently holds four
+    # claims (~85Gi). At 80Gi the scratch PVC is silently never created and the
+    # importer hangs Pending with
+    #   0/5 nodes are available: persistentvolumeclaim "...-scratch" not found
+    # which reads as a scheduling failure and is actually a quota one.
+    requests.storage: 120Gi        # whole-project VM disk + rebuild headroom
+    # Hard VM/disk count caps — a baseline-PSA namespace must not become a VM farm.
+    count/virtualmachines.kubevirt.io: "1"
+    count/datavolumes.cdi.kubevirt.io: "2"
+---
+# LimitRange — per-container ceiling + defaults so the quota is enforceable and a
+# runaway helper container cannot grab the whole namespace budget. Sized for the
+# virt-launcher container (guest RAM + overhead), NOT the tiny container-tier max
+# (cpu:1/mem:1Gi — far too small for a guest OS).
+#
+# NOTE: deliberately NO maxLimitRequestRatio — KubeVirt hotplug/attachment pods
+# historically violate it (CDI v0.58 fix note), and we WANT requests==limits
+# (Guaranteed QoS) for VMs, which a ratio cap would not improve.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: vm-container-limits
+  namespace: paper-papas-vm-prod
+  labels:
+    platform.capstone/team: paper-papas
+    platform.capstone/semester: 2026-fall
+    platform.capstone/env: prod
+    platform.capstone/tier: vm
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: "1"
+        memory: 512Mi
+      defaultRequest:
+        cpu: 250m
+        memory: 512Mi
+      max:
+        cpu: "4"
+        memory: 6Gi        # accommodates a ~4-5Gi guest + virt-launcher overhead
+---
+# NetworkPolicy 1/5 — DEFAULT-DENY ingress + egress. Same posture as every tenant
+# tier: selects all pods (KubeVirt passes VM labels through to the virt-launcher
+# pod, so podSelector:{} covers the VM too — KubeVirt netpol docs), denies all
+# until the allowances below add back the minimum. Cross-team traffic is denied by
+# construction (no rule references another team's namespace).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: paper-papas-vm-prod
+  labels:
+    platform.capstone/team: paper-papas
+    platform.capstone/semester: 2026-fall
+    platform.capstone/env: prod
+    platform.capstone/tier: vm
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# NetworkPolicy 2/5 — allow ingress from Traefik (kube-system) + intra-namespace.
+# Gives the VM its standard `<app>.prod.capstone.uamishub.com` URL via a Service ->
+# virt-launcher pod (masquerade NAT puts the guest behind the launcher pod IP, so
+# ordinary Service/Ingress/netpol apply unchanged — ADR-032 §2b).
+#
+# Kubelet liveness/readiness probes to the virt-launcher pod originate from the
+# NODE host; under Cilium, host -> local-pod is permitted without a policy rule
+# (the SEC-019 host-firewall residual). The VM-tier deny-test (security review)
+# explicitly re-confirms probes + the VM URL still work under default-deny.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-traefik-and-intra-ns
+  namespace: paper-papas-vm-prod
+  labels:
+    platform.capstone/team: paper-papas
+    platform.capstone/semester: 2026-fall
+    platform.capstone/env: prod
+    platform.capstone/tier: vm
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+    - from:
+        - podSelector: {}
+---
+# NetworkPolicy 3/5 — allow ingress on :22 from the `cloudflared` namespace ONLY —
+# the SSH transport (ADR-032a D2, resolved: Cloudflare Tunnel SSH, Option C/D,
+# $0/no-LoadBalancer). cloudflared proxies a per-tenant Cloudflare Tunnel Public
+# Hostname (`ssh.<app>.capstone.uamishub.com`, Service type SSH, fronted by a
+# Cloudflare Access application) DIRECTLY to this Service (`<app>-ssh` :22) —
+# bypassing Traefik entirely, because SSH carries no Host header to route on and so
+# cannot ride the shared HTTP tunnel route every other service uses. Scoped to port
+# 22 only (not a blanket cloudflared admit) and to the `cloudflared` namespace by
+# name — same isolation pattern as the Traefik admit above, applied to the one other
+# pod now allowed to originate traffic into this tier.
+#
+# The Cloudflare-side Public Hostname route + Access application that front this
+# hostname are dashboard/operator steps, NOT a git change — the tunnel is
+# token-based/remotely-managed (platform-services/cloudflared/deployment.yaml has no
+# mounted `ingress:` config for cloudflared to read), so there is no in-cluster
+# config to template for the route itself. See
+# docs/operator/vm-ssh-cloudflare-access.md for the exact per-tenant steps + the two
+# documented end-user connect commands.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-cloudflared-ssh
+  namespace: paper-papas-vm-prod
+  labels:
+    platform.capstone/team: paper-papas
+    platform.capstone/semester: 2026-fall
+    platform.capstone/env: prod
+    platform.capstone/tier: vm
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cloudflared
+      ports:
+        - protocol: TCP
+          port: 22
+---
+# NetworkPolicy 4/5 — allow egress to cluster DNS + intra-namespace ONLY. The VM
+# guest (virt-launcher) gets NO external egress and NO API-server egress by default
+# — identical to the container tiers (least privilege). A lifted legacy app that
+# legitimately needs to call OUT to a specific external service is an explicit,
+# per-team, security-REVIEWED netpol addition, never the default (a self-contained
+# VM that bundles its own DB/services should need nothing beyond DNS).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  # ⚠ THIS RULE DOES NOT GIVE A **VM** WORKING DNS. It selects CoreDNS by
+  # namespace -- i.e. by POD identity -- and that only matches traffic Cilium has
+  # already translated from the kube-dns ClusterIP to a CoreDNS pod IP in its
+  # SOCKET load balancer. A VM's traffic never passes through a host socket: it is
+  # forwarded out of the guest through the masquerade interface, so socket-LB does
+  # not run and Cilium judges the flow against the ClusterIP's CIDR identity, which
+  # this rule has no selector for. The query is denied:
+  #   xx drop (Policy denied) ... identity 2214->16777217: <vm> -> 10.96.0.10:53 udp
+  # Worse, adding a CIDR rule for 10.96.0.10 only gets you as far as `action allow`
+  # -- the packet then goes `-> stack` still addressed to a ClusterIP that nothing
+  # answers, because no policy can TRANSLATE an address.
+  #
+  # A VM must therefore be given resolvers it can reach directly, via the
+  # VirtualMachine's own dnsPolicy/dnsConfig, plus an egress rule for :53. See the
+  # README section "VMs and DNS". This rule is still correct and still needed for
+  # the CDI importer and any helper POD in this namespace -- it is only the VM it
+  # does not cover. Diagnosed on crimson-copies-stripped, where every pod in the
+  # namespace resolved fine and the guest resolved nothing.
+  name: allow-egress-dns-and-intra-ns
+  namespace: paper-papas-vm-prod
+  labels:
+    platform.capstone/team: paper-papas
+    platform.capstone/semester: 2026-fall
+    platform.capstone/env: prod
+    platform.capstone/tier: vm
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # DNS to CoreDNS in kube-system (UDP + TCP 53).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Intra-namespace egress so the VM + its helpers reach each other.
+    - to:
+        - podSelector: {}
+---
+# NetworkPolicy 5/5 — CDI IMPORTER disk-fetch egress, SCOPED TO THE IMPORTER POD.
+# The CDI importer pod (created transiently in THIS namespace to populate the
+# DataVolume PVC) is the ONLY pod that needs to reach a disk-image source. We scope
+# this allow to the importer's well-known label so the running VM guest does NOT
+# inherit external egress (a guest with arbitrary outbound :443 is a data-exfil /
+# C2 surface — keep it OFF the launcher).
+#
+# Egress is HTTPS:443 only (modelled on the runner netpol's :443 external pattern),
+# plus the in-cluster registry data plane for `source.registry` (containerDisk)
+# pulls from Harbor — which route via Traefik's websecure pod port 8443 (the M1
+# registry-routing gotcha; Cilium enforces the DESTINATION POD port after service
+# translation, not the Service port). The 0.0.0.0/0 excepts block cross-tenant
+# (pods) + the apiserver-on-node-IP path; see the runner-netpol header for the
+# Cilium CIDR-semantics caveats (node/tailnet excepts are intent-only until
+# policyCIDRMatchMode:nodes — apiserver stays RBAC-gated, and the importer has no
+# mounted SA token by default).
+#
+# ⚠ DENY-TEST VERIFY: the importer pod label is assumed `app:
+# containerized-data-importer` (CDI default). If our pinned CDI version differs,
+# this policy fails CLOSED (import blocked) — the safe direction. Confirm the live
+# importer pod labels during the VM-tier deny-test and adjust matchLabels if needed.
+# CIDRs are Talos-live (pods 10.244/16, svc 10.96/12, nodes 10.237.168.0/22,
+# tailnet 100.64.0.0/10).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-cdi-importer-imagepull
+  namespace: paper-papas-vm-prod
+  labels:
+    platform.capstone/team: paper-papas
+    platform.capstone/semester: 2026-fall
+    platform.capstone/env: prod
+    platform.capstone/tier: vm
+spec:
+  podSelector:
+    matchLabels:
+      app: containerized-data-importer    # CDI importer/uploader/cloner pods
+  policyTypes:
+    - Egress
+  egress:
+    # In-cluster registry data plane (Harbor via Traefik) for source.registry
+    # containerDisk pulls. ClusterIP /12 (not /32 — ClusterIPs are not stable);
+    # POD-port scoped (8443 = Traefik websecure :443->:8443; 8080 = harbor-core
+    # :80->:8080) per the registry-internal-routing gotcha.
+    - to:
+        - ipBlock:
+            cidr: 10.96.0.0/12
+      ports:
+        - protocol: TCP
+          port: 8443
+        - protocol: TCP
+          port: 8080
+    # External HTTPS:443 ONLY — source.http cloud-image download. Excepts block the
+    # in-cluster + apiserver paths (see caveats above).
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.244.0.0/16      # pods (cross-tenant + lateral) — Cilium-enforced
+              - 10.96.0.0/12       # services (covered by the scoped allow above)
+              - 10.237.168.0/22    # node LAN incl. apiserver :6443 — intent (see caveat)
+              - 100.64.0.0/10      # tailnet overlay — intent (see caveat)
+      ports:
+        - protocol: TCP
+          port: 443
+---
+# Team Role — namespaced, VM-workload-scoped (ADR-032 §2c). Lets a student inspect
+# and POWER (start/stop/restart) their own VM and reach its serial/VNC console —
+# WITHOUT any cluster-admin and without touching the KubeVirt SYSTEM components.
+# NEVER granted: raw Secrets, Nodes, RBAC, Quota, LimitRange, NetworkPolicy, or any
+# kubevirt system-namespace object (all platform-managed). This resolves the RBAC
+# half of ADR-032 open Q7 (console access under least privilege).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: team-developer-vm
+  namespace: paper-papas-vm-prod
+  labels:
+    platform.capstone/team: paper-papas
+    platform.capstone/semester: 2026-fall
+    platform.capstone/env: prod
+    platform.capstone/tier: vm
+rules:
+  # Inspect + edit the VM definition (the team owns their VM spec/cloud-init).
+  - apiGroups: ["kubevirt.io"]
+    resources: ["virtualmachines"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  # Read the running instance (status/IP/phase). VMIs are created by the
+  # controller from the VM, so no create/delete here.
+  - apiGroups: ["kubevirt.io"]
+    resources: ["virtualmachineinstances"]
+    verbs: ["get", "list", "watch"]
+  # Power control via the subresource API — start/stop/restart only (NO migrate,
+  # NO pause/unpause by default). Lets students cycle their VM without admin.
+  - apiGroups: ["subresources.kubevirt.io"]
+    resources:
+      - "virtualmachines/start"
+      - "virtualmachines/stop"
+      - "virtualmachines/restart"
+    verbs: ["update"]
+  # Serial console + VNC to THEIR OWN guest — the VM equivalent of the container
+  # tier's pods/exec (the student's own workload, not a tenancy escape).
+  - apiGroups: ["subresources.kubevirt.io"]
+    resources:
+      - "virtualmachineinstances/console"
+      - "virtualmachineinstances/vnc"
+    verbs: ["get"]
+  # Watch the disk import progress.
+  - apiGroups: ["cdi.kubevirt.io"]
+    resources: ["datavolumes"]
+    verbs: ["get", "list", "watch"]
+  # Read the VM's networking + config objects.
+  - apiGroups: [""]
+    resources: ["services", "configmaps", "serviceaccounts"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["bitnami.com"]
+    resources: ["sealedsecrets"]
+    verbs: ["get", "list", "watch"]
+  # Debugging: read the virt-launcher pod + its logs + events. NOT pods/exec (the
+  # guest is reached via the console subresource above, not by exec'ing the
+  # launcher), NOT pods/delete, NOT raw Secrets.
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+---
+# RoleBinding — binds the VM Role to the team's group (Phase 2 Keycloak / Phase 1
+# local admin). Scoped to THIS namespace only; no ClusterRoleBinding.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: team-developer-vm
+  namespace: paper-papas-vm-prod
+  labels:
+    platform.capstone/team: paper-papas
+    platform.capstone/semester: 2026-fall
+    platform.capstone/env: prod
+    platform.capstone/tier: vm
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: team-developer-vm
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: Group
+    name: paper-papas-developers
