@@ -100,27 +100,57 @@ spec:
   # --- cluster-scoped resources: NONE, same hard boundary as the tenant project ----
   clusterResourceWhitelist: []
 
-  # --- namespaced resources: the VM kinds, mirroring the tenant VM project ---------
+  # --- namespaced resources -------------------------------------------------------
+  # DERIVED from what this Application actually deploys, not assembled one rejection at a
+  # time. Reconciled in BOTH directions against
+  # tenants/_vm-workloads/crimson-copies-stripped/ and against what ArgoCD reports it
+  # tracks (`.status.resources` on the live Application):
+  #
+  #   kind                    in git   controller-created        verdict
+  #   VirtualMachine          yes      -                         keep
+  #   Service                 yes      -                         keep
+  #   Ingress                 yes      -                         keep
+  #   SealedSecret            yes      -                         ADDED (was missing)
+  #   Secret                  no       yes (sealed-secrets ctrl)  keep
+  #   DataVolume              no       yes (dataVolumeTemplates)  keep
+  #   VirtualMachineInstance  no       yes (VM controller)        keep
+  #   ConfigMap               no       no                        REMOVED
+  #   ServiceAccount          no       no                        REMOVED
+  #
+  # The four "in git" kinds are exactly the four ArgoCD tracks. The three
+  # controller-created kinds are NOT in git and are kept deliberately — do not "tidy" them
+  # away: the VM's dataVolumeTemplates make CDI create a DataVolume, the VM controller
+  # creates the VMI, and the sealed-secrets controller writes the plain Secret that
+  # cloudInitNoCloud.secretRef reads. The first live VM tenant (team-tenantvm, PR #376)
+  # hit exactly that with the VMI, which is why it is listed.
   namespaceResourceWhitelist:
+    # --- present in git ---
     - group: kubevirt.io
       kind: VirtualMachine
-    - group: kubevirt.io
-      kind: VirtualMachineInstance
-    - group: cdi.kubevirt.io
-      kind: DataVolume
-    - group: ''
-      kind: ConfigMap
     - group: ''
       kind: Service
-    - group: ''
-      kind: ServiceAccount
     - group: networking.k8s.io
       kind: Ingress
-    # cloud-init userdata Secret — KubeVirt's cloudInitNoCloud.secretRef needs a RAW
-    # Secret (key `userdata`) and cannot take a ConfigMap. Same grant, and the same
-    # tradeoff, as the tenant VM project documents at length.
+    # THE ONE THAT WAS MISSING. cloudinit-sealedsecret.yaml is a SealedSecret, and
+    # SealedSecret and Secret are DIFFERENT KINDS: the sealed one is what is committed,
+    # the plain one is what the controller produces from it, so BOTH belong. Omitting it
+    # left the Application SyncFailed on "resource bitnami.com:SealedSecret is not
+    # permitted in project crimson-copies-stripped-vm-platform" with the other three
+    # resources Synced.
+    - group: bitnami.com
+      kind: SealedSecret
+    # --- created by controllers, never by git (see the table above) ---
     - group: ''
       kind: Secret
+    - group: cdi.kubevirt.io
+      kind: DataVolume
+    - group: kubevirt.io
+      kind: VirtualMachineInstance
+    # REMOVED, deliberately: ConfigMap and ServiceAccount. Neither is in the source
+    # directory, neither is created by any controller in this path, and ArgoCD tracks
+    # neither. The only mention of ConfigMap anywhere in the workload is a comment
+    # explaining that cloudInitNoCloud CANNOT use one. A grant nothing needs is a grant
+    # nobody audits.
 
   # --- roles: NONE, and that is the whole point -----------------------------------
   # The tenant VM project binds a `developer` role to a GitHub group. This project binds

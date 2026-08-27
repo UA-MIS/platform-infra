@@ -1,5 +1,30 @@
 #!/usr/bin/env python3
-"""Every ArgoCD Application's repoURL must be permitted by its AppProject's sourceRepos.
+"""Every ArgoCD Application must be permitted by its AppProject — both its repoURL
+(sourceRepos) and every KIND it deploys (namespaceResourceWhitelist).
+
+CHECK WHAT YOU CHANGED, NOT ONLY WHAT YOU BUILT.
+Read this before adding to this file. Both defects that produced this guard were the same
+mistake, and it was not a missing check — it was a rigorous check pointed at the wrong
+object:
+  - #589 shipped an AppProject with a 337-character spec.description into a field with a
+    documented 255-char limit. The guard was correct; the object was never checked.
+  - #591 then shipped that same AppProject with a namespaceResourceWhitelist omitting
+    SealedSecret — a kind sitting in the very directory the Application points at.
+Both times the tooling was verified and the thing being added was not. The systemic answer
+is `make verify-argocd-apply` and the kind check below; the habit is the sentence above.
+
+WHY THE OFFLINE HALF IS TRACTABLE AT ALL. It is tempting to assume `kubeconform -strict`
+already covers AppProjects. It does not, for two separate reasons, and the distinction
+matters:
+  1. kubeconform CANNOT LOAD A SCHEMA for AppProject — pointed at one directly it errors
+     "could not find schema for AppProject". It is a CRD; kubeconform ships Kubernetes
+     API schemas.
+  2. validate [1/8] only scans */namespaces/*.yaml, so IT NEVER LOOKED AT THE FILE. The
+     gate was not blind to the constraint; it was not looking.
+That is why a small number of exact, CRD-derived assertions here is worth having, rather
+than assuming a general-purpose validator has it covered.
+
+--- the repo check (original purpose) ---------------------------------------------
 
 WHY THIS GUARD EXISTS. `crimson-copies-stripped-vm-prod` sat Unknown/Unknown in ArgoCD
 because its Application sources from platform-infra while its AppProject permits only the
@@ -29,6 +54,29 @@ cannot read its subject must not report that the subject is clean. Coverage is a
 PER REQUIRED DIRECTORY rather than as a repo-wide non-zero total, because Applications and
 AppProjects live in several places and a repo-wide count stays healthy while one directory
 silently empties.
+
+--- the kind check ------------------------------------------------------------------
+Every kind an Application deploys must appear in its AppProject's whitelist. A missing
+kind fails at SYNC time, not at admission:
+
+    SyncFailed — resource bitnami.com:SealedSecret is not permitted
+                 in project crimson-copies-stripped-vm-platform
+
+and it fails PARTIALLY: the other three resources in that directory synced fine, so the
+Application sits part-applied and Healthy-looking.
+
+`make verify-argocd-apply` DOES NOT CATCH THIS — verified, not assumed: run against a
+whitelist missing SealedSecret it reports "51 checked, 0 rejected". An AppProject whose
+whitelist omits a kind is a perfectly VALID AppProject, so the API server has no opinion;
+the is-this-kind-permitted decision belongs to ArgoCD's application controller at sync
+time. (And that target only dry-runs Application/AppProject manifests, never the workload
+manifests an Application points at.) Server-side dry-run and this check cover different
+failures; neither replaces the other.
+
+DERIVE THE WHITELIST, DO NOT GROW IT ONE REJECTION AT A TIME. Reconcile it against the
+source directory in BOTH directions — nothing needed missing, nothing unneeded present.
+A whitelist assembled by fixing rejections one at a time costs a live reconcile cycle per
+missing kind, and accumulates grants nobody audits.
 """
 from __future__ import annotations
 
@@ -133,14 +181,80 @@ def load_docs(path: pathlib.Path):
 
 def sources_of(spec: dict) -> list[str]:
     """ArgoCD accepts `source:` (single) or `sources:` (multi). Both must be checked."""
+    return [r for r, _ in source_pairs(spec)]
+
+
+def source_pairs(spec: dict) -> list[tuple[str, str]]:
+    """(repoURL, path) for every source. The path is what lets the kind check below
+    enumerate the manifests an Application actually deploys."""
     out = []
-    src = spec.get("source")
-    if isinstance(src, dict) and src.get("repoURL"):
-        out.append(str(src["repoURL"]))
-    for s in spec.get("sources") or []:
+    for s in ([spec.get("source")] if isinstance(spec.get("source"), dict) else []) + list(
+        spec.get("sources") or []
+    ):
         if isinstance(s, dict) and s.get("repoURL"):
-            out.append(str(s["repoURL"]))
+            out.append((str(s["repoURL"]), str(s.get("path") or "")))
     return out
+
+
+# This repo's own URL, in both spellings. Only Applications sourcing THIS repo can have
+# their manifests enumerated offline; anything pointing at a Helm chart repo or another
+# GitHub repo is reported UNRESOLVED, never passed.
+SELF_REPOS = {
+    "https://github.com/UA-MIS/platform-infra",
+    "https://github.com/UA-MIS/platform-infra.git",
+}
+
+
+def kinds_in_path(
+    root: pathlib.Path, rel_path: str
+) -> tuple[set[tuple[str, str]], list[str], list[str]]:
+    """Every (group, kind) declared under an in-repo source path.
+
+    Returns (kinds, unknowable, errors) — THREE outcomes, deliberately, because two would
+    collapse the distinction that matters:
+      - unknowable: Helm chart source (`{{- if .Values.x }}`). The kinds are real but only
+        exist after rendering. Reported, never silently passed, never a hard failure — a
+        guard that fails on every Helm-sourced Application gets deleted by the first
+        person it blocks.
+      - errors: a manifest that genuinely will not parse. FATAL, so a directory we cannot
+        fully read never yields a clean bill of health.
+    """
+    kinds: set[tuple[str, str]] = set()
+    unknowable: list[str] = []
+    errors: list[str] = []
+    base = (root / rel_path).resolve()
+    if not base.is_dir():
+        return kinds, unknowable, [f"source path {rel_path!r} is not a directory in this repo"]
+    for f in sorted(base.rglob("*.y*ml")):
+        try:
+            docs = load_docs(f)
+        except GoTemplate:
+            unknowable.append(str(f.relative_to(root)))
+            continue
+        except RuntimeError as e:
+            errors.append(str(e))
+            continue
+        for doc in docs:
+            kind = doc.get("kind")
+            if not kind:
+                continue
+            api = str(doc.get("apiVersion", ""))
+            group = api.split("/")[0] if "/" in api else ""
+            kinds.add((group, str(kind)))
+    return kinds, unknowable, errors
+
+
+def kind_permitted(group: str, kind: str, whitelist: list[dict]) -> bool:
+    """ArgoCD matches group and kind with `*` wildcards. An EMPTY/absent
+    namespaceResourceWhitelist means ALLOW-ALL in ArgoCD (unlike clusterResourceWhitelist,
+    where empty means deny-all) — the caller handles that asymmetry, not this function."""
+    for e in whitelist:
+        if not isinstance(e, dict):
+            continue
+        g, k = str(e.get("group", "")), str(e.get("kind", ""))
+        if (g == "*" or g == group) and (k == "*" or k == kind):
+            return True
+    return False
 
 
 def main() -> int:
@@ -184,16 +298,20 @@ def main() -> int:
                     "sourceRepos": [str(r) for r in (spec.get("sourceRepos") or [])],
                     "path": rel,
                     "description": str(spec.get("description") or ""),
+                    "nsWhitelist": spec.get("namespaceResourceWhitelist") or [],
+                    "clusterWhitelist": spec.get("clusterResourceWhitelist") or [],
                 }
             elif kind == "Application":
                 apps.append({"name": name, "path": rel, "project": str(spec.get("project", "")),
-                             "repos": sources_of(spec), "via": "Application"})
+                             "repos": sources_of(spec), "pairs": source_pairs(spec),
+                             "via": "Application"})
             else:  # ApplicationSet — check the Application it will generate
                 tmpl = (spec.get("template") or {}).get("spec") or {}
                 if tmpl:
                     apps.append({"name": f"{name} (template)", "path": rel,
                                  "project": str(tmpl.get("project", "")),
-                                 "repos": sources_of(tmpl), "via": "ApplicationSet"})
+                                 "repos": sources_of(tmpl), "pairs": source_pairs(tmpl),
+                                 "via": "ApplicationSet"})
 
     # ---- fail closed: could not read the subject -----------------------------
     if read_errors:
@@ -272,7 +390,76 @@ def main() -> int:
             else:
                 forbidden.append((a, repo, proj, why, near_miss(repo, proj["sourceRepos"])))
 
+    # ---- KIND check: every kind an Application deploys must be whitelisted ---------
+    # The direct sibling of the repo check above, one field over. A missing KIND fails at
+    # SYNC time, not at admission:
+    #     SyncFailed — resource bitnami.com:SealedSecret is not permitted
+    #                  in project crimson-copies-stripped-vm-platform
+    # `make verify-argocd-apply` does NOT catch it, and that was verified rather than
+    # assumed: run against a whitelist missing SealedSecret it reports "51 checked, 0
+    # rejected". Two independent reasons — an AppProject whose whitelist omits a kind is a
+    # perfectly VALID AppProject, so the API server has no opinion; and the
+    # is-this-kind-permitted decision belongs to ArgoCD's application controller at sync
+    # time. (A third: that target only dry-runs Application/AppProject manifests, never the
+    # workload manifests the Application points at.)
+    bad_kinds: list[tuple] = []
+    kind_errors: list[str] = []
+    kinds_checked = 0
+    for a in apps:
+        if a["project"] not in projects:
+            continue
+        proj = projects[a["project"]]
+        for repo, spath in a.get("pairs", []):
+            if is_templated(repo) or is_templated(spath) or not spath:
+                continue
+            if repo not in SELF_REPOS:
+                # Another repo or a Helm chart repo — not enumerable offline. Reported so
+                # it cannot be mistaken for "checked and clean".
+                unresolved.append((a, f"source {repo} is not this repo; kinds not checkable offline"))
+                continue
+            found, unknowable, errs = kinds_in_path(ROOT, spath)
+            kind_errors.extend(errs)
+            if unknowable:
+                unresolved.append((a, f"{len(unknowable)} Helm-template file(s) under {spath}/ — kinds only exist after rendering"))
+            ns_wl, cl_wl = proj["nsWhitelist"], proj["clusterWhitelist"]
+            for group, kind in sorted(found):
+                kinds_checked += 1
+                # ArgoCD asymmetry: an EMPTY namespaceResourceWhitelist means ALLOW-ALL
+                # namespaced kinds, whereas an empty clusterResourceWhitelist means
+                # DENY-ALL cluster kinds. So an empty ns list is not a finding.
+                if not ns_wl and not cl_wl:
+                    continue
+                if ns_wl and kind_permitted(group, kind, ns_wl):
+                    continue
+                if cl_wl and kind_permitted(group, kind, cl_wl):
+                    continue
+                if not ns_wl:
+                    continue  # permissive namespaced default; nothing to assert
+                bad_kinds.append((a, group, kind, spath, proj))
+
+    if kind_errors:
+        print("FAIL: could not enumerate the kinds an Application deploys —")
+        print("      refusing to report a clean tree from a scan that did not complete:")
+        for e in kind_errors:
+            print(f"       - {e}")
+        return 1
+
+    if bad_kinds:
+        print(f"FAIL: {len(bad_kinds)} kind(s) deployed by an Application are NOT permitted")
+        print("      by its AppProject. ArgoCD fails these at SYNC time with")
+        print("      'resource <group>:<kind> is not permitted in project <name>'. The other")
+        print("      resources in the same directory sync fine, so the app sits part-applied.")
+        for a, group, kind, spath, proj in bad_kinds:
+            print(f"    - {a['path']} :: {a['name']}")
+            print(f"      deploys : {group or '(core)'}:{kind}   (from {spath}/)")
+            print(f"      project : {a['project']}  ({proj['path']})")
+            print(f"      Add it to namespaceResourceWhitelist, or stop deploying it. Derive")
+            print(f"      the whole list from the source directory rather than adding one")
+            print(f"      entry per rejection — that is how you get four more of these.")
+        return 1
+
     total = len(apps)
+    print(f"  checked {kinds_checked} deployed kind(s) against their AppProject whitelist")
     print(f"  scanned {total} Application/ApplicationSet definition(s) against "
           f"{len(projects)} AppProject(s); skipped {skipped_templates} scaffolder-template "
           f"and {skipped_helm} Helm-template file(s)")
