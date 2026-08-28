@@ -78,6 +78,58 @@ spec:
         kubevirt.io/domain: ${{ values.appName }}
         app.kubernetes.io/name: ${{ values.appName }}
     spec:
+      # ── PLACEMENT — VMs run on the CONTROL-PLANE nodes, one per node. ─────
+      # A VM is PERMANENT and IMMOVABLE: it reserves its full cpu/memory for its
+      # whole lifetime (see resources below) and RBD is RWO, so it cannot live-
+      # migrate. Build runners are the opposite — ephemeral, and they schedule
+      # anywhere. Leaving VMs on the workers therefore inverts the shape: the
+      # immovable thing squats on the nodes that exist for flexible work, and the
+      # flexible work hits a capacity wall. Measured 2026-08-27, before this
+      # change: capstone-w1 76% / w2 74% of CPU REQUESTS, of which 4.0 and 6.0
+      # cores respectively were VMs, while capstone-n1/n2/n3 sat at 28-30%
+      # requests and 4-5% ACTUAL CPU with ~11 cores free each.
+      #
+      # The control-plane taint is capstone.io/control-plane=true:PreferNoSchedule
+      # — SOFT, so NO toleration is needed here. (Verified on all three nodes,
+      # 2026-08-28. If that taint is ever hardened to NoSchedule, this VM stops
+      # scheduling and a matching toleration must be added.)
+      affinity:
+        nodeAffinity:
+          # required, not preferred: a soft rule would silently fall back to a
+          # worker and recreate exactly the wall this exists to prevent.
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: Exists
+        podAntiAffinity:
+          # One VM per node. Without this, three VMs can stack on n1 and rebuild
+          # the wall somewhere new.
+          #
+          # namespaceSelector: {} IS LOAD-BEARING. Each VM tenant lives in its own
+          # <team>-vm-prod namespace, and podAntiAffinity defaults to matching only
+          # the pod's OWN namespace. Without this line the rule would compare each
+          # VM against nothing but itself and spread NOTHING, while still looking
+          # correct in review. {} means "all namespaces".
+          #
+          # CAPACITY CLIFF, deliberate and documented: this is `required`, and
+          # there are three control-plane nodes. The FOURTH VM tenant will not
+          # schedule — and per the resources comment below, that failure is
+          # near-invisible (VirtualMachine sits at `Starting`, VMI at `Pending`,
+          # no pod to inspect). Before onboarding a fourth VM team, either add a
+          # control-plane node or relax this to
+          # preferredDuringSchedulingIgnoredDuringExecution (weight: 100).
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              namespaceSelector: {}
+              labelSelector:
+                matchExpressions:
+                  # every virt-launcher pod carries this, regardless of tenant.
+                  - key: kubevirt.io
+                    operator: In
+                    values:
+                      - virt-launcher
+
       # DNS — NOT optional, and NOT the cluster default. A VM's traffic leaves the
       # guest through the masquerade interface and never passes through a host
       # socket, so Cilium's socket load-balancer never runs and the kube-dns
