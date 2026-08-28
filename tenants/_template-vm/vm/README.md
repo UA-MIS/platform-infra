@@ -177,3 +177,48 @@ boot-to-serving ~34 min. Slow but entirely workable — roughly 3–5× native, 
   in `skeleton-vm/`; the public SSH transport is an operator decision).
 - **Platform install** of `virt-operator` + `cdi-operator` as pinned ArgoCD apps.
 - **Live-migration** (CephFS RWX) — deferred; node drain cold-restarts VMs.
+
+## Where VM placement is controlled (it is NOT in this directory)
+
+A recurring wrong turn: this blueprint holds only the VM tier's **tenancy**
+scaffolding — AppProject, namespace + quota/LimitRange/NetworkPolicy, and the VM
+env ApplicationSet. There is **no VirtualMachine here** to constrain, so node
+placement cannot be set from this directory.
+
+The `affinity` block that pins VMs lives in the **VM manifest**, in two places
+that must stay in sync:
+
+| What | Where |
+|---|---|
+| Blueprint for **new** VM tenants | `platform-services/backstage/templates/vm-app/skeleton-vm/.devops/chart/base/virtualmachine.yaml` |
+| A **live** tenant | that team's own app repo, `.devops/chart/base/virtualmachine.yaml` |
+
+Editing the skeleton changes what teams two and three are *born* with; it does
+**not** retro-fit a team already onboarded, because the scaffolder copies the
+skeleton once at onboarding. An existing tenant needs a PR against its own repo.
+
+The current contract (see the comments in those files for the full reasoning):
+
+- **`nodeAffinity`, required**, on `node-role.kubernetes.io/control-plane`. VMs
+  are permanent and immovable — RWO RBD, full cpu/memory reserved for life — so
+  they belong on the control-plane nodes, leaving the workers for the ephemeral
+  build runners that can schedule anywhere. No toleration is needed: the
+  control-plane taint is `capstone.io/control-plane=true:PreferNoSchedule`, which
+  is soft.
+- **`podAntiAffinity`, required**, on `kubevirt.io=virt-launcher` over
+  `kubernetes.io/hostname`, **with `namespaceSelector: {}`** — one VM per node.
+  The namespaceSelector is load-bearing: VM tenants each live in their own
+  `<team>-vm-prod` namespace, and podAntiAffinity otherwise matches only the
+  pod's own namespace, which would spread nothing while still reading as correct.
+
+**Capacity cliff:** `required` anti-affinity across three control-plane nodes
+means the **fourth** VM tenant will not schedule, and that failure is quiet (the
+VirtualMachine sits at `Starting`, the VMI at `Pending`, with no pod to inspect).
+Before onboarding a fourth VM team, add a control-plane node or relax the rule to
+`preferredDuringSchedulingIgnoredDuringExecution` (weight 100).
+
+**Changing placement on a running VM requires deleting the VMI.** A VMI's spec is
+immutable, so a merged manifest change does not move a running guest; deleting the
+VMI lets the VM controller recreate it from the new spec. That is a convergence
+*to* git, which is why it is legitimate where a live `kubectl patch` against a
+GitOps-managed object is not — ArgoCD `selfHeal` reverts those within a minute.
