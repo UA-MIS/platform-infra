@@ -144,6 +144,7 @@ spec:
       required:
         - baseImage
         - sshPubKey
+        - githubUsernames
       properties:
         # BRING-YOUR-OWN / IMPORTED DISK IMAGE (ADR-032 §1, §4). The "image" is a whole
         # OS disk CDI imports into a PVC — NOT a container build. Point this at:
@@ -240,6 +241,65 @@ spec:
             key is set. This is a public key — safe to store in git.
           pattern: '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256|sk-ssh-ed25519@openssh.com|sk-ecdsa-sha2-nistp256@openssh.com) [A-Za-z0-9+/=]+( .*)?$'
           ui:help: 'Run `cat ~/.ssh/id_ed25519.pub` (or generate one with `ssh-keygen -t ed25519`) and paste the single-line output.'
+        # THE TEAM ROSTER — this is what makes SSH onboarding SELF-SERVICE (ADR-032a).
+        # Each member's PUBLIC keys are pulled from https://github.com/<user>.keys into
+        # the guest: once by cloud-init's `ssh_import_id` on first boot, and then every
+        # 5 minutes by a systemd timer the same cloud-init installs.
+        #
+        # THE TIMER IS NOT BELT-AND-BRACES, IT IS THE POINT. cloud-init runs ONCE. On
+        # day one NOBODY on the team has uploaded a key yet — the VM is built before
+        # they get there — so a first-boot-only import would import nothing and leave
+        # every student locked out, with no one already inside to let them in. With the
+        # timer: the student adds their key to GitHub and can SSH in ~5 minutes later,
+        # with no instructor in the loop.
+        #
+        # ⚠ THE PREREQUISITE IS REAL AND IS NOT SAFE TO ASSUME. Most students have NO
+        # SSH key on their GitHub account (sampled 2026-08-28 across a live MIS 521
+        # roster: 1 of 3 members had any). For those members this imports nothing and
+        # they simply cannot log in — with NO error anywhere they will see. The
+        # generated repo README leads with `ssh-keygen` + "paste it into
+        # github.com/settings/keys" as step one for exactly this reason; do not drop it.
+        #
+        # Membership is STATIC per boot on purpose: changing WHO is on the team is a
+        # repo edit + rebuild. Resolving it live would mean a GitHub token on the guest,
+        # and a student dev-VM is not a place to keep a credential. Only KEYS refresh.
+        githubUsernames:
+          title: Team GitHub usernames
+          type: array
+          minItems: 1
+          items:
+            type: string
+            pattern: '^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$'
+          description: >-
+            The GitHub username of every team member (yours included). Their public SSH
+            keys are imported into the VM automatically and refreshed every 5 minutes,
+            so nobody has to send anyone a key. Anyone added here can SSH in as soon as
+            they add a key to their GitHub account.
+          ui:help: 'The username from github.com/<username> — not an email. Add every teammate; you can change the list later by editing .devops/chart/base/cloud-init.yaml.'
+        # The team's university emails — rendered into the `<app>-ssh` Service's
+        # platform.capstone/ssh-access-emails annotation, which the cf-vm-access
+        # reconciler (ADR-038) turns into the Cloudflare Access Allow policy for
+        # <team>-ssh.<domain>.
+        #
+        # ⚠ THIS WAS A REAL, SHIPPED GAP. skeleton-vm/.devops/chart/base/ssh-service.yaml
+        # has always consumed `${{ values.teamEmails }}`, but this template never PASSED
+        # it — so every VM tenant scaffolded to date rendered the annotation as `""`.
+        # That file's own header warns, correctly, that an empty value "PRODUCES AN APP
+        # THAT ADMITS NOBODY, and from a student's laptop that is INDISTINGUISHABLE from
+        # a missing tunnel route". Verified live on paper-papas 2026-08-28:
+        # `platform.capstone/ssh-access-emails: ""`. Wiring the input closes it.
+        #
+        # NOT a secret — the same university emails already in the GitHub org.
+        teamEmails:
+          title: Team emails (Cloudflare Access allow-list)
+          type: string
+          description: >-
+            Comma-separated university emails for everyone who may SSH to this VM. This
+            becomes the Cloudflare Access policy on <team>-ssh.uamishub.com — the gate in
+            FRONT of the VM's sshd. Leave nobody out: an address that is not here cannot
+            reach the host at all, no matter what SSH key they have.
+          default: ''
+          ui:help: 'e.g. astudent@crimson.ua.edu, bstudent@crimson.ua.edu'
 
     # NOTE (same as new-capstone-project): there is intentionally NO repoUrl input — the
     # repo is created at github.com/UA-MIS/<appName> (owner fixed; repo name = app name),
@@ -284,6 +344,8 @@ spec:
           diskGi: ${{ parameters.diskGi }}
           port: ${{ parameters.port }}
           sshPubKey: ${{ parameters.sshPubKey }}
+          githubUsernames: ${{ parameters.githubUsernames }}
+          teamEmails: ${{ parameters.teamEmails }}
           destination: ${{ ("github.com?owner=UA-MIS&repo=" + parameters.appName) | parseRepoUrl }}
         # ⚠ INDENTATION IS LOAD-BEARING (new-capstone-project lesson): this key MUST be
         # nested under `input:` (8-space indent, a sibling of url:/values:). Misplaced at

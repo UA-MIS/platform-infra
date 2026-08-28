@@ -19,7 +19,7 @@ deliberately separate from the container tenant tiers (`../namespaces/*.yaml`).
 | --- | --- |
 | `appproject-vm.yaml` | the VM-tier tenancy fence — a SEPARATE AppProject `__TEAM__-vm` that whitelists `VirtualMachine`/`VirtualMachineInstance`/`DataVolume` (+ the cloud-init `Secret`) and targets only `__TEAM__-vm-*` namespaces. `clusterResourceWhitelist: []`. |
 | `applicationset-vm.yaml` | the VM env ApplicationSet — a single-env (prod) `matrix(list × git-files promotion.yaml)` App that syncs the APP repo's `.devops/chart/overlays/prod` VM chart into `__TEAM__-vm-prod` under project `__TEAM__-vm`. **Without this the VM tier is a fence + namespace with nothing inside it** (the #376 onboarding bug). The VM analogue of `../_template/applicationset-envs.yaml`. |
-| `namespaces/vm-prod.yaml` | `__TEAM__-vm-prod` Namespace at **PSA `baseline`** (not restricted) + VM-sized ResourceQuota + LimitRange + 4 NetworkPolicies (default-deny, Traefik ingress, DNS egress, importer image-pull) + VM-aware Role/RoleBinding. |
+| `namespaces/vm-prod.yaml` | `__TEAM__-vm-prod` Namespace at **PSA `baseline`** (not restricted) + VM-sized ResourceQuota + LimitRange + 6 NetworkPolicies (default-deny, Traefik ingress, cloudflared SSH ingress, DNS + intra-ns egress, importer image-pull, and **guest external :53/:443 egress**) + VM-aware Role/RoleBinding. |
 
 The security rationale, blast-radius analysis, and the post-install deny-test plan
 live in `artifacts/reviews/kubevirt-vm-tier-security-review.md`.

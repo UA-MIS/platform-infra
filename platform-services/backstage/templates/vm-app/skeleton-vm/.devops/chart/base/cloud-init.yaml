@@ -40,8 +40,9 @@
 #
 #   ssh <cloud-user>@<your public SSH endpoint>        # see the repo README
 #
-# ADD MORE KEYS: append to `ssh_authorized_keys` below, or uncomment `ssh_import_id`
-# to pull teammates' keys from GitHub (https://github.com/<user>.keys).
+# ADD MORE KEYS: append to `ssh_authorized_keys` below. Everything under
+# `ssh_import_id` + the roster/timer below is generated from the wizard's team
+# roster — edit the roster, not the key list.
 ssh_pwauth: false
 disable_root: true
 ssh_authorized_keys:
@@ -51,9 +52,17 @@ ssh_authorized_keys:
   # block scalar — a comment containing a colon (e.g. "laptop: personal key") would
   # otherwise break this file's YAML the same class of way D-106 fixed for description.
   - ${{ values.sshPubKey | dump }}
-# ssh_import_id:
-#   - gh:your-github-username
-#   - gh:teammate-github-username
+
+# ── SELF-SERVICE KEY IMPORT (3/3) — first boot ──────────────────────────────
+# Pull each team member's PUBLIC keys from GitHub (https://github.com/<user>.keys)
+# into the cloud user's authorized_keys, so NOBODY has to collect or hand-place a
+# key. This is cloud-init's own module and it runs EXACTLY ONCE, on first boot —
+# which is why it is only half the story. See the roster + timer below for the
+# other half.
+ssh_import_id:
+{%- for u in values.githubUsernames %}
+  - gh:${{ u }}
+{%- endfor %}
 
 # A self-contained hello page + a systemd unit that serves it with python3 (present in
 # Fedora/Ubuntu cloud images — distro-agnostic, no package install needed). Swap this
@@ -107,6 +116,158 @@ write_files:
       TrustedUserCAKeys /etc/ssh/cf_access_ca.pub
       AuthorizedPrincipalsCommand /bin/sh -c "echo '%t %k' | ssh-keygen -L -f - | grep -A1 Principals"
       AuthorizedPrincipalsCommandUser nobody
+  # ── SELF-SERVICE KEY IMPORT — the roster (the single source of truth) ───────
+  # The team's GitHub usernames, straight from the wizard. BOTH the first-boot
+  # `ssh_import_id` above and the every-5-minutes timer below are generated from this
+  # same list in this same file, so the two can never drift apart.
+  #
+  # MEMBERSHIP IS STATIC PER BOOT, BY DESIGN. Changing WHO is on the team is a repo
+  # change (edit this file, push, rebuild) — deliberately, because resolving team
+  # membership at runtime would mean putting a GitHub token on the guest, and a
+  # student dev-VM is not a place to keep a credential. Only the KEYS refresh
+  # automatically; the roster does not.
+  - path: /etc/capstone/ssh-roster
+    permissions: '0644'
+    content: |
+      # GitHub usernames for this team. One per line. `#` comments ignored.
+      # Regenerate from the roster of record:
+      #   gh api /orgs/UA-MIS/teams/<team>/members --jq '.[].login'
+{%- for u in values.githubUsernames %}
+      ${{ u }}
+{%- endfor %}
+  # ── SELF-SERVICE KEY IMPORT — the re-import script ──────────────────────────
+  # WHY THIS EXISTS AT ALL. cloud-init runs ONCE. A student who adds their SSH key to
+  # GitHub *after* the VM was provisioned is locked out forever, and on day one that
+  # is EVERY student — the VM is built before anyone has uploaded anything, and there
+  # is nobody already inside to let them in. This script + its timer close that loop:
+  #   student adds key to GitHub -> they can SSH in within ~5 minutes -> no instructor.
+  #
+  # WHY NOT `ssh-import-id` ON THE TIMER. ssh-import-id fetches
+  # https://api.github.com/users/<u>/keys — the REST API, which is rate-limited to 60
+  # requests/hour PER IP for unauthenticated callers, and it hard-fails (`die()`) when
+  # limited. Every VM guest in the cluster shares one egress IP, so a 5-minute timer
+  # over a 3-person team is 36 req/hr from ONE tenant; three tenants exceed the limit
+  # and would knock each other out. This script uses https://github.com/<u>.keys — the
+  # same public keys, no API quota. ssh-import-id is still used for the FIRST boot
+  # above, where it costs one call per member, once.
+  #
+  # THE SAFETY PROPERTY, MADE STRUCTURAL RATHER THAN CAREFUL:
+  # this script NEVER writes to ~/.ssh/authorized_keys. It owns exactly one file,
+  # /etc/ssh/authorized_keys.d/<cloud-user>, which sshd reads IN ADDITION to the
+  # normal one (see the sshd drop-in below). So the scaffold/break-glass key is
+  # untouchable from here — no bug in this script can lock the team out of their VM.
+  # Within its own file:
+  #   - a member with NO keys on GitHub contributes a `#` comment line and nothing
+  #     else. It cannot blank or corrupt anyone else's keys. (This is the case that
+  #     actually happens — most students have no key on GitHub on day one.)
+  #   - a FAILED fetch (GitHub down, egress broken) reuses that member's last known
+  #     keys from the cache instead of dropping them.
+  #   - the file is assembled in a temp file and moved into place with mv(1) on the
+  #     same filesystem, so sshd never observes a half-written file.
+  - path: /usr/local/bin/capstone-ssh-import
+    permissions: '0755'
+    content: |
+      #!/bin/sh
+      # Refresh the team's authorized keys from GitHub. Safe to run at any time.
+      set -u
+
+      ROSTER=/etc/capstone/ssh-roster
+      CACHE=/var/lib/capstone/ssh-keys
+      KEYDIR=/etc/ssh/authorized_keys.d
+
+      # The default cloud user is uid 1000 on Ubuntu/Debian/Fedora cloud images
+      # (`ubuntu`/`debian`/`fedora`), so detect it rather than hardcoding a distro.
+      CLOUD_USER=$(getent passwd 1000 2>/dev/null | cut -d: -f1)
+      [ -n "$CLOUD_USER" ] || CLOUD_USER=ubuntu
+      OUT="$KEYDIR/$CLOUD_USER"
+
+      if [ ! -r "$ROSTER" ]; then
+        echo "capstone-ssh-import: no roster at $ROSTER; nothing to do" >&2
+        exit 0
+      fi
+
+      install -d -m 0755 "$KEYDIR"
+      install -d -m 0700 "$CACHE"
+
+      TMP=$(mktemp "$OUT.XXXXXX") || exit 1
+      rc=0
+
+      {
+        echo "# GENERATED by capstone-ssh-import at $(date -u +%Y-%m-%dT%H:%M:%SZ)."
+        echo "# DO NOT EDIT — rewritten every timer tick from $ROSTER."
+        echo "# Scaffold/break-glass keys live in ~$CLOUD_USER/.ssh/authorized_keys"
+        echo "# and are never touched by this file."
+      } > "$TMP"
+
+      while IFS= read -r line || [ -n "$line" ]; do
+        u=$(printf '%s' "$line" | tr -d '[:space:]')
+        case "$u" in
+          ''|'#'*) continue ;;
+          *[!A-Za-z0-9-]*)
+            echo "capstone-ssh-import: skipping invalid username '$u'" >&2
+            continue ;;
+        esac
+
+        if curl -fsS --max-time 20 "https://github.com/$u.keys" -o "$CACHE/$u.new"; then
+          mv -f "$CACHE/$u.new" "$CACHE/$u"
+        else
+          rm -f "$CACHE/$u.new"
+          rc=1
+          echo "capstone-ssh-import: fetch FAILED for '$u'; reusing last known keys" >&2
+        fi
+
+        if [ -s "$CACHE/$u" ]; then
+          awk -v u="$u" 'NF { print $0 " " u "@github" }' "$CACHE/$u" >> "$TMP"
+        else
+          # 200-with-no-keys is authoritative: this person has not uploaded one.
+          echo "# $u: no public SSH keys on GitHub" >> "$TMP"
+        fi
+      done < "$ROSTER"
+
+      chown root:root "$TMP"
+      chmod 0644 "$TMP"
+      mv -f "$TMP" "$OUT"
+      exit $rc
+  # sshd drop-in: read the generated roster file IN ADDITION to the user's own
+  # ~/.ssh/authorized_keys. Keeping them in two separate files is what makes the
+  # script above unable to lock anyone out. Root-owned 0644 in a root-owned 0755
+  # directory satisfies sshd's StrictModes.
+  - path: /etc/ssh/sshd_config.d/20-capstone-roster-keys.conf
+    permissions: '0644'
+    content: |
+      # Managed by cloud-init. Team keys imported from GitHub by
+      # /usr/local/bin/capstone-ssh-import land in the second path.
+      AuthorizedKeysFile .ssh/authorized_keys /etc/ssh/authorized_keys.d/%u
+  - path: /etc/systemd/system/capstone-ssh-import.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Import team SSH keys from GitHub (capstone self-service onboarding)
+      Wants=network-online.target
+      After=network-online.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/capstone-ssh-import
+      # A partial refresh (exit 1 = at least one member's fetch failed, previous keys
+      # kept) must not mark the unit failed and stop the timer.
+      SuccessExitStatus=0 1
+  - path: /etc/systemd/system/capstone-ssh-import.timer
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Refresh team SSH keys from GitHub every 5 minutes
+
+      [Timer]
+      # First run shortly after boot, then every 5 minutes. AccuracySec is set
+      # because systemd's 1-minute default jitter would otherwise make "within five
+      # minutes" a promise the handout cannot keep.
+      OnBootSec=2min
+      OnUnitActiveSec=5min
+      AccuracySec=15s
+
+      [Install]
+      WantedBy=timers.target
   - path: /var/www/app/index.html
     permissions: '0644'
     content: |
@@ -152,6 +313,14 @@ runcmd:
   - [ sh, -c, "systemctl try-restart ssh 2>/dev/null || systemctl try-restart sshd 2>/dev/null || true" ]
   # Bring up the starter service (your "app"). Replace with your own install/start steps.
   - [ systemctl, daemon-reload ]
+  # ── SELF-SERVICE KEY IMPORT (3/3) — arm the refresh loop ────────────────────
+  # Run it ONCE now so the team's keys are present the moment the VM is up (the
+  # first-boot `ssh_import_id` above covers the cloud user's own authorized_keys;
+  # this populates the roster file sshd also reads), then start the timer that keeps
+  # them fresh. `|| true` because a member with no key on GitHub is a NORMAL day-one
+  # state, not a boot failure.
+  - [ sh, -c, "/usr/local/bin/capstone-ssh-import || true" ]
+  - [ systemctl, enable, --now, capstone-ssh-import.timer ]
   - [ systemctl, enable, --now, capstone-app.service ]
 
 final_message: "capstone-app first boot complete after $UPTIME seconds"

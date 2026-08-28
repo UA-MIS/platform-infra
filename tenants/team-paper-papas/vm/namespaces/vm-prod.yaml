@@ -165,7 +165,7 @@ spec:
         cpu: "12"
         memory: 12Gi
 ---
-# NetworkPolicy 1/5 — DEFAULT-DENY ingress + egress. Same posture as every tenant
+# NetworkPolicy 1/6 — DEFAULT-DENY ingress + egress. Same posture as every tenant
 # tier: selects all pods (KubeVirt passes VM labels through to the virt-launcher
 # pod, so podSelector:{} covers the VM too — KubeVirt netpol docs), denies all
 # until the allowances below add back the minimum. Cross-team traffic is denied by
@@ -186,7 +186,7 @@ spec:
     - Ingress
     - Egress
 ---
-# NetworkPolicy 2/5 — allow ingress from Traefik (kube-system) + intra-namespace.
+# NetworkPolicy 2/6 — allow ingress from Traefik (kube-system) + intra-namespace.
 # Gives the VM its standard `<app>.prod.capstone.uamishub.com` URL via a Service ->
 # virt-launcher pod (masquerade NAT puts the guest behind the launcher pod IP, so
 # ordinary Service/Ingress/netpol apply unchanged — ADR-032 §2b).
@@ -217,7 +217,7 @@ spec:
     - from:
         - podSelector: {}
 ---
-# NetworkPolicy 3/5 — allow ingress on :22 from the `cloudflared` namespace ONLY —
+# NetworkPolicy 3/6 — allow ingress on :22 from the `cloudflared` namespace ONLY —
 # the SSH transport (ADR-032a D2, resolved: Cloudflare Tunnel SSH, Option C/D,
 # $0/no-LoadBalancer). cloudflared proxies a per-tenant Cloudflare Tunnel Public
 # Hostname (`ssh.<app>.capstone.uamishub.com`, Service type SSH, fronted by a
@@ -258,7 +258,7 @@ spec:
         - protocol: TCP
           port: 22
 ---
-# NetworkPolicy 4/5 — allow egress to cluster DNS + intra-namespace ONLY. The VM
+# NetworkPolicy 4/6 — allow egress to cluster DNS + intra-namespace ONLY. The VM
 # guest (virt-launcher) gets NO external egress and NO API-server egress by default
 # — identical to the container tiers (least privilege). A lifted legacy app that
 # legitimately needs to call OUT to a specific external service is an explicit,
@@ -311,7 +311,7 @@ spec:
     - to:
         - podSelector: {}
 ---
-# NetworkPolicy 5/5 — CDI IMPORTER disk-fetch egress, SCOPED TO THE IMPORTER POD.
+# NetworkPolicy 5/6 — CDI IMPORTER disk-fetch egress, SCOPED TO THE IMPORTER POD.
 # The CDI importer pod (created transiently in THIS namespace to populate the
 # DataVolume PVC) is the ONLY pod that needs to reach a disk-image source. We scope
 # this allow to the importer's well-known label so the running VM guest does NOT
@@ -373,6 +373,113 @@ spec:
               - 10.96.0.0/12       # services (covered by the scoped allow above)
               - 10.237.168.0/22    # node LAN incl. apiserver :6443 — intent (see caveat)
               - 100.64.0.0/10      # tailnet overlay — intent (see caveat)
+      ports:
+        - protocol: TCP
+          port: 443
+---
+# NetworkPolicy 6/6 — VM GUEST external egress, :53 + :443 ONLY.
+#
+# WHY THIS IS A DEFAULT AND NOT AN OPT-IN. Policies 1–5 give the guest DNS +
+# intra-namespace egress only; the one 0.0.0.0/0:443 rule (5/6) is podSelector-scoped
+# to `app: containerized-data-importer` — the CDI IMPORTER pod, not the virt-launcher
+# pod that carries the guest's traffic. For a long time this file argued that a VM
+# tenant is "a lifted, self-contained legacy app that only needs to be REACHED", so
+# the guest should get no internet at all.
+#
+# That assumption did not survive contact with the tenants that actually exist. A VM
+# tenant is a PET DEV-VM: the team SSHes in, `git clone`s, runs `apt` and `npm`, and
+# builds their stack IN the guest (ADR-032a). Every one of those calls needs egress.
+# Without this policy the guest is a box you can log into and do nothing on — and the
+# failure is SILENT (blackholed packets, cloud-init hanging with no surfaced error),
+# which is the most expensive shape of failure on this platform.
+#
+# The evidence that made this a default rather than a per-tenant step:
+#   - crimson-copies-stripped needed it and added it by hand as a "sixth policy",
+#     documented in tenants/crimson-copies-stripped-vm/README.md.
+#   - paper-papas was then scaffolded WITHOUT it and shipped broken: on 2026-08-28 the
+#     live guest could not resolve DNS at all (`getent hosts github.com` -> nothing,
+#     `curl https://github.com/<user>.keys` -> "Resolving timed out", http=000).
+# Two for two. A default that every real tenant must remember to override by hand is
+# not a security control, it is a latent outage — so the default is flipped here and
+# the opt-OUT is documented below.
+#
+# This also aligns the VM tier with the CONTAINER tiers, which already default
+# `externalEgress: true` (platform-services/crossplane/apis/xrd.yaml). VM tenants were
+# the odd tier out, not the hardened one.
+#
+# TO OPT OUT for a genuinely self-contained appliance that only needs to be reached:
+# delete this document from the tenant's rendered copy under tenants/team-<team>/.
+# Do that deliberately, and note it in the tenant README — an appliance VM is the one
+# case where the original least-privilege reading is still right.
+#
+# SCOPE, stated plainly: this widens the guest's reach to the PUBLIC internet on two
+# ports and to NOTHING internal. The `except` list is reused VERBATIM from 5/6 so the
+# guest cannot reach pods, services, the node LAN (incl. apiserver :6443) or the
+# tailnet. Same Cilium CIDR-semantics caveat as 5/6: the pods/services excepts are
+# enforced by endpoint identity, while the node-LAN and tailnet excepts are INTENT
+# until `policyCIDRMatchMode: nodes` + Host Firewall are enabled (SEC-019). Shape is
+# reproduced from the already-reviewed allow-egress-vm-external-https in
+# tenants/crimson-copies-stripped-vm/vm/namespaces/vm-prod.yaml — not reinvented.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-vm-external-https
+  namespace: paper-papas-vm-prod
+  labels:
+    platform.capstone/team: paper-papas
+    platform.capstone/semester: 2026-fall
+    platform.capstone/env: prod
+    platform.capstone/tier: vm
+spec:
+  # KubeVirt propagates kubevirt.io/domain onto the virt-launcher pod, so this selects
+  # the pod that actually carries the guest's traffic. The domain is the APP name
+  # (virtualmachine.yaml sets it from appName), which is NOT always the team slug —
+  # hence paper-papas here and paper-papas on the namespace above.
+  podSelector:
+    matchLabels:
+      kubevirt.io/domain: paper-papas
+  policyTypes:
+    - Egress
+  egress:
+    # --- DNS, to PUBLIC resolvers -------------------------------------------
+    # NOT the kube-dns ClusterIP. A VM cannot use a ClusterIP: Cilium translates those
+    # in its SOCKET load balancer, and guest traffic never passes through a host
+    # socket — it is forwarded out through the masquerade interface, so the packet
+    # hits the host stack still addressed to 10.96.0.10 and nothing answers. Policy
+    # 4/6 (which selects CoreDNS by NAMESPACE, i.e. by pod identity) is likewise inert
+    # for VMs, because a forwarded flow is judged against a CIDR identity instead.
+    # A policy can allow an address; it cannot translate one.
+    #
+    # So the guest is pointed at public resolvers in the VirtualMachine's dnsConfig
+    # (dnsPolicy: None + nameservers 1.1.1.1/1.0.0.1) and this rule lets those queries
+    # out. Same `except` list as the HTTPS rule: the guest may resolve on the public
+    # internet and reach nothing internal.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.244.0.0/16      # pods (cross-tenant + lateral) — Cilium-enforced
+              - 10.96.0.0/12       # services — Cilium-enforced
+              - 10.237.168.0/22    # node LAN incl. apiserver :6443 — intent (see caveat)
+              - 100.64.0.0/10      # tailnet overlay — intent (see caveat)
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # --- external HTTPS -------------------------------------------------------
+    # :443 ONLY, deliberately — the same call as the ARC runner fence. apt is pointed
+    # at HTTPS mirrors rather than opening :80, and a git clone can use
+    # ssh.github.com:443 rather than opening :22. Nothing in the provisioning path,
+    # nor the ssh-import-id key refresh, needs a second port.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.244.0.0/16
+              - 10.96.0.0/12
+              - 10.237.168.0/22
+              - 100.64.0.0/10
       ports:
         - protocol: TCP
           port: 443
