@@ -1,0 +1,179 @@
+# ============================================================================
+# portal-tests.yaml — #232. Runs the Backstage portal's unit tests.
+#
+# WHY THIS FILE EXISTS. The portal's plugins carry 21 test files and NOT ONE of them
+# executed in any workflow. The repo had 8 workflows; two ran tests (ci-scripts-sync-check's
+# shell suites, wizard-green-check's Python harness self-tests) and ZERO ran
+# `backstage-cli package test`. Among the unrun: sealCore, vaultClient, teardownCore and
+# preflight — the code that writes secrets into Vault, tears a tenant down, and decides
+# whether a scaffold may proceed.
+#
+# BE ACCURATE ABOUT WHAT WAS ALREADY COVERED: the portal image's multi-stage Dockerfile
+# runs a TypeScript compile, so TYPE errors were caught. BEHAVIOUR was not. The two
+# failures this gate found on its first run were both behavioural and both invisible to
+# tsc (see below).
+#
+# IT WAS EXCLUDED AT TWO INDEPENDENT LAYERS, one of them deliberate:
+#   1. backstage-process-build-push.yaml filters `!**/*.test.ts` out of its OWN trigger, so
+#      a test-only change starts no workflow at all. That exclusion is CORRECT for a job
+#      whose purpose is building an image — a test-only change is a no-op rebuild — and it
+#      is left alone. THIS workflow must simply not inherit it.
+#   2. The Dockerfile strips tests out of the image anyway.
+# Note the exclusion says `*.test.ts` only, so `.test.tsx` and `.test.cjs` were never
+# actually excluded from that trigger — a detail, but it means the filter was not doing
+# quite what its comment claimed.
+#
+# WHAT THIS RUNS, AND WHY IT IS TWO STEPS. The suite is not homogeneous:
+#   - 20 jest suites (248 tests) via `backstage-cli repo test`.
+#   - 1 node:test/TAP suite (26 tests), composePlan.test.cjs, written DELIBERATELY to run
+#     under plain `node --test` "so the load-bearing routing logic is proven offline"
+#     (its own header). jest sweeps it up by glob and then fails it twice — "Your test
+#     suite must contain at least one test", then ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING_FLAG
+#     — so it is excluded from jest and run under the runner it was written for. Converting
+#     it to jest would throw away the offline property its author wanted.
+# ============================================================================
+name: portal-tests
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    # DELIBERATELY NOT inheriting backstage-process-build-push.yaml's `!**/*.test.ts`
+    # exclusion: a test-only change is exactly the change this workflow must run for.
+    #
+    # A `paths:` filter that never matches is indistinguishable from a passing check —
+    # ci-scripts-sync-check sat at zero runs for ten days that way. Verified by REPLAY over
+    # main rather than by reading: see hack/check-portal-test-paths.py, which reports how
+    # many real commits this filter would have matched.
+    paths:
+      - "platform-services/backstage/app/**"
+      - ".github/workflows/portal-tests.yaml"
+      - "hack/assert-portal-tests-ran.mjs"
+  pull_request:
+    paths:
+      - "platform-services/backstage/app/**"
+      - ".github/workflows/portal-tests.yaml"
+      - "hack/assert-portal-tests-ran.mjs"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: portal-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ${{ vars.RUNNER_SCALE_SET || 'ua-mis-kaniko' }}
+    timeout-minutes: 30
+    container:
+      # FULL trixie (not -slim) and pulled through the platform proxy, for the same two
+      # reasons ci-scripts-sync-check documents: the runner pods have no :80 egress and no
+      # IPv6 route, so anything needing apt is unbuildable here; and the proxy keeps this
+      # off Docker Hub's anonymous rate limit. node 24 satisfies the workspace's
+      # `engines.node: 22 || 24`.
+      image: harbor.capstone.uamishub.com/dockerhub-proxy/library/node:24.16-trixie
+    defaults:
+      run:
+        working-directory: platform-services/backstage/app
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 1
+
+      - name: Enable corepack (this workspace pins yarn 4.13.0)
+        # The system yarn is 1.22 and CANNOT run this workspace: package.json declares
+        # `packageManager: yarn@4.13.0` and .yarnrc.yml sets `yarnPath`, which yarn 1.x does
+        # not understand (it reads the legacy `yarn-path` from .yarnrc instead). corepack
+        # ships with node and needs no network to enable.
+        shell: bash
+        run: |
+          set -euo pipefail
+          corepack enable
+          echo "yarn: $(yarn --version)"
+          # Fail loudly rather than silently installing with the wrong package manager --
+          # yarn 1 against a yarn 4 workspace produces a confusing lockfile error much
+          # later, not here.
+          test "$(yarn --version)" = "4.13.0"
+
+      - name: Install (immutable — the lockfile is the contract)
+        # `--immutable` makes a lockfile that does not match package.json a FAILURE rather
+        # than something yarn quietly resolves and rewrites. Same reasoning as the `npm ci`
+        # change in #581: CI must not repair your lockfile for you.
+        shell: bash
+        run: |
+          set -euo pipefail
+          yarn install --immutable
+
+      - name: Jest suites (backstage-cli repo test)
+        # `CI: "true"` is set EXPLICITLY, and here is the accurate reason — the stronger
+        # version of this claim is wrong and was cut after measuring it.
+        #
+        # `backstage-cli repo test` outside CI defaults to jest's WATCH mode with
+        # changed-files scoping. Measured on a clean checkout with CI unset, it prints
+        #     "No tests found related to files changed since last commit."
+        # and then HANGS in watch mode — it does NOT exit 0. So the naive failure here is a
+        # job that burns its timeout having run nothing, not a silent green.
+        #
+        # GitHub Actions sets CI=true in the job environment itself, so on this runner the
+        # default would already run everything. Setting it explicitly means the run does not
+        # DEPEND on that, and names the dependency for whoever next reads this file or
+        # copies it somewhere without it. It is defensive, not load-bearing — which is
+        # exactly why the assertion step below exists rather than trusting this line.
+        #
+        # `--testPathIgnorePatterns` drops composePlan.test.cjs, which is a node:test suite
+        # (see the header) and is run by the next step under its own runner.
+        #
+        # The JSON report is what the assertion step reads: it asserts what jest ACTUALLY
+        # RAN, not what the filesystem happens to contain.
+        shell: bash
+        env:
+          CI: "true"
+        run: |
+          set -euo pipefail
+          yarn test \
+            --testPathIgnorePatterns '\.test\.cjs$' \
+            --json --outputFile=/tmp/jest-report.json
+
+      - name: Assert every workspace actually ran its tests
+        # A test job that installs nothing and runs nothing must FAIL. The count is checked
+        # PER WORKSPACE against a committed floor, never as an aggregate -- an aggregate
+        # stays healthy while one workspace silently drops out, which is the same trap that
+        # let `.github/workflows` be emptied under a repo-wide count in #581.
+        # `if: always()` so a jest FAILURE still gets this diagnosis printed underneath it.
+        if: ${{ always() }}
+        shell: bash
+        working-directory: .
+        run: |
+          set -euo pipefail
+          node hack/assert-portal-tests-ran.mjs /tmp/jest-report.json
+
+      - name: node:test suites (composePlan — TAP, runs offline by design)
+        # Excluded from jest above. Its header states the intent: "Runs under plain
+        # `node --test` (no Backstage toolchain needed), so the load-bearing routing logic
+        # is proven offline." node --test exits non-zero on any failing subtest.
+        shell: bash
+        #
+        # `--test-reporter=tap` IS REQUIRED, do not drop it. node's DEFAULT reporter is
+        # version-dependent: node 22 emits TAP (`# pass 26`), node 24 emits `spec`
+        # (`ℹ pass 26`). The first run of this workflow failed for exactly that reason —
+        # all 26 tests PASSED and the summary parser read 0, because it was written against
+        # the local node 22 output and the job container runs node 24. Pinning the reporter
+        # pins the format, instead of parsing whatever this node version happens to print.
+        run: |
+          set -euo pipefail
+          out="$(node --test --test-reporter=tap plugins/scaffolder-backend-module-capstone/src/actions/composePlan.test.cjs 2>&1)"
+          echo "${out}"
+          # Assert a non-zero pass count for the same reason as the jest step: a runner that
+          # finds no tests must not read as success.
+          pass="$(printf '%s' "${out}" | sed -n 's/^# pass \([0-9][0-9]*\)$/\1/p' | head -n1)"
+          if [ -z "${pass}" ]; then
+            echo "::error::could not find a '# pass <n>' line in the TAP output above. node's reporter format changed under --test-reporter=tap, so this assertion can no longer read the result — fix the parser rather than removing the check. Refusing to report success from output I cannot parse."
+            exit 1
+          fi
+          echo "node --test reported ${pass} passing test(s)"
+          [ "${pass}" -ge 26 ] || {
+            echo "::error::composePlan.test.cjs reported ${pass} passing tests, expected at least 26. Either coverage was deleted or node --test collected nothing — a runner that finds no tests must not report success."
+            exit 1
+          }
