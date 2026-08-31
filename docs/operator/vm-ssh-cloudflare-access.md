@@ -49,6 +49,25 @@ CI. The three Cloudflare ones are what the reconciler exists to automate.
 
 ## Read this before you debug anything
 
+### Symptom → layer, so you debug the right one
+
+Every layer of this path fails by "SSH doesn't work". These are the tells that
+separate them. Work down the table; each row is decisive for its layer.
+
+| What you see | Layer that is broken | Go to |
+| --- | --- | --- |
+| Browser: **`Unable to connect to origin`** | tunnel route missing, or ordered *below* the `*.uamishub.com` catch-all (first match wins, so the SSH rule must be above it) | Step 5 / the tunnel plan |
+| Browser: terminal renders, asks username, then **asks for a private key and password** | **no certificate** — the per-app CA is missing, or the guest trusts the *wrong* CA | the two-CA warning in Step 6 |
+| Browser: username accepted, then **`Permission denied (publickey)`** | cert was minted but the guest rejected it — wrong CA in `cf_access_ca.pub`, or an expired cert | Step 6 |
+| Browser: Access login loops or refuses the user | Access policy — most often an empty `ssh-access-emails` annotation, which creates an app that admits **nobody** | the Service annotation |
+| TLS error *before* any Access page loads | hostname is not a single label under the apex (`ssh.<team>.uamishub.com` is two levels and is **not** covered by the one-level wildcard cert) | the hostname shape |
+| Everything above looks right and nothing connects | **the guest has no IP** — read the next section before anything else | below |
+
+Note the second and third rows are different failures that both follow a successful
+GitHub login. "Asks for a key" means Cloudflare had no certificate to present.
+"Permission denied" means it presented one and sshd refused it. Confusing the two
+sends you to the wrong system.
+
 **A VM whose guest has no IP address looks exactly like a broken tunnel.** It is not.
 This is the failure that consumed three days on 2026-08-28..31, and it will be the
 first thing you hit again if you skip it.
@@ -205,8 +224,20 @@ Token**.
 | Type | Resource | Level | Why |
 | --- | --- | --- | --- |
 | **Account** | Cloudflare Tunnel | **Edit** | GET + PUT the tunnel configuration (the public-hostname route) |
-| **Account** | Access: Apps and Policies | **Edit** | create/update/delete the Access app, its policy, and its short-lived-cert CA |
+| **Account** | Access: Apps and Policies | **Edit** | create/update/delete the Access app, its policy, and its **per-app** short-lived-cert CA (`/access/apps/{app_id}/ca`) |
+| **Account** | Access: SSH Auditing | **Edit** | **belt-and-braces — include it.** See the note below. |
 | Zone | DNS | Edit | **omit it.** `*.uamishub.com` already resolves every `<team>-ssh` host, so the reconciler never touches DNS. Include it only if you later want per-host CNAMEs. |
+
+> **Why `SSH Auditing` is on the list even though it is probably not needed.**
+> Cloudflare has **two** SSH CA APIs and they are gated differently:
+> `/accounts/{id}/access/gateway_ca` is account-global and documented as requiring
+> `Access: SSH Auditing Write`; `/accounts/{id}/access/apps/{app_id}/ca` is the
+> **per-application** CA this platform actually uses, and it is a subresource of
+> Access applications. No Cloudflare doc states the permission name for the per-app
+> endpoint verbatim, so this is the one thing on this page that is inference rather
+> than a quoted fact. Adding the third permission now costs nothing; discovering it
+> was required costs a full round trip through a human. Drop it later once a real
+> run has proved it unnecessary.
 
 - **Account Resources:** Include → this account only.
 - **Zone Resources:** `uamishub.com` only (irrelevant if you omit the DNS permission,
@@ -215,10 +246,14 @@ Token**.
 
 **Create a NEW token for this.** Do not widen an existing one, and do not reuse the
 GitHub App credential or the tunnel token — the tunnel token authenticates the
-`cloudflared` daemon and cannot drive the API. The minimum viable token is the two
-**Account** permissions. It is not an admin token, but it can rewrite the routing for
-every public platform hostname (the portal, Harbor, ArgoCD, the boards, the slides all
-ride the same tunnel), so treat it as a high-value credential.
+`cloudflared` daemon and cannot drive the API. It is not an admin token, but it can
+rewrite the routing for every public platform hostname (the portal, Harbor, ArgoCD,
+the boards, the slides all ride the same tunnel), so treat it as a high-value
+credential.
+
+**If an Access *service token* was ever pasted anywhere, it is the wrong credential
+type for this and should be rotated.** Service tokens authenticate machines *through*
+Access; they cannot drive the Cloudflare API.
 
 ### Step 2 — seal it
 
@@ -279,17 +314,63 @@ ArgoCD sync, re-run the job. **This is the operator's call, not an agent's.**
 
 ### Step 6 — bake each Access app's CA into its guest
 
-The reconciler logs one short-lived-cert CA public key per Access app:
+> ### ⚠ THE ONE MISTAKE THAT COSTS A DAY: there are TWO Cloudflare SSH CAs
+>
+> They are visually identical — both a single line ending
+> `open-ssh-ca@cloudflareaccess.org`. Installing the wrong one leaves every other
+> layer correct and SSH still failing, and sshd logs only a bare `Failed publickey`
+> with nothing pointing at the CA. **This has already happened once on this
+> platform** and it is the reason this section exists.
+>
+> | | Use it? | Where it comes from | API |
+> | --- | --- | --- | --- |
+> | **Per-application CA** | ✅ **this one** | Zero Trust → Access controls → Service credentials → SSH → the row for **this VM's** app (`vm-ssh:<team>`) | `/accounts/{id}/access/apps/{app_id}/ca` |
+> | Account-global CA | ❌ never | the **Access for Infrastructure** screen | `/accounts/{id}/access/gateway_ca` |
+>
+> Browser-rendered SSH presents a certificate signed by the **per-application** CA.
+> The account-global CA exists for Gateway SSH command logging and Access for
+> Infrastructure and never signs that certificate. It is also shared across the whole
+> account, so trusting it on a guest would let a certificate minted for any other
+> target authenticate there — it breaks the per-tenant containment the design relies
+> on, as well as simply not working.
+
+The reconciler logs one short-lived-cert CA public key per Access app, and it reads it
+from the per-app endpoint, so what it logs is always the right one:
 
 ```bash
 kubectl -n cloudflared logs job/cf-vm-access-dryrun | grep -A1 "CA public key"
 ```
+
+Prefer that over copying from the dashboard. If you must use the dashboard, the
+control moved: it is now **Zero Trust → Access controls → Service credentials → SSH →
+Add a certificate**, then pick the application from the dropdown. (Older runbooks sent
+you to *Access → Service Auth*, which no longer exists.) **The dropdown only lists
+eligible self-hosted Access applications — if the Access app for this team does not
+exist yet, the control is unavailable and generating a certificate fails with
+`400`.** Create the Access app first; the reconciler does this for you.
 
 Paste each into that team's `.devops/chart/base/cloud-init.yaml` at
 `/etc/ssh/cf_access_ca.pub` (it is a public key — safe to commit), then **delete the
 VirtualMachine** so cloud-init re-runs. The ordering is unavoidable today: the CA does
 not exist until the Access app does, and cloud-init's `write_files` runs only on a
 first boot. Do it before students have state on the box.
+
+**To fix a VM that is already running and already has student state**, you do not have
+to rebuild it. `/etc/ssh/` inside the guest is not managed by ArgoCD — only the
+cloud-init `Secret` is — so editing the file on the running guest sticks, and ArgoCD's
+`selfHeal` will not revert it:
+
+```bash
+# over the GitHub-key path, which works today
+sudo tee /etc/ssh/cf_access_ca.pub <<'EOF'
+<the PER-APPLICATION CA public key>
+EOF
+sudo systemctl reload ssh     # `sshd` on some images
+```
+
+**This is a stop-gap, not the fix.** It is lost the moment the VM is rebuilt, so make
+the same change in the tenant repo's `cloud-init.yaml` in the same sitting, or the
+next rebuild silently reintroduces the outage.
 
 > **This is the last remaining per-tenant manual step, and it is a real gap.** It
 > means "provision a tenant" still ends in "and then rebuild the VM once". Options for
@@ -318,10 +399,54 @@ ssh -o ProxyCommand='cloudflared access ssh --hostname <team>-ssh.uamishub.com' 
 
 **B — browser, zero install:**
 
-Open `https://<team>-ssh.uamishub.com`. Cloudflare Access authenticates, then renders
-an SSH terminal in the page.
+Open `https://<team>-ssh.uamishub.com`. Cloudflare Access authenticates with GitHub,
+then renders an SSH terminal in the page. **At the `Enter username` prompt type
+`ubuntu`** (the cloud user on the Ubuntu 24.04 base image) and press enter — that is
+the only thing a student ever types. Nothing else is asked for.
+
+> **If it also asks for a private key and a password, stop — that is the "no
+> certificate" signal, not a student error.** The browser terminal falls back to
+> asking a human for credentials precisely when no short-lived certificate is
+> available for the application. It means the per-app CA is missing, or the CA
+> installed in the guest is the wrong one (see the two-CA warning in Step 6). No
+> amount of retrying, and no password, will get past it. Do not work around it by
+> enabling `PasswordAuthentication` — that bolts a shared secret onto the one place
+> in this design that is supposed to have none.
+
+A student's GitHub login is the only credential in this path. If you find yourself
+about to hand a student a key or a password, the configuration is wrong.
 
 ---
+
+## Paths not taken, and why — do not re-derive these
+
+Cloudflare's own docs label the short-lived-certificate path above as **"not
+recommended for new deployments"** and steer readers to **Access for Infrastructure**.
+That steer is wrong *for this platform*, and the reason is not obvious, so it is
+recorded here rather than rediscovered:
+
+- **Access for Infrastructure has no browser mode.** It requires the Cloudflare One /
+  WARP client installed on the user's device. Our binding constraint is that a student
+  needs nothing but a browser and their GitHub login, so this path cannot satisfy the
+  requirement at all — independently of anything else.
+- **Its targets cannot be our pods anyway.** An infrastructure target must be an IP
+  inside a WARP-routed **private network** route (Zero Trust → Networking → Routes). A
+  Tunnel *public hostname* route is a different mechanism and does not qualify. This is
+  why registering the pod IP `10.244.x.x` is rejected with **"no valid options for
+  ipv4"**: the shared tunnel runs with `warp-routing.enabled=false`, so there is no
+  private network for that address to belong to.
+- **Enabling WARP routing to make it qualify would be a bad trade.** Publishing the
+  pod CIDR as a private network route exposes *every pod in the cluster* — Vault,
+  Harbor, the CNPG/MariaDB databases, Prometheus, Alertmanager, ArgoCD, every tenant
+  app — to anything on the WARP side. Several of those have no authentication of their
+  own and rely on being unreachable. Worse, the `cloudflared` namespace currently has
+  **no NetworkPolicy at all**, so there is no in-cluster backstop that would contain
+  it. If WARP routing is ever wanted for another reason, publish a narrow route and
+  write a `cloudflared` egress policy *first*.
+
+The legacy per-app certificate path, by contrast, needs no client, no WARP, and no new
+network exposure — it reuses the tunnel that is already carrying every platform
+hostname.
 
 ## Known gaps
 

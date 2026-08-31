@@ -115,12 +115,39 @@ write_files:
   #
   # OPERATOR: paste this VM's Access-app CA public key on the line below the comments
   # (the value the cf-vm-access reconciler logs). It is a PUBLIC key — safe to commit.
+  #
+  # ⚠ THERE ARE TWO DIFFERENT CLOUDFLARE SSH CAs AND ONLY ONE OF THEM WORKS HERE.
+  # They look identical — both are a single line ending `open-ssh-ca@cloudflareaccess.org`
+  # — so you CANNOT tell them apart by looking. Get this wrong and everything else is
+  # configured correctly and SSH still fails, with sshd logging only a bare
+  # `Failed publickey` that says nothing about the CA. Verified by execution: a cert
+  # signed by a CA absent from this file is denied with no diagnostic pointing here.
+  #
+  #   ✅ RIGHT — the PER-APPLICATION CA. Zero Trust → Access controls →
+  #      Service credentials → SSH → the row for THIS VM's Access application
+  #      (`vm-ssh:<team>`). API: GET /accounts/{account_id}/access/apps/{app_id}/ca.
+  #      This is the CA that signs the certificate the browser terminal presents,
+  #      and it is what the cf-vm-access reconciler creates and logs.
+  #
+  #   ❌ WRONG — the ACCOUNT-GLOBAL CA shown on the Access-for-Infrastructure screen.
+  #      API: /accounts/{account_id}/access/gateway_ca — account-scoped, takes no
+  #      app_id, and exists for Gateway SSH command logging and Access for
+  #      Infrastructure. It never signs the browser-rendered SSH certificate.
+  #      (This is not hypothetical: it is the key that was mistakenly installed on
+  #      the first VM tenant, and it is why SSH stayed broken after the transport,
+  #      the tunnel route, the Access app and the guest sshd were all already correct.)
+  #
+  # The per-app CA is also what makes the SECURITY NOTE below true. The global CA is
+  # shared by the whole account, so trusting it here would let a certificate minted
+  # for ANY other target in the account authenticate as this VM's login user.
   - path: /etc/ssh/cf_access_ca.pub
     permissions: '0644'
     content: |
       # Cloudflare Access SSH CA for ${{ values.appName }}.
-      # Paste the CA public key below (one line, ends `open-ssh-ca@cloudflareaccess.org`).
-      # Blank = cert auth off, key-only.
+      # Paste the PER-APPLICATION CA public key below (one line, ends
+      # `open-ssh-ca@cloudflareaccess.org`). NOT the account-global / Access-for-
+      # Infrastructure CA — see the note above; the two are indistinguishable by eye.
+      # Blank = cert auth off, key-only (the GitHub-key path still works).
       ${{ values.cfAccessCaPub }}
   # sshd drop-in: trust the CA above, and accept whatever principal Cloudflare puts
   # on the cert. This matters and is NOT optional — a Cloudflare Access cert carries
@@ -132,11 +159,21 @@ write_files:
   # own principals back to sshd, which accepts them.
   #
   # SECURITY NOTE, stated plainly: this delegates ALL user-level authorization to
-  # Cloudflare Access. Any cert signed by this CA authenticates as the login user.
+  # Cloudflare Access. Any cert signed by this CA authenticates as the login user,
+  # whatever principal it carries — verified by execution against OpenSSH 9.6p1: a
+  # cert with principal `ccsmith33` logs in as `ubuntu`, and so would a cert with any
+  # other principal. sshd here is not an authorization layer; Access is.
+  #
   # That is the intended design — Access (the team's email allowlist on
-  # <team>-ssh.<domain>) is the gate — and it is contained because the CA is PER-APP,
-  # so a cert minted for another VM's app does not authenticate here. It does mean an
-  # over-broad Access policy is an over-broad shell. Review the policy, not the sshd.
+  # <team>-ssh.<domain>) is the gate — and it is contained ONLY because the CA is
+  # PER-APP: a cert minted for another VM's app is signed by a different CA and is
+  # rejected here (also verified by execution). That containment is a property of
+  # WHICH KEY IS IN THE FILE ABOVE, not of this config. Paste the account-global CA
+  # instead and the containment is gone — every VM in the fleet would trust one CA
+  # shared across the whole account.
+  #
+  # It also means an over-broad Access policy is an over-broad shell. Review the
+  # policy, not the sshd.
   #
   # /bin/sh (not bash) is deliberate: verified working under dash, so this does not
   # depend on bash being present in the base image.
