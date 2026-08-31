@@ -255,3 +255,67 @@ spec:
             # boot; to re-run it, recreate the VM.
             secretRef:
               name: ${{ values.appName }}-cloudinit
+            # ── networkData — DO NOT DELETE. THE VM LOSES ALL NETWORKING WITHOUT IT ──
+            #
+            # This is not tuning. Without these six lines the guest comes up with NO
+            # IP ADDRESS on its SECOND and every subsequent boot, and stays that way
+            # forever. Measured on the live `paper-papas` VM, 2026-08-31: guest fully
+            # booted to a login prompt, sshd listening, and the launcher's tap device
+            # showing `RX: 0 bytes 0 packets` after three days — the guest had never
+            # transmitted a single frame.
+            #
+            # THE MECHANISM, in three facts that only bite in combination:
+            #
+            #   1. KubeVirt masquerade gives the GUEST the launcher POD's MAC address.
+            #      (Verified: guest MAC == `ip link show eth0` in the launcher pod, on
+            #      three separate VMs.) The pod's veth MAC is generated fresh by the
+            #      CNI for every pod, so the guest's MAC CHANGES on every VM restart,
+            #      node drain, eviction, or live-migration-by-recreation.
+            #
+            #   2. With no networkData, the NoCloud seed KubeVirt builds contains only
+            #      `meta-data` + `user-data` (verified by reading the generated
+            #      noCloud.iso). cloud-init therefore falls back to
+            #      `generate_fallback_config()`, which writes a netplan file pinned to
+            #      the MAC it saw AT THAT MOMENT:
+            #          match: {macaddress: <first-boot MAC>}
+            #
+            #   3. cloud-init's `default_update_events` is
+            #      `{NETWORK: {BOOT_NEW_INSTANCE}}` — network config is re-applied
+            #      only when the INSTANCE-ID changes. The instance-id here is the VM's
+            #      stable firmware UUID, so a restart is NOT a new instance and
+            #      cloud-init logs "No network config applied" and leaves the old file
+            #      alone. (The rootdisk is a persistent PVC, so /var/lib/cloud
+            #      survives; this is exactly why the bug is invisible on an ephemeral
+            #      containerDisk, where every boot looks like a first boot.)
+            #
+            # Net effect: first boot works, and the FIRST RESTART silently strands the
+            # VM with a netplan rule matching a MAC that no longer exists. Nothing in
+            # Kubernetes reports it — the VMI stays Running and Ready, the Service
+            # keeps an Endpoint (the launcher pod IP is up even though the guest is
+            # not), and every probe from outside just times out. The failure looks
+            # exactly like a broken tunnel, a bad NetworkPolicy, or a dead sshd, which
+            # is where three days of debugging went before anyone looked at the tap
+            # counters.
+            #
+            # THE FIX: match on interface NAME, not MAC. `e*` covers every predictable
+            # name the kernel gives a virtio NIC on the pod bus (enp1s0 today, ens*/eth*
+            # on other images), and a name does not change when the MAC does. Written
+            # once on first boot, this file keeps working across every later boot with
+            # no re-render needed — so it repairs the class of failure rather than the
+            # instance. cloud-init.yaml additionally sets `updates.network.when:[boot]`
+            # as a second, independent belt (see the comment there).
+            #
+            # This block is inline rather than a networkDataSecretRef on purpose: it
+            # holds no secret, it is identical for every tenant, and putting it in the
+            # manifest keeps it visible to anyone reading the VM spec. The KubeVirt
+            # admission webhook accepts secretRef (user-data) + inline networkData
+            # together — verified with `kubectl apply --dry-run=server` against the
+            # live cluster, not assumed.
+            networkData: |
+              version: 2
+              ethernets:
+                primary:
+                  match:
+                    name: "e*"
+                  dhcp4: true
+                  dhcp6: false

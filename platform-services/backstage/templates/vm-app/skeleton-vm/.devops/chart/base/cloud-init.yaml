@@ -45,6 +45,33 @@
 # roster — edit the roster, not the key list.
 ssh_pwauth: false
 disable_root: true
+
+# ── RE-APPLY NETWORK CONFIG ON EVERY BOOT — DO NOT DELETE ────────────────────
+# cloud-init's default is `default_update_events = {NETWORK: {BOOT_NEW_INSTANCE}}`:
+# it writes the guest's network configuration ONCE, on the first boot of a given
+# instance-id, and never touches it again. Our instance-id is the VM's stable
+# firmware UUID and our rootdisk is a persistent PVC, so every restart after the
+# first is "not a new instance" and cloud-init logs
+#     No network config applied. Neither a new instance nor datasource network
+#     update allowed
+# and leaves whatever is on disk in place.
+#
+# That default is what let the paper-papas VM strand itself: the first-boot netplan
+# was pinned to the MAC of the moment (`match: {macaddress: ...}`), KubeVirt
+# masquerade handed the guest a NEW MAC on the next restart (it reuses the launcher
+# POD's MAC, which the CNI regenerates per pod), and the stale rule matched nothing.
+# The guest booted to a login prompt with sshd up and NO IP, and sent zero packets
+# for three days while looking Running/Ready to Kubernetes.
+#
+# `when: [boot]` makes cloud-init re-derive and re-write the network config on
+# EVERY boot. It is the second of two independent guards: virtualmachine.yaml's
+# `networkData` makes the config MAC-independent in the first place, and this makes
+# a stale config self-heal on the next reboot even if that block is missing, edited,
+# or the guest was first booted before either fix existed. Either one alone prevents
+# the failure; both cost nothing.
+updates:
+  network:
+    when: ['boot']
 ssh_authorized_keys:
   # dump-quoted (D-106 pattern): the key TYPE + BASE64 body are regex-constrained, but
   # the trailing key COMMENT (` .*`) is unconstrained free text and, unlike

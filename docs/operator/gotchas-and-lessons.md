@@ -134,6 +134,71 @@ ArgoCD tile. `make verify-image-pull` checks the registry-mirror failure class.
 
 ---
 
+## KubeVirt VM tenants
+
+### A VM guest with no IP reports as perfectly healthy
+
+Every Kubernetes-side signal for a KubeVirt VM is about the **launcher pod**, not the
+guest. Measured on `paper-papas`, 2026-08-31: VMI `Running` + `Ready`, `<app>-ssh`
+Service holding a live Endpoint, guest booted to a login prompt with sshd listening —
+and the guest had not transmitted a single frame in three days. The Endpoint exists
+because the launcher pod has an IP; the guest's own network is invisible to all of it.
+
+The decisive check is one command, and it is upstream of every NetworkPolicy:
+
+```bash
+kubectl exec -n <team>-vm-prod <launcher-pod> -c compute -- ip -s link show tap0
+```
+
+`RX: 0 bytes 0 packets` = the guest never spoke. Nothing in Cloudflare or in a
+NetworkPolicy can produce that number, so stop debugging them.
+
+**Read the failure kind, not just the failure.** From `ns/cloudflared` to the VM's
+`:22` — `No route to host` means the policy let you through and the guest is not
+answering ARP (no IP); `timed out` means a policy dropped you; `Connection refused`
+means the guest is up and sshd is not. On 2026-08-31 `:22` gave EHOSTUNREACH while
+`:80` from the same pod timed out, which cleared the `:22` policy in one shot.
+
+### Two artifacts nobody knows exist, and both are better than `virtctl console`
+
+- **The full guest boot log** is retained as a sidecar container:
+  `kubectl logs -n <ns> <launcher-pod> -c guest-console-log`. `virtctl console` only
+  shows what the guest prints *after* you attach, and on an image whose kernel
+  cmdline lacks `console=ttyS0` it shows nothing at all.
+- **A PNG screenshot of the guest's VGA console**, via a subresource:
+  `kubectl get --raw "/apis/subresources.kubevirt.io/v1/namespaces/<ns>/virtualmachineinstances/<vm>/vnc/screenshot"`.
+  This is how "is the guest even booted?" was answered in seconds after a silent
+  serial console had made it look dead.
+
+### Guest networking dies on the SECOND boot if netplan is MAC-pinned
+
+KubeVirt masquerade gives the guest **the launcher pod's MAC**, and the CNI
+regenerates that MAC for every pod — so the guest's MAC changes on every restart.
+Without an explicit `networkData`, cloud-init writes a fallback netplan pinned to
+`match: {macaddress: ...}`, and it will not rewrite it later because
+`default_update_events = {NETWORK: {BOOT_NEW_INSTANCE}}` and a restart keeps the same
+instance-id. First boot works; the first restart strands the VM forever.
+
+Invisible on an ephemeral `containerDisk` (every boot is a first boot) — it only bites
+VMs on a persistent rootdisk PVC, which is every real tenant. That asymmetry is worth
+remembering: **a reproduction on a containerDisk will tell you the bug does not
+exist.**
+
+Fixed in the scaffold with two independent belts — name-matched `networkData` in
+`virtualmachine.yaml`, and `updates: {network: {when: ['boot']}}` in
+`cloud-init.yaml` — both enforced by `make validate` step 11 and by the tenant repo's
+`.devops/ci/validate-vm.py`. Full write-up: [VM tenant SSH](vm-ssh-cloudflare-access.md).
+
+### `ns/cloudflared` is PodSecurity `restricted` — a naive probe fails silently
+
+`kubectl run busybox` there is rejected at admission. **A probe that cannot run looks
+exactly like a service that is down.** Give probe pods `runAsNonRoot`, `runAsUser`,
+`seccompProfile: RuntimeDefault`, `allowPrivilegeEscalation: false`,
+`capabilities.drop: [ALL]`, and use an image already pullable in that namespace
+(`python:3.12-slim`).
+
+---
+
 ## Harbor
 
 ### Harbor v2.15 removed the legacy per-project robots API

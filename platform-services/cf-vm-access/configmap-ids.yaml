@@ -29,6 +29,18 @@ metadata:
     platform.capstone/component: platform
 data:
   PLATFORM_DOMAIN: "uamishub.com"
-  # OPERATOR: fill these two in (see header). Empty => reconciler no-ops.
-  CF_ACCOUNT_ID: ""
-  CF_TUNNEL_ID: ""
+  # FILLED IN 2026-08-31, recovered from the EXISTING cloudflared-tunnel-token Secret
+  # with the command in the header (the token decodes to
+  # {"a":<account>,"t":<tunnel>,"s":<secret>}; only `s` is sensitive and it is not
+  # here). These are identifiers, not credentials: neither one authenticates anything
+  # on its own, and the reconciler still no-ops until the operator seals the API token
+  # (docs/operator/vm-ssh-cloudflare-access.md, go-live step 1-2).
+  #
+  # Note for the reviewer, since this repo is PUBLIC: committing these is what the
+  # file was designed for, and an account tag plus a tunnel UUID grant no access
+  # without the token. If you would rather they not be public, move this ConfigMap's
+  # two values into the sealed Secret alongside the token and change the CronJob's
+  # two configMapKeyRefs to secretKeyRefs — the reconciler reads them as plain env
+  # vars either way.
+  CF_ACCOUNT_ID: "ed63515eacde280b5e58dd875191cffb"
+  CF_TUNNEL_ID: "b959ce76-568b-4f30-bfc8-ae6ef5169a10"
