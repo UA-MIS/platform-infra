@@ -54,6 +54,19 @@ IMPORTER_CPU_REQUEST = 0.25
 IMPORTER_CPU_LIMIT = 0.75
 IMPORTER_MEM_MI = 600
 
+# The VM chart asks for `memoryGi + N` as its container memory LIMIT while the
+# guest still sees only `memoryGi` (skeleton-vm/.devops/chart/base/
+# virtualmachine.yaml, `memory.guest` + `resources.limits`). KEEP THIS IN SYNC WITH
+# THAT FILE — it is the third document in the agreement this guard polices, and if
+# it drifts the guard goes on passing while modelling a chart that no longer exists.
+#
+# The headroom is there because KubeVirt's own +340Mi estimate assumes KVM, and this
+# cluster runs QEMU TCG (useEmulation:true) where the measured overhead reached
+# 1.3Gi and a VM was OOM-killed mid-build. Note that the two are NOT redundant:
+# KUBEVIRT_MEM_OVERHEAD_MI is what KubeVirt adds on top of whatever the chart asks
+# for, and this is what the chart asks for above the guest's own size.
+VM_MEM_HEADROOM_GI = 2
+
 MI_PER_GI = 1024
 
 
@@ -70,12 +83,34 @@ def read(path):
 
 
 def wizard_max(text, field):
-    """The `maximum:` under a named scaffolder input."""
-    m = re.search(rf"^        {field}:\s*$", text, re.M)
+    """The `maximum:` under a named scaffolder input.
+
+    The block is scoped BY INDENTATION rather than by a fixed character window.
+    It used to read the next 900 characters, which made the guard fail on a
+    correctly-bounded input purely because the input was well commented: adding a
+    paragraph explaining WHY a maximum is what it is pushed `maximum:` past the
+    window, and the guard then reported "has no `maximum:`" about a field whose
+    maximum was four lines further down. That is a guard that punishes exactly the
+    documentation this repo asks for everywhere else, and its error message points
+    at the wrong file. Indentation is what actually delimits a YAML mapping, so
+    use that and the block is however long it needs to be.
+    """
+    m = re.search(rf"^(?P<indent> +){field}:\s*$", text, re.M)
     if not m:
         fail(f"could not find scaffolder input `{field}` in template.yaml — "
              "if it was renamed, update this guard rather than deleting it.")
-    block = text[m.end(): m.end() + 900]
+    depth = len(m.group("indent"))
+
+    # Everything up to the next line indented at or above this field's own level
+    # (blank lines and comments do not end a block).
+    lines = []
+    for line in text[m.end():].splitlines()[1:]:
+        if line.strip() and not line.lstrip().startswith("#"):
+            if len(line) - len(line.lstrip()) <= depth:
+                break
+        lines.append(line)
+    block = "\n".join(lines)
+
     mm = re.search(r"^\s+maximum:\s*(\d+)\s*$", block, re.M)
     if not mm:
         fail(f"scaffolder input `{field}` has no `maximum:` — an unbounded input "
@@ -135,16 +170,25 @@ def main():
     # What the LARGEST legal wizard VM actually demands at the pod.
     need_cpu_req = max_cores + KUBEVIRT_CPU_OVERHEAD + IMPORTER_CPU_REQUEST
     need_cpu_lim = max_cores + KUBEVIRT_CPU_OVERHEAD + IMPORTER_CPU_LIMIT
-    need_mem_mi = max_mem_gi * MI_PER_GI + KUBEVIRT_MEM_OVERHEAD_MI + IMPORTER_MEM_MI
+    # Memory REQUESTS and LIMITS are no longer the same number at the pod. The chart
+    # requests the guest's own size and permits `guest + VM_MEM_HEADROOM_GI`, so the
+    # quota is asked for different amounts on each axis and they are checked
+    # separately. Collapsing them again would under-count the limit side and let the
+    # wizard offer a size the LimitRange refuses — the exact silent-admission-refusal
+    # this guard exists to prevent.
+    need_mem_req_mi = max_mem_gi * MI_PER_GI + KUBEVIRT_MEM_OVERHEAD_MI + IMPORTER_MEM_MI
+    need_mem_lim_mi = ((max_mem_gi + VM_MEM_HEADROOM_GI) * MI_PER_GI
+                       + KUBEVIRT_MEM_OVERHEAD_MI + IMPORTER_MEM_MI)
     # per-container ceiling excludes the importer (a separate container/pod)
     need_container_cpu = max_cores + KUBEVIRT_CPU_OVERHEAD
-    need_container_mem_mi = max_mem_gi * MI_PER_GI + KUBEVIRT_MEM_OVERHEAD_MI
+    need_container_mem_mi = ((max_mem_gi + VM_MEM_HEADROOM_GI) * MI_PER_GI
+                             + KUBEVIRT_MEM_OVERHEAD_MI)
 
     checks = [
         ("quota requests.cpu", cpu_to_cores(bp["requests.cpu"]), need_cpu_req, "cores"),
         ("quota limits.cpu", cpu_to_cores(bp["limits.cpu"]), need_cpu_lim, "cores"),
-        ("quota requests.memory", quantity_to_mi(bp["requests.memory"]), need_mem_mi, "Mi"),
-        ("quota limits.memory", quantity_to_mi(bp["limits.memory"]), need_mem_mi, "Mi"),
+        ("quota requests.memory", quantity_to_mi(bp["requests.memory"]), need_mem_req_mi, "Mi"),
+        ("quota limits.memory", quantity_to_mi(bp["limits.memory"]), need_mem_lim_mi, "Mi"),
         ("LimitRange max.cpu", cpu_to_cores(bp["max.cpu"]), need_container_cpu, "cores"),
         ("LimitRange max.memory", quantity_to_mi(bp["max.memory"]), need_container_mem_mi, "Mi"),
     ]
