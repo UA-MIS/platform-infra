@@ -512,6 +512,44 @@ runcmd:
   # harmless on an image where ttyd is absent or the unit does not exist.
   - [ sh, -c, "systemctl disable --now ttyd.service 2>/dev/null || true" ]
   - [ sh, -c, "systemctl mask ttyd.service 2>/dev/null || true" ]
+  # ── STUDENT TOOLING — git + gh, preinstalled ────────────────────────
+  # A student's FIRST command must not be the one that fails. `apt install gh` on a
+  # box they have not yet discovered `sudo` on is a bad first five minutes, and it
+  # repeats once per student:
+  #
+  #   ubuntu@host:~$ apt install gh
+  #   E: Could not open lock file /var/lib/dpkg/lock-frontend  (13: Permission denied)
+  #
+  # `gh` is the load-bearing half, for a reason specific to THIS guest. The tenant
+  # repos are PRIVATE, and the guest egress NetworkPolicy permits DNS and :443 ONLY
+  # (see tenants/_template-vm/vm/namespaces/vm-prod.yaml). So an SSH clone URL
+  # (git@github.com, port 22) does not fail fast — it HANGS, which reads to a student
+  # as "the network is broken" rather than "use a different URL". The path that works
+  # is entirely over 443:
+  #
+  #   gh auth login     # device flow: a code in the browser, no key material in the guest
+  #   git clone https://github.com/UA-MIS/<repo>
+  #
+  # `gh auth login` installs itself as a git credential helper, so the plain HTTPS
+  # clone on the second line then succeeds with no further auth step. That is why
+  # both packages are needed and why neither is a nicety.
+  #
+  # `gh` is in noble/universe (2.45.0-1ubuntu0.3) — verified by `apt-cache policy gh`
+  # on the live guest, so NO third-party apt repo, signing key, or pinned download is
+  # required. It resolves from the same https-rewritten sources the ttyd install
+  # above already depends on.
+  #
+  # `git` is installed EXPLICITLY rather than assumed. It is usually in the Ubuntu
+  # cloud image, but "usually" is a property of the base image, not of the guest
+  # BUILD, and an image change would drop it silently. apt is a no-op when it is
+  # already present, so stating it costs nothing and removes an assumption.
+  #
+  # SEPARATE apt invocation, deliberately — do not fold these onto the ttyd line
+  # above. A single `apt-get install` is all-or-nothing, so a transient failure
+  # fetching `gh` would also cost the team its web console. Split, they fail
+  # independently. Checked and logged loudly for the same reason the ttyd install is:
+  # `apt-get update` exits 0 even when every index fails to download.
+  - [ sh, -c, "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git gh || echo 'CAPSTONE: git/gh install FAILED — the private-repo path (gh auth login, then an https clone) will not work; check https apt egress' >&2" ]
   # EXPLICITLY enable sshd. Cloud images normally ship it enabled, but "normally" is
   # not a guarantee, and a VM with no listening sshd is indistinguishable from a
   # broken tunnel route from the student's laptop — the exact ADR-032 gap. Enabling
