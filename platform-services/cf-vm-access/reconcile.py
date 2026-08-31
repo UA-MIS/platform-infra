@@ -106,17 +106,18 @@ SESSION_DURATION = os.environ.get("CF_ACCESS_SESSION", "24h").strip()
 #     toggle "Allow access through browser-based RDP, SSH, or VNC sessions" → SSH.
 #     CONFIRMED — and it reads as a PROPERTY OF a self-hosted app, not a type.
 #
-# WORKING HYPOTHESIS (NOT doc-confirmed, do not repeat it as fact): an application
-# that is not SSH-enabled is not offered in the Service-credentials "Application"
-# dropdown, which is why the operator sees a greyed-out control and why generating a
-# CA returned a content-free `400`. That fits every observation we have, and no
-# counter-example is known — but no Cloudflare sentence states it, so it stays a
-# hypothesis. `GET /accounts/{id}/access/apps/ca` settles it in one call once a token
-# exists.
+# WHAT SETTLED IT: the ONE Access application on this account that demonstrably
+# reaches a browser terminal — `paper-papas-ssh.uamishub.com` — is `"type": "ssh"`,
+# read from its live config. So `ssh` is the value that matches a known-working app,
+# and this reconciler emitting `self_hosted` would have given teams two and three a
+# configuration that does not match the only one proven to work.
 #
-# The one thing that IS certain: whatever produces a CA-eligible, browser-rendering
-# SSH app, `type: "self_hosted"` alone has demonstrably not produced one on this
-# account. Default to `ssh`; set CF_ACCESS_APP_TYPE=self_hosted to revert instantly.
+# NOTE this is NOT the cause of the blocked CA generation. That app is already
+# `type: ssh` and browser rendering already works on it; only certificate generation
+# is blocked. The remaining candidates are that legacy short-lived certificates are
+# gated on this account, or that a CA already exists for the app and the UI refuses to
+# mint a second. Do not speculate further in code — one read of
+# `GET /accounts/{id}/access/apps/{app_id}/ca` settles it once a token exists.
 ACCESS_APP_TYPE = os.environ.get("CF_ACCESS_APP_TYPE", "ssh").strip() or "ssh"
 
 EMAILS_ANNOTATION = "platform.capstone/ssh-access-emails"
@@ -433,8 +434,9 @@ def report_app_type(app, hostname):
     log(f"      delete the Access app for {hostname} in the dashboard and let the")
     log(f"      next pass recreate it, or flip CF_ACCESS_APP_TYPE to '{actual}' if")
     log(f"      that type is in fact the working one.")
-    log(f"      A wrong type is the leading suspect for a greyed-out 'generate")
-    log(f"      certificate' control and a content-free 400 — see the operator doc.")
+    log(f"      For reference, the app proven to reach a browser terminal on this")
+    log(f"      account is type 'ssh'. A type mismatch is NOT known to cause the")
+    log(f"      blocked CA generation — that app is already 'ssh'. See the doc.")
 
 
 def reconcile_access(tenants):
