@@ -587,12 +587,24 @@ spec:
 
           **3) Shell access — the WEB CONSOLE is the default door.** The VM serves a
           browser terminal itself, so a student needs nothing but their GitHub login:
-          no SSH key, no certificate, no client install. One dashboard step:
-          - Zero Trust → Access controls → Applications → Add → Self-hosted, domain
-            `${{ parameters.team }}-console.uamishub.com`, policy **Allow** =
+          no SSH key, no certificate, no client install.
+
+          The console ships **CLOSED**: the chart creates the console Service but not
+          its Ingress, which lives in the opt-in `console-public` kustomize component
+          and is commented out in the tenant's prod overlay. Two steps, IN THIS ORDER:
+          - **First**, Zero Trust → Access controls → Applications → Add → Self-hosted,
+            domain `${{ parameters.team }}-console.uamishub.com`, policy **Allow** =
             team-${{ parameters.team }}'s UA-MIS emails.
+          - **Then** uncomment the `components:` block in the tenant repo's
+            `.devops/chart/overlays/prod/kustomization.yaml` and merge.
           - ⚠ That Access policy is the ONLY wall in front of a root-capable shell.
-            Allow only. Never Bypass, never Service Auth.
+            Allow only. Never Bypass, never Service Auth. Doing these two steps in the
+            wrong order publishes an unauthenticated root shell — the hostname rides
+            the existing `*.uamishub.com` route and is live the moment ArgoCD syncs.
+          - Verify from OUTSIDE the cluster, and treat this as the acceptance test:
+            `curl -sSI https://${{ parameters.team }}-console.uamishub.com/ | head -1`
+            → **302** = Access is in front of it (correct); **200** = open to the
+            internet, close it now; **502** = published but ttyd is not up.
           - No tunnel change is needed — `*.uamishub.com` already routes to Traefik.
 
           **SSH (the advanced path) — Cloudflare dashboard steps, NOT git** (the

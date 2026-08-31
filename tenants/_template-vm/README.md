@@ -74,6 +74,50 @@ git add tenants/team-$TEAM && git commit -m "onboard VM team $TEAM ($SEMESTER)"
 | `__APPNAME__` | the app repo name — `UA-MIS/<appName>` (repo == appName, #101); the VM ApplicationSet + AppProject source point here | `acme` |
 | `__SEMESTER__` | cohort label — the universal GC/report selector | `2026-fall` |
 
+## The team's web console ships CLOSED — one thing to do per tenant
+
+A VM tenant's browser shell (`<team>-console.uamishub.com`, ttyd in the guest) is
+**not published by onboarding**. The tenant chart creates the console *Service*
+(ClusterIP, in-cluster only) but deliberately leaves out the *Ingress*, which lives
+in an opt-in kustomize component that ships commented out in the tenant repo's
+`.devops/chart/overlays/prod/kustomization.yaml`.
+
+This is a security default, not an oversight. The console hostname rides the shared
+`*.uamishub.com` tunnel rule, so it needs no tunnel change and goes live the instant
+the Ingress exists — and anyone past Cloudflare Access lands in a shell that can
+`sudo`. **Access is the only wall in front of it.** Publishing before the Access
+application exists is an unauthenticated root shell on the public internet, and it
+already happened once on the first VM tenant.
+
+To turn a team's console on, in this order:
+
+1. **Create the Cloudflare Access application first** — Zero Trust → Access →
+   Applications → Add → Self-hosted; domain `<team>-console.uamishub.com`; policy
+   **Allow**, scoped to that team's emails. Never Bypass, never Service Auth
+   (Cloudflare does not support either on browser-rendered apps, and Bypass here is
+   an open shell).
+2. Uncomment the `components:` block in the tenant repo's prod overlay and merge.
+3. **Verify from outside the cluster.** This is the check that matters:
+
+   ```bash
+   curl -sSI https://<team>-console.uamishub.com/ | head -1
+   #  HTTP/2 302  -> correct: Cloudflare Access is in front of it
+   #  HTTP/2 200  -> STOP: the shell is open to the internet
+   #  HTTP/2 502  -> Ingress is up but ttyd is not (see the guest's cloud-init)
+   ```
+
+Until step 2 the team still has SSH, and the console still works in-cluster — only
+the public route is withheld.
+
+> **This is a guardrail, not an interlock.** Nothing verifies that the Access app
+> exists before the component is enabled; a person can still do step 2 before step 1.
+> What it buys is that the unsafe state no longer happens *automatically* to every
+> scaffolded tenant — it takes a deliberate, reviewable commit. The real interlock is
+> extending the `cf-vm-access` reconciler (ADR-038) to provision the Access app and
+> the Ingress together; the console Service already carries the
+> `platform.capstone/access: console` label and `console-access-emails` annotation
+> for exactly that.
+
 ## Prerequisites (ADR-032 — blocking for RUN, not for onboarding)
 
 KubeVirt + CDI must be installed (platform ArgoCD apps) and the KVM-on-Talos +

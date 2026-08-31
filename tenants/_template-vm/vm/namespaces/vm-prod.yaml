@@ -248,6 +248,13 @@ spec:
 # to an explicit port list — which would be a reasonable hardening — :7681 MUST be in
 # it alongside the app port, or every team's default door closes with no other symptom
 # than a 502. Do not narrow this without also updating the VM-tier deny-test.
+#
+# This rule is NOT what makes the console public, and narrowing it is not a substitute
+# for the real gate. Reaching :7681 from kube-system is in-cluster only; the console
+# becomes reachable from the INTERNET when the tenant chart's opt-in `console-public`
+# component creates the Ingress. That component ships OFF and must not be enabled
+# before the hostname's Cloudflare Access application exists — see this blueprint's
+# README, "The team's web console ships CLOSED".
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

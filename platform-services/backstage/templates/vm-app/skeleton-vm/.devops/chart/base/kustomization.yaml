@@ -18,10 +18,17 @@ resources:
   - service.yaml
   - ssh-service.yaml
   - ingress.yaml
-  # The web console — the DEFAULT way a student gets a shell (browser + GitHub login,
-  # no keys, no certificates). SSH remains available as the advanced path.
+  # The web console — the way a student gets a shell (browser + GitHub login, no
+  # keys, no certificates). SSH remains available as the advanced path.
+  #
+  # ONLY THE SERVICE IS HERE. It is a ClusterIP, so it is reachable only from inside
+  # the cluster and publishes nothing. The Ingress — the piece that actually puts a
+  # sudo-capable shell on the public internet — is deliberately NOT in this base. It
+  # lives in the opt-in `console-public` component and ships OFF, so a freshly
+  # scaffolded tenant is never public before its Cloudflare Access application
+  # exists. See ../components/console-public/kustomization.yaml for the reasoning
+  # and the two-step enable.
   - console-service.yaml
-  - console-ingress.yaml
 
 # Package cloud-init.yaml into the Secret the VM references (cloudInitNoCloud.secretRef).
 # key `userdata` is what KubeVirt reads. disableNameSuffixHash keeps the name STABLE

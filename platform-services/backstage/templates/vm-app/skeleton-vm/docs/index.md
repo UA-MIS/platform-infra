@@ -59,6 +59,11 @@ directly on the box.
 Open **<https://${{ values.team }}-console.uamishub.com>** and sign in with GitHub.
 That's it — you get a terminal on your VM in the browser.
 
+> **Not working yet?** The console is switched on by an operator once your VM is up —
+> it is deliberately not published before the sign-in gate in front of it exists. If
+> the URL does not load, your VM is fine; the door just hasn't been opened yet. Ask
+> your instructor, and use SSH (option B) or your app's URL in the meantime.
+
 There is **nothing to install and no SSH key to generate**. Your GitHub login is the
 only credential. Each person on the team gets their own independent shell, so the
 whole team can be logged in at the same time without treading on each other.
