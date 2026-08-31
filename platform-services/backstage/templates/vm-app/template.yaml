@@ -145,6 +145,15 @@ spec:
         - baseImage
         - sshPubKey
         - githubUsernames
+        # REQUIRED, not optional-with-a-blank-default. Wiring this input (below) fixed
+        # the annotation always rendering as `""`, but an input that is merely PRESENT
+        # can still be left blank — and a blank one produces a Cloudflare Access
+        # application that admits NOBODY, which from a student's laptop is
+        # indistinguishable from a missing tunnel route or a broken VM. The failure is
+        # silent on every side: the scaffold succeeds, the PR merges, the reconciler
+        # creates the app, and the first person to try to connect is the one who finds
+        # out. Requiring it moves that discovery to the wizard form.
+        - teamEmails
       properties:
         # BRING-YOUR-OWN / IMPORTED DISK IMAGE (ADR-032 §1, §4). The "image" is a whole
         # OS disk CDI imports into a PVC — NOT a container build. Point this at:
@@ -298,7 +307,10 @@ spec:
             becomes the Cloudflare Access policy on <team>-ssh.uamishub.com — the gate in
             FRONT of the VM's sshd. Leave nobody out: an address that is not here cannot
             reach the host at all, no matter what SSH key they have.
-          default: ''
+          # No `default: ''` — a blank default plus `required` is a field the form will
+          # happily accept empty. The pattern demands at least one address that looks
+          # like an email, and tolerates spaces after the commas.
+          pattern: '^\s*[^@,\s]+@[^@,\s]+\.[^@,\s]+\s*(,\s*[^@,\s]+@[^@,\s]+\.[^@,\s]+\s*)*$'
           ui:help: 'e.g. astudent@crimson.ua.edu, bstudent@crimson.ua.edu'
 
     # NOTE (same as new-capstone-project): there is intentionally NO repoUrl input — the
