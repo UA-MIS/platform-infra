@@ -142,39 +142,12 @@ data:
         redirectURIs:
           # Grafana's OIDC callback (root_url + /login/generic_oauth).
           - https://grafana.capstone.uamishub.com/login/generic_oauth
-      # IDA Agile Board — the ida-llm tenant's sprint board. FIRST TENANT-OWNED
-      # APPLICATION to federate through this broker; every client above is a
-      # platform service.
-      #
-      # It still gets a static client here rather than its own GitHub OAuth app,
-      # for the same reason as the others: one GitHub OAuth app, N tools. The
-      # difference worth noting is the AUTHORIZATION model. Platform clients rely
-      # on the connector's `orgs:` gate (any UA-MIS member) plus their own RBAC.
-      # This app additionally requires a specific GROUP — it checks the caller is
-      # in `UA-MIS:ida-llm` before showing anyone the board.
-      #
-      # That works without any config here because the GitHub connector above sets
-      # `teamNameField: slug` and, with `orgs:` set, emits ONLY `<org>:<team-slug>`
-      # groups (never the bare org — SEC-007). So the group the app must require is
-      # exactly `UA-MIS:ida-llm`, which is what it derives by default from its own
-      # GITHUB_ORG/GITHUB_TEAM settings. Nothing to add to the connector.
-      #
-      # ⚠ Dex has NO WILDCARD redirect URIs, so this is the exact callback the app
-      # builds from its APP_URL. If APP_URL and this ever disagree — a trailing
-      # slash, http://, the wrong host — sign-in fails at the redirect with an
-      # opaque OIDC error rather than at startup. Change both together.
-      - id: ida-agile
-        name: IDA Agile Board
-        secretEnv: IDA_AGILE_CLIENT_SECRET
-        redirectURIs:
-          - https://ida-agile.capstone.uamishub.com/api/auth/callback
       # UA-MIS Platform board (agile.uamishub.com) — the MAINTAINERS' instance of
-      # the SAME application as `ida-agile` above. Both run the identical image
-      # (harbor.capstone.uamishub.com/platform/agile-board, built from
-      # github.com/UA-MIS/agile-board); everything that differs between them is
-      # environment. That is the whole point of the extraction: a second team's
-      # board is a second Dex client and a second env block, never a second copy
-      # of the code.
+      # the shared agile-board application (harbor.capstone.uamishub.com/platform/
+      # agile-board, built from github.com/UA-MIS/agile-board). Every per-team
+      # board provisioned via `tenants/_boards/*.yaml` (D-186) is a redirect URI on
+      # THIS client, not a client of its own — one GitHub OAuth app, one Dex
+      # client, N boards.
       #
       # Authorization is `UA-MIS:labmx` (the platform maintainers' team), derived
       # by the app from its GITHUB_ORG/GITHUB_TEAM. Note `labmx` is a SECRET
@@ -187,7 +160,7 @@ data:
       # `agile.uamishub.com` request returns Traefik's plain-text 404, not
       # Cloudflare's HTML error page — verified before this was added), so no DNS
       # or certificate change was needed. Same no-wildcard-redirect caveat as
-      # ida-agile: this URI and the app's APP_URL must be changed together.
+      # every client above: this URI and the app's APP_URL must be changed together.
       - id: agile-board
         name: UA-MIS Platform Board
         secretEnv: AGILE_BOARD_CLIENT_SECRET
