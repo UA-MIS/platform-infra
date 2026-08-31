@@ -922,12 +922,34 @@ write_files:
       systemctl mask capstone-app.service          >/dev/null 2>&1 || true
 
       install -D -m 0644 /etc/capstone/Caddyfile /etc/caddy/Caddyfile
-      if caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1; then
+      if ! caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1; then
+        fail "Caddyfile did NOT validate — :80 will not serve. Run: caddy validate --config /etc/caddy/Caddyfile"
+      else
         systemctl enable --now caddy >/dev/null 2>&1
         systemctl reload caddy >/dev/null 2>&1 || systemctl restart caddy >/dev/null 2>&1
-        ok "caddy configured and listening on :80"
-      else
-        fail "Caddyfile did NOT validate — :80 will not serve. Run: caddy validate --config /etc/caddy/Caddyfile"
+
+        # ── VERIFY BY CONNECTING, NOT BY VALIDATING. ──────────────────────────────
+        # An earlier version of this script printed "caddy configured and listening on
+        # :80" after `caddy validate` succeeded and the unit was enabled. Both were
+        # true and NOTHING WAS LISTENING: the caddy package's postinst had not run (a
+        # dpkg interrupted by an earlier crash), so the `caddy` system user did not
+        # exist and every start died instantly with
+        #     caddy.service: Failed to determine user credentials: No such process
+        #     Main process exited, code=exited, status=217/USER
+        # A config that parses says nothing about a socket that accepts. This is the
+        # same class of lie as `systemctl is-active` reporting "active" for a unit that
+        # is restart-looping — the failure that once left this template's web console
+        # dead while every status read green. So: open a connection.
+        listening=0
+        for i in $(seq 1 30); do
+          if curl -fsS -o /dev/null --max-time 3 http://127.0.0.1:80/ 2>/dev/null; then listening=1; break; fi
+          sleep 2
+        done
+        if [ "$listening" = 1 ]; then
+          ok "caddy is answering on :80"
+        else
+          fail "caddy is NOT answering on :80 — the tenant hostname will not serve. Try: systemctl status caddy; journalctl -u caddy -n 50"
+        fi
       fi
 
       echo "=== capstone-lab-install finished $(date -Is) ==="
