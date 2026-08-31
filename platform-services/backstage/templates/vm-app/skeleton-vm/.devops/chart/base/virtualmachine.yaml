@@ -212,13 +212,61 @@ spec:
         # quota and LimitRange in tenants/_template-vm/vm/namespaces/vm-prod.yaml are
         # sized WITH that overhead included; do not size them from these numbers
         # directly.
+        # ── QEMU NEEDS HEADROOM ABOVE THE GUEST'S RAM. ───────────────────────
+        # A VM SCAFFOLDED WITHOUT THIS BLOCK CRASHES UNDER ITS OWN WORKLOAD, and the
+        # crash looks like nothing at all. Observed on the paper-papas tenant
+        # 2026-08-31, during an ordinary `pnpm build` inside the guest:
+        #
+        #   Warning  SyncFailed  ... Could not get owner Pid of socket
+        #                            /pods/.../launcher-sock: connection refused
+        #   Warning  Stopped     virtualmachineinstance/paper-papas
+        #                            The VirtualMachineInstance crashed.
+        #
+        # The launcher pod was replaced, the guest cold-booted, /tmp was wiped, and
+        # `kubectl get vmi` said Running again about a minute later. To a student it
+        # is their build dying and their SSH session dropping, with NOTHING in the
+        # guest's own logs — because the guest did not fail, it was killed from
+        # outside by the cgroup OOM killer.
+        #
+        # WHY IT HAPPENS. With `requests == limits` and no `memory.guest`, the guest
+        # is handed EXACTLY the container's memory ask and KubeVirt adds only its
+        # own overhead estimate on top (measured: a 4096Mi guest produced a compute
+        # container limited to 4714397697 B = 4496Mi, i.e. ~400Mi of headroom). That
+        # estimate assumes KVM. This cluster runs KubeVirt with useEmulation:true —
+        # QEMU TCG, no hardware virtualisation — where the translation caches make
+        # the true overhead much larger. MEASURED on that guest: 559Mi at idle,
+        # over 1.3Gi during a build.
+        #
+        # And QEMU's RSS only ever RATCHETS UP: a guest page that has been touched
+        # stays resident on the host even after the guest frees it, so the container
+        # climbs monotonically toward guest-RAM + overhead and never falls back.
+        # Sampled across one build: 1380 -> 2643 -> 2901Mi while the GUEST's own
+        # `free` showed usage going DOWN. Any sustained memory-churning workload
+        # therefore walks the container into its limit and gets killed.
+        #
+        # THE FIX is to stop pinning guest RAM to the container ask. `memory.guest`
+        # is what the guest SEES; `resources` is what the container may HAVE. The
+        # guest still gets exactly the memoryGi the team asked for; the extra 2Gi is
+        # hypervisor headroom, not student RAM.
+        #
+        # The asymmetric requests/limits is REQUIRED, not sloppy: `memory.guest` must
+        # lie between requests and limits (`kubectl explain
+        # virtualmachine.spec.template.spec.domain.memory.guest`), so requests stays
+        # at the guest size. The scheduler reserves the guest's RAM; the headroom is
+        # burst.
+        memory:
+          guest: ${{ values.memoryGi }}Gi
         resources:
           requests:
             # Guest RAM, reserved for the VM's whole lifetime (ADR-032 §5).
             memory: ${{ values.memoryGi }}Gi
             cpu: "${{ values.cpuCores }}"
           limits:
-            memory: ${{ values.memoryGi }}Gi
+            # Guest RAM + 2Gi of hypervisor headroom. NOT the guest's size — raising
+            # this does NOT give the team a bigger machine. `memoryGi` is capped at 8
+            # in template.yaml so that this stays inside the tier's 12Gi LimitRange
+            # with room for the transient CDI importer.
+            memory: ${{ values.memoryGi + 2 }}Gi
             cpu: "${{ values.cpuCores }}"
         devices:
           # virtio-rng. The cluster runs KubeVirt with useEmulation:true (QEMU TCG,
