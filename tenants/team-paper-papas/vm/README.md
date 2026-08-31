@@ -17,9 +17,9 @@ deliberately separate from the container tenant tiers (`../namespaces/*.yaml`).
 
 | File | Purpose |
 | --- | --- |
-| `appproject-vm.yaml` | the VM-tier tenancy fence — a SEPARATE AppProject `__TEAM__-vm` that whitelists `VirtualMachine`/`VirtualMachineInstance`/`DataVolume` (+ the cloud-init `Secret`) and targets only `__TEAM__-vm-*` namespaces. `clusterResourceWhitelist: []`. |
-| `applicationset-vm.yaml` | the VM env ApplicationSet — a single-env (prod) `matrix(list × git-files promotion.yaml)` App that syncs the APP repo's `.devops/chart/overlays/prod` VM chart into `__TEAM__-vm-prod` under project `__TEAM__-vm`. **Without this the VM tier is a fence + namespace with nothing inside it** (the #376 onboarding bug). The VM analogue of `../_template/applicationset-envs.yaml`. |
-| `namespaces/vm-prod.yaml` | `__TEAM__-vm-prod` Namespace at **PSA `baseline`** (not restricted) + VM-sized ResourceQuota + LimitRange + 6 NetworkPolicies (default-deny, Traefik ingress, cloudflared SSH ingress, DNS + intra-ns egress, importer image-pull, and **guest external :53/:443 egress**) + VM-aware Role/RoleBinding. |
+| `appproject-vm.yaml` | the VM-tier tenancy fence — a SEPARATE AppProject `paper-papas-vm` that whitelists `VirtualMachine`/`VirtualMachineInstance`/`DataVolume` (+ the cloud-init `Secret`) and targets only `paper-papas-vm-*` namespaces. `clusterResourceWhitelist: []`. |
+| `applicationset-vm.yaml` | the VM env ApplicationSet — a single-env (prod) `matrix(list × git-files promotion.yaml)` App that syncs the APP repo's `.devops/chart/overlays/prod` VM chart into `paper-papas-vm-prod` under project `paper-papas-vm`. **Without this the VM tier is a fence + namespace with nothing inside it** (the #376 onboarding bug). The VM analogue of `../_template/applicationset-envs.yaml`. |
+| `namespaces/vm-prod.yaml` | `paper-papas-vm-prod` Namespace at **PSA `baseline`** (not restricted) + VM-sized ResourceQuota + LimitRange + 4 NetworkPolicies (default-deny, Traefik ingress, DNS egress, importer image-pull) + VM-aware Role/RoleBinding. |
 
 The security rationale, blast-radius analysis, and the post-install deny-test plan
 live in `artifacts/reviews/kubevirt-vm-tier-security-review.md`.
@@ -34,7 +34,7 @@ tightest profile that still runs `virt-launcher`, and a full step below the
 relaxation **and** the VM kinds are fenced together to this one tier:
 
 - A team **cannot** create a VM in their `restricted` container namespaces — the VM
-  kinds are whitelisted only in the `__TEAM__-vm` project (GitOps layer) and
+  kinds are whitelisted only in the `paper-papas-vm` project (GitOps layer) and
   `virt-launcher` would be rejected by `restricted` PSA anyway (admission layer).
 - A team **cannot** run arbitrary container Deployments in the relaxed VM namespace
   — `Deployment`/`ReplicaSet`/`HPA` are NOT in the VM project's whitelist.
@@ -44,7 +44,7 @@ relaxation **and** the VM kinds are fenced together to this one tier:
 A lifted whole-project VM is a single heavyweight artifact and usually needs one
 live home, not a dev/staging/prod fan-out. `vm-prod` is that home. A team that
 genuinely needs a second VM env copies `namespaces/vm-prod.yaml` to `vm-dev.yaml`
-and `s/prod/dev/`; the AppProject destination is a `__TEAM__-vm-*` wildcard, so no
+and `s/prod/dev/`; the AppProject destination is a `paper-papas-vm-*` wildcard, so no
 AppProject edit is required.
 
 ## Sizing (homelab reality)
@@ -57,9 +57,9 @@ second VM needs an explicit quota bump + a platform capacity review.
 
 ## Tokens
 
-Same as the parent template: `__TEAM__`, `__APPNAME__`, `__SEMESTER__`. Substitute
-`__APPNAME__` BEFORE `__TEAM__` (a `__TEAM__`-prefixed appName would otherwise be
-half-replaced). The team group `__TEAM__-developers` is the same subject used by the
+Same as the parent template: `paper-papas`, `paper-papas`, `2026-fall`. Substitute
+`paper-papas` BEFORE `paper-papas` (a `paper-papas`-prefixed appName would otherwise be
+half-replaced). The team group `paper-papas-developers` is the same subject used by the
 container tier.
 
 ## Field notes — things that will bite you (from the crimson-copies-stripped bring-up)
@@ -177,48 +177,3 @@ boot-to-serving ~34 min. Slow but entirely workable — roughly 3–5× native, 
   in `skeleton-vm/`; the public SSH transport is an operator decision).
 - **Platform install** of `virt-operator` + `cdi-operator` as pinned ArgoCD apps.
 - **Live-migration** (CephFS RWX) — deferred; node drain cold-restarts VMs.
-
-## Where VM placement is controlled (it is NOT in this directory)
-
-A recurring wrong turn: this blueprint holds only the VM tier's **tenancy**
-scaffolding — AppProject, namespace + quota/LimitRange/NetworkPolicy, and the VM
-env ApplicationSet. There is **no VirtualMachine here** to constrain, so node
-placement cannot be set from this directory.
-
-The `affinity` block that pins VMs lives in the **VM manifest**, in two places
-that must stay in sync:
-
-| What | Where |
-|---|---|
-| Blueprint for **new** VM tenants | `platform-services/backstage/templates/vm-app/skeleton-vm/.devops/chart/base/virtualmachine.yaml` |
-| A **live** tenant | that team's own app repo, `.devops/chart/base/virtualmachine.yaml` |
-
-Editing the skeleton changes what teams two and three are *born* with; it does
-**not** retro-fit a team already onboarded, because the scaffolder copies the
-skeleton once at onboarding. An existing tenant needs a PR against its own repo.
-
-The current contract (see the comments in those files for the full reasoning):
-
-- **`nodeAffinity`, required**, on `node-role.kubernetes.io/control-plane`. VMs
-  are permanent and immovable — RWO RBD, full cpu/memory reserved for life — so
-  they belong on the control-plane nodes, leaving the workers for the ephemeral
-  build runners that can schedule anywhere. No toleration is needed: the
-  control-plane taint is `capstone.io/control-plane=true:PreferNoSchedule`, which
-  is soft.
-- **`podAntiAffinity`, required**, on `kubevirt.io=virt-launcher` over
-  `kubernetes.io/hostname`, **with `namespaceSelector: {}`** — one VM per node.
-  The namespaceSelector is load-bearing: VM tenants each live in their own
-  `<team>-vm-prod` namespace, and podAntiAffinity otherwise matches only the
-  pod's own namespace, which would spread nothing while still reading as correct.
-
-**Capacity cliff:** `required` anti-affinity across three control-plane nodes
-means the **fourth** VM tenant will not schedule, and that failure is quiet (the
-VirtualMachine sits at `Starting`, the VMI at `Pending`, with no pod to inspect).
-Before onboarding a fourth VM team, add a control-plane node or relax the rule to
-`preferredDuringSchedulingIgnoredDuringExecution` (weight 100).
-
-**Changing placement on a running VM requires deleting the VMI.** A VMI's spec is
-immutable, so a merged manifest change does not move a running guest; deleting the
-VMI lets the VM controller recreate it from the new spec. That is a convergence
-*to* git, which is why it is legitimate where a live `kubectl patch` against a
-GitOps-managed object is not — ArgoCD `selfHeal` reverts those within a minute.

@@ -1,0 +1,162 @@
+# ============================================================================
+# validate.yaml — board #186: run `make validate` in CI.
+#
+# ── WHAT THIS IS ────────────────────────────────────────────────────────────
+# `make validate` is this repo's static safety net for tenancy changes. Six
+# offline guards, three of which are REAL controls that four separate documents
+# already describe as automated:
+#
+#   [4/6] SEC-006 — an ArgoCD role policy naming a nonexistent AppProject is
+#         silently INERT. The students it was meant to authorise cannot deploy,
+#         and nothing anywhere emits an error. It reads exactly like a working
+#         grant. (docs/OPERATIONS-AND-HANDOFF.md:152, docs/operator/argocd-gitops.md:181,
+#         platform-services/dex/README.md:33 all say `make validate` guards this.)
+#   [5/6] claim-uniqueness — two CapstoneTenant claims for one team means two
+#         XRs co-managing the same team-keyed NetworkPolicies, and the provider
+#         reconcile loops fight the moment their rendered specs diverge. That is
+#         the 2026-07-09 incident, not a hypothetical.
+#   [6/6] Dex board-client — Dex has no wildcard redirect URIs, so a board whose
+#         callback is missing deploys, reports Healthy, serves its landing page,
+#         and dies at "Sign in" with an opaque OIDC error.
+#
+# Until this workflow, `make validate` appeared in NO workflow at all — the only
+# mention of it under .github/ was a comment in dex-board-clients.yaml asserting
+# that it "runs on PRs", which it did not. It was developer-local discipline
+# documented as an enforced gate.
+#
+# ── WHY THERE IS NO `paths:` FILTER (deliberate) ────────────────────────────
+# The obvious filter is `tenants/**`, and it would be wrong. The guards read
+# from at least six independently-changing areas:
+#
+#   tenants/**                                     [1][2][3][5][6]
+#   platform-services/argocd-config/argocd-rbac-cm.yaml   [4]
+#   bootstrap/platform-appproject.yaml                    [4]  (the project list)
+#   platform-services/dex/configmap.yaml + gen-board-clients.py  [6]
+#   platform-services/crossplane/apis/composition.yaml    (renders what [1][2][3] check)
+#   the Makefile itself                                   (the guards' own source)
+#
+# Measured over the 30 days to 2026-08-26: 70 commits touched `tenants/`, and
+# **36 more touched guard-relevant paths outside it** — 20 of them
+# composition.yaml, 9 dex/configmap.yaml, 2 bootstrap/platform-appproject.yaml.
+# A `tenants/**` filter would have skipped all 36.
+#
+# Worse, the guarded set GROWS. PR #574 (SEC-021) adds guard [7/7], whose input
+# is composition.yaml and hack/lint-appproject-groups.py — neither of which any
+# filter written before that PR could have known to list. A hand-maintained
+# `paths:` list next to a growing guard set is precisely the copy-drift class
+# that FIX-24 / ci-scripts-sync-check.yaml exists to police. We are not going to
+# reintroduce it in the gate that polices it.
+#
+# The cost argument for a filter does not survive contact either: the whole suite
+# is offline and runs in **0.32s** locally. Checkout dominates. Running it on
+# every PR is free, and a gate that always runs cannot silently stop matching.
+#
+# (Cautionary case, measured: the neighbouring `ci-scripts-sync-check` has run
+# 4 times TOTAL since it was created — and 2 of those were yesterday, on the PR
+# that unblocked it. Against denominators of 180 / 148 / 48 runs for the live
+# workflows in this repo, that is what a narrow filter buys you.)
+#
+# ── WHY IT ALSO RUNS ON PUSH TO MAIN ────────────────────────────────────────
+# The scaffolder wizard commits STRAIGHT TO MAIN (the `ua-mis-backstage` App
+# holds a branch-protection bypass) — `tenants/_claims/<team>.yaml`,
+# `tenants/_boards/<team>.yaml` and the rendered `tenants/<team>/**`. A PR-only
+# gate has a hole in exactly the path that creates tenants.
+#
+# A push-on-main run cannot PREVENT that commit — it has already landed. It makes
+# it LOUD, which is the same posture the repo already chose for this path:
+#   - guard [6/6]'s subject is auto-remediated by dex-board-clients.yaml, which
+#     runs on push-to-main + a 10-minute schedule and opens a fix PR;
+#   - guard [5/6]'s subject is mirrored pre-commit by the scaffolder's own
+#     preflight action (preflight.ts:360, "mirrors make validate, PR #311").
+# Guards [1][2][3] over rendered tenant manifests have NO such mirror: a
+# malformed render lands on main unchecked today. That is what this covers.
+#
+#   (Guard [1/6] only genuinely covers that path as of this PR. Its file list was
+#   the glob `tenants/*/namespaces/*.yaml`, one directory too shallow — it matched
+#   the four `_template` files and never the VM tier's `*/vm/namespaces/*.yaml`,
+#   so the repo's only real tenant namespace manifest went unvalidated. Now built
+#   with `find`. [2] and [3] already recursed, via `grep -r` and `find`.)
+#
+# ⚠ Guard [4/6] (SEC-006) needs no push-on-main coverage: argocd-rbac-cm.yaml is
+#   only ever edited by humans in PRs. The PR trigger is a complete gate for it.
+#
+# ── ⚠ THIS IS NOT YET A MERGE BLOCKER ───────────────────────────────────────
+# `main`'s branch protection has NO required_status_checks at all (verified via
+# the API on 2026-08-27) — so no workflow in this repo blocks a merge today, this
+# one included. It will show a red X on the PR; it will not stop the button.
+# Making it binding is a repo-settings change only an admin can make: add the
+# check named **`make validate`** to Settings -> Branches -> main -> Require
+# status checks to pass. Recommended, and deliberately NOT done from CI (this
+# repo has already rejected handing CI a bypass/admin credential for
+# convenience — FIX-10, tenants/_claims/README.md).
+# ============================================================================
+name: validate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: validate-${{ github.ref }}
+  # Superseded PR pushes are worth cancelling; main history is not.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: make validate
+    # GitHub-hosted on purpose. The self-hosted `ua-mis-kaniko` pool has :443-only
+    # egress and no IPv6 route (see ci-scripts-sync-check.yaml's container note);
+    # kubeconform fetches its JSON schemas over the network at run time, so the
+    # hosted runner removes a whole class of "the gate is down" failure. The repo
+    # is public, so hosted minutes are free, and this keeps every PR off the lab's
+    # finite ARC capacity. dex-board-clients.yaml uses the same runner: 48 runs,
+    # no runner-related failures.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 1
+
+      - name: Install kubeconform (pinned + checksum-verified)
+        env:
+          # Pinned, not `latest`: `make validate` runs `kubeconform -strict`, and a
+          # schema-validator that silently changes version between runs is a gate
+          # whose verdict you cannot reproduce. Bump deliberately.
+          KUBECONFORM_VERSION: v0.7.0
+          KUBECONFORM_SHA256: c31518ddd122663b3f3aa874cfe8178cb0988de944f29c74a0b9260920d115d3
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          url="https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          curl -sSLf -o /tmp/kubeconform.tgz "$url"
+          echo "${KUBECONFORM_SHA256}  /tmp/kubeconform.tgz" | sha256sum -c -
+          tar -xzf /tmp/kubeconform.tgz -C /tmp kubeconform
+          install -m 0755 /tmp/kubeconform "$HOME/.local/bin/kubeconform"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Assert the toolchain the guards need
+        run: |
+          set -euo pipefail
+          # `make validate` shells out to kubeconform and python3. Assert both up
+          # front so a missing tool fails with this sentence instead of surfacing
+          # as a confusing error from inside a guard.
+          for t in kubeconform python3 make; do
+            command -v "$t" >/dev/null || { echo "::error::${t} is not on PATH"; exit 1; }
+          done
+          kubeconform -v
+
+      - name: make validate
+        run: make validate
+
+      - name: Explain a failure on main
+        if: failure() && github.event_name == 'push'
+        run: |
+          echo "::error::\`make validate\` is RED on main. This run is detection, not prevention — the commit has already landed (the scaffolder wizard commits to main directly, bypassing PRs). Fix forward: run \`make validate\` locally, and see .github/workflows/validate.yaml for what each guard protects. If this is guard [6/6] (Dex board clients), dex-board-clients.yaml will already have opened a fix PR — merge that."

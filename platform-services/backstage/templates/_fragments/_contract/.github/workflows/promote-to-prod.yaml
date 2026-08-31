@@ -112,6 +112,18 @@ jobs:
           GIT_AUTHOR_EMAIL: ci@capstone.uamishub.com
           GIT_COMMITTER_NAME: ua-mis-ci
           GIT_COMMITTER_EMAIL: ci@capstone.uamishub.com
+        # `shell: bash` is LOAD-BEARING here, and this step is the reason the check in
+        # ci-scripts-sync-check.yaml exists (A2). This job runs in a CONTAINER, and for a
+        # container job the runner picks `sh -e {0}` — not bash — for a bare `run:`
+        # (observed in run 33027282352). The `set -euo pipefail` below then works ONLY
+        # because Debian trixie's dash happens to implement pipefail; Ubuntu's dash
+        # (0.5.12-6ubuntu5) rejects it outright. Without this line, `promote.sh ... | tee`
+        # on the line below reports only tee's status — always 0 — in THE PROD PROMOTION
+        # PATH, on an image reference that can move under us.
+        #
+        # #578 pinned the other four steps of this class and missed this one, which is
+        # exactly why the sweep is now a CI check rather than a thing to remember.
+        shell: bash
         run: |
           set -euo pipefail
           # promote.sh reads the live tag from `from`'s overlay and hands off to
@@ -127,7 +139,7 @@ jobs:
           # ephemeral). We parse promote.sh/bump-image.sh's own stdout rather than
           # re-reading the overlays here, so promotion.yaml stays the single source of
           # truth for the env -> overlay mapping (#210: no second copy of that map).
-          COMMIT=1 sh .devops/ci/promote.sh "${FROM}" "prod" 2>&1 | tee /tmp/promote.log
+          COMMIT=1 bash .devops/ci/promote.sh "${FROM}" "prod" 2>&1 | tee /tmp/promote.log
 
           # Matches promote.sh's `==> <env> is live at <TAG> — promoting to <env>` line. The
           # capture stops at the first space (an image tag can never contain one), so this

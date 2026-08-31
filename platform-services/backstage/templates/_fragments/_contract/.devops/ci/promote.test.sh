@@ -180,6 +180,19 @@ R3="$(make_repo)"
 bash "${R3}/.devops/ci/promote.sh" prod prod >/tmp/promote.log 2>&1; RC=$?
 assert_eq "same-env rc" "${RC}" "2"
 
+# 4b) an env with NO overlay mapping in promotion.yaml is refused, and refused
+# LOUDLY. Added because a mutation run (#187) showed this guard had zero coverage:
+# deleting `if [ -z "${FROM_OVERLAY}" ] ...` from promote.sh left the suite 16/16
+# green. Without the guard, FROM_OVERLAY is empty, FROM_KUSTOMIZATION collapses to
+# "<repo>//kustomization.yaml", and promote.sh fails one line later with a path
+# error instead of naming the env -- so assert on the MESSAGE, not just the code,
+# or the next person to delete the guard passes this test anyway.
+R3b="$(make_repo)"
+bash "${R3b}/.devops/ci/promote.sh" nosuchenv prod >/tmp/promote.log 2>&1; RC=$?
+assert_eq "unmapped-env rc" "${RC}" "1"
+assert_eq "unmapped-env names the env" \
+  "$(grep -c "no overlay mapping for env 'nosuchenv'" /tmp/promote.log)" "1"
+
 # 5) a mismatched "from" overlay (partial hand-edit) is refused, not silently promoted.
 R4="$(make_repo)"
 SK4="${R4}/.devops/chart/overlays/staging/kustomization.yaml"

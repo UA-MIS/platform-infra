@@ -16,18 +16,33 @@
 # (key `userdata`), which the VirtualMachine references via cloudInitNoCloud.secretRef.
 # ============================================================================
 
-# ── TEAM ACCESS — key-based SSH (ADR-032a) ──────────────────────────────────
-# A VM tenant is a PET dev-VM: you SSH in from any laptop with a STANDARD ssh
-# client, clone your app repo, and run your stack here. cloud-init installs your
-# team's SSH PUBLIC key (the scaffolder `sshPubKey` input) into the default cloud
-# user's ~/.ssh/authorized_keys, and password login is turned OFF (key-only — no
-# `changeme` password to leak). The default user is distro-specific: `fedora` on the
-# default Fedora cloud image, `ubuntu`/`debian` on those images.
+# ── TEAM ACCESS — two paths, one guest (ADR-032a + ADR-039) ──────────────────
+# A VM tenant is a PET dev-VM. There are TWO ways in, and this cloud-init wires BOTH.
+#
+#   1. SSH-over-Cloudflare-Access (the PRIMARY path, browser + CLI) — ADR-039.
+#      The guest sshd trusts Cloudflare's per-Access-app SSH CA (written to
+#      /etc/ssh/cf_access_ca.pub below). After a user passes the Access login for
+#      <team>-ssh.<domain>, Cloudflare mints a SHORT-LIVED SSH certificate signed by
+#      that CA; sshd accepts it, so the user needs NO password and NO personal key
+#      in the guest. Without this block the guest is key-only and BOTH Cloudflare
+#      paths fail — Cloudflare presents a cert, not a key.
+#      The CA is created + logged by the cf-vm-access reconciler once this VM's ssh
+#      Service exists (ADR-038); the operator pastes it in during onboarding.
+#      Until it is pasted, cert auth is simply inactive and path 2 still works —
+#      VERIFIED: sshd starts cleanly with a CA file that contains only comments,
+#      and with no CA file at all.
+#
+#   2. Key-based SSH (the FALLBACK / break-glass) — ADR-032a. cloud-init installs
+#      your team's SSH PUBLIC key (the scaffolder `sshPubKey` input) into the default
+#      cloud user's ~/.ssh/authorized_keys. Password login stays OFF (key-only — no
+#      `changeme` password to leak). The default user is distro-specific: `fedora` on
+#      the default Fedora cloud image, `ubuntu`/`debian` on those images.
 #
 #   ssh <cloud-user>@<your public SSH endpoint>        # see the repo README
 #
-# ADD MORE KEYS: append to `ssh_authorized_keys` below, or uncomment `ssh_import_id`
-# to pull teammates' keys from GitHub (https://github.com/<user>.keys).
+# ADD MORE KEYS: append to `ssh_authorized_keys` below. Everything under
+# `ssh_import_id` + the roster/timer below is generated from the wizard's team
+# roster — edit the roster, not the key list.
 ssh_pwauth: false
 disable_root: true
 ssh_authorized_keys:
@@ -37,14 +52,222 @@ ssh_authorized_keys:
   # block scalar — a comment containing a colon (e.g. "laptop: personal key") would
   # otherwise break this file's YAML the same class of way D-106 fixed for description.
   - ${{ values.sshPubKey | dump }}
-# ssh_import_id:
-#   - gh:your-github-username
-#   - gh:teammate-github-username
+
+# ── SELF-SERVICE KEY IMPORT (3/3) — first boot ──────────────────────────────
+# Pull each team member's PUBLIC keys from GitHub (https://github.com/<user>.keys)
+# into the cloud user's authorized_keys, so NOBODY has to collect or hand-place a
+# key. This is cloud-init's own module and it runs EXACTLY ONCE, on first boot —
+# which is why it is only half the story. See the roster + timer below for the
+# other half.
+ssh_import_id:
+{%- for u in values.githubUsernames %}
+  - gh:${{ u }}
+{%- endfor %}
 
 # A self-contained hello page + a systemd unit that serves it with python3 (present in
 # Fedora/Ubuntu cloud images — distro-agnostic, no package install needed). Swap this
 # for your real app's install + service.
 write_files:
+  # ── Cloudflare Access SSH CA trust (ADR-039) ────────────────────────────────
+  # The per-Access-app SSH CA public key. sshd trusts certs signed by this CA, so
+  # Cloudflare Access can mint short-lived SSH certs for authorized users with NO
+  # user key in the guest.
+  #
+  # This is a TrustedUserCAKeys file (authorized_keys format): `#` comments and blank
+  # lines are ignored. With no CA line present (the default), cert auth is inactive
+  # and the VM is reachable only via the authorized_keys fallback above — sshd still
+  # starts cleanly (verified against a real OpenSSH 9.6 sshd, both for a
+  # comments-only file and for a missing file).
+  #
+  # OPERATOR: paste this VM's Access-app CA public key on the line below the comments
+  # (the value the cf-vm-access reconciler logs). It is a PUBLIC key — safe to commit.
+  - path: /etc/ssh/cf_access_ca.pub
+    permissions: '0644'
+    content: |
+      # Cloudflare Access SSH CA for ${{ values.appName }}.
+      # Paste the CA public key below (one line, ends `open-ssh-ca@cloudflareaccess.org`).
+      # Blank = cert auth off, key-only.
+      ${{ values.cfAccessCaPub }}
+  # sshd drop-in: trust the CA above, and accept whatever principal Cloudflare puts
+  # on the cert. This matters and is NOT optional — a Cloudflare Access cert carries
+  # the user's EMAIL PREFIX as its principal (e.g. `ccsmith33`), which does NOT equal
+  # the guest's cloud user (`ubuntu`/`fedora`). With plain TrustedUserCAKeys and no
+  # principals mapping, sshd rejects the cert with
+  #     Certificate invalid: name is not a listed principal
+  # — verified by execution against a real sshd. The command below echoes the cert's
+  # own principals back to sshd, which accepts them.
+  #
+  # SECURITY NOTE, stated plainly: this delegates ALL user-level authorization to
+  # Cloudflare Access. Any cert signed by this CA authenticates as the login user.
+  # That is the intended design — Access (the team's email allowlist on
+  # <team>-ssh.<domain>) is the gate — and it is contained because the CA is PER-APP,
+  # so a cert minted for another VM's app does not authenticate here. It does mean an
+  # over-broad Access policy is an over-broad shell. Review the policy, not the sshd.
+  #
+  # /bin/sh (not bash) is deliberate: verified working under dash, so this does not
+  # depend on bash being present in the base image.
+  - path: /etc/ssh/sshd_config.d/10-cf-access-ca.conf
+    permissions: '0644'
+    content: |
+      # Managed by cloud-init (ADR-039). Cloudflare Access short-lived SSH certs.
+      PubkeyAuthentication yes
+      PasswordAuthentication no
+      PermitRootLogin no
+      TrustedUserCAKeys /etc/ssh/cf_access_ca.pub
+      AuthorizedPrincipalsCommand /bin/sh -c "echo '%t %k' | ssh-keygen -L -f - | grep -A1 Principals"
+      AuthorizedPrincipalsCommandUser nobody
+  # ── SELF-SERVICE KEY IMPORT — the roster (the single source of truth) ───────
+  # The team's GitHub usernames, straight from the wizard. BOTH the first-boot
+  # `ssh_import_id` above and the every-5-minutes timer below are generated from this
+  # same list in this same file, so the two can never drift apart.
+  #
+  # MEMBERSHIP IS STATIC PER BOOT, BY DESIGN. Changing WHO is on the team is a repo
+  # change (edit this file, push, rebuild) — deliberately, because resolving team
+  # membership at runtime would mean putting a GitHub token on the guest, and a
+  # student dev-VM is not a place to keep a credential. Only the KEYS refresh
+  # automatically; the roster does not.
+  - path: /etc/capstone/ssh-roster
+    permissions: '0644'
+    content: |
+      # GitHub usernames for this team. One per line. `#` comments ignored.
+      # Regenerate from the roster of record:
+      #   gh api /orgs/UA-MIS/teams/<team>/members --jq '.[].login'
+{%- for u in values.githubUsernames %}
+      ${{ u }}
+{%- endfor %}
+  # ── SELF-SERVICE KEY IMPORT — the re-import script ──────────────────────────
+  # WHY THIS EXISTS AT ALL. cloud-init runs ONCE. A student who adds their SSH key to
+  # GitHub *after* the VM was provisioned is locked out forever, and on day one that
+  # is EVERY student — the VM is built before anyone has uploaded anything, and there
+  # is nobody already inside to let them in. This script + its timer close that loop:
+  #   student adds key to GitHub -> they can SSH in within ~5 minutes -> no instructor.
+  #
+  # WHY NOT `ssh-import-id` ON THE TIMER. ssh-import-id fetches
+  # https://api.github.com/users/<u>/keys — the REST API, which is rate-limited to 60
+  # requests/hour PER IP for unauthenticated callers, and it hard-fails (`die()`) when
+  # limited. Every VM guest in the cluster shares one egress IP, so a 5-minute timer
+  # over a 3-person team is 36 req/hr from ONE tenant; three tenants exceed the limit
+  # and would knock each other out. This script uses https://github.com/<u>.keys — the
+  # same public keys, no API quota. ssh-import-id is still used for the FIRST boot
+  # above, where it costs one call per member, once.
+  #
+  # THE SAFETY PROPERTY, MADE STRUCTURAL RATHER THAN CAREFUL:
+  # this script NEVER writes to ~/.ssh/authorized_keys. It owns exactly one file,
+  # /etc/ssh/authorized_keys.d/<cloud-user>, which sshd reads IN ADDITION to the
+  # normal one (see the sshd drop-in below). So the scaffold/break-glass key is
+  # untouchable from here — no bug in this script can lock the team out of their VM.
+  # Within its own file:
+  #   - a member with NO keys on GitHub contributes a `#` comment line and nothing
+  #     else. It cannot blank or corrupt anyone else's keys. (This is the case that
+  #     actually happens — most students have no key on GitHub on day one.)
+  #   - a FAILED fetch (GitHub down, egress broken) reuses that member's last known
+  #     keys from the cache instead of dropping them.
+  #   - the file is assembled in a temp file and moved into place with mv(1) on the
+  #     same filesystem, so sshd never observes a half-written file.
+  - path: /usr/local/bin/capstone-ssh-import
+    permissions: '0755'
+    content: |
+      #!/bin/sh
+      # Refresh the team's authorized keys from GitHub. Safe to run at any time.
+      set -u
+
+      ROSTER=/etc/capstone/ssh-roster
+      CACHE=/var/lib/capstone/ssh-keys
+      KEYDIR=/etc/ssh/authorized_keys.d
+
+      # The default cloud user is uid 1000 on Ubuntu/Debian/Fedora cloud images
+      # (`ubuntu`/`debian`/`fedora`), so detect it rather than hardcoding a distro.
+      CLOUD_USER=$(getent passwd 1000 2>/dev/null | cut -d: -f1)
+      [ -n "$CLOUD_USER" ] || CLOUD_USER=ubuntu
+      OUT="$KEYDIR/$CLOUD_USER"
+
+      if [ ! -r "$ROSTER" ]; then
+        echo "capstone-ssh-import: no roster at $ROSTER; nothing to do" >&2
+        exit 0
+      fi
+
+      install -d -m 0755 "$KEYDIR"
+      install -d -m 0700 "$CACHE"
+
+      TMP=$(mktemp "$OUT.XXXXXX") || exit 1
+      rc=0
+
+      {
+        echo "# GENERATED by capstone-ssh-import at $(date -u +%Y-%m-%dT%H:%M:%SZ)."
+        echo "# DO NOT EDIT — rewritten every timer tick from $ROSTER."
+        echo "# Scaffold/break-glass keys live in ~$CLOUD_USER/.ssh/authorized_keys"
+        echo "# and are never touched by this file."
+      } > "$TMP"
+
+      while IFS= read -r line || [ -n "$line" ]; do
+        u=$(printf '%s' "$line" | tr -d '[:space:]')
+        case "$u" in
+          ''|'#'*) continue ;;
+          *[!A-Za-z0-9-]*)
+            echo "capstone-ssh-import: skipping invalid username '$u'" >&2
+            continue ;;
+        esac
+
+        if curl -fsS --max-time 20 "https://github.com/$u.keys" -o "$CACHE/$u.new"; then
+          mv -f "$CACHE/$u.new" "$CACHE/$u"
+        else
+          rm -f "$CACHE/$u.new"
+          rc=1
+          echo "capstone-ssh-import: fetch FAILED for '$u'; reusing last known keys" >&2
+        fi
+
+        if [ -s "$CACHE/$u" ]; then
+          awk -v u="$u" 'NF { print $0 " " u "@github" }' "$CACHE/$u" >> "$TMP"
+        else
+          # 200-with-no-keys is authoritative: this person has not uploaded one.
+          echo "# $u: no public SSH keys on GitHub" >> "$TMP"
+        fi
+      done < "$ROSTER"
+
+      chown root:root "$TMP"
+      chmod 0644 "$TMP"
+      mv -f "$TMP" "$OUT"
+      exit $rc
+  # sshd drop-in: read the generated roster file IN ADDITION to the user's own
+  # ~/.ssh/authorized_keys. Keeping them in two separate files is what makes the
+  # script above unable to lock anyone out. Root-owned 0644 in a root-owned 0755
+  # directory satisfies sshd's StrictModes.
+  - path: /etc/ssh/sshd_config.d/20-capstone-roster-keys.conf
+    permissions: '0644'
+    content: |
+      # Managed by cloud-init. Team keys imported from GitHub by
+      # /usr/local/bin/capstone-ssh-import land in the second path.
+      AuthorizedKeysFile .ssh/authorized_keys /etc/ssh/authorized_keys.d/%u
+  - path: /etc/systemd/system/capstone-ssh-import.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Import team SSH keys from GitHub (capstone self-service onboarding)
+      Wants=network-online.target
+      After=network-online.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/capstone-ssh-import
+      # A partial refresh (exit 1 = at least one member's fetch failed, previous keys
+      # kept) must not mark the unit failed and stop the timer.
+      SuccessExitStatus=0 1
+  - path: /etc/systemd/system/capstone-ssh-import.timer
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Refresh team SSH keys from GitHub every 5 minutes
+
+      [Timer]
+      # First run shortly after boot, then every 5 minutes. AccuracySec is set
+      # because systemd's 1-minute default jitter would otherwise make "within five
+      # minutes" a promise the handout cannot keep.
+      OnBootSec=2min
+      OnUnitActiveSec=5min
+      AccuracySec=15s
+
+      [Install]
+      WantedBy=timers.target
   - path: /var/www/app/index.html
     permissions: '0644'
     content: |
@@ -78,8 +301,26 @@ write_files:
       WantedBy=multi-user.target
 
 runcmd:
+  # EXPLICITLY enable sshd. Cloud images normally ship it enabled, but "normally" is
+  # not a guarantee, and a VM with no listening sshd is indistinguishable from a
+  # broken tunnel route from the student's laptop — the exact ADR-032 gap. Enabling
+  # it here makes it a property of the guest BUILD rather than of the base image.
+  # The unit is `ssh` on Debian/Ubuntu and `sshd` on Fedora/RHEL, so try both and
+  # never fail the boot on this step.
+  - [ sh, -c, "systemctl enable --now ssh 2>/dev/null || systemctl enable --now sshd 2>/dev/null || true" ]
+  # Load the Cloudflare Access CA drop-in written above (ADR-039). try-restart only
+  # bounces sshd if it is already running.
+  - [ sh, -c, "systemctl try-restart ssh 2>/dev/null || systemctl try-restart sshd 2>/dev/null || true" ]
   # Bring up the starter service (your "app"). Replace with your own install/start steps.
   - [ systemctl, daemon-reload ]
+  # ── SELF-SERVICE KEY IMPORT (3/3) — arm the refresh loop ────────────────────
+  # Run it ONCE now so the team's keys are present the moment the VM is up (the
+  # first-boot `ssh_import_id` above covers the cloud user's own authorized_keys;
+  # this populates the roster file sshd also reads), then start the timer that keeps
+  # them fresh. `|| true` because a member with no key on GitHub is a NORMAL day-one
+  # state, not a boot failure.
+  - [ sh, -c, "/usr/local/bin/capstone-ssh-import || true" ]
+  - [ systemctl, enable, --now, capstone-ssh-import.timer ]
   - [ systemctl, enable, --now, capstone-app.service ]
 
 final_message: "capstone-app first boot complete after $UPTIME seconds"

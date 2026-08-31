@@ -218,10 +218,12 @@ data:
           # Each URI must equal that board's APP_URL + /api/auth/callback exactly;
           # both sides derive from the one team slug so they cannot disagree.
           # ── BEGIN GENERATED team board redirect URIs (gen-board-clients.py) ──
-          - https://alhands-agile.capstone.uamishub.com/api/auth/callback
-          - https://capstone-demo-agile.capstone.uamishub.com/api/auth/callback
-          - https://wizarddress-agile.capstone.uamishub.com/api/auth/callback
-          - https://wizardtest-agile.capstone.uamishub.com/api/auth/callback
+          - https://curb-agile.capstone.uamishub.com/api/auth/callback
+          - https://ida-llm-agile.capstone.uamishub.com/api/auth/callback
+          - https://lab-team-3-agile.capstone.uamishub.com/api/auth/callback
+          - https://nextup-agile.capstone.uamishub.com/api/auth/callback
+          - https://paper-papas-agile.capstone.uamishub.com/api/auth/callback
+          - https://ss-evan-and-emily-agile.capstone.uamishub.com/api/auth/callback
           # ── END GENERATED team board redirect URIs ──
 
     oauth2:

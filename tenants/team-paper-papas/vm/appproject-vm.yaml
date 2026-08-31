@@ -1,10 +1,10 @@
 # ============================================================================
 # VM-TIER AppProject — the tenancy fence for KubeVirt workloads (ADR-032). *** GATE ***
-# Tokens: crimson-copies-stripped, crimson-copies-stripped, 2026-fall.
+# Tokens: paper-papas, paper-papas, 2026-fall.
 #
 # A SEPARATE AppProject from the team's container project, by design. This is
 # defense-in-depth: VM kinds (VirtualMachine/DataVolume) are whitelisted ONLY in
-# this project, whose destinations are ONLY the `crimson-copies-stripped-vm-*` baseline-PSA
+# this project, whose destinations are ONLY the `paper-papas-vm-*` baseline-PSA
 # namespaces. So even at the GitOps layer — not just Pod Security Admission — a
 # team cannot create a VM in their `restricted` container namespaces, and cannot
 # create container Deployments in their relaxed VM namespace. The privilege
@@ -13,7 +13,7 @@
 # SECURITY CONTRACT (parallels tenants/_template/appproject.yaml):
 #   - sourceRepos: ONLY the team's app repo (same as container; SEC-024 removed
 #     platform-infra from both).
-#   - destinations: ONLY crimson-copies-stripped-vm-* on the in-cluster API. Cannot target another
+#   - destinations: ONLY paper-papas-vm-* on the in-cluster API. Cannot target another
 #     team's namespace, the container namespaces, or another cluster.
 #   - clusterResourceWhitelist: EMPTY. VirtualMachine, VirtualMachineInstance, and
 #     DataVolume are ALL namespaced, so NO cluster-scope grant is needed — the hard
@@ -26,34 +26,36 @@
 apiVersion: argoproj.io/v1alpha1
 kind: AppProject
 metadata:
-  name: crimson-copies-stripped-vm
+  name: paper-papas-vm
   namespace: argocd
   labels:
-    platform.capstone/team: crimson-copies-stripped
+    platform.capstone/team: paper-papas
     platform.capstone/semester: 2026-fall
     platform.capstone/component: tenant
     platform.capstone/tier: vm
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
-  description: "VM-tier project for team crimson-copies-stripped (2026-fall). KubeVirt workloads only; baseline-PSA namespaces; no cluster-scoped resources."
+  description: "VM-tier project for team paper-papas (2026-fall). KubeVirt workloads only; baseline-PSA namespaces; no cluster-scoped resources."
 
   # --- source repos: the team's app repo ONLY (identical to container) -----------
-  # SEC-024: platform-infra removed — an allowlisted platform repo in a TENANT
-  # project becomes a live path to render platform manifests the moment the
-  # developer role below binds a group Dex actually emits (SEC-021).
+  # SEC-024: platform-infra removed here for the same reason as the container
+  # template — an allowlisted platform repo in a TENANT project becomes a live path
+  # to render platform manifests the moment the developer role below binds a group
+  # Dex actually emits (SEC-021). The bootstrap App that reads platform-infra runs
+  # in the `platform` project.
   sourceRepos:
-    - https://github.com/UA-MIS/crimson-copies-stripped
-    - https://github.com/UA-MIS/crimson-copies-stripped.git
+    - https://github.com/UA-MIS/paper-papas
+    - https://github.com/UA-MIS/paper-papas.git
 
   # --- destinations: ONLY this team's VM namespaces on the in-cluster API ---------
-  # `vm-prod` is the default single VM home; the `crimson-copies-stripped-vm-*` wildcard also
-  # covers an opt-in `crimson-copies-stripped-vm-dev` without an AppProject edit.
+  # `vm-prod` is the default single VM home; the `paper-papas-vm-*` wildcard also
+  # covers an opt-in `paper-papas-vm-dev` without an AppProject edit.
   destinations:
     - server: https://kubernetes.default.svc
-      namespace: crimson-copies-stripped-vm-prod
+      namespace: paper-papas-vm-prod
     - server: https://kubernetes.default.svc
-      namespace: crimson-copies-stripped-vm-*
+      namespace: paper-papas-vm-*
 
   # --- cluster-scoped resources: NONE. Hard tenancy boundary, unchanged. ----------
   # All VM kinds are namespaced; no cluster-scope grant is required. (KubeVirt/CDI
@@ -85,7 +87,7 @@ spec:
     # Secret (key `userdata`); it cannot take a ConfigMap for userData. The VM chart's
     # kustomize secretGenerator emits `<app>-cloudinit` as exactly this kind, so the VM
     # tier MUST permit it or ArgoCD refuses to create it ("Secret is not permitted in
-    # project crimson-copies-stripped-vm") and the virt-launcher pod hangs mounting a missing volume.
+    # project paper-papas-vm") and the virt-launcher pod hangs mounting a missing volume.
     # This mirrors the FIRST live VM tenant (team-tenantvm, PR #376), which had to
     # hand-add this same grant — the template now carries it so the NEXT VM tenant does
     # not break identically.
@@ -117,10 +119,17 @@ spec:
   # --- ArgoCD RBAC role for the team (parallels the container project) -------------
   roles:
     - name: developer
-      description: "Team crimson-copies-stripped developers — sync/get own VM apps only."
+      description: "Team paper-papas developers — sync/get own VM apps only."
       policies:
-        - p, proj:crimson-copies-stripped-vm:developer, applications, get, crimson-copies-stripped-vm/*, allow
-        - p, proj:crimson-copies-stripped-vm:developer, applications, sync, crimson-copies-stripped-vm/*, allow
+        - p, proj:paper-papas-vm:developer, applications, get, paper-papas-vm/*, allow
+        - p, proj:paper-papas-vm:developer, applications, sync, paper-papas-vm/*, allow
+        # Pod logs for THIS project's apps only — scoped replacement for the
+        # cluster-wide `logs, get, */*` that SEC-022 removes from policy.default.
+        - p, proj:paper-papas-vm:developer, logs, get, paper-papas-vm/*, allow
         # Explicitly NO delete, NO override, NO action/* — least privilege.
       groups:
-        - crimson-copies-stripped-developers
+        # SEC-021: the group Dex actually emits is `<org>:<team-slug>`, never
+        # `paper-papas-developers`. NOTE the project is `paper-papas-vm` but the GitHub
+        # team is just `paper-papas` — the VM tier is the SAME team, so the group
+        # carries no `-vm` suffix. Format mirrors the container template.
+        - UA-MIS:paper-papas

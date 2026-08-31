@@ -78,16 +78,155 @@ spec:
         kubevirt.io/domain: ${{ values.appName }}
         app.kubernetes.io/name: ${{ values.appName }}
     spec:
+      # ── PLACEMENT — VMs run on the CONTROL-PLANE nodes, one per node. ─────
+      # A VM is PERMANENT and IMMOVABLE: it reserves its full cpu/memory for its
+      # whole lifetime (see resources below) and RBD is RWO, so it cannot live-
+      # migrate. Build runners are the opposite — ephemeral, and they schedule
+      # anywhere. Leaving VMs on the workers therefore inverts the shape: the
+      # immovable thing squats on the nodes that exist for flexible work, and the
+      # flexible work hits a capacity wall. Measured 2026-08-27, before this
+      # change: capstone-w1 76% / w2 74% of CPU REQUESTS, of which 4.0 and 6.0
+      # cores respectively were VMs, while capstone-n1/n2/n3 sat at 28-30%
+      # requests and 4-5% ACTUAL CPU with ~11 cores free each.
+      #
+      # The control-plane taint is capstone.io/control-plane=true:PreferNoSchedule
+      # — SOFT, so NO toleration is needed here. (Verified on all three nodes,
+      # 2026-08-28. If that taint is ever hardened to NoSchedule, this VM stops
+      # scheduling and a matching toleration must be added.)
+      affinity:
+        nodeAffinity:
+          # required, not preferred: a soft rule would silently fall back to a
+          # worker and recreate exactly the wall this exists to prevent.
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: Exists
+        podAntiAffinity:
+          # One VM per node. Without this, three VMs can stack on n1 and rebuild
+          # the wall somewhere new.
+          #
+          # namespaceSelector: {} IS LOAD-BEARING. Each VM tenant lives in its own
+          # <team>-vm-prod namespace, and podAntiAffinity defaults to matching only
+          # the pod's OWN namespace. Without this line the rule would compare each
+          # VM against nothing but itself and spread NOTHING, while still looking
+          # correct in review. {} means "all namespaces".
+          #
+          # CAPACITY CLIFF, deliberate and documented: this is `required`, and
+          # there are three control-plane nodes. The FOURTH VM tenant will not
+          # schedule — and per the resources comment below, that failure is
+          # near-invisible (VirtualMachine sits at `Starting`, VMI at `Pending`,
+          # no pod to inspect). Before onboarding a fourth VM team, either add a
+          # control-plane node or relax this to
+          # preferredDuringSchedulingIgnoredDuringExecution (weight: 100).
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              namespaceSelector: {}
+              labelSelector:
+                matchExpressions:
+                  # every virt-launcher pod carries this, regardless of tenant.
+                  - key: kubevirt.io
+                    operator: In
+                    values:
+                      - virt-launcher
+
+      # DNS — NOT optional, and NOT the cluster default. A VM's traffic leaves the
+      # guest through the masquerade interface and never passes through a host
+      # socket, so Cilium's socket load-balancer never runs and the kube-dns
+      # ClusterIP (10.96.0.10) is never translated. The guest resolves NOTHING
+      # while every pod in the same namespace resolves fine, and no NetworkPolicy
+      # can fix it — a policy can allow an address, it cannot translate one.
+      # Public resolvers + dnsPolicy:None is the shape the live reference VM runs.
+      # See tenants/_template-vm/vm/namespaces/vm-prod.yaml, NetworkPolicy 4/5.
+      dnsPolicy: None
+      dnsConfig:
+        nameservers:
+          - 1.1.1.1
+          - 1.0.0.1
       domain:
         cpu:
           # vCPUs RESERVED for the VM's whole lifetime (no overcommit). Mirror in
           # .devops/vm-metadata.yaml.
           cores: ${{ values.cpuCores }}
+        # ── RESOURCES — all four values, deliberately. ────────────────────────
+        # SETTING ONLY `requests.memory` HERE DOES NOT PRODUCE A VM THAT RUNS SLOWLY.
+        # IT PRODUCES A VM THAT NEVER STARTS — and it inflates the ask while doing it.
+        #
+        # OBSERVED LIVE on paper-papas, 2026-08-27, with exactly this spec (an 8Gi
+        # guest declaring a memory REQUEST and no limits):
+        #
+        #   Error creating pod: pods "virt-launcher-paper-papas-hv7dh" is forbidden:
+        #   [maximum cpu usage per Container is 4, but limit is 8,
+        #    maximum memory usage per Container is 6Gi, but limit is 17064Mi]
+        #
+        # Note the 17064Mi. When a memory LIMIT is absent, KubeVirt does not simply
+        # pass the request through — it derives a launcher limit of roughly TWICE the
+        # guest RAM. The same 8Gi guest on the reference VM, which DOES declare
+        # `limits.memory`, produces an 8532Mi container (guest + ~340Mi overhead).
+        # So declaring the limit does not merely add a field; it HALVES what the
+        # namespace is asked for, from 17064Mi to 8532Mi. A tier ceiling sized for a
+        # correct manifest will still reject an incorrect one.
+        #
+        # The failure is also invisible in the usual places: the VirtualMachine sits
+        # at `Starting` and the VMI at `Pending` with no pod to inspect, because the
+        # launcher is rejected at admission and never created. Only the namespace
+        # EVENTS carry the reason, and KubeVirt retries in a loop that buries them.
+        #
+        # WHY request == limit for BOTH, rather than the reference VM's cpu 6/8 split:
+        #   * Memory is incompressible and KubeVirt reserves the whole guest RAM for
+        #     the VM's lifetime (ADR-032 §5), so request MUST equal limit. The
+        #     vm-prod.yaml quota enforces exactly this with requests.memory ==
+        #     limits.memory. This half is not a choice.
+        #   * For CPU it IS a choice, and the obvious reason to prefer equality —
+        #     Guaranteed QoS — turns out not to exist here. The launcher pod is
+        #     Burstable no matter what this file says, because KubeVirt itself adds
+        #     an `ephemeral-storage: 50M` REQUEST with no matching limit, and one
+        #     unmatched resource is enough to disqualify the pod. Measured on the
+        #     live reference VM:
+        #         qosClass=Burstable
+        #         compute req={cpu 6, ephemeral-storage 50M, memory 8532Mi}
+        #                 lim={cpu 8,                        memory 8532Mi}
+        #     So a 6/8 split buys nothing in eviction protection, and equality
+        #     costs nothing in it either. The blueprint's "we WANT requests==limits
+        #     (Guaranteed QoS)" aspiration is unreachable for VMs; do not re-derive
+        #     a CPU split in pursuit of it.
+        #   * What equality DOES buy is that this template stays arithmetic-free.
+        #     A 75% split needs `cpuCores * 0.75` rounded, evaluated by the
+        #     scaffolder's templating engine, in a resource field — and a silent
+        #     templating error in a resource field is precisely the failure class
+        #     this whole change exists to remove. An integer that is already an
+        #     input cannot be miscomputed.
+        #   * It also makes the quota arithmetic checkable rather than guessed:
+        #     requests.cpu and limits.cpu are the same number, so a tier sized for N
+        #     VMs of C cores is exactly N×C plus importer headroom. That is what
+        #     hack/lint-vm-tier-bounds.py relies on.
+        # The cost is honest: an idle VM reserves its full core count against the
+        # namespace quota. On this 5-node/80-core cluster with
+        # count/virtualmachines capped at 1 per team, that is affordable; if it
+        # stops being affordable, lower the wizard's cpuCores maximum — the guard
+        # will make the quota follow — rather than re-splitting here.
+        #
+        # KubeVirt adds its own overhead ON TOP of these numbers when it builds the
+        # launcher pod — measured at ~340Mi of RAM and ~5m of CPU on the live
+        # reference VM (an 8Gi guest becomes an 8532Mi container). The namespace
+        # quota and LimitRange in tenants/_template-vm/vm/namespaces/vm-prod.yaml are
+        # sized WITH that overhead included; do not size them from these numbers
+        # directly.
         resources:
           requests:
             # Guest RAM, reserved for the VM's whole lifetime (ADR-032 §5).
             memory: ${{ values.memoryGi }}Gi
+            cpu: "${{ values.cpuCores }}"
+          limits:
+            memory: ${{ values.memoryGi }}Gi
+            cpu: "${{ values.cpuCores }}"
         devices:
+          # virtio-rng. The cluster runs KubeVirt with useEmulation:true (QEMU TCG,
+          # no hardware virt), where guest entropy accrues slowly. sshd generates its
+          # host keys on first boot; starved of entropy that can stall for minutes,
+          # which presents as "SSH is broken" rather than "SSH is not up yet". The
+          # live reference VM carries this device.
+          rng: {}
           disks:
             - name: rootdisk
               disk:

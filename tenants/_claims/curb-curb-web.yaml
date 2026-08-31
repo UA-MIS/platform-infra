@@ -13,17 +13,17 @@
 apiVersion: platform.capstone.uamishub.com/v1alpha1
 kind: CapstoneTenant
 metadata:
-  name: alhands-rolltide
+  name: curb-curb-web
   labels:
-    platform.capstone/team: "alhands"
+    platform.capstone/team: "curb"
     platform.capstone/semester: "2026-fall"
     platform.capstone/component: tenant
 spec:
-  team: "alhands"
-  appName: "rolltide"
+  team: "curb"
+  appName: "curb-web"
   semester: "2026-fall"
-  githubTeam: "alhands"
-  port: 8080
+  githubTeam: "curb"
+  port: 6767
   previewEnabled: false
   domain: "capstone.uamishub.com"
-  database: "mysql"
+  database: "postgres"

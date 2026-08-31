@@ -1,6 +1,6 @@
 # ============================================================================
 # <team>-vm-prod namespace bundle — VM WORKLOAD tier (ADR-032).  *** SECURITY GATE ***
-# Tokens: __TEAM__, __SEMESTER__.  Bundles, in dependency order:
+# Tokens: __TEAM__, __APPNAME__, __SEMESTER__.  Bundles, in dependency order:
 #   Namespace -> ResourceQuota -> LimitRange -> NetworkPolicies -> Role/RoleBinding
 #
 # WHAT THIS IS. A dedicated, OPT-IN namespace for teams that deploy a real VM via
@@ -101,12 +101,52 @@ spec:
     # and the VMI then sits ErrorUnschedulable behind a MISLEADING secondary
     # condition -- "PVC ... does not exist, waiting for it to appear" -- while the
     # DataVolume has in fact imported cleanly. Learned on crimson-copies-stripped.
-    requests.cpu: "3"
-    limits.cpu: "4"
-    # requests == limits => no RAM overcommit. 6Gi fits one ~4Gi-guest VM +
-    # launcher overhead + a transient importer. Guest > ~5Gi needs a quota bump.
-    requests.memory: 6Gi
-    limits.memory: 6Gi
+    # ⚠ THESE NUMBERS ARE A FUNCTION OF THE WIZARD'S MAXIMA. Do not tune them in
+    # isolation. The scaffolder (platform-services/backstage/templates/vm-app/
+    # template.yaml) lets a student ask for up to cpuCores: 8 and memoryGi: 16. A
+    # quota below that is not a "tighter default" — it is a wizard input that is
+    # accepted by the form and then guaranteed to fail in the namespace, which is
+    # exactly how paper-papas was scaffolded dead on 2026-08-27. Either these
+    # numbers cover the wizard maximum, or the wizard maximum comes down to meet
+    # them. hack/lint-vm-tier-bounds.py enforces that they agree; it fails CI if
+    # they drift apart again.
+    #
+    # A quota is a CEILING, not a reservation: a team that scaffolds the default
+    # 2-core/4Gi VM consumes 4Gi, not 18Gi. Sizing the ceiling to the wizard maximum
+    # therefore costs nothing until a team actually asks for a big guest, while
+    # sizing it below the maximum costs that team a VM that never starts.
+    #
+    # THESE ARE THE PROVEN REFERENCE'S NUMBERS, not a fresh derivation.
+    # crimson-copies-stripped-vm-prod is the only configuration on this cluster
+    # demonstrated to actually host an 8GiB guest, and it carries exactly:
+    #     requests.cpu 8   limits.cpu 12   requests.memory 12Gi   limits.memory 12Gi
+    #     LimitRange max:  cpu 12,  memory 12Gi
+    # Copied deliberately rather than re-derived tighter. The measured overhead
+    # explains why the ceiling sits well above the guest instead of just above it:
+    # an 8Gi guest becomes an 8532Mi CONTAINER once KubeVirt's ~340Mi lands, so a
+    # 12Gi ceiling carries ~3.5Gi of genuine headroom. A ceiling computed to just
+    # fit is one KubeVirt version bump — one overhead change — from breaking every
+    # VM on the cluster at once.
+    #
+    # This is also the direct fix for the old 6Gi value, which could not host even
+    # a 6Gi guest: 6Gi guest + 340Mi overhead = 6484Mi > 6144Mi. The tier could not
+    # run a guest sized at its own advertised ceiling.
+    #
+    # ONE DELIBERATE DEVIATION from the reference: requests.cpu is 12 here, not 8.
+    # The reference VM asks for cpu request 6 / limit 8 (a 75% split); the skeleton
+    # now emits request == limit == cores so the template stays arithmetic-free
+    # (see the rationale in the skeleton's virtualmachine.yaml). An 8-core guest
+    # therefore REQUESTS 8 cores, and 8 + KubeVirt overhead + a transient CDI
+    # importer does not fit in a requests.cpu ceiling of exactly 8. Raising it to
+    # match limits.cpu is strictly more headroom, never less, and cannot invalidate
+    # what the reference proved.
+    #
+    # requests.memory == limits.memory is the no-RAM-overcommit invariant
+    # (ADR-032 §5) and is enforced by hack/lint-vm-tier-bounds.py.
+    requests.cpu: "12"
+    limits.cpu: "12"
+    requests.memory: 12Gi
+    limits.memory: 12Gi
     pods: "4"                       # virt-launcher + CDI importer + ≤2 helpers
     services: "3"
     # A CDI registry/http disk import transiently creates THREE PVCs at once: the
@@ -161,11 +201,17 @@ spec:
       defaultRequest:
         cpu: 250m
         memory: 512Mi
+      # `max` is per-CONTAINER, and the virt-launcher compute container is a single
+      # container carrying the whole guest. So this must be >= the largest legal
+      # guest plus KubeVirt overhead, or the launcher pod is rejected with
+      #   maximum memory usage per Container is 6Gi, but limit is 8Gi
+      # even when the namespace quota would have allowed it. Sized to the same
+      # wizard maximum as the quota above (8 cores / 16Gi + overhead).
       max:
-        cpu: "4"
-        memory: 6Gi        # accommodates a ~4-5Gi guest + virt-launcher overhead
+        cpu: "12"
+        memory: 12Gi
 ---
-# NetworkPolicy 1/5 — DEFAULT-DENY ingress + egress. Same posture as every tenant
+# NetworkPolicy 1/6 — DEFAULT-DENY ingress + egress. Same posture as every tenant
 # tier: selects all pods (KubeVirt passes VM labels through to the virt-launcher
 # pod, so podSelector:{} covers the VM too — KubeVirt netpol docs), denies all
 # until the allowances below add back the minimum. Cross-team traffic is denied by
@@ -186,7 +232,7 @@ spec:
     - Ingress
     - Egress
 ---
-# NetworkPolicy 2/5 — allow ingress from Traefik (kube-system) + intra-namespace.
+# NetworkPolicy 2/6 — allow ingress from Traefik (kube-system) + intra-namespace.
 # Gives the VM its standard `<app>.prod.capstone.uamishub.com` URL via a Service ->
 # virt-launcher pod (masquerade NAT puts the guest behind the launcher pod IP, so
 # ordinary Service/Ingress/netpol apply unchanged — ADR-032 §2b).
@@ -217,7 +263,7 @@ spec:
     - from:
         - podSelector: {}
 ---
-# NetworkPolicy 3/5 — allow ingress on :22 from the `cloudflared` namespace ONLY —
+# NetworkPolicy 3/6 — allow ingress on :22 from the `cloudflared` namespace ONLY —
 # the SSH transport (ADR-032a D2, resolved: Cloudflare Tunnel SSH, Option C/D,
 # $0/no-LoadBalancer). cloudflared proxies a per-tenant Cloudflare Tunnel Public
 # Hostname (`ssh.<app>.capstone.uamishub.com`, Service type SSH, fronted by a
@@ -258,7 +304,7 @@ spec:
         - protocol: TCP
           port: 22
 ---
-# NetworkPolicy 4/5 — allow egress to cluster DNS + intra-namespace ONLY. The VM
+# NetworkPolicy 4/6 — allow egress to cluster DNS + intra-namespace ONLY. The VM
 # guest (virt-launcher) gets NO external egress and NO API-server egress by default
 # — identical to the container tiers (least privilege). A lifted legacy app that
 # legitimately needs to call OUT to a specific external service is an explicit,
@@ -311,7 +357,7 @@ spec:
     - to:
         - podSelector: {}
 ---
-# NetworkPolicy 5/5 — CDI IMPORTER disk-fetch egress, SCOPED TO THE IMPORTER POD.
+# NetworkPolicy 5/6 — CDI IMPORTER disk-fetch egress, SCOPED TO THE IMPORTER POD.
 # The CDI importer pod (created transiently in THIS namespace to populate the
 # DataVolume PVC) is the ONLY pod that needs to reach a disk-image source. We scope
 # this allow to the importer's well-known label so the running VM guest does NOT
@@ -373,6 +419,113 @@ spec:
               - 10.96.0.0/12       # services (covered by the scoped allow above)
               - 10.237.168.0/22    # node LAN incl. apiserver :6443 — intent (see caveat)
               - 100.64.0.0/10      # tailnet overlay — intent (see caveat)
+      ports:
+        - protocol: TCP
+          port: 443
+---
+# NetworkPolicy 6/6 — VM GUEST external egress, :53 + :443 ONLY.
+#
+# WHY THIS IS A DEFAULT AND NOT AN OPT-IN. Policies 1–5 give the guest DNS +
+# intra-namespace egress only; the one 0.0.0.0/0:443 rule (5/6) is podSelector-scoped
+# to `app: containerized-data-importer` — the CDI IMPORTER pod, not the virt-launcher
+# pod that carries the guest's traffic. For a long time this file argued that a VM
+# tenant is "a lifted, self-contained legacy app that only needs to be REACHED", so
+# the guest should get no internet at all.
+#
+# That assumption did not survive contact with the tenants that actually exist. A VM
+# tenant is a PET DEV-VM: the team SSHes in, `git clone`s, runs `apt` and `npm`, and
+# builds their stack IN the guest (ADR-032a). Every one of those calls needs egress.
+# Without this policy the guest is a box you can log into and do nothing on — and the
+# failure is SILENT (blackholed packets, cloud-init hanging with no surfaced error),
+# which is the most expensive shape of failure on this platform.
+#
+# The evidence that made this a default rather than a per-tenant step:
+#   - crimson-copies-stripped needed it and added it by hand as a "sixth policy",
+#     documented in tenants/crimson-copies-stripped-vm/README.md.
+#   - paper-papas was then scaffolded WITHOUT it and shipped broken: on 2026-08-28 the
+#     live guest could not resolve DNS at all (`getent hosts github.com` -> nothing,
+#     `curl https://github.com/<user>.keys` -> "Resolving timed out", http=000).
+# Two for two. A default that every real tenant must remember to override by hand is
+# not a security control, it is a latent outage — so the default is flipped here and
+# the opt-OUT is documented below.
+#
+# This also aligns the VM tier with the CONTAINER tiers, which already default
+# `externalEgress: true` (platform-services/crossplane/apis/xrd.yaml). VM tenants were
+# the odd tier out, not the hardened one.
+#
+# TO OPT OUT for a genuinely self-contained appliance that only needs to be reached:
+# delete this document from the tenant's rendered copy under tenants/team-<team>/.
+# Do that deliberately, and note it in the tenant README — an appliance VM is the one
+# case where the original least-privilege reading is still right.
+#
+# SCOPE, stated plainly: this widens the guest's reach to the PUBLIC internet on two
+# ports and to NOTHING internal. The `except` list is reused VERBATIM from 5/6 so the
+# guest cannot reach pods, services, the node LAN (incl. apiserver :6443) or the
+# tailnet. Same Cilium CIDR-semantics caveat as 5/6: the pods/services excepts are
+# enforced by endpoint identity, while the node-LAN and tailnet excepts are INTENT
+# until `policyCIDRMatchMode: nodes` + Host Firewall are enabled (SEC-019). Shape is
+# reproduced from the already-reviewed allow-egress-vm-external-https in
+# tenants/crimson-copies-stripped-vm/vm/namespaces/vm-prod.yaml — not reinvented.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-vm-external-https
+  namespace: __TEAM__-vm-prod
+  labels:
+    platform.capstone/team: __TEAM__
+    platform.capstone/semester: __SEMESTER__
+    platform.capstone/env: prod
+    platform.capstone/tier: vm
+spec:
+  # KubeVirt propagates kubevirt.io/domain onto the virt-launcher pod, so this selects
+  # the pod that actually carries the guest's traffic. The domain is the APP name
+  # (virtualmachine.yaml sets it from appName), which is NOT always the team slug —
+  # hence __APPNAME__ here and __TEAM__ on the namespace above.
+  podSelector:
+    matchLabels:
+      kubevirt.io/domain: __APPNAME__
+  policyTypes:
+    - Egress
+  egress:
+    # --- DNS, to PUBLIC resolvers -------------------------------------------
+    # NOT the kube-dns ClusterIP. A VM cannot use a ClusterIP: Cilium translates those
+    # in its SOCKET load balancer, and guest traffic never passes through a host
+    # socket — it is forwarded out through the masquerade interface, so the packet
+    # hits the host stack still addressed to 10.96.0.10 and nothing answers. Policy
+    # 4/6 (which selects CoreDNS by NAMESPACE, i.e. by pod identity) is likewise inert
+    # for VMs, because a forwarded flow is judged against a CIDR identity instead.
+    # A policy can allow an address; it cannot translate one.
+    #
+    # So the guest is pointed at public resolvers in the VirtualMachine's dnsConfig
+    # (dnsPolicy: None + nameservers 1.1.1.1/1.0.0.1) and this rule lets those queries
+    # out. Same `except` list as the HTTPS rule: the guest may resolve on the public
+    # internet and reach nothing internal.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.244.0.0/16      # pods (cross-tenant + lateral) — Cilium-enforced
+              - 10.96.0.0/12       # services — Cilium-enforced
+              - 10.237.168.0/22    # node LAN incl. apiserver :6443 — intent (see caveat)
+              - 100.64.0.0/10      # tailnet overlay — intent (see caveat)
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # --- external HTTPS -------------------------------------------------------
+    # :443 ONLY, deliberately — the same call as the ARC runner fence. apt is pointed
+    # at HTTPS mirrors rather than opening :80, and a git clone can use
+    # ssh.github.com:443 rather than opening :22. Nothing in the provisioning path,
+    # nor the ssh-import-id key refresh, needs a second port.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.244.0.0/16
+              - 10.96.0.0/12
+              - 10.237.168.0/22
+              - 100.64.0.0/10
       ports:
         - protocol: TCP
           port: 443

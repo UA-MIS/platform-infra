@@ -577,8 +577,40 @@ spec:
                         policies:
                           - {{ printf "p, proj:%s:developer, applications, get, %s/*, allow" $team $team | quote }}
                           - {{ printf "p, proj:%s:developer, applications, sync, %s/*, allow" $team $team | quote }}
+                          {{- /* Pod logs for the team's OWN apps only. Students can
+                                 read logs today only because `policy.default:
+                                 role:readonly` carries a CLUSTER-WIDE logs-get grant
+                                 over every project — exactly the hole SEC-022
+                                 (board #56) closes. Granting the scoped version HERE,
+                                 in the change that makes this role live, means there
+                                 is never a window where a student cannot read their
+                                 own app's logs: this lands before SEC-022 takes the
+                                 broad grant away. Mirrors role:sample in
+                                 argocd-rbac-cm.yaml.
+                                 NB: no glob is written inside this comment on
+                                 purpose — a literal star-slash would close it. */}}
+                          - {{ printf "p, proj:%s:developer, logs, get, %s/*, allow" $team $team | quote }}
+                        {{- /* SEC-021: this MUST be the group Dex actually emits.
+                               Dex's GitHub connector (teamNameField: slug, orgs set)
+                               emits ONLY `<org>:<team-slug>` — e.g. `UA-MIS:ida-llm`.
+                               It never emits `<team>-developers`, so the previous
+                               value matched nothing and this role was inert: every
+                               student fell through to `policy.default: role:readonly`
+                               and could not sync even their own application.
+                               `UA-MIS:%s` is the SAME form already proven to work for
+                               the db-console forwardAuth gate further down this file
+                               (`allowed_groups=UA-MIS:%s`) — copied, not re-derived.
+                               ⚠ This is now a REAL tenancy boundary rather than a
+                               dead string. It grants get+sync scoped to this team's
+                               own project only (policies above) — deliberately NOT
+                               create/update/delete/override, so a team still cannot
+                               point an Application anywhere new.
+                               ⚠ The slug must be a REAL GitHub team AND the students
+                               must be MEMBERS of it — repo collaborators get no group
+                               claim at all. `make validate` guard [7/7] checks the
+                               format; it cannot check membership. */}}
                         groups:
-                          - {{ printf "%s-developers" $team | quote }}
+                          - {{ printf "UA-MIS:%s" $team | quote }}
 
             {{- /* Per-env namespace bundle: Namespace+Quota+LimitRange+3 NetworkPolicies+
                    RoleBinding + eso-tenant SA + vault-ca ConfigMap + SecretStore +

@@ -1,6 +1,6 @@
 # ============================================================================
 # <team>-vm-prod namespace bundle — VM WORKLOAD tier (ADR-032).  *** SECURITY GATE ***
-# Tokens: crimson-copies-stripped, 2026-fall.  Bundles, in dependency order:
+# Tokens: paper-papas, 2026-fall.  Bundles, in dependency order:
 #   Namespace -> ResourceQuota -> LimitRange -> NetworkPolicies -> Role/RoleBinding
 #
 # WHAT THIS IS. A dedicated, OPT-IN namespace for teams that deploy a real VM via
@@ -22,7 +22,7 @@
 # heavyweight artifact and usually needs ONE live home, not a dev/staging/prod
 # fan-out. `prod` = that live home. A team that genuinely needs a second VM env
 # copies this file to vm-dev.yaml (s/prod/dev/); the AppProject destination is a
-# `crimson-copies-stripped-vm-*` wildcard so no AppProject edit is needed.
+# `paper-papas-vm-*` wildcard so no AppProject edit is needed.
 #
 # OPT-IN: this `vm/` subtree is rendered into a team dir ONLY for layout: vm teams
 # (scaffolder render-tenant — follow-up). It is NOT part of the default container
@@ -35,10 +35,10 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: crimson-copies-stripped-vm-prod
+  name: paper-papas-vm-prod
   labels:
     app.kubernetes.io/managed-by: argocd
-    platform.capstone/team: crimson-copies-stripped
+    platform.capstone/team: paper-papas
     platform.capstone/semester: 2026-fall
     platform.capstone/env: prod
     platform.capstone/tier: vm
@@ -84,31 +84,27 @@ apiVersion: v1
 kind: ResourceQuota
 metadata:
   name: vm-compute-quota
-  namespace: crimson-copies-stripped-vm-prod
+  namespace: paper-papas-vm-prod
   labels:
-    platform.capstone/team: crimson-copies-stripped
+    platform.capstone/team: paper-papas
     platform.capstone/semester: 2026-fall
     platform.capstone/env: prod
     platform.capstone/tier: vm
 spec:
   hard:
-    # BUMPED vs the blueprint (which sizes a ~4Gi guest). This tenant BUILDS the app
-    # on the VM — `pnpm install` + two `next build`s — under KubeVirt
-    # `useEmulation: true` (QEMU TCG software emulation, no KVM), so it is given an
-    # 8Gi / 8-vCPU guest to keep a first boot that is already slow from being
-    # needlessly slower. CPU is overcommitted deliberately (requests 6 < 8 vCPU);
-    # RAM is NOT (requests == limits), preserving the blueprint's no-overcommit rule.
-    # NOTE the headroom over the guest's own 6-vCPU request: KubeVirt adds a small
-    # per-VM CPU overhead to the virt-launcher pod on top of
-    # domain.resources.requests.cpu, so a 6-core guest actually asks for 6005m. A
-    # quota of exactly "6" therefore rejects the launcher outright —
+    # SIZE CPU ABOVE THE GUEST REQUEST, NEVER LEVEL WITH IT. KubeVirt adds a small
+    # per-VM overhead to the virt-launcher pod on top of the guest's
+    # domain.resources.requests.cpu, so a guest asking for N cores makes a pod that
+    # asks for slightly more (observed: a 6-core guest -> 6005m). A ceiling set to
+    # exactly the guest request rejects the launcher outright:
     #   exceeded quota: vm-compute-quota, requested: requests.cpu=6005m, limited: 6
-    # — and the VMI sits ErrorUnschedulable with no pod ever created. Size this
-    # ceiling ABOVE the guest request, never equal to it.
-    requests.cpu: "8"
+    # and the VMI then sits ErrorUnschedulable behind a MISLEADING secondary
+    # condition -- "PVC ... does not exist, waiting for it to appear" -- while the
+    # DataVolume has in fact imported cleanly. Learned on crimson-copies-stripped.
+    requests.cpu: "12"
     limits.cpu: "12"
-    # requests == limits => no RAM overcommit. 12Gi covers the 8Gi guest + KubeVirt
-    # launcher overhead (~0.5-1Gi) + a transient CDI importer, with margin.
+    # requests == limits => no RAM overcommit. 6Gi fits one ~4Gi-guest VM +
+    # launcher overhead + a transient importer. Guest > ~5Gi needs a quota bump.
     requests.memory: 12Gi
     limits.memory: 12Gi
     pods: "4"                       # virt-launcher + CDI importer + ≤2 helpers
@@ -125,17 +121,14 @@ spec:
     # covers the default import + headroom; prime+scratch are freed once the import
     # finishes, leaving only the rootdisk. A bigger guest disk still needs an
     # explicit quota bump + a platform capacity review (not a silent default).
-    # 80Gi covers a single disk's import peak (rootdisk + prime + scratch, each at
-    # the image's VIRTUAL size). It does NOT cover a REBUILD, which is how a VM
-    # whose cloud-init failed gets fixed: the dataVolumeTemplate is renamed so a
-    # new disk imports ALONGSIDE the old one, and for that window the namespace
-    # holds four claims (old rootdisk + new rootdisk + prime + scratch) ~= 85Gi.
-    # At 80Gi the scratch PVC is silently never created, and the only symptom is
-    # an importer pod stuck Pending with
+    # 80Gi covers a FIRST import (rootdisk + prime + scratch, each at the image's
+    # VIRTUAL size). It does NOT cover a REBUILD, which is the supported way to
+    # re-run a failed cloud-init (see README "Rebuilding a VM"): the replacement
+    # disk imports alongside the old one, so the namespace transiently holds four
+    # claims (~85Gi). At 80Gi the scratch PVC is silently never created and the
+    # importer hangs Pending with
     #   0/5 nodes are available: persistentvolumeclaim "...-scratch" not found
-    # which reads like a scheduling problem and is actually a quota one. 120Gi
-    # covers the rebuild window with margin; Ceph has ~1.8TB free, so the ceiling
-    # is about blast-radius discipline, not capacity.
+    # which reads as a scheduling failure and is actually a quota one.
     requests.storage: 120Gi        # whole-project VM disk + rebuild headroom
     # Hard VM/disk count caps — a baseline-PSA namespace must not become a VM farm.
     count/virtualmachines.kubevirt.io: "1"
@@ -153,9 +146,9 @@ apiVersion: v1
 kind: LimitRange
 metadata:
   name: vm-container-limits
-  namespace: crimson-copies-stripped-vm-prod
+  namespace: paper-papas-vm-prod
   labels:
-    platform.capstone/team: crimson-copies-stripped
+    platform.capstone/team: paper-papas
     platform.capstone/semester: 2026-fall
     platform.capstone/env: prod
     platform.capstone/tier: vm
@@ -170,9 +163,9 @@ spec:
         memory: 512Mi
       max:
         cpu: "12"
-        memory: 12Gi       # must be >= the virt-launcher ask (8Gi guest + overhead)
+        memory: 12Gi
 ---
-# NetworkPolicy 1/5 — DEFAULT-DENY ingress + egress. Same posture as every tenant
+# NetworkPolicy 1/6 — DEFAULT-DENY ingress + egress. Same posture as every tenant
 # tier: selects all pods (KubeVirt passes VM labels through to the virt-launcher
 # pod, so podSelector:{} covers the VM too — KubeVirt netpol docs), denies all
 # until the allowances below add back the minimum. Cross-team traffic is denied by
@@ -181,9 +174,9 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: default-deny-all
-  namespace: crimson-copies-stripped-vm-prod
+  namespace: paper-papas-vm-prod
   labels:
-    platform.capstone/team: crimson-copies-stripped
+    platform.capstone/team: paper-papas
     platform.capstone/semester: 2026-fall
     platform.capstone/env: prod
     platform.capstone/tier: vm
@@ -193,7 +186,7 @@ spec:
     - Ingress
     - Egress
 ---
-# NetworkPolicy 2/5 — allow ingress from Traefik (kube-system) + intra-namespace.
+# NetworkPolicy 2/6 — allow ingress from Traefik (kube-system) + intra-namespace.
 # Gives the VM its standard `<app>.prod.capstone.uamishub.com` URL via a Service ->
 # virt-launcher pod (masquerade NAT puts the guest behind the launcher pod IP, so
 # ordinary Service/Ingress/netpol apply unchanged — ADR-032 §2b).
@@ -206,9 +199,9 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-ingress-traefik-and-intra-ns
-  namespace: crimson-copies-stripped-vm-prod
+  namespace: paper-papas-vm-prod
   labels:
-    platform.capstone/team: crimson-copies-stripped
+    platform.capstone/team: paper-papas
     platform.capstone/semester: 2026-fall
     platform.capstone/env: prod
     platform.capstone/tier: vm
@@ -224,7 +217,7 @@ spec:
     - from:
         - podSelector: {}
 ---
-# NetworkPolicy 3/5 — allow ingress on :22 from the `cloudflared` namespace ONLY —
+# NetworkPolicy 3/6 — allow ingress on :22 from the `cloudflared` namespace ONLY —
 # the SSH transport (ADR-032a D2, resolved: Cloudflare Tunnel SSH, Option C/D,
 # $0/no-LoadBalancer). cloudflared proxies a per-tenant Cloudflare Tunnel Public
 # Hostname (`ssh.<app>.capstone.uamishub.com`, Service type SSH, fronted by a
@@ -246,9 +239,9 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-ingress-cloudflared-ssh
-  namespace: crimson-copies-stripped-vm-prod
+  namespace: paper-papas-vm-prod
   labels:
-    platform.capstone/team: crimson-copies-stripped
+    platform.capstone/team: paper-papas
     platform.capstone/semester: 2026-fall
     platform.capstone/env: prod
     platform.capstone/tier: vm
@@ -265,7 +258,7 @@ spec:
         - protocol: TCP
           port: 22
 ---
-# NetworkPolicy 4/5 — allow egress to cluster DNS + intra-namespace ONLY. The VM
+# NetworkPolicy 4/6 — allow egress to cluster DNS + intra-namespace ONLY. The VM
 # guest (virt-launcher) gets NO external egress and NO API-server egress by default
 # — identical to the container tiers (least privilege). A lifted legacy app that
 # legitimately needs to call OUT to a specific external service is an explicit,
@@ -274,10 +267,28 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
+  # ⚠ THIS RULE DOES NOT GIVE A **VM** WORKING DNS. It selects CoreDNS by
+  # namespace -- i.e. by POD identity -- and that only matches traffic Cilium has
+  # already translated from the kube-dns ClusterIP to a CoreDNS pod IP in its
+  # SOCKET load balancer. A VM's traffic never passes through a host socket: it is
+  # forwarded out of the guest through the masquerade interface, so socket-LB does
+  # not run and Cilium judges the flow against the ClusterIP's CIDR identity, which
+  # this rule has no selector for. The query is denied:
+  #   xx drop (Policy denied) ... identity 2214->16777217: <vm> -> 10.96.0.10:53 udp
+  # Worse, adding a CIDR rule for 10.96.0.10 only gets you as far as `action allow`
+  # -- the packet then goes `-> stack` still addressed to a ClusterIP that nothing
+  # answers, because no policy can TRANSLATE an address.
+  #
+  # A VM must therefore be given resolvers it can reach directly, via the
+  # VirtualMachine's own dnsPolicy/dnsConfig, plus an egress rule for :53. See the
+  # README section "VMs and DNS". This rule is still correct and still needed for
+  # the CDI importer and any helper POD in this namespace -- it is only the VM it
+  # does not cover. Diagnosed on crimson-copies-stripped, where every pod in the
+  # namespace resolved fine and the guest resolved nothing.
   name: allow-egress-dns-and-intra-ns
-  namespace: crimson-copies-stripped-vm-prod
+  namespace: paper-papas-vm-prod
   labels:
-    platform.capstone/team: crimson-copies-stripped
+    platform.capstone/team: paper-papas
     platform.capstone/semester: 2026-fall
     platform.capstone/env: prod
     platform.capstone/tier: vm
@@ -300,7 +311,7 @@ spec:
     - to:
         - podSelector: {}
 ---
-# NetworkPolicy 5/5 — CDI IMPORTER disk-fetch egress, SCOPED TO THE IMPORTER POD.
+# NetworkPolicy 5/6 — CDI IMPORTER disk-fetch egress, SCOPED TO THE IMPORTER POD.
 # The CDI importer pod (created transiently in THIS namespace to populate the
 # DataVolume PVC) is the ONLY pod that needs to reach a disk-image source. We scope
 # this allow to the importer's well-known label so the running VM guest does NOT
@@ -327,9 +338,9 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-egress-cdi-importer-imagepull
-  namespace: crimson-copies-stripped-vm-prod
+  namespace: paper-papas-vm-prod
   labels:
-    platform.capstone/team: crimson-copies-stripped
+    platform.capstone/team: paper-papas
     platform.capstone/semester: 2026-fall
     platform.capstone/env: prod
     platform.capstone/tier: vm
@@ -366,68 +377,89 @@ spec:
         - protocol: TCP
           port: 443
 ---
-# NetworkPolicy 6/6 — VM GUEST external egress, :443 ONLY.  *** ADDED, not in the blueprint ***
+# NetworkPolicy 6/6 — VM GUEST external egress, :53 + :443 ONLY.
 #
-# WHY THIS EXISTS. The blueprint ships five policies and NONE of them lets the VM
-# itself reach the internet: 4/5 grants egress only to DNS + intra-namespace, and
-# the one 0.0.0.0/0:443 rule (5/5, above) is podSelector-scoped to
-# `app: containerized-data-importer` — the CDI IMPORTER pod, not the virt-launcher
-# pod that runs the guest. That asymmetry is correct for the blueprint's use case (a
-# lifted, self-contained legacy VM that only needs to be REACHED), but this tenant's
-# guest must PROVISION ITSELF on first boot: apt from the Ubuntu archive, the app
-# source from github.com, and the dependency tree from the npm registry. Without
-# this policy every one of those calls is silently blackholed and cloud-init hangs
-# with no error the platform surfaces — a failure mode that is especially expensive
-# here because the guest has no working sshd to debug from (ADR-032 known gap).
+# WHY THIS IS A DEFAULT AND NOT AN OPT-IN. Policies 1–5 give the guest DNS +
+# intra-namespace egress only; the one 0.0.0.0/0:443 rule (5/6) is podSelector-scoped
+# to `app: containerized-data-importer` — the CDI IMPORTER pod, not the virt-launcher
+# pod that carries the guest's traffic. For a long time this file argued that a VM
+# tenant is "a lifted, self-contained legacy app that only needs to be REACHED", so
+# the guest should get no internet at all.
 #
-# :443 ONLY, deliberately — the same call as the ARC runner fence: apt is pointed at
-# HTTPS mirrors by cloud-init rather than opening :80, and the git clone uses
-# ssh.github.com:443 rather than opening :22. Nothing in the provisioning path needs
-# a second port.
+# That assumption did not survive contact with the tenants that actually exist. A VM
+# tenant is a PET DEV-VM: the team SSHes in, `git clone`s, runs `apt` and `npm`, and
+# builds their stack IN the guest (ADR-032a). Every one of those calls needs egress.
+# Without this policy the guest is a box you can log into and do nothing on — and the
+# failure is SILENT (blackholed packets, cloud-init hanging with no surfaced error),
+# which is the most expensive shape of failure on this platform.
 #
-# The excepts list re-uses 5/5's verbatim so the guest cannot reach pods, services,
-# the node LAN (incl. apiserver :6443) or the tailnet — this widens the guest's
-# reach to the PUBLIC internet on one port, and to nothing internal. Same Cilium
-# CIDR-semantics caveat as 5/5 applies to the node/tailnet excepts.
+# The evidence that made this a default rather than a per-tenant step:
+#   - crimson-copies-stripped needed it and added it by hand as a "sixth policy",
+#     documented in tenants/crimson-copies-stripped-vm/README.md.
+#   - paper-papas was then scaffolded WITHOUT it and shipped broken: on 2026-08-28 the
+#     live guest could not resolve DNS at all (`getent hosts github.com` -> nothing,
+#     `curl https://github.com/<user>.keys` -> "Resolving timed out", http=000).
+# Two for two. A default that every real tenant must remember to override by hand is
+# not a security control, it is a latent outage — so the default is flipped here and
+# the opt-OUT is documented below.
+#
+# This also aligns the VM tier with the CONTAINER tiers, which already default
+# `externalEgress: true` (platform-services/crossplane/apis/xrd.yaml). VM tenants were
+# the odd tier out, not the hardened one.
+#
+# TO OPT OUT for a genuinely self-contained appliance that only needs to be reached:
+# delete this document from the tenant's rendered copy under tenants/team-<team>/.
+# Do that deliberately, and note it in the tenant README — an appliance VM is the one
+# case where the original least-privilege reading is still right.
+#
+# SCOPE, stated plainly: this widens the guest's reach to the PUBLIC internet on two
+# ports and to NOTHING internal. The `except` list is reused VERBATIM from 5/6 so the
+# guest cannot reach pods, services, the node LAN (incl. apiserver :6443) or the
+# tailnet. Same Cilium CIDR-semantics caveat as 5/6: the pods/services excepts are
+# enforced by endpoint identity, while the node-LAN and tailnet excepts are INTENT
+# until `policyCIDRMatchMode: nodes` + Host Firewall are enabled (SEC-019). Shape is
+# reproduced from the already-reviewed allow-egress-vm-external-https in
+# tenants/crimson-copies-stripped-vm/vm/namespaces/vm-prod.yaml — not reinvented.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-egress-vm-external-https
-  namespace: crimson-copies-stripped-vm-prod
+  namespace: paper-papas-vm-prod
   labels:
-    platform.capstone/team: crimson-copies-stripped
+    platform.capstone/team: paper-papas
     platform.capstone/semester: 2026-fall
     platform.capstone/env: prod
     platform.capstone/tier: vm
 spec:
-  # KubeVirt propagates kubevirt.io/domain onto the virt-launcher pod, so this
-  # selects the pod that actually carries the guest's traffic.
+  # KubeVirt propagates kubevirt.io/domain onto the virt-launcher pod, so this selects
+  # the pod that actually carries the guest's traffic. The domain is the APP name
+  # (virtualmachine.yaml sets it from appName), which is NOT always the team slug —
+  # hence paper-papas here and paper-papas on the namespace above.
   podSelector:
     matchLabels:
-      kubevirt.io/domain: crimson-copies-stripped
+      kubevirt.io/domain: paper-papas
   policyTypes:
     - Egress
   egress:
     # --- DNS, to PUBLIC resolvers -------------------------------------------
-    # Not the kube-dns ClusterIP. A VM cannot use a ClusterIP: Cilium translates
-    # those in its SOCKET load balancer, and guest traffic never passes through a
-    # host socket — it is forwarded out through the masquerade interface, so the
-    # packet hits the host stack still addressed to 10.96.0.10 and nothing
-    # answers. Verified on the wire: policy verdict `action allow`, flow
-    # `-> stack`, then silence. The tier's 4/5 DNS rule (which selects CoreDNS by
-    # namespace, i.e. by POD identity) is likewise inert for VMs, since a
-    # forwarded flow is judged against a CIDR identity instead.
+    # NOT the kube-dns ClusterIP. A VM cannot use a ClusterIP: Cilium translates those
+    # in its SOCKET load balancer, and guest traffic never passes through a host
+    # socket — it is forwarded out through the masquerade interface, so the packet
+    # hits the host stack still addressed to 10.96.0.10 and nothing answers. Policy
+    # 4/6 (which selects CoreDNS by NAMESPACE, i.e. by pod identity) is likewise inert
+    # for VMs, because a forwarded flow is judged against a CIDR identity instead.
+    # A policy can allow an address; it cannot translate one.
     #
-    # So the guest is pointed at public resolvers in the VirtualMachine's
-    # dnsConfig, and this rule lets those queries out. Same `except` list as the
-    # HTTPS rule below: the guest may resolve on the public internet and reach
-    # nothing internal.
+    # So the guest is pointed at public resolvers in the VirtualMachine's dnsConfig
+    # (dnsPolicy: None + nameservers 1.1.1.1/1.0.0.1) and this rule lets those queries
+    # out. Same `except` list as the HTTPS rule: the guest may resolve on the public
+    # internet and reach nothing internal.
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
             except:
               - 10.244.0.0/16      # pods (cross-tenant + lateral) — Cilium-enforced
-              - 10.96.0.0/12       # services
+              - 10.96.0.0/12       # services — Cilium-enforced
               - 10.237.168.0/22    # node LAN incl. apiserver :6443 — intent (see caveat)
               - 100.64.0.0/10      # tailnet overlay — intent (see caveat)
       ports:
@@ -436,14 +468,18 @@ spec:
         - protocol: TCP
           port: 53
     # --- external HTTPS -------------------------------------------------------
+    # :443 ONLY, deliberately — the same call as the ARC runner fence. apt is pointed
+    # at HTTPS mirrors rather than opening :80, and a git clone can use
+    # ssh.github.com:443 rather than opening :22. Nothing in the provisioning path,
+    # nor the ssh-import-id key refresh, needs a second port.
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
             except:
-              - 10.244.0.0/16      # pods (cross-tenant + lateral) — Cilium-enforced
-              - 10.96.0.0/12       # services (the DNS /32 above is the one exception)
-              - 10.237.168.0/22    # node LAN incl. apiserver :6443 — intent (see caveat)
-              - 100.64.0.0/10      # tailnet overlay — intent (see caveat)
+              - 10.244.0.0/16
+              - 10.96.0.0/12
+              - 10.237.168.0/22
+              - 100.64.0.0/10
       ports:
         - protocol: TCP
           port: 443
@@ -458,9 +494,9 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: team-developer-vm
-  namespace: crimson-copies-stripped-vm-prod
+  namespace: paper-papas-vm-prod
   labels:
-    platform.capstone/team: crimson-copies-stripped
+    platform.capstone/team: paper-papas
     platform.capstone/semester: 2026-fall
     platform.capstone/env: prod
     platform.capstone/tier: vm
@@ -519,9 +555,9 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: team-developer-vm
-  namespace: crimson-copies-stripped-vm-prod
+  namespace: paper-papas-vm-prod
   labels:
-    platform.capstone/team: crimson-copies-stripped
+    platform.capstone/team: paper-papas
     platform.capstone/semester: 2026-fall
     platform.capstone/env: prod
     platform.capstone/tier: vm
@@ -532,4 +568,4 @@ roleRef:
 subjects:
   - apiGroup: rbac.authorization.k8s.io
     kind: Group
-    name: crimson-copies-stripped-developers
+    name: paper-papas-developers

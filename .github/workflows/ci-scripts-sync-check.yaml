@@ -29,17 +29,39 @@
 name: ci-scripts-sync-check
 
 on:
+  # The WORKFLOW paths were added for the interpreter check below (#189): that check
+  # reads the workflows, so it has to run when a workflow moves. Without them someone
+  # could reintroduce `sh <a-bash-script>` in promote-to-prod.yaml — the exact defect
+  # #189 was filed for — and nothing would look.
+  #
+  # A `paths:` filter that never matches is indistinguishable from a check that passes,
+  # so this was verified by REPLAY rather than by reading it. Over all 120 commits on
+  # main since this check was created (6e5b8db..HEAD), the OLD filter would have fired
+  # on 2 commits and this one fires on 4 — the two it adds are 79c3f9d
+  # ("fix(promote-to-prod): lock promotion target to prod", #53x) and 2e6e319
+  # ("fix(scaffolder): catalog:register colon bug + dockerhub-proxy"), both of which
+  # edited a contract workflow with no sync-check run at all.
   push:
     branches: [main]
+    # NB: listed twice on purpose. GitHub's workflow parser does not resolve YAML
+    # anchors/aliases, so `&x` / `*x` here would be a silent no-op, not DRY.
     paths:
       - ".github/actions/tenant-ci-scripts/scripts/**"
       - "platform-services/backstage/templates/_fragments/_contract/.devops/ci/**"
+      - "platform-services/backstage/templates/_fragments/_contract/.github/workflows/**"
+      - ".github/workflows/tenant-build.yaml"
       - ".github/workflows/ci-scripts-sync-check.yaml"
+      - "hack/check-pipefail-pinning.mjs"
+      - "hack/toolchain-strictness.test.mjs"
   pull_request:
     paths:
       - ".github/actions/tenant-ci-scripts/scripts/**"
       - "platform-services/backstage/templates/_fragments/_contract/.devops/ci/**"
+      - "platform-services/backstage/templates/_fragments/_contract/.github/workflows/**"
+      - ".github/workflows/tenant-build.yaml"
       - ".github/workflows/ci-scripts-sync-check.yaml"
+      - "hack/check-pipefail-pinning.mjs"
+      - "hack/toolchain-strictness.test.mjs"
 
 permissions:
   contents: read
@@ -81,7 +103,23 @@ jobs:
           CANON=".github/actions/tenant-ci-scripts/scripts"
           SCAFFOLD="platform-services/backstage/templates/_fragments/_contract/.devops/ci"
           fail=0
-          for s in resolve-image.sh resolve-components.sh bump-image.sh; do
+          # queue-status.mjs was in the canonical directory but NOT in this list, so it
+          # was the one shared file free to drift unpoliced (A6). The list is now DERIVED
+          # from the canonical directory rather than hand-maintained, because a
+          # hand-maintained list of things to check is the same class of bug as the
+          # hand-applied rule that missed promote-to-prod.yaml: it silently omits whatever
+          # nobody remembered to add. A new canonical file is now covered on arrival.
+          #
+          # Deriving the list introduces its OWN vacuous-pass risk: if CANON moved or is
+          # empty, `ls` yields nothing, the loop body never runs and the step reports
+          # "in sync" having compared nothing. Assert a non-zero count first. (Same defect
+          # this PR fixes in the interpreter check; it is not going in here at the same time.)
+          [ -d "${CANON}" ] || { echo "::error::canonical script directory ${CANON} does not exist. If it moved, update this workflow; a sync check that cannot find one side must not pass."; exit 1; }
+          n_canon="$(cd "${CANON}" && ls -1 | wc -l)"
+          [ "${n_canon}" -gt 0 ] || { echo "::error::canonical script directory ${CANON} is EMPTY — refusing to report 'in sync' after comparing zero files."; exit 1; }
+          echo "comparing ${n_canon} canonical file(s) against the scaffold copy"
+          for s in $(cd "${CANON}" && ls); do
+            [ -e "${SCAFFOLD}/${s}" ] || { echo "::error::${s} exists in the canonical copy but is MISSING from the scaffold copy (${SCAFFOLD}/${s}). A fresh tenant would ship without it."; fail=1; continue; }
             if ! diff -u "${CANON}/${s}" "${SCAFFOLD}/${s}"; then
               echo "::error::${s} has DRIFTED between the canonical copy (${CANON}/${s}, installed into every tenant's CI at runtime) and the scaffold copy (${SCAFFOLD}/${s}, what a fresh tenant repo actually commits). These must stay byte-identical -- see this workflow's header for why. Sync them before merging (FIX-24)."
               fail=1
@@ -90,7 +128,130 @@ jobs:
           [ "${fail}" -eq 0 ] || exit 1
           echo "canonical and scaffold CI scripts are in sync."
 
+      - name: Interpreter check — no bash script may be invoked with `sh`
+        # #187/#189. bump-image.sh, promote.sh and build-and-push.sh declare
+        # `#!/usr/bin/env bash` and `set -euo pipefail`. `pipefail` is NOT POSIX: run any
+        # of them as `sh script.sh` and dash exits 2 on the `set` line before doing
+        # anything ("set: Illegal option -o pipefail"). promote-to-prod.yaml did exactly
+        # that. It did not break prod ONLY because that job runs in node:24-trixie, whose
+        # dash happens to implement pipefail — click-to-promote worked by accident of one
+        # base image's shell, and was broken for anyone following .devops/ci/RUNBOOK.md
+        # on Ubuntu or macOS. resolve-image.sh / resolve-components.sh /
+        # seed-initial-envs.sh are REAL `#!/usr/bin/env sh` + `set -eu` scripts, so
+        # invoking those with `sh` is correct and this check leaves them alone — it reads
+        # each script's actual shebang rather than hardcoding a list.
+        shell: bash
+        run: |
+          set -euo pipefail
+          SCAFFOLD="platform-services/backstage/templates/_fragments/_contract"
+          bash_scripts=""
+          for f in "${SCAFFOLD}"/.devops/ci/*.sh; do
+            case "$(head -n1 "${f}")" in
+              *bash) bash_scripts="${bash_scripts} $(basename "${f}")" ;;
+            esac
+          done
+          echo "bash-shebang scripts:${bash_scripts}"
+
+          # THE INPUT PATHS MUST EXIST. A guard whose input path moves is a guard that
+          # passes vacuously: `git mv tenant-build.yaml tenant-build-v2.yaml` used to
+          # leave this step printing "0 violations" and exiting 0 while the file it was
+          # supposed to police sat unread. Assert the corpus first, so a rename fails
+          # here — loudly, naming the missing path — instead of quietly disarming the
+          # check. This is the failure mode that has caught us every time; it is not
+          # hypothetical.
+          TARGETS="${SCAFFOLD}/.github/workflows
+          ${SCAFFOLD}/.devops/ci/RUNBOOK.md
+          .github/workflows/tenant-build.yaml"
+          missing=0
+          for t in ${TARGETS}; do
+            [ -e "${t}" ] || { echo "::error::interpreter check corpus is missing '${t}'. If it moved, update this list; do not let the check pass on a corpus it can no longer read."; missing=1; }
+          done
+          [ "${missing}" -eq 0 ] || exit 1
+
+          # grep's THREE exit codes are three different things and must not be collapsed:
+          #   0 = matched   -> a violation
+          #   1 = no match  -> SUCCESS, the normal state; `|| true` alone would be right
+          #   2 = ERROR     -> unreadable file / bad pattern. #578 swallowed this along
+          #                    with 1, and `2>/dev/null` hid the reason, so the check
+          #                    failed OPEN on its own malfunction. The neighbouring
+          #                    `diff -u` step fails CLOSED; match it.
+          # stderr is deliberately NOT discarded — if grep has something to say about why
+          # it could not read the corpus, that sentence is the whole diagnosis.
+          violations=""
+          for s in ${bash_scripts}; do
+            set +e
+            hits="$(grep -rn "\bsh \.devops/ci/${s}\b" \
+                      "${SCAFFOLD}/.github/workflows" \
+                      "${SCAFFOLD}/.devops/ci/RUNBOOK.md" \
+                      .github/workflows/tenant-build.yaml)"
+            rc=$?
+            set -e
+            if [ "${rc}" -ge 2 ]; then
+              echo "::error::grep failed with exit ${rc} while scanning for '${s}' (see its stderr above). Refusing to report a clean tree from a scan that did not complete."
+              exit 1
+            fi
+            [ -n "${hits}" ] && violations="${violations}${hits}"$'\n'
+          done
+          if [ -n "${violations}" ]; then
+            printf '%s' "${violations}"
+            echo "::error::A bash script (set -euo pipefail) is invoked with 'sh' above. dash has no 'pipefail' and exits 2 immediately. Use 'bash <script>' — do NOT remove pipefail, it is load-bearing."
+            exit 1
+          fi
+          echo "OK: 0 violations — every bash-shebang script is invoked with bash."
+
+      - name: "Pipefail-pinning check — container steps must pin `shell: bash`"
+        # A2. #578 applied this rule by hand to three files and missed a fourth --
+        # promote-to-prod.yaml, the PROD promotion path. A rule applied by memory has now
+        # been the hole twice, so it is a check. See hack/check-pipefail-pinning.mjs for
+        # why container jobs specifically (the runner gives them `sh -e {0}`, so pipefail
+        # rides on whatever /bin/sh the image ships).
+        shell: bash
+        run: |
+          set -euo pipefail
+          node hack/check-pipefail-pinning.mjs .
+
+      - name: Toolchain-strictness tests — CI_STRICT_TOOLCHAIN + the retry
+        # A4. CI_STRICT_TOOLCHAIN accepted only the literal "1", so `true` silently meant
+        # permissive; the reviewer's point was that NOTHING TESTED IT, which is what made
+        # it latent rather than known. This executes the real Ruby/PHP step bodies from
+        # both workflow twins against a stubbed package manager. It also pins the #189.4
+        # retry property — a transient install failure must still end with the tests HAVING
+        # RUN — which nothing else covers.
+        shell: bash
+        run: |
+          set -euo pipefail
+          node hack/toolchain-strictness.test.mjs .
+
+      - name: Install yq (pinned + checksum-verified)
+        # The three scripts under test each have TWO implementations of every read/write:
+        # a yq path and a sed/awk fallback. This job's image has no yq, so until this step
+        # only the FALLBACK was ever executed and the yq path was untested. Demonstrated
+        # by mutation: changing bump-image.sh's yq write from `.images[].newTag` to
+        # `.images[0].newTag` — which silently breaks the bump for every multi-component
+        # tenant — leaves the suites 42/42 GREEN without yq, and turns them RED (12 passed,
+        # 4 failed) with it. The yq path is the one tenant-build.yaml's bump jobs actually
+        # take, since they install yq exactly like this.
+        #
+        # Same version + digest as tenant-build.yaml's install steps. Over :443 from GitHub
+        # releases, so it is fine on the runner's :443-only egress — unlike apt, which is
+        # what made this job unrunnable before #565 (deb.debian.org is :80 and AAAA-only).
+        env:
+          YQ_VERSION: v4.44.3
+          YQ_SHA256: a2c097180dd884a8d50c956ee16a9cec070f30a7947cf4ebf87d5f36213e9ed7
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /usr/local/bin/yq \
+            "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+          echo "${YQ_SHA256}  /usr/local/bin/yq" | sha256sum -c -
+          chmod +x /usr/local/bin/yq
+          yq --version
+
       - name: Run promote.sh / bump-image.sh / seed-initial-envs.sh unit tests
+        # Run the whole set TWICE — once with yq on PATH, once with it hidden — because
+        # the scripts branch on `command -v yq` and the two branches are independent
+        # implementations. Running only one of them is half a test suite reporting as a
+        # whole one. See the yq install step above for the mutation that proves it.
         run: |
           set -eu
           cd platform-services/backstage/templates/_fragments/_contract/.devops/ci
@@ -103,7 +264,15 @@ jobs:
             echo "::error::git is missing from this job's container image. It cannot be apt-get installed here: arc-runners pods have no IPv6 route and no :80 egress, so deb.debian.org is unreachable by design. Use an image that ships git (the full node:*-trixie does) rather than adding an install step."
             exit 1
           fi
+          command -v yq >/dev/null 2>&1 || {
+            echo "::error::yq is not on PATH — the install step above must run before this one. Without it only the sed/awk fallback branch of each script is exercised and the yq branch silently goes untested."
+            exit 1
+          }
+          # A directory that shadows yq with nothing, to force the fallback branch.
+          NOYQ="$(mktemp -d)"
           for t in promote.test.sh bump-image.test.sh seed-initial-envs.test.sh; do
-            echo "==> running ${t}"
+            echo "==> running ${t} [yq path]"
             bash "${t}"
+            echo "==> running ${t} [sed/awk fallback path — yq hidden]"
+            env PATH="${NOYQ}:/usr/bin:/bin" bash "${t}"
           done

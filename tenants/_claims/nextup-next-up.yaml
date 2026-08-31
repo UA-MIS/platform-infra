@@ -13,16 +13,16 @@
 apiVersion: platform.capstone.uamishub.com/v1alpha1
 kind: CapstoneTenant
 metadata:
-  name: capstone-demo-demo
+  name: nextup-next-up
   labels:
-    platform.capstone/team: "capstone-demo"
+    platform.capstone/team: "nextup"
     platform.capstone/semester: "2026-fall"
     platform.capstone/component: tenant
 spec:
-  team: "capstone-demo"
-  appName: "demo"
+  team: "nextup"
+  appName: "next-up"
   semester: "2026-fall"
-  githubTeam: "capstone-demo"
+  githubTeam: "nextup"
   port: 8080
   previewEnabled: false
   domain: "capstone.uamishub.com"
