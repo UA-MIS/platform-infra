@@ -310,7 +310,20 @@ describe('SEC-057: the Vault destination is checked against the derived team', (
       key: 'APP_SECRET',
       value: 'pwned',
       envs: ['prod'],
-    }).catch(e => e as Error);
+    }).catch((e: unknown) => e);
+
+    // Narrow deliberately rather than casting. `.catch()` widens the result to
+    // `Error | <success shape>`, and the assertions below are only meaningful against a
+    // rejection: if this call ever RESOLVES, the seal went through against the victim's
+    // path, which is precisely the regression this test exists to catch. Fail loudly here
+    // instead of letting a wrong-shaped value make the assertions vacuous.
+    if (!(err instanceof Error)) {
+      throw new Error(
+        `expected sealAndPublish to reject with an Error, but it resolved with: ${JSON.stringify(
+          err,
+        )}`,
+      );
+    }
 
     expect(err.message).toContain('.devops/chart/overlays/prod/app-secret.externalsecret.yaml');
     expect(err.message).toContain(VICTIM); // what it found
