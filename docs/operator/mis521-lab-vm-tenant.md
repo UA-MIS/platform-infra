@@ -112,7 +112,9 @@ Everything in this table. A missed row is a defect, not a cosmetic difference.
 | DataVolume name | workload | |
 | Ingress hosts | `service-ingress.yaml` | |
 | `platform.capstone/ssh-access-emails` | ssh Service | the team's emails. **Empty = an Access app that admits nobody.** |
-| **The sealed cloud-init** | `cloudinit-sealedsecret.yaml` | **cannot be copied.** See §3. |
+| **The sealed cloud-init** | `cloudinit-sealedsecret.yaml` | **cannot be copied.** See §3. (Mechanism retired — see §3a.) |
+| **The Cloudflare Access SSH CA** | tenant repo `.devops/chart/base/cloud-init.yaml` | **cannot be copied — cross-tenant authorization leak.** The CA is per-Access-*application*. See §3a. |
+| The team's GitHub roster | tenant repo `.devops/chart/base/cloud-init.yaml` | `ssh_import_id` **and** `/etc/capstone/ssh-roster`, which must not drift apart |
 | `namespaceResourceWhitelist` | both AppProjects | **must be re-derived.** See §4. |
 
 ### What must NOT change
@@ -128,6 +130,12 @@ Everything in this table. A missed row is a defect, not a cosmetic difference.
 ---
 
 ## 3. TRAP 1 — the sealed cloud-init cannot be copied between teams
+
+> ⚠ **This section describes a RETIRED mechanism.** cloud-init is no longer sealed
+> and carries no deploy key; it lives in the tenant repo. Kept for history and
+> because its lesson transferred intact to a *different* credential — **read §3a,
+> which is the live version of this trap.** The `tenants/_vm-workloads/` paths below
+> were torn down in #604.
 
 `cloudinit-sealedsecret.yaml` carries a **per-repo read-only deploy key**. Copying
 one team's sealed cloud-init to another team hands team B a working credential to
@@ -171,6 +179,65 @@ Verify before committing — the sealed file must name the right namespace:
 ```bash
 grep -E 'namespace|name:' tenants/_vm-workloads/${TEAM}/cloudinit-sealedsecret.yaml
 ```
+
+---
+
+## 3a. TRAP 1, IN THE CURRENT MODEL — the per-app Access SSH CA cannot be copied
+
+**§3's mechanism is retired; its lesson is not.** cloud-init is no longer a
+SealedSecret in this repo. It lives in the **tenant repo** at
+`.devops/chart/base/cloud-init.yaml`, and kustomize's `secretGenerator` packages it
+into the `<app>-cloudinit` Secret. There is no deploy key in it any more, because
+the guest no longer clones the repo — students authenticate with `gh auth login`.
+
+So the *specific* credential §3 warns about is gone. **A different one took its
+place, and it is not in §2's original table** — which is how it was nearly copied
+into two new tenants on 2026-08-31.
+
+`cloud-init.yaml` writes `/etc/ssh/cf_access_ca.pub`, and the sshd drop-in beside it
+does:
+
+```
+TrustedUserCAKeys /etc/ssh/cf_access_ca.pub
+AuthorizedPrincipalsCommand /bin/sh -c "echo '%t %k' | ssh-keygen -L -f - | grep -A1 Principals"
+```
+
+That is a deliberate design — Cloudflare Access is the gate — but read what it
+means: **any certificate signed by the CA in that file authenticates as the login
+user.** And the CA is issued **per Access application**
+(`/accounts/{id}/access/apps/{app_id}/ca`), not per account.
+
+Therefore **copying one team's `cf_access_ca.pub` line into another team's
+cloud-init lets anyone authorised on the FIRST team's `vm-ssh` Access app log into
+the SECOND team's VM as the cloud user.** It is the same class of cross-tenant leak
+as §3, it is silent — the guest boots fine and SSH appears to work — and the
+cloud-init's own comment already states the containment property that copying
+destroys: *"it is contained because the CA is PER-APP, so a cert minted for another
+VM's app does not authenticate here."*
+
+**What to ship in a new tenant.** Leave the CA out. A comments-only file is an
+explicitly supported state — *"Blank = cert auth off, key-only"* — and sshd starts
+cleanly with it (verified against OpenSSH 9.6, both for a comments-only file and a
+missing one). The guest is then reachable by the browser console and by the
+`ssh_import_id` / roster key path; only Access-**SSH** is inactive.
+
+**Then, once per team:** create that team's `vm-ssh` Access app, read the CA public
+key the `cf-vm-access` reconciler logs (see §7 step 6 and
+`vm-ssh-cloudflare-access.md`), paste **that team's own** key into **that team's**
+cloud-init, and rebuild the VM so cloud-init re-runs. It is a PUBLIC key — safe to
+commit.
+
+**Check before committing a new tenant:**
+
+```bash
+# must print NOTHING but this team's own CA (or nothing at all)
+grep -rn 'cloudflareaccess.org' <tenant-repo>/.devops/chart/base/cloud-init.yaml \
+  | grep -E '^\s*(ecdsa|ssh)-'
+```
+
+> The same "derive it, do not copy it" rule now also covers the team's GitHub
+> roster, which appears **twice** in cloud-init (`ssh_import_id` and
+> `/etc/capstone/ssh-roster`) and must not drift between the two.
 
 ---
 
