@@ -52,9 +52,23 @@ jobs:
         # VM/Service/Ingress trio is present, and promotion.yaml is the no-build shape.
         uses: docker://python@sha256:63a4c7f612a00f92042cbdcc7cdc6a306f38485af0a200b9c89de7d9b1607d15 # 3-slim
         with:
+          # $GITHUB_WORKSPACE (the STEP-POD mount) — NOT ${{ github.workspace }}. Same
+          # defect, same fix as tenant-build.yaml's scan+checks (#197) and the contract
+          # workflow: a `uses: docker://` step is executed by the ARC container-hook in
+          # its OWN pod, and the JOB-container path the expression evaluates to does not
+          # exist there. Measured on ua-mis-kaniko (run 33346076548):
+          #   ${{ github.workspace }} -> /home/runner/_work/<repo>/<repo>   (MISSING)
+          #   $GITHUB_WORKSPACE       -> /github/workspace                  (the checkout)
+          # With `set -eu` the bad `cd` aborts the step before pip or the validator runs,
+          # so this gate has never actually validated anything.
+          #
+          # The `$` survives the surrounding `-c '...'`: those single quotes are consumed
+          # by the runner's argv tokenizer (shlex-style), not by a shell, so the body
+          # reaches /bin/sh unquoted and expands normally — which is also why the Kaniko
+          # steps in the sibling skeletons already use ${GITHUB_WORKSPACE} this way.
           entrypoint: /bin/sh
           args: >-
             -c 'set -eu;
-            cd "${{ github.workspace }}";
+            cd "$GITHUB_WORKSPACE";
             python -m pip install --quiet --root-user-action=ignore pyyaml;
             python .devops/ci/validate-vm.py'
