@@ -189,6 +189,12 @@ Fixed in the scaffold with two independent belts — name-matched `networkData` 
 `cloud-init.yaml` — both enforced by `make validate` step 11 and by the tenant repo's
 `.devops/ci/validate-vm.py`. Full write-up: [VM tenant SSH](vm-ssh-cloudflare-access.md).
 
+Repairing a VM that is **already** stranded takes **two** restarts, not one: at the
+local stage cloud-init reads the user-data it cached on the previous boot, so the boot
+that first delivers the new user-data is still driven by the old copy. Measured, after
+the one-restart version of this advice was written and turned out to be wrong.
+Rebuilding the VM is one step instead of two.
+
 ### `ns/cloudflared` is PodSecurity `restricted` — a naive probe fails silently
 
 `kubectl run busybox` there is rejected at admission. **A probe that cannot run looks

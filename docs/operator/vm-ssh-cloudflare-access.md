@@ -152,18 +152,41 @@ Both are enforced by CI — `make validate` step 11 in this repo
 (`hack/lint-vm-network-config.py`) and `.devops/ci/validate-vm.py` in every tenant
 repo. Both guards are tested to **refuse**, not merely to pass.
 
-**Repairing an EXISTING stranded VM.** The `networkData` block only takes effect on a
-first boot, so adding it does not fix a VM that is already stranded — but the
-`updates.network.when: ['boot']` line *does*, because cloud-init reads user-data on
-every boot. Merge the tenant-repo change, then restart the VM:
+### Repairing a VM that is ALREADY stranded
+
+Neither fix is retroactive in the obvious way, and the measured behaviour is not what
+you would guess. **This was tested by execution, not reasoned about** — the first
+version of this section was wrong.
+
+`networkData` is applied by cloud-init's local stage, which on a non-new instance-id
+does not run at all, so adding it to a stranded VM changes nothing on the next boot.
+
+`updates.network.when: ['boot']` *does* repair a stranded VM, **but it takes two
+restarts**, because at the local stage cloud-init reads the user-data it CACHED under
+`/var/lib/cloud/instance/` on the previous boot. The boot on which your new user-data
+first arrives is therefore still driven by the old cached copy; only the boot after
+that sees the `updates` key. Measured on a purpose-built reproduction, 2026-08-31:
+
+| boot | change in effect | result |
+| --- | --- | --- |
+| 2 (before any fix) | — | `enp1s0 False`, tap RX **0 packets** |
+| 3 | `updates` added to user-data | `enp1s0 False`, tap RX **0 packets** — still stranded |
+| 4 | (no further change) | `enp1s0 True 10.0.2.2`, tap RX 39 packets, `SSH-2.0-OpenSSH_9.6p1` |
+
+So the repair is:
 
 ```bash
+# after the tenant-repo change has merged and ArgoCD has synced the new Secret
 kubectl delete vmi -n <team>-vm-prod <app>     # runStrategy: Always recreates it
+# wait for it to boot, confirm it is STILL stranded, then:
+kubectl delete vmi -n <team>-vm-prod <app>     # this is the one that takes
 ```
 
-If the VM has no state worth keeping, deleting the `VirtualMachine` and letting
-ArgoCD recreate it (a fresh CDI import, ~10-20 min) is the cleaner option and also
-re-runs cloud-init from scratch.
+**If the VM has no state worth keeping, rebuild instead** — delete the
+`VirtualMachine` and let ArgoCD recreate it. That is a new instance-id, so cloud-init
+runs everything from scratch: one step instead of two, both belts active immediately,
+and `write_files`/`runcmd` re-run (which is also how a newly-issued Cloudflare Access
+CA gets into the guest). Cost is a fresh CDI import, ~10-15 minutes.
 
 ---
 
