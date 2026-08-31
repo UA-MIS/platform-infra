@@ -213,7 +213,17 @@ spec:
           # that actually fits is ~11Gi. Set to 10 to keep a GiB of slack, on the
           # same principle as the quota itself: a bound that only just fits is one
           # overhead change away from breaking every VM at once.
-          maximum: 10
+          #
+          # LOWERED AGAIN, 10 -> 8, on 2026-08-31. The VM chart now asks for
+          # `memoryGi + 2` as its container memory LIMIT, because KubeVirt's own
+          # ~400Mi overhead estimate assumes KVM and this cluster runs QEMU TCG
+          # (useEmulation:true), where the measured overhead reached 1.3Gi and a VM
+          # was OOM-killed mid-build. See the long note at `memory:` in
+          # skeleton-vm/.devops/chart/base/virtualmachine.yaml. With that +2Gi, a
+          # 10Gi guest would ask for a 12Gi limit — EXACTLY the tier LimitRange
+          # ceiling, leaving nothing for the CDI importer. 8 restores the slack this
+          # bound was lowered to 10 to preserve in the first place.
+          maximum: 8
         diskGi:
           title: Root disk (GiB)
           type: integer
@@ -405,15 +415,35 @@ spec:
         # picks it up via filters.topic.include — org-wide discovery with no topic
         # filter would ingest catalog-info.yaml from ANY of the org's other repos.
         topics: ['capstone-tenant']
-        # Set the repo Actions variable RUNNER_SCALE_SET so this tenant's CI runs on ITS
-        # OWN per-team runner scale-set (<team>-kaniko), which injects the tenant's own
-        # harbor-push-<team> cred. Without it the workflow's `${{ vars.RUNNER_SCALE_SET ||
-        # 'ua-mis-kaniko' }}` falls back to the SHARED ua-mis-kaniko runner (backstage's
-        # push cred) -> `UNAUTHORIZED: action: push` to <team>/<app>. Built into
-        # publish:github (@0.9.10 calls actions.createRepoVariable) — no Backstage rebuild;
-        # requires the platform GitHub App to have Actions Variables: read/write. (Fix A.)
-        repoVariables:
-          RUNNER_SCALE_SET: ${{ parameters.team }}-kaniko
+        # ── NO RUNNER_SCALE_SET HERE. This is the VM template. ────────────────
+        #
+        # The CONTAINER templates set the repo Actions variable RUNNER_SCALE_SET to
+        # `<team>-kaniko` so a tenant's CI runs on its OWN per-team runner scale set,
+        # which injects that tenant's `harbor-push-<team>` credential. Without it the
+        # workflow's `${{ vars.RUNNER_SCALE_SET || 'ua-mis-kaniko' }}` falls back to
+        # the SHARED runner (backstage's push cred) and the image push fails with
+        # `UNAUTHORIZED: action: push` to <team>/<app>. That reasoning is correct —
+        # for container tenants.
+        #
+        # IT IS FALSE FOR VM TENANTS, and setting the variable here was a real bug
+        # rather than a harmless extra. Per-team scale sets are created by the
+        # container `CapstoneTenant` Composition, which a VM tenant NEVER uses, so
+        # `<team>-kaniko` does not exist for these repos. A workflow labelled for a
+        # runner that does not exist does not fail — it QUEUES, silently, until
+        # GitHub times it out 24 hours later. paper-papas carried
+        # `RUNNER_SCALE_SET=paper-papas-kaniko` from scaffold time and consequently
+        # had never completed a single CI run; 13 runs were sitting queued against a
+        # label nothing would ever answer. Note also that changing the variable does
+        # NOT re-target an already-queued run — those have to be cancelled by hand.
+        #
+        # And there is nothing for a per-team runner to do here anyway: a VM tenant
+        # builds no image and pushes to no registry (ADR-032 §6 — the VM CI only
+        # VALIDATES manifests, see .devops/ci/validate-vm.py). It wants the shared
+        # runner, which is what omitting the variable gets it.
+        #
+        # So: do not add a `repoVariables:` block to this template. If a future VM
+        # tenant genuinely needs a dedicated runner, create the scale set FIRST and
+        # confirm the label exists — a missing label is invisible until the timeout.
         protectDefaultBranch: true
         requireCodeOwnerReviews: true
         # Role-based access by GitHub TEAM (not creator): the project team gets push,

@@ -452,6 +452,683 @@ write_files:
       echo "CAPSTONE: no cloud user found; opening a root shell." >&2
       exec /bin/bash --login
 
+  # ══════════════════════════════════════════════════════════════════════════
+  # LAB STACK — the MIS 521 storefront's runtime, preinstalled.
+  #
+  # WHY THIS IS HERE AND NOT IN A docker-compose.yml. The app repo ships a
+  # docker-compose.yml that gives a LAPTOP its MySQL/MinIO/Mailpit while the Node
+  # apps run on the host. On a VM that dependency is backwards: the VM IS the
+  # host, and installing a container runtime inside it just to run three daemons
+  # would add a second machine boundary the course does not teach. On a VM these
+  # services are installed natively. There is no Docker on this guest.
+  #
+  # The three files below are the whole mechanism:
+  #   /etc/capstone/Caddyfile        the :80 reverse proxy (the ONLY public door)
+  #   /usr/local/bin/capstone-lab-install   installs the stack (runcmd calls it)
+  #   /usr/local/bin/capstone-app-deploy    builds + publishes the team's clone
+  #
+  # NOT A LAB TEAM? Delete these three write_files entries and the single
+  # `capstone-lab-install` line in runcmd. Nothing else in this file depends on
+  # them, and the scaffold's starter page keeps working exactly as before.
+  # ══════════════════════════════════════════════════════════════════════════
+  - path: /etc/capstone/Caddyfile
+    permissions: '0644'
+    content: |
+      # ============================================================================
+      # Capstone VM reverse proxy — the thing that makes the app REACHABLE.
+      #
+      # The tenant Service is `port: 80 -> targetPort: 80`, and it is the ONLY ingress
+      # path into this guest. None of the workspace's apps listen on 80: storefront is
+      # 3000, staff-console 3001, and orders-api (4000) + notify (4100) are internal by
+      # design and must never be published. So without something answering on :80 the
+      # site is unreachable no matter how healthy the app is.
+      #
+      # `:80` as the site address — NOT a hostname — is deliberate and load-bearing. An
+      # explicit port-80 address turns Caddy's automatic HTTPS OFF. TLS for this host is
+      # terminated upstream (Cloudflare -> Traefik), and the guest could never complete
+      # an ACME challenge anyway: nothing on the internet can reach it directly, and its
+      # egress NetworkPolicy allows only DNS and :443. A hostname site address here
+      # would make Caddy try, fail, and retry forever.
+      #
+      # NOTE ON deploy/vm/Caddyfile IN THE REPO: that file is the students' exercise and
+      # is deliberately left with its `__TEAM__` placeholders unfilled. It describes the
+      # THREE-hostname world the app was originally written for
+      # (storefront./staff./mail.<team>.crimsoncopies.dev.uamishub.com). This VM has one
+      # hostname, so this file — installed by cloud-init, outside the repo — is what
+      # actually runs. The exercise is untouched.
+      # ============================================================================
+
+      {
+      	# Belt to the `:80` braces above. Neither alone is a guess; both together mean
+      	# no code path reaches ACME.
+      	auto_https off
+      }
+
+      :80 {
+      	# ── Extra hostnames, matched first ────────────────────────────────────────
+      	# These do NOT resolve today: the tenant has exactly one Ingress host. They are
+      	# here so that publishing staff-console or Mailpit later is a platform-side
+      	# change (DNS + a second Ingress) with NOTHING to edit inside the guest.
+      	#
+      	# Worth knowing before trying: on the free Cloudflare plan the wildcard
+      	# certificate covers only ONE label, so `staff.<app>.capstone.uamishub.com` is
+      	# two levels deep and could not get a certificate even once DNS existed. That
+      	# is a platform decision (D-044/ADR-028), not something this file can fix.
+      	@staff host staff.${{ values.appName }}.capstone.uamishub.com
+      	handle @staff {
+      		reverse_proxy 127.0.0.1:3001
+      	}
+
+      	# There is no `mail.` vhost here even though deploy/vm/Caddyfile has one:
+      	# nothing in the workspace sends mail. services/notify is a stub that logs
+      	# "[stub] would send ..." and returns 202, with no SMTP host in its config
+      	# schema and no nodemailer dependency. Mailpit is not installed on this guest.
+
+      	# ── Everything else -> the storefront ─────────────────────────────────────
+      	# This is what https://${{ values.appName }}.capstone.uamishub.com/ serves.
+      	handle {
+      		reverse_proxy 127.0.0.1:3000
+      	}
+
+      	# ── Before the team's first deploy ────────────────────────────────────────
+      	# Nothing listens on 3000 until the app is deployed, so the proxy above fails.
+      	# Serving the scaffold's placeholder page on that error keeps a freshly built
+      	# VM looking alive and self-explanatory instead of returning a bare 502 that
+      	# reads as "the platform is broken".
+      	handle_errors {
+      		root * /var/www/app
+      		rewrite * /index.html
+      		file_server
+      	}
+      }
+  - path: /usr/local/bin/capstone-lab-install
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      # ============================================================================
+      # capstone-lab-install — turn a bare Ubuntu 24.04 guest into the MIS 521 lab box.
+      #
+      # Installs, natively (NO Docker — this is a VM; a container runtime inside it
+      # would be a second, redundant machine boundary the course does not teach):
+      #
+      #   Node 22.23.2 + pnpm 9.15.0   the workspace's own `engines`/`packageManager`
+      #   MySQL 8.0.46                 noble's, with the app's database + user created
+      #   MinIO                        S3 API on :9000, `order-files` bucket created
+      #   Caddy 2.6.2                  the reverse proxy that OWNS :80
+      #
+      # NO MAILPIT, deliberately. docker-compose.yml runs one, so it looks required —
+      # but nothing in the workspace can talk to it. services/notify is a stub: its
+      # handler validates, logs "[stub] would send ...", and returns 202. Its config
+      # schema has exactly HOST/PORT/INTERNAL_API_KEY with nowhere to put an SMTP host,
+      # nodemailer is not a dependency, and `smtp|nodemailer|mailpit` appears in zero
+      # .ts files. Installing Mailpit would add a daemon, a port, and a maintenance
+      # burden to this guest for a wire nothing connects to. (cc-notify.service's
+      # header comment claims "Fastify + nodemailer ... Talks to Mailpit" — that
+      # comment is stale and false; do not provision from it.)
+      #
+      # IDEMPOTENT AND RE-RUNNABLE, on purpose. cloud-init runs exactly once per boot,
+      # so a half-finished install would otherwise leave a VM that can only be fixed by
+      # rebuilding it. Every step here checks before it acts, so an operator who finds a
+      # broken guest can just re-run this script from the web console.
+      #
+      # Everything is fetched over HTTPS. The guest egress NetworkPolicy
+      # (allow-egress-vm-external-https) permits DNS and :443 ONLY, so there is no
+      # other option — and no step here needs one.
+      # ============================================================================
+      set -uo pipefail
+
+      LOG=/var/log/capstone-lab-install.log
+      exec > >(tee -a "$LOG") 2>&1
+      echo "=== capstone-lab-install starting $(date -Is) ==="
+
+      fail() { echo "CAPSTONE: LAB-INSTALL FAILED: $*" >&2; }
+      ok()   { echo "CAPSTONE: ok — $*"; }
+
+      # ── Pinned versions ─────────────────────────────────────────────────────────
+      # Pinned, not floating. A lab VM that installs "latest" is a VM whose behaviour
+      # changes under the students between one team's build and the next.
+      NODE_VER=v22.23.2
+      NODE_SHA=  # resolved from the signed SHASUMS256.txt published beside the tarball
+      PNPM_VER=9.15.0
+      MINIO_REL=minio.RELEASE.2025-09-07T16-13-09Z
+      MINIO_SHA=7c5bd8512c6e966455b1d198209358b2d191c77a83ab377c4073281065fb855f
+      MC_REL=mc.RELEASE.2025-08-13T08-35-41Z
+      MC_SHA=01f866e9c5f9b87c2b09116fa5d7c06695b106242d829a8bb32990c00312e891
+
+      # ── App-side constants (these MUST match the repo's .env.example) ────────────
+      # DB_PASS must stay URL-SAFE. apps/orders-api/src/db/client.ts does a bare
+      # `createPool(DATABASE_URL)` and DATABASE_URL is a URI, so a generated password
+      # containing `/` or `+` (what `openssl rand -base64` emits) would silently corrupt
+      # the connection string rather than fail cleanly. The repo's own documented dev
+      # value is used here, which is both URL-safe and what .env.example says.
+      DB_NAME=crimson_copies
+      DB_USER=crimson_copies
+      DB_PASS=devpassword
+      MINIO_USER=minioadmin
+      MINIO_PASS=minioadmin
+      MINIO_BUCKET=order-files
+      SVC_USER=crimsoncopies
+
+      # ============================================================================
+      # 1. APT PACKAGES
+      # ============================================================================
+      # apt over HTTPS — the sources rewrite happens earlier in runcmd. `apt-get update`
+      # EXITS 0 EVEN WHEN EVERY INDEX FAILS, so each install below is checked by asking
+      # for the binary afterwards rather than by trusting apt's exit code.
+      export DEBIAN_FRONTEND=noninteractive
+
+      # Finish any package configuration a previous run left half-done. On a guest that
+      # was interrupted mid-install (a reboot, or the OOM kill this template's
+      # virtualmachine.yaml now has headroom to prevent), dpkg refuses every subsequent
+      # operation with "dpkg was interrupted, you must manually run 'dpkg --configure
+      # -a'" — and since this script is the thing an operator re-runs to REPAIR such a
+      # guest, it must clear that state itself rather than reporting it and stopping.
+      dpkg --configure -a >/dev/null 2>&1 || true
+
+      apt-get update -qq || true
+      apt-get install -y -qq mysql-server caddy rsync jq || true
+
+      command -v mysqld >/dev/null && ok "mysql-server present ($(mysqld --version 2>/dev/null | head -1))" || fail "mysql-server missing"
+      command -v caddy  >/dev/null && ok "caddy present ($(caddy version 2>/dev/null | head -1))"          || fail "caddy missing"
+
+      # ============================================================================
+      # 2. NODE 22 — official nodejs.org tarball, SHA256-verified
+      # ============================================================================
+      # WHY NOT `apt install nodejs`: noble ships Node 18.19.1 (verified by
+      # `apt-cache policy nodejs` on this guest). The workspace's root package.json
+      # declares `"engines": {"node": ">=22"}`, so the distro package is not merely old,
+      # it is BELOW THE FLOOR THE REPO DECLARES. A student would hit a wall of peer
+      # warnings and then a runtime failure that reads as their bug.
+      #
+      # WHY NOT the NodeSource apt repo: it means trusting and pinning a third-party
+      # signing key and apt source. The official tarball is one HTTPS GET whose checksum
+      # is published beside it, which is both simpler and stronger.
+      if [ "$(node --version 2>/dev/null)" != "$NODE_VER" ]; then
+        TARBALL="node-${NODE_VER}-linux-x64.tar.xz"
+        TMPD=$(mktemp -d)
+        if curl -fsSL -o "$TMPD/$TARBALL" "https://nodejs.org/dist/${NODE_VER}/${TARBALL}" \
+           && curl -fsSL -o "$TMPD/SHASUMS256.txt" "https://nodejs.org/dist/${NODE_VER}/SHASUMS256.txt"; then
+          if ( cd "$TMPD" && grep " ${TARBALL}\$" SHASUMS256.txt | sha256sum -c - >/dev/null 2>&1 ); then
+            tar -xJf "$TMPD/$TARBALL" -C /usr/local --strip-components=1 --no-same-owner
+            ok "node $(node --version) installed (sha256 verified)"
+          else
+            fail "node tarball CHECKSUM MISMATCH — refusing to install"
+          fi
+        else
+          fail "node download failed — check https egress"
+        fi
+        rm -rf "$TMPD"
+      else
+        ok "node ${NODE_VER} already installed"
+      fi
+
+      # The repo's own systemd units (deploy/vm/systemd/cc-*.service) say
+      # `ExecStart=/usr/bin/node`, which is where the DISTRO package would have put it.
+      # The tarball installs to /usr/local/bin. Symlink rather than editing the students'
+      # unit files, so the repo stays the single source of truth for how a service starts.
+      ln -sfn /usr/local/bin/node /usr/bin/node
+
+      # pnpm, pinned to the version the workspace's `packageManager` field names.
+      if [ "$(pnpm --version 2>/dev/null)" != "$PNPM_VER" ]; then
+        /usr/local/bin/npm install -g "pnpm@${PNPM_VER}" >/dev/null 2>&1 \
+          && ok "pnpm $(pnpm --version) installed" || fail "pnpm install failed"
+        ln -sfn /usr/local/bin/pnpm /usr/bin/pnpm
+      else
+        ok "pnpm ${PNPM_VER} already installed"
+      fi
+
+      # ============================================================================
+      # 3. MYSQL — database + user the app expects
+      # ============================================================================
+      # noble ships 8.0.46; the repo's docker-compose.yml pins mysql:8.4. The DDL in
+      # apps/orders-api/drizzle/0000_breezy_sentinels.sql was read before choosing:
+      # bigint AUTO_INCREMENT, enum, json, and `timestamp DEFAULT (now())` are all
+      # 8.0-compatible (expression defaults landed in 8.0.13), and nothing in it is
+      # 8.4-only. So 8.0.46 runs this schema unchanged, and taking it from noble avoids
+      # adding Oracle's third-party apt repo to a student VM for a version difference
+      # the app cannot observe.
+      #
+      # The app user is created with caching_sha2_password (8.0's default) rather than
+      # the deprecated mysql_native_password — mysql2 speaks it, and 8.4 REMOVES the
+      # native plugin, so choosing it here would be a migration landmine.
+      mkdir -p /etc/mysql/mysql.conf.d
+      cat > /etc/mysql/mysql.conf.d/99-capstone.cnf <<'MYCNF'
+      # Lab-VM sizing. The guest is small and shares it with MySQL, MinIO, Mailpit,
+      # Caddy and up to four Node processes, so MySQL is told to be a good neighbour
+      # rather than to assume it owns the box.
+      [mysqld]
+      bind-address            = 127.0.0.1
+      innodb_buffer_pool_size = 128M
+      performance_schema      = OFF
+      max_connections         = 50
+      MYCNF
+
+      systemctl enable --now mysql >/dev/null 2>&1 || true
+      # 180s, not 60s. EVERY timeout in this script is sized for an EMULATED cpu: the
+      # cluster runs KubeVirt with useEmulation:true, so first-boot work that takes
+      # seconds on real hardware takes tens of seconds here (MinIO's first pool format
+      # was measured at 35s on this guest). A too-short wait does not fail loudly, it
+      # fails as "the database was not created" on a box where the database is merely
+      # still starting.
+      for i in $(seq 1 90); do mysqladmin ping >/dev/null 2>&1 && break; sleep 2; done
+
+      if mysqladmin ping >/dev/null 2>&1; then
+        # The `drizzle` grant is NOT redundant. drizzle-kit's mysql2 migrator keeps its
+        # applied-migration journal outside the app schema, and exactly where it puts it
+        # was not something we could confirm from the library source. Granting the app
+        # user rights on a `drizzle` schema as well as its own costs nothing here (this
+        # MySQL is loopback-only on a single-tenant lab VM) and removes a failure whose
+        # symptom would be `db:migrate` dying with a permissions error on a table the
+        # student has never heard of. MySQL accepts a GRANT naming a schema that does
+        # not exist yet, so this works whether or not the migrator ever creates it.
+        #
+        # No `IDENTIFIED WITH mysql_native_password`: it works on 8.0 and is REMOVED in
+        # 8.4 (the version docker-compose.yml pins), so pinning it here would be a
+        # provisioning script that works today and breaks on the first upgrade. The 8.0
+        # default is caching_sha2_password, which mysql2 speaks natively over loopback
+        # with no client flags.
+        mysql <<SQL
+      CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+      CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';
+      CREATE USER IF NOT EXISTS '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';
+      GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost';
+      GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'127.0.0.1';
+      GRANT ALL PRIVILEGES ON \`drizzle\`.* TO '${DB_USER}'@'localhost';
+      GRANT ALL PRIVILEGES ON \`drizzle\`.* TO '${DB_USER}'@'127.0.0.1';
+      FLUSH PRIVILEGES;
+      SQL
+        ok "mysql database ${DB_NAME} + user ${DB_USER} ready"
+      else
+        fail "mysql did not come up — database NOT created"
+      fi
+
+      # ============================================================================
+      # 4. MINIO + mc
+      # ============================================================================
+      # Not in noble (verified: `apt-cache policy minio` returns nothing), so it comes
+      # from MinIO's own HTTPS release channel, pinned to a dated RELEASE tag with the
+      # checksum MinIO publishes next to it.
+      install_pinned_binary() { # url sha256 dest
+        local url="$1" sha="$2" dest="$3" tmp
+        tmp=$(mktemp)
+        if curl -fsSL -o "$tmp" "$url"; then
+          if echo "${sha}  ${tmp}" | sha256sum -c - >/dev/null 2>&1; then
+            install -m 0755 "$tmp" "$dest"; rm -f "$tmp"; return 0
+          fi
+          fail "CHECKSUM MISMATCH for $url — refusing to install"
+        else
+          fail "download failed: $url"
+        fi
+        rm -f "$tmp"; return 1
+      }
+
+      if [ ! -x /usr/local/bin/minio ]; then
+        install_pinned_binary "https://dl.min.io/server/minio/release/linux-amd64/${MINIO_REL}" \
+          "$MINIO_SHA" /usr/local/bin/minio && ok "minio installed (${MINIO_REL})"
+      fi
+      if [ ! -x /usr/local/bin/mc ]; then
+        install_pinned_binary "https://dl.min.io/client/mc/release/linux-amd64/${MC_REL}" \
+          "$MC_SHA" /usr/local/bin/mc && ok "mc installed (${MC_REL})"
+      fi
+
+      id -u minio-user >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin -d /var/lib/minio minio-user
+      install -d -o minio-user -g minio-user -m 0750 /var/lib/minio
+
+      cat > /etc/default/minio <<MINIOENV
+      MINIO_ROOT_USER=${MINIO_USER}
+      MINIO_ROOT_PASSWORD=${MINIO_PASS}
+      MINIO_VOLUMES=/var/lib/minio
+      MINIO_OPTS=--address 127.0.0.1:9000 --console-address 127.0.0.1:9001
+      MINIOENV
+      chmod 0640 /etc/default/minio
+
+      cat > /etc/systemd/system/minio.service <<'MINIOUNIT'
+      [Unit]
+      Description=MinIO object storage (capstone lab)
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      User=minio-user
+      Group=minio-user
+      EnvironmentFile=/etc/default/minio
+      ExecStart=/usr/local/bin/minio server $MINIO_OPTS $MINIO_VOLUMES
+      Restart=always
+      RestartSec=3
+      # Comes back by itself after a reboot or a node drain -- a lab VM that needs
+      # hand-nursing after every restart is not finished.
+
+      [Install]
+      WantedBy=multi-user.target
+      MINIOUNIT
+
+      systemctl daemon-reload
+      systemctl enable --now minio.service >/dev/null 2>&1 || fail "minio failed to start"
+
+      # The bucket must PRE-EXIST: apps/staff-console/src/lib/minio.ts only ever calls
+      # presignedGetObject, and nothing in the workspace ever creates a bucket.
+      # 180s. MinIO formats its backing pool on FIRST start, measured at ~35s on this
+      # emulated guest, and the health endpoint does not answer until that finishes. A
+      # 60s budget here left the bucket uncreated on a run where MinIO became ready 11
+      # seconds later — the service was fine and the lab was still broken.
+      for i in $(seq 1 90); do curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null 2>&1 && break; sleep 2; done
+
+      if curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null 2>&1; then
+        export MC_HOST_local="http://${MINIO_USER}:${MINIO_PASS}@127.0.0.1:9000"
+        # Retried: "health is live" and "ready to serve an admin API call" are not the
+        # same instant, and this is the last step that can leave the app broken in a way
+        # that only shows up when a student uploads a file.
+        bucket_ok=0
+        for i in $(seq 1 10); do
+          if /usr/local/bin/mc mb --ignore-existing "local/${MINIO_BUCKET}" >/dev/null 2>&1; then
+            bucket_ok=1; break
+          fi
+          sleep 3
+        done
+        [ "$bucket_ok" = 1 ] && ok "minio bucket ${MINIO_BUCKET} ready" \
+                             || fail "could not create bucket ${MINIO_BUCKET}"
+      else
+        fail "minio health check never passed — bucket NOT created"
+      fi
+
+      # ============================================================================
+      # 5. SERVICE USER + DEPLOY ROOTS + ENV FILES
+      # ============================================================================
+      # The repo's units run as `crimsoncopies` out of /opt/crimsoncopies/<service>
+      # (docs/manual-deploy.md). Create both so a student's first deploy has somewhere
+      # to land.
+      id -u "$SVC_USER" >/dev/null 2>&1 || useradd -r -m -d "/home/${SVC_USER}" -s /bin/bash "$SVC_USER"
+      for s in orders-api notify storefront staff-console; do
+        install -d -o "$SVC_USER" -g "$SVC_USER" -m 0755 "/opt/crimsoncopies/$s"
+      done
+
+      # ── The .env files, GENERATED HERE, once. ───────────────────────────────────
+      # Three of these values must match ACROSS services or the app fails in a way that
+      # looks like a bug in the student's code: INTERNAL_API_KEY is checked by
+      # orders-api's and notify's internal-auth plugins on every call, and each web app
+      # signs its session cookie with its own SESSION_SECRET. Making a student copy four
+      # .env.example files and keep one shared secret identical across three of them is
+      # a guaranteed lost afternoon, so the guest does it.
+      #
+      # The secrets are generated PER VM, inside the guest, at first boot. Nothing
+      # secret is baked into cloud-init, so this file remains safe to copy between
+      # tenants -- which is precisely the property a per-repo deploy key would destroy.
+      #
+      # The infrastructure values (DB name/user/password, MinIO keys, bucket) are the
+      # repo's own documented dev defaults on purpose, so that a student who ignores
+      # these files and copies .env.example by hand still gets a working box.
+      install -d -m 0750 -o root -g "$SVC_USER" /etc/capstone/env
+      if [ ! -f /etc/capstone/env/.generated ]; then
+        INTERNAL_API_KEY=$(head -c 32 /dev/urandom | base64 | tr -d '=+/' | cut -c1-40)
+        SF_SECRET=$(head -c 32 /dev/urandom | base64 | tr -d '=+/' | cut -c1-40)
+        SC_SECRET=$(head -c 32 /dev/urandom | base64 | tr -d '=+/' | cut -c1-40)
+
+        cat > /etc/capstone/env/orders-api.env <<ENVA
+      DATABASE_URL=mysql://${DB_USER}:${DB_PASS}@127.0.0.1:3306/${DB_NAME}
+      HOST=127.0.0.1
+      PORT=4000
+      INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      NOTIFY_URL=http://127.0.0.1:4100
+      BCRYPT_ROUNDS=10
+      FILE_INTAKE_HOST=localhost
+      FILE_INTAKE_PORT=2222
+      ENVA
+
+        cat > /etc/capstone/env/notify.env <<ENVB
+      HOST=127.0.0.1
+      PORT=4100
+      INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      ENVB
+
+        cat > /etc/capstone/env/storefront.env <<ENVC
+      ORDERS_API_URL=http://127.0.0.1:4000
+      INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      SESSION_SECRET=${SF_SECRET}
+      ENVC
+
+        cat > /etc/capstone/env/staff-console.env <<ENVD
+      ORDERS_API_URL=http://127.0.0.1:4000
+      INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      SESSION_SECRET=${SC_SECRET}
+      MINIO_ENDPOINT=127.0.0.1
+      MINIO_PORT=9000
+      MINIO_USE_SSL=false
+      MINIO_ACCESS_KEY=${MINIO_USER}
+      MINIO_SECRET_KEY=${MINIO_PASS}
+      MINIO_BUCKET=${MINIO_BUCKET}
+      ENVD
+
+        touch /etc/capstone/env/.generated
+        ok "generated per-VM .env files in /etc/capstone/env"
+      fi
+      chown root:"$SVC_USER" /etc/capstone/env/*.env 2>/dev/null || true
+      chmod 0640 /etc/capstone/env/*.env 2>/dev/null || true
+
+      # ============================================================================
+      # 6. CADDY OWNS :80
+      # ============================================================================
+      # The scaffold's starter service is `python3 -m http.server 80`, and Caddy wants
+      # the same port. Two things fighting over :80 is exactly the failure the ttyd
+      # package caused on this template (see the ttyd notes in runcmd): the loser
+      # restart-loops forever while `systemctl is-active` still says "active".
+      #
+      # So the starter is stopped and MASKED, not merely disabled -- masked because a
+      # later `systemctl enable` or a package refresh could otherwise quietly hand it
+      # back the port on the next boot. Its placeholder page is not lost: Caddy serves
+      # /var/www/app/index.html as the error fallback, so a VM whose team has not
+      # deployed yet still answers with the friendly page instead of a bare 502.
+      systemctl disable --now capstone-app.service >/dev/null 2>&1 || true
+      systemctl mask capstone-app.service          >/dev/null 2>&1 || true
+
+      install -D -m 0644 /etc/capstone/Caddyfile /etc/caddy/Caddyfile
+      if caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1; then
+        systemctl enable --now caddy >/dev/null 2>&1
+        systemctl reload caddy >/dev/null 2>&1 || systemctl restart caddy >/dev/null 2>&1
+        ok "caddy configured and listening on :80"
+      else
+        fail "Caddyfile did NOT validate — :80 will not serve. Run: caddy validate --config /etc/caddy/Caddyfile"
+      fi
+
+      echo "=== capstone-lab-install finished $(date -Is) ==="
+  - path: /usr/local/bin/capstone-app-deploy
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      # ============================================================================
+      # capstone-app-deploy — build the workspace and put it behind Caddy, on the box.
+      #
+      #   sudo capstone-app-deploy [/path/to/clone]      (default: ~/paper-papas)
+      #
+      # This is docs/manual-deploy.md steps 1-3 executed LOCALLY. That document assumes
+      # you build on a workstation and rsync to the VM over SSH; on this lab VM the
+      # student's clone and the deploy target are the same machine, so the ssh/rsync hop
+      # is replaced by a local copy and nothing else changes. The layout it produces is
+      # byte-for-byte the layout deploy/vm/systemd/cc-*.service expects.
+      #
+      # THE NEXT.JS LAYOUT IS THE TRICKY PART and the reason this is a script rather
+      # than a paragraph in a README. `outputFileTracingRoot` is the pnpm workspace
+      # root, so `next build` emits a NESTED tree:
+      #
+      #   .next/standalone/                 <- the real node_modules lives HERE
+      #   .next/standalone/apps/<app>/server.js
+      #
+      # Copying only `.next/standalone/apps/<app>/` — the obvious thing to do — silently
+      # drops node_modules and produces MODULE_NOT_FOUND at runtime. `public/` and
+      # `.next/static/` are additionally NOT part of the traced output and must be
+      # copied into the nested dir separately. The repo's own unit file carries a note
+      # about a reviewer-caught regression that was exactly this.
+      # ============================================================================
+      set -uo pipefail
+
+      SRC="${1:-}"
+      if [ -z "$SRC" ]; then
+        for cand in "/home/ubuntu/paper-papas" "$HOME/paper-papas"; do
+          [ -f "$cand/pnpm-workspace.yaml" ] && SRC="$cand" && break
+        done
+      fi
+
+      if [ -z "$SRC" ] || [ ! -f "$SRC/pnpm-workspace.yaml" ]; then
+        echo "capstone-app-deploy: no workspace found." >&2
+        echo "  Clone the repo first, then:  sudo capstone-app-deploy ~/paper-papas" >&2
+        exit 1
+      fi
+
+      if [ "$(id -u)" -ne 0 ]; then
+        echo "capstone-app-deploy: must run as root (it writes /opt and restarts units)." >&2
+        echo "  Try:  sudo capstone-app-deploy $SRC" >&2
+        exit 1
+      fi
+
+      SVC_USER=crimsoncopies
+      DEST_ROOT=/opt/crimsoncopies
+      BUILD_USER=$(stat -c '%U' "$SRC")
+
+      echo "=== capstone-app-deploy ==="
+      echo "    source : $SRC  (building as $BUILD_USER)"
+      echo "    target : $DEST_ROOT"
+
+      run_as_builder() { sudo -u "$BUILD_USER" --preserve-env=HOME env HOME="$(getent passwd "$BUILD_USER" | cut -d: -f6)" bash -lc "cd '$SRC' && $1"; }
+
+      # ── 1. put the generated .env files INTO THE CLONE ──────────────────────────
+      # Not just into /opt. `apps/orders-api/src/db/migrate.ts` does `import
+      # 'dotenv/config'`, which loads `.env` RELATIVE TO CWD — so db:migrate reads
+      # apps/orders-api/.env, in the clone, not the copy under /opt. Without this the
+      # migrate step fails with an unset DATABASE_URL and the student is debugging
+      # dotenv on day one.
+      echo "--- env ---"
+      declare -A ENVMAP=(
+        [orders-api]="apps/orders-api"
+        [notify]="services/notify"
+        [storefront]="apps/storefront"
+        [staff-console]="apps/staff-console"
+      )
+      for svc in "${!ENVMAP[@]}"; do
+        src="/etc/capstone/env/$svc.env"
+        dst="$SRC/${ENVMAP[$svc]}/.env"
+        if [ -f "$src" ]; then
+          install -m 0640 -o "$BUILD_USER" -g "$BUILD_USER" "$src" "$dst"
+          echo "  $dst"
+        else
+          echo "WARNING: $src missing — run 'sudo capstone-lab-install' first" >&2
+        fi
+      done
+
+      # ── 2. install + build ──────────────────────────────────────────────────────
+      # NEXT_TELEMETRY_DISABLED: Next phones home on first build. It is an https call so
+      # the egress policy permits it, but a lab VM should not be sending telemetry on a
+      # student's behalf, and the first-run notice is noise in the build log.
+      echo "--- pnpm install ---"
+      run_as_builder "pnpm install --frozen-lockfile" || { echo "DEPLOY FAILED: pnpm install" >&2; exit 1; }
+
+      # ── 3. schema ───────────────────────────────────────────────────────────────
+      # RUN FROM THE CLONE, NEVER FROM /opt. Both db:migrate and db:seed are
+      # `tsx src/db/*.ts`, and tsx is a DEV dependency — the `pnpm --prod deploy`
+      # artifact staged into /opt below deliberately has no dev deps, so it physically
+      # cannot migrate its own schema. The clone is the only place these can run.
+      #
+      # Invoked via `pnpm --filter ... run` rather than a bare tsx call because
+      # drizzle.config's `migrationsFolder: './drizzle'` is CWD-relative; pnpm sets CWD
+      # to the package dir, a run from the repo root throws.
+      #
+      # Idempotent: drizzle skips already-applied migrations and seed.ts is written to
+      # be re-runnable, so a second `capstone-app-deploy` is safe.
+      echo "--- db migrate + seed ---"
+      run_as_builder "pnpm --filter @crimson-copies/orders-api run db:migrate" \
+        || { echo "DEPLOY FAILED: db:migrate" >&2; exit 1; }
+      run_as_builder "pnpm --filter @crimson-copies/orders-api run db:seed" \
+        || echo "WARNING: db:seed failed (schema is migrated; demo logins may be absent)" >&2
+
+      echo "--- pnpm build ---"
+      run_as_builder "NEXT_TELEMETRY_DISABLED=1 pnpm build" || { echo "DEPLOY FAILED: build" >&2; exit 1; }
+
+      # ── 4. stage each service into /opt ─────────────────────────────────────────
+      # Backends: `pnpm --prod deploy` is what produces a REAL, pruned node_modules.
+      # Neither `dist/` nor the workspace's symlinked node_modules is self-contained.
+      for svc in orders-api notify; do
+        case "$svc" in
+          orders-api) pkg=@crimson-copies/orders-api ;;
+          notify)     pkg=@crimson-copies/notify ;;
+        esac
+        echo "--- staging $svc ---"
+        stage="/tmp/capstone-stage-$svc"
+        rm -rf "$stage"
+        run_as_builder "pnpm --filter $pkg --prod deploy --legacy '$stage'" \
+          || { echo "DEPLOY FAILED: pnpm deploy $svc" >&2; exit 1; }
+        rsync -a --delete --exclude '.env' "$stage/" "$DEST_ROOT/$svc/"
+        rm -rf "$stage"
+      done
+
+      # Next.js apps: copy the WHOLE standalone root (for node_modules), then fold in
+      # public/ and .next/static/ which tracing does not emit.
+      for app in storefront staff-console; do
+        echo "--- staging $app ---"
+        sa="$SRC/apps/$app/.next/standalone"
+        [ -d "$sa" ] || { echo "DEPLOY FAILED: $sa missing (did next build run?)" >&2; exit 1; }
+        rsync -a --delete --exclude '.env' "$sa/" "$DEST_ROOT/$app/"
+        mkdir -p "$SRC/apps/$app/public"
+        rsync -a "$SRC/apps/$app/public/"      "$DEST_ROOT/$app/apps/$app/public/"
+        rsync -a "$SRC/apps/$app/.next/static/" "$DEST_ROOT/$app/apps/$app/.next/static/"
+      done
+
+      # ── 5. env files for the RUNTIME copies under /opt ──────────────────────────
+      # Generated once per VM by capstone-lab-install and NEVER overwritten by a deploy
+      # (same rule docs/manual-deploy.md states: "Do NOT rsync .env"); the rsyncs above
+      # exclude .env for exactly that reason.
+      for svc in orders-api notify storefront staff-console; do
+        if [ -f "/etc/capstone/env/$svc.env" ]; then
+          install -m 0640 -o "$SVC_USER" -g "$SVC_USER" "/etc/capstone/env/$svc.env" "$DEST_ROOT/$svc/.env"
+        else
+          echo "WARNING: /etc/capstone/env/$svc.env missing — $svc will not start" >&2
+        fi
+      done
+
+      chown -R "$SVC_USER:$SVC_USER" "$DEST_ROOT"
+
+      # ── 6. systemd units, taken FROM THE REPO ───────────────────────────────────
+      # Installed from deploy/vm/systemd/ rather than copied into cloud-init, so the
+      # repo stays the single source of truth for how each service starts and a student
+      # editing a unit sees their edit take effect on the next deploy.
+      if [ -d "$SRC/deploy/vm/systemd" ]; then
+        install -m 0644 "$SRC"/deploy/vm/systemd/cc-*.service /etc/systemd/system/
+        systemctl daemon-reload
+      else
+        echo "WARNING: $SRC/deploy/vm/systemd not found — units not refreshed" >&2
+      fi
+
+      # ── 7. start ────────────────────────────────────────────────────────────────
+      for u in cc-orders-api cc-notify cc-storefront cc-staff-console; do
+        systemctl enable "$u" >/dev/null 2>&1
+        systemctl restart "$u" || echo "WARNING: $u failed to start — journalctl -u $u" >&2
+      done
+
+      # ── 8. tell the truth about what came up ────────────────────────────────────
+      # Health-check by EXECUTION, not by `systemctl is-active`: a unit that is
+      # restart-looping still reports "active", which is how a dead console looked
+      # healthy on this platform once already.
+      echo "--- health ---"
+      sleep 5
+      rc=0
+      check() { # name url
+        if curl -fsS --max-time 5 "$2" >/dev/null 2>&1; then
+          echo "  OK    $1  ($2)"
+        else
+          echo "  DOWN  $1  ($2)   -> journalctl -u cc-$1 -n 40"; rc=1
+        fi
+      }
+      check orders-api    http://127.0.0.1:4000/healthz
+      check notify        http://127.0.0.1:4100/healthz
+      check storefront    http://127.0.0.1:3000/
+      check staff-console http://127.0.0.1:3001/
+      check "caddy(:80)"  http://127.0.0.1:80/
+
+      if [ $rc -eq 0 ]; then
+        echo "=== deploy OK — the public hostname now serves the storefront ==="
+      else
+        echo "=== deploy FINISHED WITH FAILURES (see above) ===" >&2
+      fi
+      exit $rc
+
 runcmd:
   # ── WEB CONSOLE (install) ───────────────────────────────────────────────────
   # `ttyd` is in noble/universe (1.7.4) — verified by execution, so no third-party
@@ -575,5 +1252,20 @@ runcmd:
   # still finishes booting with SSH and the app working; the console is then the only
   # thing missing, and `systemctl status capstone-console` says why.
   - [ sh, -c, "systemctl enable --now capstone-console.service || true" ]
+  # ── LAB STACK (install) ─────────────────────────────────────────────────────
+  # Node 22 + pnpm, MySQL (with the app's database and user created), MinIO (with
+  # the `order-files` bucket created), Mailpit, and Caddy owning :80.
+  #
+  # ONE runcmd line calling a SCRIPT, deliberately, rather than thirty runcmd
+  # lines. cloud-init runs once per boot, so a stack install that fails halfway
+  # through runcmd would leave a VM that can only be repaired by rebuilding it.
+  # The script is idempotent and re-runnable, so an operator who finds a broken
+  # guest can just run `sudo capstone-lab-install` from the web console and read
+  # /var/log/capstone-lab-install.log to see which step failed.
+  #
+  # `|| true` so that a failure here can never stop the rest of the boot: the web
+  # console and SSH must come up even on a VM whose lab stack did not, because
+  # those are the doors you need to go FIX it.
+  - [ sh, -c, "/usr/local/bin/capstone-lab-install || echo 'CAPSTONE: lab stack install FAILED — see /var/log/capstone-lab-install.log' >&2" ]
 
 final_message: "capstone-app first boot complete after $UPTIME seconds"
