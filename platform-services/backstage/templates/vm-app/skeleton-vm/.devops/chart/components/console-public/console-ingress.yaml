@@ -1,6 +1,13 @@
 # WEB CONSOLE Ingress — publishes the browser terminal at
 #   <team>-console.uamishub.com
 #
+# ⚠ THIS FILE IS OPT-IN AND SHIPS DISABLED. It is not in the chart's base; it is
+# pulled in only when a tenant's prod overlay uncomments the `console-public`
+# component. Creating this Ingress puts a sudo-capable shell on the public
+# internet, so it must not exist before the Cloudflare Access application does.
+# The reasoning, the two-step enable, and the verification curl are in
+# ./kustomization.yaml.
+#
 # HOSTNAME SHAPE IS A TLS CONSTRAINT, NOT A PREFERENCE. The live certificate is
 # `DNS:uamishub.com, DNS:*.uamishub.com` — a ONE-level wildcard. `<team>-console` is a
 # single label under the apex, so it is covered. A dotted `console.<team>.uamishub.com`
@@ -23,7 +30,13 @@ kind: Ingress
 metadata:
   name: ${{ values.appName }}-console
   labels:
+    # These are set EXPLICITLY, not inherited. This Ingress lives in a component
+    # applied at the overlay, so the `labels:` transformer inside base/ does not
+    # reach it — dropping `managed-by` would make ArgoCD's tracking inconsistent
+    # with every other object in the chart. Keep these three in step with the
+    # pairs in base/kustomization.yaml.
     app.kubernetes.io/name: ${{ values.appName }}
+    app.kubernetes.io/managed-by: argocd
     platform.capstone/team: ${{ values.team }}
   annotations:
     # ttyd upgrades to a WebSocket after the first request. Traefik proxies the
