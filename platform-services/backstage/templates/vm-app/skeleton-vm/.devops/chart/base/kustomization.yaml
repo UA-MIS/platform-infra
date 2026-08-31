@@ -18,6 +18,10 @@ resources:
   - service.yaml
   - ssh-service.yaml
   - ingress.yaml
+  # The web console — the DEFAULT way a student gets a shell (browser + GitHub login,
+  # no keys, no certificates). SSH remains available as the advanced path.
+  - console-service.yaml
+  - console-ingress.yaml
 
 # Package cloud-init.yaml into the Secret the VM references (cloudInitNoCloud.secretRef).
 # key `userdata` is what KubeVirt reads. disableNameSuffixHash keeps the name STABLE

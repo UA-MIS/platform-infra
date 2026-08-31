@@ -51,27 +51,33 @@ is a shared homelab cluster.
 
 ## SSH access (pet dev-VM)
 
-Your VM is a real machine: `ssh` in with a **standard client**, `git clone` your app
-repo, and run your stack directly on the box. cloud-init already installed the public
-key you provided at scaffold time and disabled password login.
+Your VM is a real machine: get a shell, `git clone` your app repo, and run your stack
+directly on the box.
 
-Public SSH rides the platform's existing Cloudflare Tunnel (no VPN, no LoadBalancer,
-$0) at `ssh.${{ values.appName }}.capstone.uamishub.com`, gated by a Cloudflare
-Access login (your UA-MIS email). Two ways to connect:
+**A — the web console (start here).**
 
-**A — native `ssh` client** (one-time: install the free `cloudflared` binary):
+Open **<https://${{ values.team }}-console.uamishub.com>** and sign in with GitHub.
+That's it — you get a terminal on your VM in the browser.
+
+There is **nothing to install and no SSH key to generate**. Your GitHub login is the
+only credential. Each person on the team gets their own independent shell, so the
+whole team can be logged in at the same time without treading on each other.
+
+**B — native `ssh` client (optional, for people who prefer a real terminal).**
+
+One-time: install the free `cloudflared` binary, and add your public key at
+<https://github.com/settings/keys>. The VM imports the GitHub keys of everyone on the
+team roster and refreshes them every 5 minutes, so a newly added key works within
+about five minutes. Password login is off.
 
 ```bash
-ssh -o ProxyCommand='cloudflared access ssh --hostname ssh.${{ values.appName }}.capstone.uamishub.com' \
-    <cloud-user>@ssh.${{ values.appName }}.capstone.uamishub.com
+ssh -o ProxyCommand='cloudflared access ssh --hostname ${{ values.team }}-ssh.uamishub.com' \
+    <cloud-user>@${{ values.team }}-ssh.uamishub.com
 ```
 
 (`<cloud-user>` is distro-specific — `fedora`/`ubuntu`/`debian` depending on your base
 image.) Add a `Host` block to `~/.ssh/config` to shorten this to a plain `ssh
 ${{ values.appName }}`.
-
-**B — browser, zero install:** open `https://ssh.${{ values.appName }}.capstone.uamishub.com`
-in a browser, sign in via Cloudflare Access, and use the rendered terminal.
 
 > This route is enabled by an operator/dashboard step **after** your onboarding PR
 > merges — see the PR checklist and `docs/operator/vm-ssh-cloudflare-access.md` in

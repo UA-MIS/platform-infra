@@ -213,5 +213,151 @@ class TestGuards(Base):
         self.assertNotIn("hostname", new[-1])
 
 
+class TestPlanNotes(Base):
+    """The plan SUMMARY must describe what the write actually does.
+
+    Regression guard for a defect found against the live v23 tunnel config: the
+    summary compared whole dicts, but Cloudflare stores every rule decorated with
+    fields we never send (`id`, and an empty `originRequest: {}`). A live, healthy,
+    unchanged tenant therefore compared unequal to the bare rule we build, and the
+    plan announced `ADD` and `DEL <host> (tenant gone)` for it at the same time.
+
+    The write was never wrong. The go-live dry run — the one artefact the operator
+    doc tells a human to read before flipping DRY_RUN off — was.
+    """
+
+    # A rule exactly as Cloudflare hands it back, decorated the way the live tunnel
+    # decorates it. This is the whole point of the fixture: it is NOT `==` to ours.
+    def live_rule(self, host, service, rule_id="1"):
+        return {"hostname": host, "id": rule_id,
+                "originRequest": {}, "service": service}
+
+    def test_unchanged_live_tenant_reports_keep_and_never_tenant_gone(self):
+        tenants = self.tenants(svc("paper-papas", "storefront", "paper-papas-vm-prod"))
+        live = [self.live_rule(
+            "paper-papas-ssh.uamishub.com",
+            "ssh://storefront-ssh.paper-papas-vm-prod.svc.cluster.local:22")]
+        new, notes = reconcile.plan_ingress(live + PLATFORM_RULES, tenants)
+        self.assertIsNotNone(new, notes)
+        body = "\n".join(notes)
+        self.assertIn("keep paper-papas-ssh.uamishub.com", body)
+        self.assertNotIn("tenant gone", body)
+        self.assertNotIn("ADD ", body)
+
+    def test_the_rule_survives_the_write_even_though_the_note_said_keep(self):
+        # "keep" must not be mistaken for "we skipped it" — the rule is rebuilt.
+        tenants = self.tenants(svc("paper-papas", "storefront", "paper-papas-vm-prod"))
+        live = [self.live_rule(
+            "paper-papas-ssh.uamishub.com",
+            "ssh://storefront-ssh.paper-papas-vm-prod.svc.cluster.local:22")]
+        new, _ = reconcile.plan_ingress(live + PLATFORM_RULES, tenants)
+        self.assertEqual(new[0], {
+            "hostname": "paper-papas-ssh.uamishub.com",
+            "service": "ssh://storefront-ssh.paper-papas-vm-prod.svc.cluster.local:22"})
+        self.assertEqual(new[1:], PLATFORM_RULES)
+
+    def test_a_genuinely_departed_tenant_still_reports_tenant_gone(self):
+        # The alarm must still fire when it is real, or the fix has broken teardown.
+        tenants = self.tenants(svc("paper-papas", "storefront", "paper-papas-vm-prod"))
+        live = [
+            self.live_rule("paper-papas-ssh.uamishub.com",
+                           "ssh://storefront-ssh.paper-papas-vm-prod.svc.cluster.local:22"),
+            self.live_rule("blue-jays-ssh.uamishub.com",
+                           "ssh://app-ssh.blue-jays-vm-prod.svc.cluster.local:22", "2"),
+        ]
+        _, notes = reconcile.plan_ingress(live + PLATFORM_RULES, tenants)
+        body = "\n".join(notes)
+        self.assertIn("DEL  blue-jays-ssh.uamishub.com (tenant gone)", body)
+        self.assertNotIn("DEL  paper-papas-ssh.uamishub.com", body)
+
+    def test_a_repointed_tenant_reports_move_not_add_plus_delete(self):
+        # Same hostname, different origin (e.g. the app was renamed). That is one
+        # re-point, not a delete plus an add of the same host.
+        tenants = self.tenants(svc("paper-papas", "newapp", "paper-papas-vm-prod"))
+        live = [self.live_rule(
+            "paper-papas-ssh.uamishub.com",
+            "ssh://oldapp-ssh.paper-papas-vm-prod.svc.cluster.local:22")]
+        _, notes = reconcile.plan_ingress(live + PLATFORM_RULES, tenants)
+        body = "\n".join(notes)
+        self.assertIn("MOVE paper-papas-ssh.uamishub.com", body)
+        self.assertNotIn("tenant gone", body)
+
+    def test_a_brand_new_tenant_still_reports_add(self):
+        tenants = self.tenants(svc("paper-papas", "storefront", "paper-papas-vm-prod"))
+        _, notes = reconcile.plan_ingress(PLATFORM_RULES, tenants)
+        self.assertIn("ADD  paper-papas-ssh.uamishub.com", "\n".join(notes))
+
+
+class TestAppType(Base):
+    """The Access application `type` sent on create, and mismatch reporting.
+
+    A `self_hosted` app has demonstrably not yielded a CA-eligible, browser-rendering
+    SSH app on this account. Whether `ssh` is THE answer is a working hypothesis, not
+    a doc-confirmed fact, so the value is an env var and these tests pin the
+    mechanism (it is configurable, it is actually used, mismatches are reported and
+    never silently converted) rather than blessing one value as correct.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._saved = reconcile.ACCESS_APP_TYPE
+
+    def tearDown(self):
+        reconcile.ACCESS_APP_TYPE = self._saved
+
+    def test_default_is_ssh_not_self_hosted(self):
+        self.assertEqual(self._saved, "ssh")
+
+    def test_type_is_overridable_for_an_instant_revert(self):
+        # The revert path must not need a code change or a rebuild.
+        reconcile.ACCESS_APP_TYPE = "self_hosted"
+        self.assertEqual(reconcile.ACCESS_APP_TYPE, "self_hosted")
+
+    def test_matching_type_is_silent(self):
+        out = []
+        reconcile.log = out.append
+        try:
+            reconcile.report_app_type({"type": "ssh"}, "t-ssh.uamishub.com")
+        finally:
+            reconcile.log = print
+        self.assertEqual(out, [])
+
+    def test_missing_type_is_silent_rather_than_a_false_alarm(self):
+        # A listing that omits `type` must not be reported as a mismatch.
+        out = []
+        reconcile.log = out.append
+        try:
+            reconcile.report_app_type({}, "t-ssh.uamishub.com")
+        finally:
+            reconcile.log = print
+        self.assertEqual(out, [])
+
+    def test_mismatched_type_is_reported_with_the_actual_value(self):
+        out = []
+        reconcile.log = out.append
+        try:
+            reconcile.report_app_type({"type": "self_hosted"}, "t-ssh.uamishub.com")
+        finally:
+            reconcile.log = print
+        body = "\n".join(out)
+        self.assertIn("self_hosted", body)
+        self.assertIn("ssh", body)
+        self.assertIn("t-ssh.uamishub.com", body)
+
+    def test_mismatch_reports_but_never_converts(self):
+        # report_app_type must be pure reporting: no API surface touched. If it ever
+        # grows a write, `cf` gets called and this fails.
+        called = []
+        saved_cf, saved_log = reconcile.cf, reconcile.log
+        reconcile.cf = lambda *a, **k: called.append(a)
+        reconcile.log = lambda *a, **k: None
+        try:
+            reconcile.report_app_type({"type": "self_hosted", "id": "abc"},
+                                      "t-ssh.uamishub.com")
+        finally:
+            reconcile.cf, reconcile.log = saved_cf, saved_log
+        self.assertEqual(called, [], "report_app_type must not call the API")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -91,6 +91,35 @@ ALLOW_EMPTY = os.environ.get("ALLOW_EMPTY_DESIRED", "0").strip() == "1"
 SSH_LABEL = os.environ.get("SSH_SVC_LABEL", "platform.capstone/access=ssh").strip()
 SESSION_DURATION = os.environ.get("CF_ACCESS_SESSION", "24h").strip()
 
+# The Access application `type` discriminator sent on create.
+#
+# WHY THIS IS AN ENV VAR AND NOT A CONSTANT. The evidence here is genuinely mixed and
+# we cannot settle it without a token, so it is made changeable without a code change:
+#
+#   * The API `type` enum does include a first-class `ssh` value (alongside `vnc`,
+#     `rdp`, `infrastructure`, `self_hosted`, ...). CONFIRMED from the API reference.
+#   * The short-lived-certificate (legacy) page says to create "a self-hosted Access
+#     application". CONFIRMED, but that page is describing the dashboard's umbrella
+#     CATEGORY, which is not the same thing as the API discriminator.
+#   * The browser-rendering page says browser rendering "is only supported for
+#     self-hosted public applications" and is switched on per-application by the
+#     toggle "Allow access through browser-based RDP, SSH, or VNC sessions" → SSH.
+#     CONFIRMED — and it reads as a PROPERTY OF a self-hosted app, not a type.
+#
+# WHAT SETTLED IT: the ONE Access application on this account that demonstrably
+# reaches a browser terminal — `paper-papas-ssh.uamishub.com` — is `"type": "ssh"`,
+# read from its live config. So `ssh` is the value that matches a known-working app,
+# and this reconciler emitting `self_hosted` would have given teams two and three a
+# configuration that does not match the only one proven to work.
+#
+# NOTE this is NOT the cause of the blocked CA generation. That app is already
+# `type: ssh` and browser rendering already works on it; only certificate generation
+# is blocked. The remaining candidates are that legacy short-lived certificates are
+# gated on this account, or that a CA already exists for the app and the UI refuses to
+# mint a second. Do not speculate further in code — one read of
+# `GET /accounts/{id}/access/apps/{app_id}/ca` settles it once a token exists.
+ACCESS_APP_TYPE = os.environ.get("CF_ACCESS_APP_TYPE", "ssh").strip() or "ssh"
+
 EMAILS_ANNOTATION = "platform.capstone/ssh-access-emails"
 TEAM_LABEL = "platform.capstone/team"
 CF_API = "https://api.cloudflare.com/client/v4"
@@ -260,11 +289,36 @@ def plan_ingress(current_ingress, tenants, allow_empty=False):
                      "not have preserved every non-SSH rule verbatim. No change.")
         return None, notes
 
+    # WHAT CHANGED — reported on rule IDENTITY (hostname, service), never on whole-dict
+    # equality. Cloudflare decorates every stored rule with fields we do not send
+    # (`id`, and an empty `originRequest: {}`), so a live rule is NEVER `==` to the
+    # bare two-key rule we build. Comparing dicts made the plan announce
+    #     ADD  <host> ...
+    #     DEL  <host> (tenant gone)
+    # for one healthy, unchanged tenant — simultaneously, which is impossible. The
+    # WRITE was always correct (`new_ingress` is rebuilt from `desired`, so the rule
+    # survives); only this summary lied. It lied in the one place the operator is told
+    # to look — the go-live dry run — and it lied in the most alarming direction
+    # available, so it is a real defect even though nothing was ever deleted.
+    def _identity(rule):
+        return (rule.get("hostname"), rule.get("service"))
+
+    live = {_identity(r) for r in managed}
+    live_hosts = {r.get("hostname") for r in managed}
+    desired_hosts = {r["hostname"] for r in desired}
+
     for r in desired:
-        verb = "keep" if r in ingress else "ADD "
+        if _identity(r) in live:
+            verb = "keep"
+        elif r["hostname"] in live_hosts:
+            verb = "MOVE"  # same host, different origin — a re-point, not an add
+        else:
+            verb = "ADD "
         notes.append(f"  {verb} {r['hostname']} -> {r['service']}")
     for r in managed:
-        if r not in desired:
+        # Only a hostname that has left the DESIRED set is a departed tenant. A
+        # hostname still desired but pointing elsewhere is the MOVE reported above.
+        if r.get("hostname") not in desired_hosts:
             notes.append(f"  DEL  {r.get('hostname')} (tenant gone)")
     notes.append(f"  catch-all preserved: {json.dumps(non_managed[-1])}")
     notes.append(f"  non-SSH rules preserved verbatim: {len(non_managed)}")
@@ -358,6 +412,33 @@ def _ensure_app_ca(app_id, hostname):
         log(f"    WARNING: no CA public key returned for {hostname}")
 
 
+def report_app_type(app, hostname):
+    """Report — never silently repair — an existing app whose `type` is not ours.
+
+    DELIBERATELY NOT A CONVERSION. Cloudflare's update schema does not obviously
+    forbid sending a different `type`, but nothing documents that a change is
+    HONOURED, and discriminators of this kind are commonly immutable after create. A
+    PUT written on that hope would either no-op silently (leaving the operator certain
+    they had fixed it) or mutate a live Access app fronting a student's shell. Neither
+    is an acceptable thing to guess at, so this only tells a human what to do.
+
+    Conversion, if it is ever wanted, needs a throwaway app proving a PUT is honoured
+    BEFORE any code path depends on it.
+    """
+    actual = (app.get("type") or "").strip()
+    if not actual or actual == ACCESS_APP_TYPE:
+        return
+    log(f"    ⚠ app type is '{actual}', wanted '{ACCESS_APP_TYPE}'.")
+    log(f"      NOT converting it in place — unverified whether Cloudflare honours a")
+    log(f"      type change, and this app fronts a live shell. To fix by hand:")
+    log(f"      delete the Access app for {hostname} in the dashboard and let the")
+    log(f"      next pass recreate it, or flip CF_ACCESS_APP_TYPE to '{actual}' if")
+    log(f"      that type is in fact the working one.")
+    log(f"      For reference, the app proven to reach a browser terminal on this")
+    log(f"      account is type 'ssh'. A type mismatch is NOT known to cause the")
+    log(f"      blocked CA generation — that app is already 'ssh'. See the doc.")
+
+
 def reconcile_access(tenants):
     log("== Access application reconcile ==")
     desired = {t["hostname"]: t for t in tenants}
@@ -373,6 +454,7 @@ def reconcile_access(tenants):
         emails = ", ".join(t["emails"]) or "NONE — this app will admit NOBODY"
         if app:
             log(f"  ensure app {hostname} (emails: {emails})")
+            report_app_type(app, hostname)
             if not DRY_RUN:
                 _ensure_policy(app["id"], t["emails"])
             try:
@@ -380,12 +462,12 @@ def reconcile_access(tenants):
             except Exception as e:  # noqa: BLE001
                 log(f"    CA ensure/log FAILED for {hostname}: {e}")
         else:
-            log(f"  CREATE app {hostname} (emails: {emails})")
+            log(f"  CREATE app {hostname} (emails: {emails}) type={ACCESS_APP_TYPE}")
             if not DRY_RUN:
                 created = cf("POST", f"/accounts/{ACCOUNT_ID}/access/apps", {
                     "name": f"{ACCESS_APP_TAG}{t['team']}",
                     "domain": hostname,
-                    "type": "self_hosted",
+                    "type": ACCESS_APP_TYPE,
                     "session_duration": SESSION_DURATION,
                 })
                 app_id = created["result"]["id"]
@@ -439,7 +521,7 @@ def main(argv=None):
             log("  ---- end ----")
         log("== Access application plan ==")
         for t in sorted(tenants, key=lambda x: x["hostname"]):
-            log(f"  would ensure self-hosted app {t['hostname']}")
+            log(f"  would ensure app {t['hostname']} (type={ACCESS_APP_TYPE})")
             log(f"    name={ACCESS_APP_TAG}{t['team']} session_duration={SESSION_DURATION}")
             log(f"    allow policy include: {[{'email': {'email': e}} for e in t['emails']]}")
             log(f"    would ensure per-app short-lived-cert CA and log its public key")
