@@ -524,21 +524,33 @@ write_files:
       	# "[stub] would send ..." and returns 202, with no SMTP host in its config
       	# schema and no nodemailer dependency. Mailpit is not installed on this guest.
 
-      	# ── Everything else -> the storefront ─────────────────────────────────────
+      	# ── Everything else -> the storefront, falling back to the starter page ───
       	# This is what https://${{ values.appName }}.capstone.uamishub.com/ serves.
+      	#
+      	# TWO upstreams, and the second one is the point. Nothing listens on 3000 until
+      	# the team has deployed, so a single-upstream proxy answers a freshly built VM's
+      	# public hostname with a bare 502. `lb_policy first` always prefers 3000 and only
+      	# uses 8080 — the scaffold's starter page, moved off :80 so Caddy can own it —
+      	# when 3000 is not answering.
+      	#
+      	# THE STATUS CODE IS WHY THIS IS A FAILOVER AND NOT `handle_errors`. The obvious
+      	# construction is an error handler that serves the placeholder, and it was tried
+      	# first: it renders the right page but keeps the ORIGINATING status, so a healthy,
+      	# freshly-built VM answered `502` with a friendly-looking body. Verified by
+      	# execution on a rebuilt guest — `curl -o /dev/null -w %{http_code}` returned 502
+      	# while the HTML looked perfect. Any uptime check, and anyone reading the tenant
+      	# host's status, would call that VM broken. Failing over to a real upstream keeps
+      	# the placeholder a genuine 200.
+      	#
+      	# `lb_try_duration` is what makes the failover happen WITHIN the first request
+      	# rather than after a failure has been recorded; without it the very first visitor
+      	# still gets the 502 that this whole block exists to avoid.
       	handle {
-      		reverse_proxy 127.0.0.1:3000
-      	}
-
-      	# ── Before the team's first deploy ────────────────────────────────────────
-      	# Nothing listens on 3000 until the app is deployed, so the proxy above fails.
-      	# Serving the scaffold's placeholder page on that error keeps a freshly built
-      	# VM looking alive and self-explanatory instead of returning a bare 502 that
-      	# reads as "the platform is broken".
-      	handle_errors {
-      		root * /var/www/app
-      		rewrite * /index.html
-      		file_server
+      		reverse_proxy 127.0.0.1:3000 127.0.0.1:8080 {
+      			lb_policy first
+      			lb_try_duration 5s
+      			fail_duration 10s
+      		}
       	}
       }
   - path: /usr/local/bin/capstone-lab-install
@@ -913,13 +925,29 @@ write_files:
       # package caused on this template (see the ttyd notes in runcmd): the loser
       # restart-loops forever while `systemctl is-active` still says "active".
       #
-      # So the starter is stopped and MASKED, not merely disabled -- masked because a
-      # later `systemctl enable` or a package refresh could otherwise quietly hand it
-      # back the port on the next boot. Its placeholder page is not lost: Caddy serves
-      # /var/www/app/index.html as the error fallback, so a VM whose team has not
-      # deployed yet still answers with the friendly page instead of a bare 502.
-      systemctl disable --now capstone-app.service >/dev/null 2>&1 || true
-      systemctl mask capstone-app.service          >/dev/null 2>&1 || true
+      # The starter is MOVED, not masked. Masking it was the first approach and it made a
+      # freshly-built VM answer its public hostname with a 502 (Caddy's error handler
+      # renders the placeholder but keeps the originating status -- see the note in the
+      # Caddyfile). Instead the starter keeps serving the same page on :8080, and Caddy
+      # fails over to it whenever the storefront is not up. The team's hostname is then a
+      # genuine 200 from the moment the VM finishes booting, and it becomes the real
+      # storefront the moment they deploy, with no further change here.
+      #
+      # A DROP-IN rather than an edit to capstone-app.service: that unit is the generic
+      # scaffold's, rendered with the team's own `port`. Overriding ExecStart in a
+      # drop-in leaves the template's file untouched and makes this reversible by
+      # deleting one directory. The empty `ExecStart=` is REQUIRED -- systemd appends to
+      # ExecStart otherwise, and the unit would try to run both commands.
+      install -d -m 0755 /etc/systemd/system/capstone-app.service.d
+      cat > /etc/systemd/system/capstone-app.service.d/10-lab-fallback.conf <<'DROPIN'
+      [Service]
+      ExecStart=
+      ExecStart=/usr/bin/python3 -m http.server 8080 --directory /var/www/app
+      DROPIN
+      systemctl unmask capstone-app.service >/dev/null 2>&1 || true
+      systemctl daemon-reload
+      systemctl enable --now capstone-app.service >/dev/null 2>&1 || true
+      systemctl restart capstone-app.service >/dev/null 2>&1 || true
 
       install -D -m 0644 /etc/capstone/Caddyfile /etc/caddy/Caddyfile
       if ! caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1; then
@@ -940,15 +968,29 @@ write_files:
         # same class of lie as `systemctl is-active` reporting "active" for a unit that
         # is restart-looping — the failure that once left this template's web console
         # dead while every status read green. So: open a connection.
-        listening=0
+        # NOT `curl -f`. That was the first version and it reported "caddy is NOT
+        # answering" about a Caddy that was answering perfectly well — with a 502,
+        # because at that moment nothing was deployed behind it. `-f` treats any 4xx/5xx
+        # as a failed request, which collapses "nothing is listening" and "listening, and
+        # correctly reporting that its upstream is down" into the same result. Those need
+        # to be told apart: the second one is the NORMAL state of a freshly built VM.
+        #
+        # So: ask for the status code, and require a real 200. With the starter page
+        # failover configured above, 200 is what a correctly-built VM returns whether or
+        # not the team has deployed yet — which makes this a check on the whole :80 path
+        # rather than just on the socket.
+        code=000
         for i in $(seq 1 30); do
-          if curl -fsS -o /dev/null --max-time 3 http://127.0.0.1:80/ 2>/dev/null; then listening=1; break; fi
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:80/ 2>/dev/null || echo 000)
+          [ "$code" = "200" ] && break
           sleep 2
         done
-        if [ "$listening" = 1 ]; then
-          ok "caddy is answering on :80"
+        if [ "$code" = "200" ]; then
+          ok "caddy is answering on :80 (HTTP 200)"
+        elif [ "$code" = "000" ]; then
+          fail "nothing is listening on :80 — the tenant hostname will not serve. Try: systemctl status caddy; journalctl -u caddy -n 50"
         else
-          fail "caddy is NOT answering on :80 — the tenant hostname will not serve. Try: systemctl status caddy; journalctl -u caddy -n 50"
+          fail "caddy answered :80 with HTTP ${code}, not 200 — check that the starter fallback on :8080 is up (systemctl status capstone-app)"
         fi
       fi
 
@@ -1043,7 +1085,22 @@ write_files:
       echo "--- pnpm install ---"
       run_as_builder "pnpm install --frozen-lockfile" || { echo "DEPLOY FAILED: pnpm install" >&2; exit 1; }
 
-      # ── 3. schema ───────────────────────────────────────────────────────────────
+      echo "--- pnpm build ---"
+      run_as_builder "NEXT_TELEMETRY_DISABLED=1 pnpm build" || { echo "DEPLOY FAILED: build" >&2; exit 1; }
+
+      # ── 3. schema — AFTER the build, and that ordering is load-bearing ──────────
+      # `packages/shared` publishes `main: ./dist/index.js`, and apps/orders-api's
+      # src/db/schema.ts imports from it. dist/ does not exist in a fresh clone, so
+      # running db:migrate before the build dies with
+      #     Error [ERR_MODULE_NOT_FOUND]: Cannot find module
+      #     '.../node_modules/@crimson-copies/shared/dist/index.js'
+      #     imported from .../apps/orders-api/src/db/schema.ts
+      # — which reads like a broken dependency rather than a missing build step. Found by
+      # running it. docs/manual-deploy.md states the same dependency ("every other build
+      # needs its dist output present first"); the root `build` script is `pnpm -r
+      # --workspace-concurrency=1 run build`, which builds shared first in topological
+      # order, so one `pnpm build` above is enough.
+      #
       # RUN FROM THE CLONE, NEVER FROM /opt. Both db:migrate and db:seed are
       # `tsx src/db/*.ts`, and tsx is a DEV dependency — the `pnpm --prod deploy`
       # artifact staged into /opt below deliberately has no dev deps, so it physically
@@ -1051,18 +1108,15 @@ write_files:
       #
       # Invoked via `pnpm --filter ... run` rather than a bare tsx call because
       # drizzle.config's `migrationsFolder: './drizzle'` is CWD-relative; pnpm sets CWD
-      # to the package dir, a run from the repo root throws.
+      # to the package dir, and a run from the repo root throws.
       #
-      # Idempotent: drizzle skips already-applied migrations and seed.ts is written to
-      # be re-runnable, so a second `capstone-app-deploy` is safe.
+      # Idempotent: drizzle skips already-applied migrations and seed.ts is re-runnable,
+      # so a second `capstone-app-deploy` is safe.
       echo "--- db migrate + seed ---"
       run_as_builder "pnpm --filter @crimson-copies/orders-api run db:migrate" \
         || { echo "DEPLOY FAILED: db:migrate" >&2; exit 1; }
       run_as_builder "pnpm --filter @crimson-copies/orders-api run db:seed" \
         || echo "WARNING: db:seed failed (schema is migrated; demo logins may be absent)" >&2
-
-      echo "--- pnpm build ---"
-      run_as_builder "NEXT_TELEMETRY_DISABLED=1 pnpm build" || { echo "DEPLOY FAILED: build" >&2; exit 1; }
 
       # ── 4. stage each service into /opt ─────────────────────────────────────────
       # Backends: `pnpm --prod deploy` is what produces a REAL, pruned node_modules.
@@ -1075,7 +1129,12 @@ write_files:
         echo "--- staging $svc ---"
         stage="/tmp/capstone-stage-$svc"
         rm -rf "$stage"
-        run_as_builder "pnpm --filter $pkg --prod deploy --legacy '$stage'" \
+        # NO `--legacy` here. It reads like the right flag (pnpm 10 requires it for this
+        # command's pre-10 behaviour) and pnpm 9.15.0 REJECTS it outright:
+        #     ERROR  Unknown option: 'legacy'
+        # Verified against the pinned pnpm on a real guest. docs/manual-deploy.md does not
+        # use it either; this matches that document exactly.
+        run_as_builder "pnpm --filter $pkg --prod deploy '$stage'" \
           || { echo "DEPLOY FAILED: pnpm deploy $svc" >&2; exit 1; }
         rsync -a --delete --exclude '.env' "$stage/" "$DEST_ROOT/$svc/"
         rm -rf "$stage"
