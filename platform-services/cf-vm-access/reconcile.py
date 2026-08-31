@@ -260,11 +260,36 @@ def plan_ingress(current_ingress, tenants, allow_empty=False):
                      "not have preserved every non-SSH rule verbatim. No change.")
         return None, notes
 
+    # WHAT CHANGED — reported on rule IDENTITY (hostname, service), never on whole-dict
+    # equality. Cloudflare decorates every stored rule with fields we do not send
+    # (`id`, and an empty `originRequest: {}`), so a live rule is NEVER `==` to the
+    # bare two-key rule we build. Comparing dicts made the plan announce
+    #     ADD  <host> ...
+    #     DEL  <host> (tenant gone)
+    # for one healthy, unchanged tenant — simultaneously, which is impossible. The
+    # WRITE was always correct (`new_ingress` is rebuilt from `desired`, so the rule
+    # survives); only this summary lied. It lied in the one place the operator is told
+    # to look — the go-live dry run — and it lied in the most alarming direction
+    # available, so it is a real defect even though nothing was ever deleted.
+    def _identity(rule):
+        return (rule.get("hostname"), rule.get("service"))
+
+    live = {_identity(r) for r in managed}
+    live_hosts = {r.get("hostname") for r in managed}
+    desired_hosts = {r["hostname"] for r in desired}
+
     for r in desired:
-        verb = "keep" if r in ingress else "ADD "
+        if _identity(r) in live:
+            verb = "keep"
+        elif r["hostname"] in live_hosts:
+            verb = "MOVE"  # same host, different origin — a re-point, not an add
+        else:
+            verb = "ADD "
         notes.append(f"  {verb} {r['hostname']} -> {r['service']}")
     for r in managed:
-        if r not in desired:
+        # Only a hostname that has left the DESIRED set is a departed tenant. A
+        # hostname still desired but pointing elsewhere is the MOVE reported above.
+        if r.get("hostname") not in desired_hosts:
             notes.append(f"  DEL  {r.get('hostname')} (tenant gone)")
     notes.append(f"  catch-all preserved: {json.dumps(non_managed[-1])}")
     notes.append(f"  non-SSH rules preserved verbatim: {len(non_managed)}")

@@ -213,5 +213,80 @@ class TestGuards(Base):
         self.assertNotIn("hostname", new[-1])
 
 
+class TestPlanNotes(Base):
+    """The plan SUMMARY must describe what the write actually does.
+
+    Regression guard for a defect found against the live v23 tunnel config: the
+    summary compared whole dicts, but Cloudflare stores every rule decorated with
+    fields we never send (`id`, and an empty `originRequest: {}`). A live, healthy,
+    unchanged tenant therefore compared unequal to the bare rule we build, and the
+    plan announced `ADD` and `DEL <host> (tenant gone)` for it at the same time.
+
+    The write was never wrong. The go-live dry run — the one artefact the operator
+    doc tells a human to read before flipping DRY_RUN off — was.
+    """
+
+    # A rule exactly as Cloudflare hands it back, decorated the way the live tunnel
+    # decorates it. This is the whole point of the fixture: it is NOT `==` to ours.
+    def live_rule(self, host, service, rule_id="1"):
+        return {"hostname": host, "id": rule_id,
+                "originRequest": {}, "service": service}
+
+    def test_unchanged_live_tenant_reports_keep_and_never_tenant_gone(self):
+        tenants = self.tenants(svc("paper-papas", "storefront", "paper-papas-vm-prod"))
+        live = [self.live_rule(
+            "paper-papas-ssh.uamishub.com",
+            "ssh://storefront-ssh.paper-papas-vm-prod.svc.cluster.local:22")]
+        new, notes = reconcile.plan_ingress(live + PLATFORM_RULES, tenants)
+        self.assertIsNotNone(new, notes)
+        body = "\n".join(notes)
+        self.assertIn("keep paper-papas-ssh.uamishub.com", body)
+        self.assertNotIn("tenant gone", body)
+        self.assertNotIn("ADD ", body)
+
+    def test_the_rule_survives_the_write_even_though_the_note_said_keep(self):
+        # "keep" must not be mistaken for "we skipped it" — the rule is rebuilt.
+        tenants = self.tenants(svc("paper-papas", "storefront", "paper-papas-vm-prod"))
+        live = [self.live_rule(
+            "paper-papas-ssh.uamishub.com",
+            "ssh://storefront-ssh.paper-papas-vm-prod.svc.cluster.local:22")]
+        new, _ = reconcile.plan_ingress(live + PLATFORM_RULES, tenants)
+        self.assertEqual(new[0], {
+            "hostname": "paper-papas-ssh.uamishub.com",
+            "service": "ssh://storefront-ssh.paper-papas-vm-prod.svc.cluster.local:22"})
+        self.assertEqual(new[1:], PLATFORM_RULES)
+
+    def test_a_genuinely_departed_tenant_still_reports_tenant_gone(self):
+        # The alarm must still fire when it is real, or the fix has broken teardown.
+        tenants = self.tenants(svc("paper-papas", "storefront", "paper-papas-vm-prod"))
+        live = [
+            self.live_rule("paper-papas-ssh.uamishub.com",
+                           "ssh://storefront-ssh.paper-papas-vm-prod.svc.cluster.local:22"),
+            self.live_rule("blue-jays-ssh.uamishub.com",
+                           "ssh://app-ssh.blue-jays-vm-prod.svc.cluster.local:22", "2"),
+        ]
+        _, notes = reconcile.plan_ingress(live + PLATFORM_RULES, tenants)
+        body = "\n".join(notes)
+        self.assertIn("DEL  blue-jays-ssh.uamishub.com (tenant gone)", body)
+        self.assertNotIn("DEL  paper-papas-ssh.uamishub.com", body)
+
+    def test_a_repointed_tenant_reports_move_not_add_plus_delete(self):
+        # Same hostname, different origin (e.g. the app was renamed). That is one
+        # re-point, not a delete plus an add of the same host.
+        tenants = self.tenants(svc("paper-papas", "newapp", "paper-papas-vm-prod"))
+        live = [self.live_rule(
+            "paper-papas-ssh.uamishub.com",
+            "ssh://oldapp-ssh.paper-papas-vm-prod.svc.cluster.local:22")]
+        _, notes = reconcile.plan_ingress(live + PLATFORM_RULES, tenants)
+        body = "\n".join(notes)
+        self.assertIn("MOVE paper-papas-ssh.uamishub.com", body)
+        self.assertNotIn("tenant gone", body)
+
+    def test_a_brand_new_tenant_still_reports_add(self):
+        tenants = self.tenants(svc("paper-papas", "storefront", "paper-papas-vm-prod"))
+        _, notes = reconcile.plan_ingress(PLATFORM_RULES, tenants)
+        self.assertIn("ADD  paper-papas-ssh.uamishub.com", "\n".join(notes))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
