@@ -1,0 +1,28 @@
+# VM-tenant teardown ledger (ADR-032a). This is NOT a Crossplane CapstoneTenant XR and it
+# is NOT applied to the cluster — it is an INERT marker that makes this VM tenant visible to
+# the Backstage teardown UI (capstone-tenants-backend listTenants), which otherwise only
+# enumerates tenants/_claims/*.yaml and so cannot see VM tenants (they deploy from the git
+# directory generator over tenants/team-<team>/vm/, not from a Crossplane claim).
+#
+# WHY IT IS SAFE / INERT: it lives under tenants/_vm-claims/, an underscore-prefixed dir that
+# every tenant generator EXCLUDES — the `tenants` ApplicationSet skips `tenants/_*`, and
+# `platform-crossplane-claims` syncs only `tenants/_claims` (not `_vm-claims`). So nothing ever
+# tries to apply this `kind`. It exists purely so teardown can (a) LIST the VM tenant and
+# (b) know which tree to remove (`teardownPath`).
+#
+# TEARDOWN CONTRACT: removing this VM tenant = a PR that git-rm's BOTH this marker AND the
+# `teardownPath` tree. On merge the `tenants` ApplicationSet drops the `tenant-<team>`
+# bootstrap App → ArgoCD prunes the VM AppProject + the VM ApplicationSet + the
+# <team>-vm-prod namespace; namespace GC then deletes the VM/DataVolume and RECLAIMS the
+# rootdisk PVC (ceph-block reclaimPolicy: Delete → the RBD image is freed, no orphan).
+apiVersion: platform.capstone/v1
+kind: VmTenantLedger
+metadata:
+  name: ss-evan-and-emily-ss-evan-and-emily
+team: ss-evan-and-emily
+appName: ss-evan-and-emily
+semester: 2026-fall
+# Discriminator the teardown backend reads to branch VM-vs-container teardown.
+layout: vm
+# The tree teardown removes (in addition to this marker) to de-provision the VM tenant.
+teardownPath: tenants/team-ss-evan-and-emily
