@@ -1,0 +1,48 @@
+# WEB CONSOLE Ingress — publishes the browser terminal at
+#   <team>-console.uamishub.com
+#
+# HOSTNAME SHAPE IS A TLS CONSTRAINT, NOT A PREFERENCE. The live certificate is
+# `DNS:uamishub.com, DNS:*.uamishub.com` — a ONE-level wildcard. `<team>-console` is a
+# single label under the apex, so it is covered. A dotted `console.<team>.uamishub.com`
+# is two levels and is NOT covered: the browser fails the TLS handshake before
+# Cloudflare Access even loads, which looks nothing like an auth problem and has
+# already cost this project real time. Keep it one label.
+#
+# NO TUNNEL CHANGE IS NEEDED. The shared tunnel already routes `*.uamishub.com` to
+# Traefik, so this host is carried by the existing catch-all wildcard rule the moment
+# the Ingress exists. That is a real advantage of the console over the SSH path: SSH
+# carries no Host header and therefore needs its own dedicated, correctly-ordered
+# tunnel rule per tenant; this needs none.
+#
+# WHAT STILL HAS TO BE DONE ONCE, BY A HUMAN: a Cloudflare Access application on this
+# hostname, with an Allow policy for the team. Until that exists the console is
+# reachable by anyone who knows the URL. See docs/operator/vm-ssh-cloudflare-access.md
+# — do not publish the URL to students before the Access app is in place.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ${{ values.appName }}-console
+  labels:
+    app.kubernetes.io/name: ${{ values.appName }}
+    platform.capstone/team: ${{ values.team }}
+  annotations:
+    # ttyd upgrades to a WebSocket after the first request. Traefik proxies the
+    # upgrade without special configuration, but the read/write timeouts must not
+    # guillotine an idle terminal — a student reading output for a few minutes is a
+    # perfectly normal idle websocket.
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+spec:
+  rules:
+    - host: ${{ values.team }}-console.uamishub.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ${{ values.appName }}-console
+                port:
+                  name: http
+  tls:
+    - hosts:
+        - ${{ values.team }}-console.uamishub.com

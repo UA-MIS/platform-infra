@@ -371,7 +371,107 @@ write_files:
       [Install]
       WantedBy=multi-user.target
 
+  # ── WEB CONSOLE (the DEFAULT door) — ttyd over the ordinary HTTP path ───────
+  # A browser terminal served by the guest itself, exposed as a normal HTTP Service
+  # + Ingress and fronted by a plain self-hosted Cloudflare Access application.
+  #
+  # WHY THIS EXISTS, and why it is the default rather than SSH. The requirement is
+  # that a student's GitHub login is the ONLY credential. Getting there over SSH
+  # means Cloudflare must mint a short-lived certificate, which means the legacy
+  # per-application CA — a path Cloudflare itself marks "not recommended for new
+  # deployments" and which is currently blocked on this account. Serving the terminal
+  # from the guest removes that whole problem class: there is NO SSH hop here, so
+  # there is no key material anywhere — no student keypairs, no service-held private
+  # key, no CA, no certificates. Fifteen students generating SSH keys was the thing
+  # this is designed to avoid.
+  #
+  # ⚠ SECURITY — READ BEFORE CHANGING THE ACCESS POLICY. Anyone who gets past Access
+  # lands in a shell as the cloud user, which can sudo. Access is the ONLY wall in
+  # front of it. That is the same exposure the SSH path already has, so it is not new
+  # — but it means the Access application for the console host MUST carry an Allow
+  # policy naming the team, and MUST NOT carry Bypass or Service Auth. Cloudflare
+  # additionally documents that Bypass and Service Auth are unsupported for
+  # browser-rendered applications. A Bypass policy here is an unauthenticated root
+  # shell on the public internet.
+  #
+  # ttyd binds 0.0.0.0, and that is REQUIRED, not lax. KubeVirt masquerade networking
+  # DNATs traffic arriving at the launcher pod to the GUEST's interface address — not
+  # to the guest's loopback. A console bound to 127.0.0.1 inside the guest would be
+  # unreachable through the Service, and would fail exactly like a missing route. The
+  # starter app on the app port binds the same way for the same reason.
+  # The guest is not exposed by this: reaching the guest address at all is gated by
+  # the tenant NetworkPolicies, and the public door is Access.
+  - path: /etc/systemd/system/capstone-console.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Capstone VM web console (ttyd) for ${{ values.appName }}
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      # --writable is required for an interactive shell; without it the terminal is
+      # read-only. Each client connection gets its OWN shell process — verified by
+      # execution: two concurrent websocket clients produced two distinct PIDs
+      # ("started process, pid: 3054" / "pid: 3056" in ttyd's own log). That is what
+      # we want for a team lab; `--once`, or a shared session, would mean students
+      # typing over each other. `--max-clients` is left at its default of 0 (no cap).
+      #
+      # THE TITLE IS SET WITH `-t titleFixed=`, NOT `--title-fixed`. There is no
+      # `--title-fixed` option in ttyd 1.7.4 — verified against `ttyd --help`. Passing
+      # it does NOT fail loudly: ttyd still starts and still listens, but the unknown
+      # option shifts argv so the TITLE becomes the command, every shell dies instantly
+      # with exit 254, and the student sees a terminal that opens and closes with no
+      # error anywhere except ttyd's own log. Caught by execution before shipping.
+      # Keep the value space-free so it needs no quoting through systemd.
+      ExecStart=/usr/bin/ttyd --port 7681 --interface 0.0.0.0 --writable \
+                -t titleFixed=${{ values.appName }}-console \
+                /usr/local/bin/capstone-console-shell
+      Restart=always
+      RestartSec=2
+      User=root
+
+      [Install]
+      WantedBy=multi-user.target
+  # The shell each console connection gets. A login shell as the CLOUD USER, not as
+  # root — sudo still works, but the session starts unprivileged and lands in the
+  # user's home directory exactly like an SSH session would.
+  #
+  # The cloud user is distro-specific (`ubuntu` on the Ubuntu images this template
+  # ships, `fedora`/`debian` elsewhere), so it is DETECTED rather than hardcoded — a
+  # hardcoded name would turn a base-image swap into a broken console.
+  - path: /usr/local/bin/capstone-console-shell
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      for u in ubuntu fedora debian cloud-user; do
+        if id -u "$u" >/dev/null 2>&1; then exec /bin/su - "$u"; fi
+      done
+      # No known cloud user: fall back to a root shell rather than dropping the
+      # student into nothing. Loud, because it means the image changed.
+      echo "CAPSTONE: no cloud user found; opening a root shell." >&2
+      exec /bin/bash --login
+
 runcmd:
+  # ── WEB CONSOLE (install) ───────────────────────────────────────────────────
+  # `ttyd` is in noble/universe (1.7.4) — verified by execution, so no third-party
+  # binary and no checksum-pinned download is needed.
+  #
+  # BUT apt must run over HTTPS. The guest egress NetworkPolicy permits :53 and :443
+  # ONLY, so the default `http://archive.ubuntu.com` sources are blackholed. Rewrite
+  # them to https first. (ca-certificates ships in the Ubuntu cloud image, which is
+  # also why the roster's https://github.com fetch already works.)
+  #
+  # ⚠ `apt-get update` EXITS 0 EVEN WHEN EVERY INDEX FAILS TO DOWNLOAD. Verified by
+  # execution: with no CA certs it printed four `Certificate verification failed`
+  # warnings and still returned 0. So `apt-get update && apt-get install` would sail
+  # straight past a total failure and the only symptom would be a missing console.
+  # The install step below is therefore checked explicitly, and logs loudly on
+  # failure instead of silently leaving the VM without its default door.
+  - [ sh, -c, "sed -i 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g; s|http://security.ubuntu.com|https://security.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true" ]
+  - [ sh, -c, "sed -i 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g; s|http://security.ubuntu.com|https://security.ubuntu.com|g' /etc/apt/sources.list 2>/dev/null || true" ]
+  - [ sh, -c, "DEBIAN_FRONTEND=noninteractive apt-get update -qq || true" ]
+  - [ sh, -c, "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ttyd || echo 'CAPSTONE: ttyd install FAILED — web console will be unavailable; check https apt egress' >&2" ]
   # EXPLICITLY enable sshd. Cloud images normally ship it enabled, but "normally" is
   # not a guarantee, and a VM with no listening sshd is indistinguishable from a
   # broken tunnel route from the student's laptop — the exact ADR-032 gap. Enabling
@@ -393,5 +493,9 @@ runcmd:
   - [ sh, -c, "/usr/local/bin/capstone-ssh-import || true" ]
   - [ systemctl, enable, --now, capstone-ssh-import.timer ]
   - [ systemctl, enable, --now, capstone-app.service ]
+  # The web console — the default door. `|| true` so a VM whose ttyd install failed
+  # still finishes booting with SSH and the app working; the console is then the only
+  # thing missing, and `systemctl status capstone-console` says why.
+  - [ sh, -c, "systemctl enable --now capstone-console.service || true" ]
 
 final_message: "capstone-app first boot complete after $UPTIME seconds"

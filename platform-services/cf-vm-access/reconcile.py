@@ -91,6 +91,34 @@ ALLOW_EMPTY = os.environ.get("ALLOW_EMPTY_DESIRED", "0").strip() == "1"
 SSH_LABEL = os.environ.get("SSH_SVC_LABEL", "platform.capstone/access=ssh").strip()
 SESSION_DURATION = os.environ.get("CF_ACCESS_SESSION", "24h").strip()
 
+# The Access application `type` discriminator sent on create.
+#
+# WHY THIS IS AN ENV VAR AND NOT A CONSTANT. The evidence here is genuinely mixed and
+# we cannot settle it without a token, so it is made changeable without a code change:
+#
+#   * The API `type` enum does include a first-class `ssh` value (alongside `vnc`,
+#     `rdp`, `infrastructure`, `self_hosted`, ...). CONFIRMED from the API reference.
+#   * The short-lived-certificate (legacy) page says to create "a self-hosted Access
+#     application". CONFIRMED, but that page is describing the dashboard's umbrella
+#     CATEGORY, which is not the same thing as the API discriminator.
+#   * The browser-rendering page says browser rendering "is only supported for
+#     self-hosted public applications" and is switched on per-application by the
+#     toggle "Allow access through browser-based RDP, SSH, or VNC sessions" → SSH.
+#     CONFIRMED — and it reads as a PROPERTY OF a self-hosted app, not a type.
+#
+# WORKING HYPOTHESIS (NOT doc-confirmed, do not repeat it as fact): an application
+# that is not SSH-enabled is not offered in the Service-credentials "Application"
+# dropdown, which is why the operator sees a greyed-out control and why generating a
+# CA returned a content-free `400`. That fits every observation we have, and no
+# counter-example is known — but no Cloudflare sentence states it, so it stays a
+# hypothesis. `GET /accounts/{id}/access/apps/ca` settles it in one call once a token
+# exists.
+#
+# The one thing that IS certain: whatever produces a CA-eligible, browser-rendering
+# SSH app, `type: "self_hosted"` alone has demonstrably not produced one on this
+# account. Default to `ssh`; set CF_ACCESS_APP_TYPE=self_hosted to revert instantly.
+ACCESS_APP_TYPE = os.environ.get("CF_ACCESS_APP_TYPE", "ssh").strip() or "ssh"
+
 EMAILS_ANNOTATION = "platform.capstone/ssh-access-emails"
 TEAM_LABEL = "platform.capstone/team"
 CF_API = "https://api.cloudflare.com/client/v4"
@@ -383,6 +411,32 @@ def _ensure_app_ca(app_id, hostname):
         log(f"    WARNING: no CA public key returned for {hostname}")
 
 
+def report_app_type(app, hostname):
+    """Report — never silently repair — an existing app whose `type` is not ours.
+
+    DELIBERATELY NOT A CONVERSION. Cloudflare's update schema does not obviously
+    forbid sending a different `type`, but nothing documents that a change is
+    HONOURED, and discriminators of this kind are commonly immutable after create. A
+    PUT written on that hope would either no-op silently (leaving the operator certain
+    they had fixed it) or mutate a live Access app fronting a student's shell. Neither
+    is an acceptable thing to guess at, so this only tells a human what to do.
+
+    Conversion, if it is ever wanted, needs a throwaway app proving a PUT is honoured
+    BEFORE any code path depends on it.
+    """
+    actual = (app.get("type") or "").strip()
+    if not actual or actual == ACCESS_APP_TYPE:
+        return
+    log(f"    ⚠ app type is '{actual}', wanted '{ACCESS_APP_TYPE}'.")
+    log(f"      NOT converting it in place — unverified whether Cloudflare honours a")
+    log(f"      type change, and this app fronts a live shell. To fix by hand:")
+    log(f"      delete the Access app for {hostname} in the dashboard and let the")
+    log(f"      next pass recreate it, or flip CF_ACCESS_APP_TYPE to '{actual}' if")
+    log(f"      that type is in fact the working one.")
+    log(f"      A wrong type is the leading suspect for a greyed-out 'generate")
+    log(f"      certificate' control and a content-free 400 — see the operator doc.")
+
+
 def reconcile_access(tenants):
     log("== Access application reconcile ==")
     desired = {t["hostname"]: t for t in tenants}
@@ -398,6 +452,7 @@ def reconcile_access(tenants):
         emails = ", ".join(t["emails"]) or "NONE — this app will admit NOBODY"
         if app:
             log(f"  ensure app {hostname} (emails: {emails})")
+            report_app_type(app, hostname)
             if not DRY_RUN:
                 _ensure_policy(app["id"], t["emails"])
             try:
@@ -405,12 +460,12 @@ def reconcile_access(tenants):
             except Exception as e:  # noqa: BLE001
                 log(f"    CA ensure/log FAILED for {hostname}: {e}")
         else:
-            log(f"  CREATE app {hostname} (emails: {emails})")
+            log(f"  CREATE app {hostname} (emails: {emails}) type={ACCESS_APP_TYPE}")
             if not DRY_RUN:
                 created = cf("POST", f"/accounts/{ACCOUNT_ID}/access/apps", {
                     "name": f"{ACCESS_APP_TAG}{t['team']}",
                     "domain": hostname,
-                    "type": "self_hosted",
+                    "type": ACCESS_APP_TYPE,
                     "session_duration": SESSION_DURATION,
                 })
                 app_id = created["result"]["id"]
@@ -464,7 +519,7 @@ def main(argv=None):
             log("  ---- end ----")
         log("== Access application plan ==")
         for t in sorted(tenants, key=lambda x: x["hostname"]):
-            log(f"  would ensure self-hosted app {t['hostname']}")
+            log(f"  would ensure app {t['hostname']} (type={ACCESS_APP_TYPE})")
             log(f"    name={ACCESS_APP_TAG}{t['team']} session_duration={SESSION_DURATION}")
             log(f"    allow policy include: {[{'email': {'email': e}} for e in t['emails']]}")
             log(f"    would ensure per-app short-lived-cert CA and log its public key")

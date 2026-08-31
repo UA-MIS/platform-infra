@@ -20,6 +20,53 @@ one scoped API token. Until then every VM tenant needs the dashboard steps in
 
 ---
 
+## Start here: the WEB CONSOLE is the default door
+
+**A student does not need an SSH key, a certificate, or any installed software.** They
+open `https://<team>-console.uamishub.com`, sign in with GitHub, and get a terminal on
+their VM. Their GitHub login is the only credential — which was the requirement all
+along.
+
+The VM serves that terminal itself (`ttyd`, installed and started by cloud-init), and
+it is published as an **ordinary HTTP Service + Ingress** behind an **ordinary
+self-hosted Cloudflare Access application**. That is the entire point of the design:
+
+| | Web console | SSH |
+| --- | --- | --- |
+| Student installs | nothing | `cloudflared` |
+| Credential | GitHub login | GitHub login + an SSH keypair |
+| Needs a Cloudflare CA / short-lived certs | **no** | yes |
+| Needs a per-tenant tunnel rule | **no** — rides `*.uamishub.com` | yes, and it must sit above the catch-all |
+| Cloudflare feature maturity | ordinary self-hosted app | legacy, "not recommended for new deployments" |
+
+SSH still works and is still supported — it is the advanced path for people who want a
+real terminal. It is no longer the path a student is asked to walk on day one, and it
+is no longer blocking: fifteen students generating SSH keypairs was the thing this
+design exists to avoid.
+
+> ### ⚠ The Access policy on the console host is the ONLY wall in front of a shell
+>
+> Anyone who gets past Access lands in a shell that can `sudo`. That is the same
+> exposure the SSH path has always had — it is not new — but on the console there is
+> no second factor behind it: no key, no certificate, nothing. So:
+>
+> - the policy **must** be **Allow**, scoped to the team's emails;
+> - it must **never** be **Bypass** or **Service Auth**. A Bypass policy here is an
+>   unauthenticated, sudo-capable shell on the public internet. (Cloudflare does not
+>   support either decision on browser-rendered apps, but this host is an ordinary
+>   HTTP app, so nothing stops you creating one by mistake.)
+> - **do not publish the URL to students before the Access application exists.** The
+>   Ingress is live as soon as ArgoCD syncs the tenant; Access is what makes it safe.
+
+**What is proven, and what is not.** The guest side is verified by execution against
+Ubuntu 24.04: apt over HTTPS-only egress, `ttyd 1.7.4` installed from `noble/universe`,
+the shipped `ExecStart` serving HTTP 200, two concurrent clients receiving **two
+independent shell processes**, and the session landing as the cloud user in its home
+directory. The leg through Cloudflare Access needs an interactive human login and is
+**not** verified — that is the click-list below.
+
+---
+
 ## The whole path, end to end
 
 ```
@@ -206,6 +253,78 @@ kubectl delete vmi -n <team>-vm-prod <app>     # this is the one that takes
 runs everything from scratch: one step instead of two, both belts active immediately,
 and `write_files`/`runcmd` re-run (which is also how a newly-issued Cloudflare Access
 CA gets into the guest). Cost is a fresh CDI import, ~10-15 minutes.
+
+---
+
+## Per tenant: open the web console (the click-list)
+
+Literal navigation, literal values. Do this once per team. It is the only Cloudflare
+step the console needs — there is **no tunnel change and no DNS change**, because
+`*.uamishub.com` already routes to Traefik and is already covered by the wildcard
+certificate.
+
+**Before you start**, confirm the tenant is actually serving the console. From a
+machine with cluster access:
+
+```bash
+TEAM=paper-papas ; APP=paper-papas          # app name, usually the same
+kubectl -n ${TEAM}-vm-prod get svc ${APP}-console ${APP}
+kubectl -n ${TEAM}-vm-prod get ingress ${APP}-console
+# and prove the guest is answering on the console port, from the ingress tier:
+kubectl -n kube-system run consoleprobe --rm -it --restart=Never --image=curlimages/curl -- \
+  -s -o /dev/null -w '%{http_code}\n' --max-time 5 \
+  http://${APP}-console.${TEAM}-vm-prod.svc.cluster.local/
+```
+
+`200` means the guest's `ttyd` is up and Traefik can reach it. Anything else is a
+guest-side problem — fix that before touching Cloudflare, or you will be debugging
+Access in front of a VM that is not serving.
+
+**Then, in the Cloudflare dashboard:**
+
+1. Go to **Zero Trust** → **Access controls** → **Applications**.
+2. Click **Add an application**.
+3. Choose **Self-hosted**. (Not Infrastructure. Not SaaS. This is a plain HTTP app —
+   that is the whole advantage of the console over SSH.)
+4. **Application name:** `vm-console:<team>` — e.g. `vm-console:paper-papas`.
+5. **Session Duration:** `24 hours`.
+6. Under **Public hostname**, click **Add public hostname** and enter:
+   - **Subdomain:** `<team>-console` — e.g. `paper-papas-console`
+   - **Domain:** `uamishub.com` (select it from the dropdown)
+   - **Path:** leave empty
+   > ⚠ **Subdomain must be exactly one label.** `paper-papas-console` is correct.
+   > `console.paper-papas` is **wrong** — that is two labels, the wildcard certificate
+   > covers only one, and the browser fails the TLS handshake before the Access login
+   > page can load. The error will look nothing like a configuration problem.
+7. Click **Next** to reach policies.
+8. **Add a policy:**
+   - **Policy name:** `team-allow`
+   - **Action:** **Allow** ← never Bypass, never Service Auth
+   - **Configure rules** → **Include** → Selector **Emails** → **Value:** paste the
+     team's university emails, one per entry.
+   - Leave *Require* and *Exclude* empty.
+9. Click **Next**, then **Next** again through the settings page — **change nothing
+   there**. In particular do **not** enable browser rendering; this is an HTTP app and
+   the terminal is rendered by the VM, not by Cloudflare.
+10. Click **Save**.
+
+**Verify, before you tell the team:**
+
+```bash
+curl -s -o /dev/null -w '%{http_code} -> %{redirect_url}\n' \
+  https://<team>-console.uamishub.com/
+```
+
+You want `302` redirecting to `https://<your-team-domain>.cloudflareaccess.com/cdn-cgi/access/login/...`.
+
+- A `302` to the Access login is **correct** — Access is in front.
+- A `200` means **Access is NOT protecting it** and the shell is open to the internet.
+  Fix that before doing anything else.
+- A `404` means Traefik has no route — the Ingress has not synced.
+- A TLS error means the hostname is not one label under the apex. Re-read step 6.
+
+Then open the URL in a browser, sign in with GitHub, and confirm you land at a shell
+prompt. That last leg cannot be verified from a script; it needs a human login.
 
 ---
 

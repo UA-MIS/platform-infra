@@ -288,5 +288,76 @@ class TestPlanNotes(Base):
         self.assertIn("ADD  paper-papas-ssh.uamishub.com", "\n".join(notes))
 
 
+class TestAppType(Base):
+    """The Access application `type` sent on create, and mismatch reporting.
+
+    A `self_hosted` app has demonstrably not yielded a CA-eligible, browser-rendering
+    SSH app on this account. Whether `ssh` is THE answer is a working hypothesis, not
+    a doc-confirmed fact, so the value is an env var and these tests pin the
+    mechanism (it is configurable, it is actually used, mismatches are reported and
+    never silently converted) rather than blessing one value as correct.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._saved = reconcile.ACCESS_APP_TYPE
+
+    def tearDown(self):
+        reconcile.ACCESS_APP_TYPE = self._saved
+
+    def test_default_is_ssh_not_self_hosted(self):
+        self.assertEqual(self._saved, "ssh")
+
+    def test_type_is_overridable_for_an_instant_revert(self):
+        # The revert path must not need a code change or a rebuild.
+        reconcile.ACCESS_APP_TYPE = "self_hosted"
+        self.assertEqual(reconcile.ACCESS_APP_TYPE, "self_hosted")
+
+    def test_matching_type_is_silent(self):
+        out = []
+        reconcile.log = out.append
+        try:
+            reconcile.report_app_type({"type": "ssh"}, "t-ssh.uamishub.com")
+        finally:
+            reconcile.log = print
+        self.assertEqual(out, [])
+
+    def test_missing_type_is_silent_rather_than_a_false_alarm(self):
+        # A listing that omits `type` must not be reported as a mismatch.
+        out = []
+        reconcile.log = out.append
+        try:
+            reconcile.report_app_type({}, "t-ssh.uamishub.com")
+        finally:
+            reconcile.log = print
+        self.assertEqual(out, [])
+
+    def test_mismatched_type_is_reported_with_the_actual_value(self):
+        out = []
+        reconcile.log = out.append
+        try:
+            reconcile.report_app_type({"type": "self_hosted"}, "t-ssh.uamishub.com")
+        finally:
+            reconcile.log = print
+        body = "\n".join(out)
+        self.assertIn("self_hosted", body)
+        self.assertIn("ssh", body)
+        self.assertIn("t-ssh.uamishub.com", body)
+
+    def test_mismatch_reports_but_never_converts(self):
+        # report_app_type must be pure reporting: no API surface touched. If it ever
+        # grows a write, `cf` gets called and this fails.
+        called = []
+        saved_cf, saved_log = reconcile.cf, reconcile.log
+        reconcile.cf = lambda *a, **k: called.append(a)
+        reconcile.log = lambda *a, **k: None
+        try:
+            reconcile.report_app_type({"type": "self_hosted", "id": "abc"},
+                                      "t-ssh.uamishub.com")
+        finally:
+            reconcile.cf, reconcile.log = saved_cf, saved_log
+        self.assertEqual(called, [], "report_app_type must not call the API")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

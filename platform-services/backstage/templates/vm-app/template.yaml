@@ -358,6 +358,23 @@ spec:
           sshPubKey: ${{ parameters.sshPubKey }}
           githubUsernames: ${{ parameters.githubUsernames }}
           teamEmails: ${{ parameters.teamEmails }}
+          # The Cloudflare Access PER-APPLICATION SSH CA public key.
+          #
+          # ⚠ THE SAME SHIPPED GAP AS teamEmails ABOVE, one field over.
+          # skeleton-vm/.devops/chart/base/cloud-init.yaml has always consumed
+          # `${{ values.cfAccessCaPub }}` at /etc/ssh/cf_access_ca.pub, but this
+          # template never DEFINED or PASSED it — so every VM scaffolded to date was
+          # born with an empty CA file, i.e. cert auth off. Passing it closes the
+          # loop; it is intentionally NOT a wizard question, because the CA does not
+          # exist until the Access application does, which is after scaffold. It
+          # stays empty at birth (harmless — the guest is key-only until then) and
+          # the operator commits the real key during onboarding.
+          #
+          # If you set this, it MUST be the per-application CA, NOT the
+          # account-global / Access-for-Infrastructure one. The two are visually
+          # identical and the wrong one fails with no diagnostic. See the two-CA
+          # warning in docs/operator/vm-ssh-cloudflare-access.md.
+          cfAccessCaPub: ''
           destination: ${{ ("github.com?owner=UA-MIS&repo=" + parameters.appName) | parseRepoUrl }}
         # ⚠ INDENTATION IS LOAD-BEARING (new-capstone-project lesson): this key MUST be
         # nested under `input:` (8-space indent, a sibling of url:/values:). Misplaced at
@@ -568,17 +585,38 @@ spec:
             && git commit -m "harbor pull robot (vm): team-${{ parameters.team }}"
           ```
 
-          **3) SSH public transport (ADR-032a D2) — Cloudflare dashboard steps, NOT
-          git** (the tunnel is token-based/remotely-managed; there is no in-cluster
-          `ingress:` config to commit for this). Full steps: `docs/operator/vm-ssh-cloudflare-access.md`. Summary:
+          **3) Shell access — the WEB CONSOLE is the default door.** The VM serves a
+          browser terminal itself, so a student needs nothing but their GitHub login:
+          no SSH key, no certificate, no client install. One dashboard step:
+          - Zero Trust → Access controls → Applications → Add → Self-hosted, domain
+            `${{ parameters.team }}-console.uamishub.com`, policy **Allow** =
+            team-${{ parameters.team }}'s UA-MIS emails.
+          - ⚠ That Access policy is the ONLY wall in front of a root-capable shell.
+            Allow only. Never Bypass, never Service Auth.
+          - No tunnel change is needed — `*.uamishub.com` already routes to Traefik.
+
+          **SSH (the advanced path) — Cloudflare dashboard steps, NOT git** (the
+          tunnel is token-based/remotely-managed; there is no in-cluster `ingress:`
+          config to commit for this). Full steps:
+          `docs/operator/vm-ssh-cloudflare-access.md`. Summary:
           - Zero Trust → Networks → Tunnels → platform tunnel → Public Hostname → Add:
-            subdomain `ssh.${{ parameters.appName }}`, domain `capstone.uamishub.com`,
+            subdomain `${{ parameters.team }}-ssh`, domain `uamishub.com`,
             Type `SSH`, URL
             `${{ parameters.appName }}-ssh.${{ parameters.team }}-vm-prod.svc.cluster.local:22`.
-          - Zero Trust → Access → Applications → Add → Self-hosted, domain
-            `ssh.${{ parameters.appName }}.capstone.uamishub.com`, policy Allow =
+            Put this rule ABOVE the `*.uamishub.com` catch-all — first match wins, and
+            SSH carries no Host header, so it cannot ride the shared HTTP route.
+          - Zero Trust → Access controls → Applications → Add → Self-hosted, domain
+            `${{ parameters.team }}-ssh.uamishub.com`, policy Allow =
             team-${{ parameters.team }}'s UA-MIS emails.
           - Confirm the CNAME Cloudflare auto-creates for that hostname in DNS.
+
+          > **Hostnames are ONE label under the apex, and that is a TLS constraint.**
+          > The certificate is `DNS:uamishub.com, DNS:*.uamishub.com` — a single-level
+          > wildcard. `${{ parameters.team }}-console.uamishub.com` is covered; a
+          > dotted `console.${{ parameters.team }}.uamishub.com` or the older
+          > `ssh.<app>.capstone.uamishub.com` is two or three labels and fails the TLS
+          > handshake BEFORE Cloudflare Access loads — which looks nothing like an
+          > auth error and has already cost this project real debugging time.
 
           > **No CI push robot** — the VM path has no Kaniko build (ADR-032 §6 CI). The
           > only image work, if any, is an OPTIONAL future disk-bake pipeline (v2.1).
@@ -607,19 +645,31 @@ spec:
              VirtualMachine; CDI imports the disk and cloud-init runs your app on first boot.
           Your VM will be reachable at `https://${{ parameters.appName }}.capstone.uamishub.com`.
 
-          **SSH in (pet dev-VM).** Your VM is a real machine you own: `ssh` in with a
-          **standard client** using the key you provided (no VPN, no extra tooling), then
-          `git clone` your app repo and run your stack right on the box. cloud-init installs
-          your public key and turns password login OFF. Public SSH rides the platform's
-          existing Cloudflare Tunnel (ADR-032a D2, $0, no LoadBalancer) at
-          `ssh.${{ parameters.appName }}.capstone.uamishub.com`, gated by a Cloudflare
-          Access login — connect with `ssh -o ProxyCommand='cloudflared access ssh
-          --hostname ssh.${{ parameters.appName }}.capstone.uamishub.com'
-          <cloud-user>@ssh.${{ parameters.appName }}.capstone.uamishub.com`, or just open
-          that URL in a browser for a zero-install rendered terminal. This route is wired
-          by an **operator dashboard step after your onboarding PR merges** (see the PR
-          checklist below / `docs/operator/vm-ssh-cloudflare-access.md`) — until then your
-          VM is reachable at its HTTP URL but not over SSH.
+          **Get a shell — open the web console.** Your VM is a real machine you own.
+          The simplest way in is a browser: open
+          `https://${{ parameters.team }}-console.uamishub.com`, sign in with GitHub,
+          and you get a terminal on the box. **That is the whole procedure** — no SSH
+          key to generate, no certificate, no client to install. Your GitHub login is
+          the only credential. Everyone on the team gets their own independent shell,
+          so you can all be on at once.
+
+          From there, `git clone` your app repo and run your stack right on the VM.
+
+          **SSH in (the advanced path).** If you would rather use a standard `ssh`
+          client, that works too. cloud-init imports the GitHub public keys of
+          everyone on the team roster and refreshes them every 5 minutes, and turns
+          password login OFF. Public SSH rides the platform's existing Cloudflare
+          Tunnel (ADR-032a D2, $0, no LoadBalancer) at
+          `${{ parameters.team }}-ssh.uamishub.com`, gated by a Cloudflare Access
+          login — connect with `ssh -o ProxyCommand='cloudflared access ssh --hostname
+          ${{ parameters.team }}-ssh.uamishub.com'
+          <cloud-user>@${{ parameters.team }}-ssh.uamishub.com`. Add your key at
+          <https://github.com/settings/keys> and wait ~5 minutes.
+
+          Both routes are wired by an **operator dashboard step after your onboarding
+          PR merges** (see the PR checklist below /
+          `docs/operator/vm-ssh-cloudflare-access.md`) — until then your VM is
+          reachable at its HTTP URL but the console and SSH are not yet open.
           Your rootdisk **persists across reboots** (it is a pet, not immutable) — but note
           in-VM changes are NOT in git, so push anything you want to keep back to the repo.
 

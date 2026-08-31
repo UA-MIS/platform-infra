@@ -241,6 +241,13 @@ spec:
 # NODE host; under Cilium, host -> local-pod is permitted without a policy rule
 # (the SEC-019 host-firewall residual). The VM-tier deny-test (security review)
 # explicitly re-confirms probes + the VM URL still work under default-deny.
+#
+# ⚠ THIS RULE HAS NO `ports:`, SO IT ADMITS kube-system ON EVERY PORT. That is what
+# lets the WEB CONSOLE work: ttyd listens on :7681 in the guest and Traefik reaches it
+# through this rule, with no console-specific policy needed. If this is ever narrowed
+# to an explicit port list — which would be a reasonable hardening — :7681 MUST be in
+# it alongside the app port, or every team's default door closes with no other symptom
+# than a 502. Do not narrow this without also updating the VM-tier deny-test.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
