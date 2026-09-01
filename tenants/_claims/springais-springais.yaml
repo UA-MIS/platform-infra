@@ -1,0 +1,149 @@
+# SpringAIS — vector skill/job matching (embeddings + pgvector ANN over EY job postings).
+#
+# PROVISIONED BY HAND, deliberately — same posture as ida-llm-ida-llm.yaml, and for
+# overlapping reasons: the Backstage zero-touch wizard has no `database: postgres`
+# option (D-185: "ask us and we set it up by hand"), and this claim is the FIRST
+# consumer of `dbExtensions` (the pgvector field added alongside this file). Nothing
+# else here is bespoke — it is the ordinary ADR-031 contract.
+#
+# ONE CapstoneTenant XR; the reviewed-once Composition
+# (platform-services/crossplane/apis/composition.yaml) expands it into the full tenant:
+# Harbor project + push/pull robots, Vault policy/role, the k8s tenancy fence
+# (3 namespaces + quota/limitrange/netpol/RBAC/PSA), ESO plumbing, the env
+# ApplicationSet, a per-team ARC runner scale set (runs-on: springais-kaniko), and —
+# because `database: postgres` — a per-env PG17 database + login role + grant on
+# capstone-tenant-pg, credentials pushed to tenants/springais/<env>/database, plus the
+# per-team Adminer console in springais-dev.
+#
+# ⚠ THIS CLAIM IS NOT SELF-SUFFICIENT. It cannot render until the app repo exists at
+# UA-MIS/springais carrying .devops/promotion.yaml at HEAD (the env ApplicationSet reads
+# that file to render dev). Today the app lives at ccsmith33/SpringAIS — a PERSONAL
+# repo — and the Composition hardcodes the org (`$repoUrl := printf
+# "https://github.com/UA-MIS/%s" $app`, composition.yaml). See the PR body for the full
+# personal-repo analysis; the repo move is an OWNER decision and is NOT done by this
+# claim. Merging this file before the repo exists is harmless but inert: the tenant
+# fence + Harbor + Vault + database all provision, and the env Application simply has
+# nothing to sync.
+#
+# De-provision = `git rm` this file (plus strip the app repo's `capstone-tenant` topic —
+# see tenants/_claims/README.md).
+apiVersion: platform.capstone.uamishub.com/v1alpha1
+kind: CapstoneTenant
+metadata:
+  name: springais-springais
+  labels:
+    platform.capstone/team: "springais"
+    platform.capstone/semester: "2026-fall"
+    platform.capstone/component: tenant
+spec:
+  team: "springais"
+  appName: "springais"
+  semester: "2026-fall"
+
+  # githubTeam DIVERGES from `team` deliberately. The Composition creates no GitHub
+  # state (ADR-035 §D2), so githubTeam must name a team that ALREADY EXISTS — and
+  # `springais` does not. `team` stays `springais` because it is the
+  # namespace/Harbor/Vault/AppProject key and should read as the app.
+  #
+  # ⚠ THIS WAS `ais` AND THAT WAS WRONG — A SLUG COLLISION, NAMED HERE SO THE NEXT
+  # CLAIM DOES NOT REPEAT IT. `ais` reads like "AIS" for SpringAIS, and it IS a real,
+  # populated UA-MIS team — which is exactly what makes it dangerous. Verified against
+  # the live org 2026-09-01:
+  #     ais    name="AIS"    parent=capstone-fall-2024   members=10
+  #            [mppatel6 gbmorris1 mdpentecost adamkkane clmiller16 hrenninger
+  #             nepedigo-XIII jwcook4 jessicadodson1 blsanders4]
+  #     labmx  name="LabMx"  parent=<none>               members=9
+  #            [jslucas1 jslucascba wmcgiffert sydneymarch mjbux ccsmith33
+  #             brroberts21 kicasey RileyDavisGilbreath]
+  # `ais` is a TWO-YEAR-OLD capstone team of ten people with no relationship to this
+  # app. `labmx` is the team the owner moved the repo to ("transferred it over to
+  # labmx membership"), contains the owner, and is the ONLY team with access to
+  # UA-MIS/springais today (`gh api repos/UA-MIS/springais/teams` -> labmx, perm=pull).
+  #
+  # ⚠ AND — READ THIS BEFORE RELYING ON THIS FIELD — `githubTeam` IS CURRENTLY INERT.
+  # composition.yaml binds it to a variable and then never reads it:
+  #     line 46:  {{- $ghTeam := $spec.githubTeam | default $team }}
+  #     grep -n 'ghTeam\|githubTeam' composition.yaml  ->  that ONE line, nothing else
+  # So neither `ais` nor `labmx` grants anything today. The value that ACTUALLY gates
+  # access is `$team`: the AppProject developer role binds group `UA-MIS:{{ team }}`
+  # (composition.yaml ~line 621) and the per-team Adminer console forwardAuth uses
+  # `allowed_groups=UA-MIS:{{ team }}` (~lines 3293, 4568). For this tenant that is
+  # `UA-MIS:springais` — A GITHUB TEAM THAT DOES NOT EXIST. Consequence: nobody,
+  # including the owner, gets the ArgoCD developer role or the Adminer console for
+  # this tenant; everyone falls through to `policy.default: role:readonly`. That does
+  # NOT block the app or the public prod host (the workload is unaffected), so it is
+  # not a merge blocker — but it IS a real gap. Fixing it is an ORG decision, not a
+  # claim edit: either create a `springais` GitHub team whose members are the LabMx
+  # people, or wire `$ghTeam` through to those three call sites in a reviewed PR.
+  # Setting the field correctly NOW means that when it is wired, it is already right.
+  githubTeam: "labmx"
+
+  # Container port of the PUBLIC entrypoint (the frontend). The chart sets each
+  # component's own port from .devops/components.yaml; this XRD field is only the
+  # default the Composition carries. Both SpringAIS components listen on 8080, which is
+  # also the XRD default — set explicitly so it is not silently inherited.
+  port: 8080
+
+  # OFF. Previews do not work on this platform today (see the long note in
+  # ida-llm-ida-llm.yaml and docs/operator/tenant-preview-gaps.md). Nothing about this
+  # tenant is a reason to be the one that finds out.
+  previewEnabled: false
+
+  # DEFAULT (false) — dev keeps the platform's non-prod SSO forwardAuth gate.
+  # ⚠ READ THIS BEFORE THE DEMO: the gate 302s to Dex BEFORE Traefik routes to the
+  # backend, so a signed-out visitor never reaches the app at all. The donor-facing URL
+  # must therefore be the PROD host (springais.capstone.uamishub.com), which is public
+  # regardless of this field — NOT the dev host. Verified live 2026-09-01:
+  # ida-llm.capstone.uamishub.com -> HTTP 200, curb-web.dev.capstone.uamishub.com ->
+  # HTTP 302 to id.capstone.uamishub.com.
+  # Flipping this to `true` to demo from dev is the WRONG trade here: it would make dev
+  # exactly as reachable as prod for an app that holds uploaded resumes.
+  publicDevIngress: false
+
+  domain: "capstone.uamishub.com"
+
+  # PostgreSQL — the PG17 engine of capstone-tenant-pg via provider-sql. The app is
+  # Python/SQLAlchemy + Alembic and its whole point is vector similarity search, so
+  # Postgres is not a preference here, it is the feature. Per env this mints database +
+  # role `springais_<env>` and pushes username/password/host/port to
+  # tenants/springais/<env>/database.
+  #
+  # ⚠ ENGINE-VERSION NOTE: the app was developed against pgvector/pgvector:pg16 on
+  # compose; this tier is PG 17.9. The migrations are plain Alembic with no
+  # version-gated DDL, and pgvector 0.8.2 behaves identically — CREATE EXTENSION, a
+  # vector(1536) column, both HNSW opclasses (vector_cosine_ops + vector_l2_ops) and a
+  # live ANN query were all exercised against PG 17.9 on this cluster on 2026-09-01
+  # before this claim was written. Verified, not assumed.
+  database: "postgres"
+
+  # ⚠ THE REASON THIS TENANT NEEDED A PLATFORM CHANGE.
+  # pgvector is `trusted=f` on this server, so ONLY a superuser may CREATE EXTENSION it.
+  # The per-env login role this tenant gets is deliberately NOSUPERUSER, so the app's own
+  # Alembic migration 001 (`CREATE EXTENSION IF NOT EXISTS vector`) and its init_db.py
+  # would BOTH fail with:
+  #     ERROR: permission denied to create extension "vector"
+  #     HINT:  Must be superuser to create this extension.
+  # This field makes the platform install it superuser-side, once per env, before the
+  # app's migration initContainer runs — declared here in git rather than hand-run
+  # against the live cluster. The app's own IF NOT EXISTS call then degrades to a clean
+  # no-op (NOTICE ... skipping, exit 0), so the SAME migration still works unchanged on
+  # the compose stack where the app IS superuser. See xrd.yaml `dbExtensions` for the
+  # allowlist rationale and composition.yaml for the teardown-wedge handling.
+  dbExtensions:
+    - vector
+
+  # Platform defaults, pinned explicitly rather than inherited, because this tenant is
+  # demo-facing and a silent regression when a default moves is exactly the failure this
+  # repo has already eaten twice (maxRunners 8->5, #535).
+  #
+  # maxRunners 5 = the current default and genuinely enough: this repo builds TWO images
+  # (frontend + backend), so a 2-wide matrix never approaches the ceiling.
+  maxRunners: 5
+
+  # cpuLimit 8 = the platform default, NOT raised. Sized to FIT the fence rather than
+  # move it, per the composition's own D-187 guidance. This tenant runs 3 small
+  # workloads per env (frontend, backend, redis) plus a short-lived migration
+  # initContainer; at the chart's 500m per-container limit that is ~1.5 CPU of an 8-CPU
+  # limits ceiling. Raise it in a later PR if prod ever approaches the cap — do not
+  # pre-raise it on a guess.
+  cpuLimit: 8

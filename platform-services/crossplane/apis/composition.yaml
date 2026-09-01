@@ -103,6 +103,14 @@ spec:
             {{-   $externalEgress = $spec.externalEgress }}
             {{- end }}
             {{- $database := $spec.database | default "none" }}
+            {{- /* Superuser-installed PG extensions (xrd.yaml `dbExtensions`, allowlisted
+                   enum). hasKey-guarded like externalEgress above: missingkey=error is set
+                   on this template, and an XR written before this field existed carries no
+                   `dbExtensions` key at all until the apiserver re-defaults it. */}}
+            {{- $dbExtensions := list }}
+            {{- if hasKey $spec "dbExtensions" }}
+            {{-   $dbExtensions = $spec.dbExtensions }}
+            {{- end }}
             {{- /* MySQL identifiers from the team slug: hyphens -> underscores, since
                    `<team>_<env>` becomes a MariaDB schema + username (ADR-033). */}}
             {{- $teamDb := $team | replace "-" "_" }}
@@ -3459,6 +3467,72 @@ spec:
                   - TEMPORARY
               providerConfigRef:
                 name: db-tier-postgres
+            {{- /* =====================================================================
+                   Superuser-installed extensions (xrd.yaml `dbExtensions`).
+                   ONE Extension MR per (env, extension). Emitted only when the claim asks
+                   for one, so every existing tenant renders byte-identically to before.
+
+                   WHY THE PLATFORM DOES THIS AND NOT THE APP: `vector` (pgvector 0.8.2,
+                   already in the CNPG image) is `trusted=f`, so ONLY a superuser may
+                   `CREATE EXTENSION` it. The tenant Role above is deliberately
+                   NOSUPERUSER, so an app migration that opens with `CREATE EXTENSION
+                   vector` fails with `permission denied to create extension "vector"` and
+                   there is nothing the team can change to fix it. Verified live on
+                   capstone-tenant-pg (PG 17.9) 2026-09-01, both directions:
+                     * as the tenant role, before  -> permission denied (42501)
+                     * as the tenant role, after   -> `NOTICE: extension "vector" already
+                       exists, skipping`, exit 0 — so the app needs NO cluster-specific
+                       migration edit, and the same migration still runs on plain
+                       `pgvector/pgvector` compose images where the app IS superuser.
+                   The install identity is `crossplane_provisioner`, SUPERUSER on this
+                   dedicated tenant-only cluster (cnpg/tenant-cluster/roles.yaml,
+                   TENANT-PG-DROP fix) — which is exactly why xrd.yaml constrains this
+                   field to an ENUM and not a free string.
+
+                   ORDERING — deliberately NOT enforced, and it does not need to be. The
+                   Extension MR does not reference the Database MR, so on a first reconcile
+                   it can fire before the database exists and reports
+                     `create failed: cannot create extension: pq: database "<db>" does not
+                      exist (3D000)`
+                   ...and then SELF-HEALS on the next reconcile with no human touch —
+                   measured at 2s once the database appeared (live test, 2026-09-01). A
+                   transient red condition on a brand-new tenant is expected here; it is
+                   not a stuck tenant. Using databaseRef instead would need a stable
+                   metadata.name on the composed Database MR, which this Composition does
+                   not set (Crossplane generates it) — a bigger change for no gain.
+
+                   ⚠ deletionPolicy: Orphan IS LORE-BEARING — DO NOT "TIDY" IT AWAY.
+                   provider-sql's delete path issues a bare `DROP EXTENSION` (RESTRICT).
+                   The instant the app creates its first `vector` COLUMN, that DROP can
+                   never succeed:
+                     `delete failed: cannot drop extension: cannot drop extension vector
+                      because other objects depend on it (2BP01)`
+                   — and because the failure is inside a Crossplane finalizer, the MR wedges
+                   UNDELETABLE and takes the whole tenant teardown down with it. Reproduced
+                   live on 2026-09-01 (a spike MR had to have its finalizer force-cleared by
+                   hand), i.e. this is the SAME teardown-wedge class as TENANT-PG-DROP, hit
+                   from a new direction. Orphan is correct rather than merely expedient: an
+                   extension is contained INSIDE its database, and the Database MR's
+                   `DROP DATABASE` reclaims it wholesale. Verified: with Orphan set and a
+                   dependent vector column + HNSW index present, MR delete returned
+                   immediately (exit 0) and DROP DATABASE then left zero residue.
+                   ===================================================================== */}}
+            {{- range $ext := $dbExtensions }}
+            ---
+            apiVersion: postgresql.sql.crossplane.io/v1alpha1
+            kind: Extension
+            metadata:
+              annotations:
+                {{ setResourceNameAnnotation (printf "sql-ext-%s-%s" $e.name $ext) }}
+                crossplane.io/external-name: {{ $ext | quote }}
+            spec:
+              deletionPolicy: Orphan          # see the 2BP01 teardown-wedge note above — NOT removable
+              forProvider:
+                database: {{ $dbName | quote }}
+                extension: {{ $ext | quote }}
+              providerConfigRef:
+                name: db-tier-postgres
+            {{- end }}
             ---
             # Bridge the generated DB creds into Vault at the ADR-033 contract path
             # tenants/<team>/<env>/database (properties: username, password, host, port) —
