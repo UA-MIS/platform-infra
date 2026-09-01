@@ -65,8 +65,9 @@ tell them; do not expect this to do it.
 reference sheet they are meant to correct as they learn the machine, not a
 read-only notice; the previous text stays in the page's revision history.
 
-**The document is written ONCE and rendered per team.** It may contain `<team>`
-or `<your-team>`, and the chart substitutes that board's own slug at render time.
+**The document is written ONCE and rendered per team.** It may contain
+`__TEAM__` — the placeholder convention this repo already uses — and the chart
+substitutes that board's own slug at render time.
 That is the entire reason it is a document name here and not the markdown
 itself: a document naming one team's hostnames, copied to three boards, would
 send a student to another team's VM — where they would be refused by *that*

@@ -1,114 +1,126 @@
-# Your VM — what it is and how it's wired
+# __TEAM__
 
-You've inherited a running system. This is the reference sheet for it. It is short on purpose: it tells you what exists and where, not why every decision was made. Some of it you will want to change.
+## Your three links
 
----
-
-## The machine
-
-A virtual machine running **Ubuntu 24.04**, 4 CPU, 4 GB RAM, 30 GB disk.
-
-It is a normal Linux box. You have `sudo` with no password. There is no one else on it.
-
-## Getting in
-
-Open **`https://<your-team>-console.uamishub.com`** and sign in with GitHub. You land in a terminal as the user `ubuntu`. No SSH key, no client to install.
-
-You only get in if you are a member of your team on GitHub. If you get a permission error, that's why.
-
-## The two URLs
-
-| URL | What it is |
+| | |
 |---|---|
-| `https://<team>.capstone.uamishub.com` | your app, in public |
-| `https://<team>-console.uamishub.com` | your terminal |
+| **Your app** | https://__TEAM__.capstone.uamishub.com |
+| **Your terminal** | https://__TEAM__-console.uamishub.com |
+| **Your repo** | https://github.com/UA-MIS/__TEAM__ |
 
-There is no other way in from the internet. Port 80 is the only door.
+Sign in to the terminal with GitHub. You land in a shell as `ubuntu` on your own virtual machine. No SSH key, no client to install.
+
+There is **one** environment. No dev, no staging, no separate database console — if you change something, you change the live site.
 
 ---
 
-## What's already installed
+## What you have
 
-| | Version | Notes |
-|---|---|---|
-| Node | 22 | the workspace requires >= 22 |
-| pnpm | 9.15 | this project uses pnpm, **not** npm |
-| MySQL | 8.0 | local, on `127.0.0.1:3306` |
-| MinIO | current | S3-compatible file storage, `127.0.0.1:9000` |
-| Caddy | 2.6 | the reverse proxy, owns port 80 |
-| git, gh | | `gh` is the GitHub CLI |
+A virtual machine running **Ubuntu 24.04** — 4 CPU, 4 GB RAM, 30 GB disk. It is a normal Linux box and you have `sudo` with no password.
 
-There is **no Docker** on this machine, and you do not need it. The repo has a `docker-compose.yml` — that file is for running the project on a laptop. On this VM those same services are installed directly.
+Already installed: **Node 22**, **pnpm 9.15** (this project uses pnpm, *not* npm), **MySQL 8.0** on `127.0.0.1:3306`, **MinIO** for file storage, **Caddy** as the reverse proxy, plus `git` and `gh`.
+
+There is **no Docker** and you do not need it. The repo has a `docker-compose.yml` — that file is for running the project on a laptop. On this VM those same services are installed directly.
 
 ## Where things live
 
 ```
 /opt/crimsoncopies/<service>     the deployed app services
-/etc/capstone/Caddyfile          the reverse proxy config that is actually in use
-/var/www/app/                    a placeholder page, served on :8080 as a fallback
+/etc/capstone/Caddyfile          the reverse proxy config actually in use
 ```
 
-## The services
-
-Everything runs under `systemd`. Useful commands:
+Everything runs under `systemd` and starts automatically on boot:
 
 ```bash
-systemctl status cc-orders-api      # check one
-journalctl -u cc-orders-api -n 50   # read its log
-sudo systemctl restart cc-orders-api
+systemctl status cc-orders-api        # check a service
+journalctl -u cc-orders-api -n 50     # read its log
+sudo systemctl restart cc-orders-api  # restart it
 ```
 
-The app services are named `cc-*`. Also running: `mysql`, `minio`, `caddy`, and `capstone-console` (that's your terminal — leave it alone).
-
-Everything starts automatically on boot. If you reboot the VM, it comes back on its own.
+The app services are named `cc-*`. Also running: `mysql`, `minio`, `caddy`.
 
 ## How traffic reaches your app
 
 ```
-internet -> Caddy on :80 -> the app on 127.0.0.1:3000
+internet  ->  Caddy on :80  ->  your app on 127.0.0.1:3000
 ```
 
-Nothing else is exposed. Your apps listen on localhost only; Caddy is what makes them public. If you change which port an app listens on, you must also change `/etc/capstone/Caddyfile` or your site will stop working.
+Port 80 is the only way in. Your apps listen on localhost; Caddy is what makes them public. Change which port an app listens on and you must change `/etc/capstone/Caddyfile` too, or the site stops working.
 
-> `deploy/vm/Caddyfile` in the repo is **not** the file in use. It has placeholders in it. Sorting that out is part of your work.
-
----
+> `deploy/vm/Caddyfile` in the repo is **not** the file in use — it still has placeholders in it. Sorting that out is part of your work.
 
 ## The database
 
-MySQL is running locally with a database and user already created. The connection string is in `.env`. It is not shared with any other team, and it is not backed up — if you drop it, it's gone.
-
-Two accounts are seeded so you can log in to the app:
+MySQL runs locally, already created, with the connection string in `.env`. It is yours alone and **it is not backed up**. Two accounts are seeded so you can log in:
 
 | Username | Password |
 |---|---|
 | `staff` | `staffpass123` |
 | `customer` | `customerpass123` |
 
-There are **no orders** in the database. An empty staff queue is expected, not a bug.
+There are **no orders** in the database. An empty staff queue is expected.
 
-## Getting the code
+## The components
+
+Four Node services, each its own `systemd` unit, all listening on localhost. Caddy on `:80` is the only thing the internet can reach.
+
+| Service | Unit | Port | What it does |
+|---|---|---|---|
+| orders-api | `cc-orders-api` | 4000 | the API, and the only thing that writes to MySQL |
+| storefront | `cc-storefront` | 3000 | the public shop — this is what `/` serves |
+| staff-console | `cc-staff-console` | 3001 | the staff side — not reachable from the internet yet |
+| notify | `cc-notify` | 4100 | notifications (a stub — see below) |
+
+Supporting them: `mysql` (3306), `minio` (9000), `caddy` (80).
+
+**The staff console has no public URL.** It answers on `3001` inside the VM, but nothing routes to it from outside: `/staff` is a 404, and the `staff.__TEAM__.capstone.uamishub.com` vhost in the Caddyfile neither resolves nor can be issued a certificate on the current plan. From your terminal you can still reach it with `curl localhost:3001`. Publishing it is a platform change, not something you can fix in the guest — so the seeded `staff` login is for later.
+
+Config lives in `/etc/capstone/env/<service>.env` — that is where `DATABASE_URL`, the ports and the shared `INTERNAL_API_KEY` come from. Change a value there and the service needs a restart to see it.
+
+## Restarting things
+
+**After changing config** in `/etc/capstone/env/`:
 
 ```bash
-gh auth login          # choose GitHub.com, HTTPS, "login with a web browser"
-git clone https://github.com/UA-MIS/<your-team>.git
+sudo systemctl restart cc-orders-api      # or whichever service
 ```
 
-Use the **HTTPS** clone URL. The SSH one (`git@github.com:...`) will hang and time out — this VM can only make outbound connections on port 443.
+**After changing code** — the deploy builds *whatever is in the clone on this VM*. It does not fetch anything. So if the change was made anywhere else — your laptop, a pull request, a teammate's push — **pull it in first**:
 
----
+```bash
+cd ~/__TEAM__
+git pull                              # bring the VM's clone up to date
+sudo capstone-app-deploy ~/__TEAM__   # then build and publish it
+```
 
-## Things that will confuse you if nobody tells you
+Skip the `git pull` and you will rebuild the code you already had, watch it succeed, and see nothing change on the site. That is the most common way to lose an hour here.
 
-- **It's `pnpm`, not `npm`.** `npm install` will not do the right thing here.
-- **The app is a workspace** — `apps/orders-api`, `apps/storefront`, `apps/staff-console`, `services/notify`. They run as separate services.
+The deploy builds the workspace, runs migrations, publishes to `/opt/crimsoncopies/` and restarts the `cc-*` units. It takes a while — this VM has no hardware virtualisation, so a full build is roughly half an hour. Nothing runs it for you: pushing to GitHub does **not** update the VM.
+
+**Restart everything:**
+
+```bash
+sudo systemctl restart cc-orders-api cc-notify cc-storefront cc-staff-console
+```
+
+**Check what is running:**
+
+```bash
+systemctl status 'cc-*'
+journalctl -u cc-orders-api -n 50 -f
+```
+
+Order matters if you restart by hand: `cc-orders-api` first, since the two web apps call it.
+
+## Things that will confuse you if nobody says them
+
+- **It's `pnpm`, not `npm`.**
+- The app is a workspace — `apps/orders-api`, `apps/storefront`, `apps/staff-console`, `services/notify` — each running as its own service.
 - **`services/notify` doesn't send anything.** It logs what it *would* have sent and returns success. That's how you received it.
-- **Database migrations must run from `apps/orders-api`**, not the repo root. They use a relative path and will fail from anywhere else.
-- **Your VM has no automatic deploys.** Nothing rebuilds when you push. Getting new code onto this machine and restarting the right service is your job — that is the point of the exercise.
+- Database migrations run from `apps/orders-api`, not the repo root.
+- **Nothing deploys automatically.** Pushing to GitHub does not update the VM; `sudo capstone-app-deploy` is what does.
 
 ## If the site is down
-
-In order:
 
 ```bash
 curl -I localhost:80          # is Caddy answering?
@@ -117,8 +129,12 @@ systemctl status 'cc-*'       # are the app services up?
 journalctl -u cc-orders-api -n 50
 ```
 
-A **502** means Caddy is running but the app behind it is not. That is the most common failure and it is almost always in the app's log, not in Caddy's.
+A **502** means Caddy is running but the app behind it is not. That is the most common failure and it is almost always in the app's log, not Caddy's.
 
----
+## How we work
 
-*Written 2026-09-01. If something here disagrees with the machine, the machine is right — write down what you found.*
+- Work is tracked on this board; pick up anything in **Ready**.
+- Branches are created from a work item with **Start work**; pull requests link back automatically.
+- A merged pull request moves its item to **Resolved**; a human accepts it to **Closed**.
+
+*If something here disagrees with the machine, the machine is right — fix this page.*

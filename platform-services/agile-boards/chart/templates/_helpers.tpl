@@ -77,7 +77,8 @@ template, which is what every board does today. Optional is not a nicety here:
 four live boards set nothing, and a required field would break all four.
 
 WHY THE SUBSTITUTION IS THE POINT. The document is written once and says
-`<team>` / `<your-team>`; each board renders it with its own slug. A shared copy
+`__TEAM__` (the placeholder convention this repo already uses, as in
+tenants/_template/); each board renders it with its own slug. A shared copy
 naming one team's hosts would be WORSE than no document at all — a student would
 follow it to another team's VM, be refused by that team's GitHub-team check, and
 read the refusal as their own account being broken.
@@ -101,7 +102,7 @@ hasKey/fail-guard split documented at the top of this file.
 {{- fail (printf "agile-board: homepage %q names %s, which is missing or empty in the chart. Add the document, or drop the `homepage:` key to fall back to the app's built-in starter template." $doc $path) -}}
 {{- end -}}
 {{- $team := include "agile-board.team" . -}}
-{{- $body | replace "<your-team>" $team | replace "<team>" $team -}}
+{{- $body | replace "__TEAM__" $team -}}
 {{- end -}}
 {{- end -}}
 

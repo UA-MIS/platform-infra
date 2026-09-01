@@ -110,8 +110,8 @@ browser. A board file may name a document to start it out as:
 homepage: mis521-vm-handover     # -> chart/files/homepage/mis521-vm-handover.md
 ```
 
-The chart reads that file, substitutes the board's own team slug for `<team>` /
-`<your-team>`, and passes the result as `HOME_TEMPLATE` in the per-board
+The chart reads that file, substitutes the board's own team slug for `__TEAM__`,
+and passes the result as `HOME_TEMPLATE` in the per-board
 ConfigMap — the app's own documented extension point. So this stays **data, not a
 build**: the ONE shared image is untouched, and N teams with N different
 documents is still one image.
