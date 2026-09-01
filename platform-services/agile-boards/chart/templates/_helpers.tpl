@@ -68,6 +68,43 @@ identical string from tenants/_boards/, and `make validate` fails on drift.
 {{- if empty $t -}}{{- printf "%s Board" (include "agile-board.team" .) -}}{{- else -}}{{- $t -}}{{- end -}}
 {{- end -}}
 
+{{/*
+The homepage seed document, with this board's OWN team slug substituted in.
+
+Returns "" when .Values.homepage is unset — the overwhelmingly common case. The
+caller then omits HOME_TEMPLATE entirely and the app uses its built-in starter
+template, which is what every board does today. Optional is not a nicety here:
+four live boards set nothing, and a required field would break all four.
+
+WHY THE SUBSTITUTION IS THE POINT. The document is written once and says
+`<team>` / `<your-team>`; each board renders it with its own slug. A shared copy
+naming one team's hosts would be WORSE than no document at all — a student would
+follow it to another team's VM, be refused by that team's GitHub-team check, and
+read the refusal as their own account being broken.
+
+FAILS LOUDLY, like every other guard in this file. A homepage naming a document
+that is not in the chart is a silent regression otherwise: `.Files.Get` returns
+"" for a missing path, the ConfigMap key is dropped, the board comes up Healthy
+and serves the generic starter text, and nobody notices the doc is missing until
+a student asks where it went. Scoped to this one Application, per the
+hasKey/fail-guard split documented at the top of this file.
+*/}}
+{{- define "agile-board.homepage" -}}
+{{- $doc := .Values.homepage | default "" | trim -}}
+{{- if $doc -}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $doc) -}}
+{{- fail (printf "agile-board: homepage %q must be a bare document name (lowercase, digits and hyphens) naming files/homepage/<name>.md — not a path and not a filename. Anything else is either a typo or an attempt to read outside the chart." $doc) -}}
+{{- end -}}
+{{- $path := printf "files/homepage/%s.md" $doc -}}
+{{- $body := .Files.Get $path -}}
+{{- if not $body -}}
+{{- fail (printf "agile-board: homepage %q names %s, which is missing or empty in the chart. Add the document, or drop the `homepage:` key to fall back to the app's built-in starter template." $doc $path) -}}
+{{- end -}}
+{{- $team := include "agile-board.team" . -}}
+{{- $body | replace "<your-team>" $team | replace "<team>" $team -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "agile-board.labels" -}}
 app.kubernetes.io/name: agile-board
 app.kubernetes.io/instance: {{ include "agile-board.name" . }}

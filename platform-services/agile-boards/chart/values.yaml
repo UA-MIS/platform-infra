@@ -11,6 +11,27 @@ repos: "PLACEHOLDER-repos"
 title: ""
 accent: "#9e1b32"
 
+# OPTIONAL. Names a shipped document to seed this board's homepage with, WITHOUT
+# the ".md": `mis521-vm-handover` -> files/homepage/mis521-vm-handover.md.
+#
+# Empty (the default, and the case for every board that does not set it) means
+# the app falls back to its own built-in starter template — i.e. exactly the
+# behaviour every existing board has today. This must stay optional: `curb`,
+# `ida-llm`, `nextup` and `_example-team` set nothing, and a required field here
+# would break all four.
+#
+# WHY A DOC NAME AND NOT THE MARKDOWN ITSELF. Three boards share one document
+# that names each team's own hostnames. Pasting it into three tenants/_boards/
+# files would be three copies to keep in step — the copy-not-reference pattern
+# that generates bugs here. The document lives ONCE under files/homepage/ and the
+# chart substitutes the team slug at render time, so the three boards cannot
+# drift and cannot show each other's hostnames.
+#
+# This is DATA, not a build: it becomes HOME_TEMPLATE in the per-board ConfigMap,
+# which the app already reads (its documented HOME_TEMPLATE extension point). The
+# ONE shared image is unchanged — a per-team homepage costs no per-team build.
+homepage: ""
+
 # Public base domain. The board's host is <team>-agile.<domain> — a SINGLE
 # hyphenated label, which is what keeps it inside the existing Cloudflare
 # wildcard Public Hostname and the *.capstone.uamishub.com certificate. A dotted

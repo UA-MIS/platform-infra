@@ -30,6 +30,38 @@ data:
   BOARD_TITLE: {{ include "agile-board.title" . | quote }}
   BOARD_ACCENT: {{ .Values.accent | quote }}
 
+  {{- $homepage := include "agile-board.homepage" . }}
+  {{- if $homepage }}
+
+  # ── Homepage seed text ─────────────────────────────────────────────────────
+  # HOME_TEMPLATE is the app's OWN documented extension point (apps/agile README:
+  # "overridable per instance with HOME_TEMPLATE (inline) or HOME_TEMPLATE_PATH
+  # (a file)"). Using it rather than adding a code path is what keeps this a
+  # config change against the ONE shared image instead of a per-team build.
+  #
+  # KNOW EXACTLY WHAT THIS DOES, because the name undersells it and oversells it
+  # at the same time. It is the text a board shows when NOBODY HAS EDITED THE
+  # HOMEPAGE YET — the app reads it only when there is no `home` row in
+  # board_pages for this instance (src/lib/domain/pages.ts, getPage). So:
+  #
+  #   - It CANNOT overwrite a team's own writing. A board whose homepage has been
+  #     edited ignores this value completely. That is the safe direction, and it
+  #     is why this can be added to live boards without a data migration.
+  #   - It is therefore NOT a way to push an update to a board someone has
+  #     already edited. Changing the document here moves the SEED, not the page.
+  #     Once a team edits their homepage, the document reaches them only if they
+  #     go and read it in the repo — the same as any inherited reference sheet.
+  #   - The team can edit it, and their edit wins from then on, with the previous
+  #     text kept in the page's revision history. That is intended: this is a
+  #     starting point they are meant to correct, not a read-only notice.
+  #
+  # Rendered markdown: the app parses this with `marked` (gfm: true) and
+  # sanitises the result against an allow-list that includes tables, fenced code,
+  # blockquotes and headings, all of which this document uses.
+  HOME_TEMPLATE: |-
+{{ $homepage | indent 4 }}
+  {{- end }}
+
   # ── Web sign-in ────────────────────────────────────────────────────────────
   OIDC_ISSUER: {{ .Values.oidc.issuer | quote }}
   OIDC_CLIENT_ID: {{ .Values.oidc.clientId | quote }}

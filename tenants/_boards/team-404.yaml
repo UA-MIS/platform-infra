@@ -36,3 +36,11 @@ team: team-404
 repos: UA-MIS/team-404
 title: Team 404 Board
 accent: "#9e1b32"
+
+# Seeds this board's homepage with the shipped VM handover reference sheet
+# (chart/files/homepage/mis521-vm-handover.md), rendered with THIS team's slug —
+# the document names <team>-console.uamishub.com, so a shared copy would send a
+# student to another team's VM. Read only when the homepage has never been
+# edited; the team's own edits always win. Remove this line and the board falls
+# back to the app's built-in starter text.
+homepage: mis521-vm-handover

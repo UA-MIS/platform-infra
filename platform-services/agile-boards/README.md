@@ -98,6 +98,38 @@ cluster-wide default-deny here, so a board pod with no policy selecting it would
 | Path | Contents |
 |---|---|
 | `chart/` | the per-board Helm chart, rendered once per team |
+| `chart/files/homepage/` | documents a board can seed its homepage with (`homepage:` in `tenants/_boards/<team>.yaml`) |
+
+### Seeding a board's homepage
+
+The board's landing page is a markdown "living README" the team edits in the
+browser. A board file may name a document to start it out as:
+
+```yaml
+# tenants/_boards/team-404.yaml
+homepage: mis521-vm-handover     # -> chart/files/homepage/mis521-vm-handover.md
+```
+
+The chart reads that file, substitutes the board's own team slug for `<team>` /
+`<your-team>`, and passes the result as `HOME_TEMPLATE` in the per-board
+ConfigMap — the app's own documented extension point. So this stays **data, not a
+build**: the ONE shared image is untouched, and N teams with N different
+documents is still one image.
+
+Three things this is not:
+
+- **Not a broadcast.** `HOME_TEMPLATE` is read only when a board's homepage has
+  never been edited. It cannot overwrite a team's writing (safe to add to a live
+  board), and it cannot update a board a team has already edited.
+- **Not required.** Most boards set nothing and get the app's built-in starter
+  text, exactly as before. `curb`, `ida-llm`, `nextup` and `_example-team` do.
+- **Not a shared copy.** The substitution is the point: three boards render one
+  document with three different hostnames. A shared copy naming one team's hosts
+  would walk a student into another team's VM and a permission error that reads
+  like their own account is broken.
+
+A `homepage:` naming a document that is not in the chart **fails the render for
+that board**, loudly, rather than quietly falling back — see `_helpers.tpl`.
 
 The parent directory is **excluded** from `platform-services-appset` — it holds
 only a chart, with no root `kustomization.yaml` (the `lab-hosting/` precedent).

@@ -74,6 +74,13 @@ spec:
             repos: '{{ if hasKey . "repos" }}{{ .repos }}{{ end }}'
             title: '{{ if hasKey . "title" }}{{ .title }}{{ end }}'
             accent: '{{ if hasKey . "accent" }}{{ .accent }}{{ else }}#9e1b32{{ end }}'
+            # OPTIONAL. Names a document under the chart's files/homepage/ to seed
+            # this board's homepage with. Absent for most boards, and absent must
+            # keep meaning "the app's built-in starter text" — hasKey-guarded like
+            # every field above, so a board file without the key degrades to "" for
+            # THAT board rather than aborting the render for every board
+            # (goTemplateOptions: missingkey=error, the labs-students C-2 precedent).
+            homepage: '{{ if hasKey . "homepage" }}{{ .homepage }}{{ end }}'
             image:
               # ── THE SHARED IMAGE TAG. Bump here; every board moves together. ──
               # Immutable tag, never `latest` (Kyverno disallow-latest-tag is Enforce

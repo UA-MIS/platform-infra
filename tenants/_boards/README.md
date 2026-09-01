@@ -31,12 +31,52 @@ team: swami                       # REQUIRED. GitHub Team slug. Also the filenam
 repos: UA-MIS/swami               # REQUIRED. Comma-separated; the repo(s) the board tracks.
 title: Swami Board                # optional; defaults to "<team> Board"
 accent: "#9e1b32"                 # optional; defaults to Crimson
+homepage: mis521-vm-handover      # optional; seeds the board's homepage. See below.
 ```
 
 `host` is **not** a field. It is derived: `<team>-agile.capstone.uamishub.com`.
 Deriving it is what keeps the Dex redirect URI, the Ingress host and `APP_URL`
 from ever disagreeing — a class of failure that shows up as an opaque OIDC error
 at sign-in rather than at startup.
+
+### `homepage` — seeding the board's homepage
+
+The board's landing page is a **living README**: markdown the team writes and
+edits in the browser, stored in Postgres with revision history. `homepage` names
+a document the platform ships, which that page starts out as:
+
+    homepage: mis521-vm-handover
+      -> platform-services/agile-boards/chart/files/homepage/mis521-vm-handover.md
+
+Omit the key and the board shows the app's built-in starter text — which is what
+every board did before this existed, and what most boards should keep doing. It
+is **optional and must stay optional**: most files here set nothing.
+
+Three properties are worth knowing before using it.
+
+**It is a SEED, not a broadcast.** The app reads it only when the homepage has
+never been edited (no `home` row in `board_pages` for that instance). So it
+cannot overwrite a team's own writing — which is what makes it safe to add to a
+live board — but equally, changing the document does **not** update a board
+somebody has already edited. If you need to reach a team that has edited theirs,
+tell them; do not expect this to do it.
+
+**The team can edit it, and their edit wins.** That is intended. This is a
+reference sheet they are meant to correct as they learn the machine, not a
+read-only notice; the previous text stays in the page's revision history.
+
+**The document is written ONCE and rendered per team.** It may contain `<team>`
+or `<your-team>`, and the chart substitutes that board's own slug at render time.
+That is the entire reason it is a document name here and not the markdown
+itself: a document naming one team's hostnames, copied to three boards, would
+send a student to another team's VM — where they would be refused by *that*
+team's GitHub-team check and read the refusal as their own account being broken.
+One source, three renders, no copies to keep in step.
+
+Markdown support is the app's: GFM tables, fenced code, blockquotes, headings and
+lists all render. Raw HTML and images are stripped by the sanitiser. Note that
+the renderer sets `breaks: true`, so a hard-wrapped source line becomes a visible
+line break — write paragraphs as single lines.
 
 ## What consumes this directory
 
