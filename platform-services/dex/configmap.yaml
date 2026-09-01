@@ -193,6 +193,7 @@ data:
           # ── BEGIN GENERATED team board redirect URIs (gen-board-clients.py) ──
           - https://curb-agile.capstone.uamishub.com/api/auth/callback
           - https://ida-llm-agile.capstone.uamishub.com/api/auth/callback
+          - https://mychef-agile.capstone.uamishub.com/api/auth/callback
           - https://nextup-agile.capstone.uamishub.com/api/auth/callback
           - https://paper-papas-agile.capstone.uamishub.com/api/auth/callback
           - https://ss-evan-and-emily-agile.capstone.uamishub.com/api/auth/callback
