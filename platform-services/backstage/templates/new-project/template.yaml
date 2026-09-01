@@ -262,6 +262,9 @@ spec:
                             - backend/spring-boot
                             - blank/bring-your-own
                             - frontend/angular
+                            - frontend/react
+                            - frontend/solid
+                            - frontend/vue
                             - fullstack/nextjs
                             - fullstack/nuxt
                             - fullstack/sveltekit
@@ -282,6 +285,9 @@ spec:
                             - 'Java / Spring Boot API (Spring Web + JDBC + MySQL)'
                             - 'Blank / bring-your-own-code (green placeholder + Dockerfile)'
                             - 'Angular (TypeScript + Tailwind) SPA'
+                            - 'React (Vite + TypeScript + Tailwind) SPA'
+                            - 'SolidJS (Vite + TypeScript + Tailwind) SPA'
+                            - 'Vue 3 (Vite + TypeScript + Tailwind) SPA'
                             - 'Next.js Full-Stack (TypeScript + Prisma + MySQL)'
                             - 'Nuxt 3 fullstack (Vue + Nitro API + MySQL)'
                             - 'SvelteKit fullstack (Svelte + server routes + MySQL)'
@@ -316,10 +322,19 @@ spec:
                         singleFragment:
                           oneOf:
                             # Group (a): DB-less single-app fragments — no database question offered.
+                            # All are needsDB:false, so the wizard sends NO `database` key at all
+                            # for them. That is only accepted because capstone:compose-project
+                            # declares `database` OPTIONAL (board #139) — the four frontends added
+                            # here by board #207 land in this group for exactly that reason, so
+                            # #139 must be DEPLOYED (not merely merged — the action is baked into
+                            # the portal image, #113) before this list grows.
                             - properties:
                                 singleFragment:
                                   enum:
                                     - frontend/angular
+                                    - frontend/react
+                                    - frontend/solid
+                                    - frontend/vue
                                     - static/bare-html
                                     - static/react-static
                             # Group (b): MySQL-only needsDB fragments — host-postgres dropped
