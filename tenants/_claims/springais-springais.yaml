@@ -42,11 +42,41 @@ spec:
 
   # githubTeam DIVERGES from `team` deliberately. The Composition creates no GitHub
   # state (ADR-035 §D2), so githubTeam must name a team that ALREADY EXISTS — and
-  # `springais` does not. `ais` does (verified against the UA-MIS org team list,
-  # 2026-09-01), and it is the team whose members actually own this app. `team` stays
-  # `springais` because it is the namespace/Harbor/Vault/AppProject key and should read
-  # as the app, not as a course-org abbreviation shared with `ais-s25`.
-  githubTeam: "ais"
+  # `springais` does not. `team` stays `springais` because it is the
+  # namespace/Harbor/Vault/AppProject key and should read as the app.
+  #
+  # ⚠ THIS WAS `ais` AND THAT WAS WRONG — A SLUG COLLISION, NAMED HERE SO THE NEXT
+  # CLAIM DOES NOT REPEAT IT. `ais` reads like "AIS" for SpringAIS, and it IS a real,
+  # populated UA-MIS team — which is exactly what makes it dangerous. Verified against
+  # the live org 2026-09-01:
+  #     ais    name="AIS"    parent=capstone-fall-2024   members=10
+  #            [mppatel6 gbmorris1 mdpentecost adamkkane clmiller16 hrenninger
+  #             nepedigo-XIII jwcook4 jessicadodson1 blsanders4]
+  #     labmx  name="LabMx"  parent=<none>               members=9
+  #            [jslucas1 jslucascba wmcgiffert sydneymarch mjbux ccsmith33
+  #             brroberts21 kicasey RileyDavisGilbreath]
+  # `ais` is a TWO-YEAR-OLD capstone team of ten people with no relationship to this
+  # app. `labmx` is the team the owner moved the repo to ("transferred it over to
+  # labmx membership"), contains the owner, and is the ONLY team with access to
+  # UA-MIS/springais today (`gh api repos/UA-MIS/springais/teams` -> labmx, perm=pull).
+  #
+  # ⚠ AND — READ THIS BEFORE RELYING ON THIS FIELD — `githubTeam` IS CURRENTLY INERT.
+  # composition.yaml binds it to a variable and then never reads it:
+  #     line 46:  {{- $ghTeam := $spec.githubTeam | default $team }}
+  #     grep -n 'ghTeam\|githubTeam' composition.yaml  ->  that ONE line, nothing else
+  # So neither `ais` nor `labmx` grants anything today. The value that ACTUALLY gates
+  # access is `$team`: the AppProject developer role binds group `UA-MIS:{{ team }}`
+  # (composition.yaml ~line 621) and the per-team Adminer console forwardAuth uses
+  # `allowed_groups=UA-MIS:{{ team }}` (~lines 3293, 4568). For this tenant that is
+  # `UA-MIS:springais` — A GITHUB TEAM THAT DOES NOT EXIST. Consequence: nobody,
+  # including the owner, gets the ArgoCD developer role or the Adminer console for
+  # this tenant; everyone falls through to `policy.default: role:readonly`. That does
+  # NOT block the app or the public prod host (the workload is unaffected), so it is
+  # not a merge blocker — but it IS a real gap. Fixing it is an ORG decision, not a
+  # claim edit: either create a `springais` GitHub team whose members are the LabMx
+  # people, or wire `$ghTeam` through to those three call sites in a reviewed PR.
+  # Setting the field correctly NOW means that when it is wired, it is already right.
+  githubTeam: "labmx"
 
   # Container port of the PUBLIC entrypoint (the frontend). The chart sets each
   # component's own port from .devops/components.yaml; this XRD field is only the
