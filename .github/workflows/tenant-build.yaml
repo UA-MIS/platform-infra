@@ -406,7 +406,7 @@ jobs:
             if npm run | grep -qE "^[[:space:]]+test"; then echo "==> npm test"; npm test;
             else echo "::notice::no npm test script — test run skipped"; fi'
 
-      - name: Python — install + ruff (advisory) + pytest
+      - name: Python — install (BLOCKING) + ruff (advisory) + pytest (BLOCKING)
         if: ${{ steps.detect.outputs.lang == 'python' }}
         # Digest-pinned (SEC). python:3-slim. Installs requirements(.txt|-dev.txt) + the app
         # (if pyproject) + pytest/ruff over :443. ruff is advisory; pytest is BLOCKING. A
@@ -424,20 +424,52 @@ jobs:
         # whole && list return 1 and kills the script — which is exactly why the original
         # could only use `set -u`. Each one is therefore rewritten as a real `if` block.
         # Do not fold them back into && lists.
+        #
+        # pip runs WITHOUT --quiet into a log that is printed ONLY when that pip call
+        # FAILS. --quiet holds pip to WARNING level, but pip emits the "The conflict is
+        # caused by:" block — the only part that NAMES the two colliding packages — at
+        # INFO. So a ResolutionImpossible printed its headline and swallowed its own
+        # diagnosis: a real tenant break (UA-MIS/curb-web, run 33464463439) cost an hour
+        # and a hand-built reproduction to identify from `ERROR: ResolutionImpossible`
+        # alone. Capturing rather than silencing keeps a PASSING log exactly as short as
+        # --quiet did, while making a failing one self-describing.
+        #
+        # This is a CAPTURE, not a retry: nothing is installed twice, so it costs no
+        # extra minutes even on a five-minute install. `pip_install` returns pip's REAL
+        # exit code, so errexit still kills the step on a blocking install failure —
+        # never wrap the bare `pip_install` calls in `|| true`, and never let the
+        # non-blocking `if pip_install advisory .` form spread to the other calls.
+        # Warnings from a SUCCESSFUL install are still surfaced (the grep), so this loses
+        # no signal that --quiet was showing before; it only loses the pip-upgrade notice.
+        #
+        # The FIRST argument is `blocking` or `advisory` and is not decoration: it decides
+        # whether a failure also emits a `::error::` annotation. Only the pyproject install
+        # is advisory. Getting that backwards paints a red error annotation onto a check
+        # that then passes, which is how people learn to ignore annotations.
         uses: docker://python@sha256:63a4c7f612a00f92042cbdcc7cdc6a306f38485af0a200b9c89de7d9b1607d15 # 3-slim
         with:
           entrypoint: /bin/sh
           args: >-
             -c 'set -eu;
             cd "$GITHUB_WORKSPACE/${{ matrix.context }}" || exit 1;
-            PIP="python -m pip install --quiet --root-user-action=ignore";
-            if [ -f requirements.txt ]; then echo "==> pip install -r requirements.txt"; $PIP -r requirements.txt; fi;
-            if [ -f requirements-dev.txt ]; then echo "==> pip install -r requirements-dev.txt"; $PIP -r requirements-dev.txt; fi;
+            PIPLOG=/tmp/pip-install.log;
+            pip_install() { pmode="$1"; shift;
+            python -m pip install --root-user-action=ignore "$@" >"$PIPLOG" 2>&1
+            || { prc=$?; echo "--- pip output (shown because this install FAILED; hidden on success) ---";
+            cat "$PIPLOG"; echo "--- end pip output ---";
+            if [ "$pmode" = blocking ]; then
+            echo "::error::A BLOCKING pip install failed above, so this check is red. When pip reports ResolutionImpossible, the block headed -The conflict is caused by- is the part that names the two packages that collide. Note that any dependency you did not pin is re-resolved against live PyPI on every run, so this can start failing when nothing in your repo changed.";
+            fi;
+            return $prc; };
+            grep -E "^(WARNING|ERROR)" "$PIPLOG" || :;
+            return 0; };
+            if [ -f requirements.txt ]; then echo "==> pip install -r requirements.txt"; pip_install blocking -r requirements.txt; fi;
+            if [ -f requirements-dev.txt ]; then echo "==> pip install -r requirements-dev.txt"; pip_install blocking -r requirements-dev.txt; fi;
             proj_install=skipped;
             if [ -f pyproject.toml ]; then echo "==> pip install .";
-            if $PIP .; then proj_install=ok; else proj_install=FAILED;
+            if pip_install advisory .; then proj_install=ok; else proj_install=FAILED;
             echo "::warning::pip install . failed — a pyproject.toml that only carries tool config (no [build-system]) is not installable, so this stays non-blocking; a real packaging error will surface at image build"; fi; fi;
-            echo "==> pip install pytest ruff"; $PIP pytest ruff;
+            echo "==> pip install pytest ruff"; pip_install blocking pytest ruff;
             echo "==> ruff (advisory)";
             ruff check . || echo "::warning::ruff reported findings — ADVISORY ONLY, this does not fail the build and is not test coverage";
             echo "==> pytest"; set +e; pytest -q; rc=$?; set -e;
