@@ -649,6 +649,42 @@ spec:
           #     server admin — the "labmx -> Admin" requirement). Needs
           #     `allow_assign_grafana_admin = true`, scoped to this one role-map
           #     branch (no other branch ever resolves to GrafanaAdmin).
+          #   - `UA-MIS:grafana-editors` -> Grafana `Editor`. A dedicated,
+          #     purpose-scoped Team (NOT a tenant team, and NOT `labmx`) whose
+          #     only meaning is "may author dashboards". Membership is the
+          #     grant: onboarding a team to dashboard-authoring is adding them
+          #     to this Team on GitHub, with NO edit to this JMESPath — which is
+          #     why a dedicated Team beats enumerating tenant slugs here.
+          #     NOTE: Dex emits GitHub team SLUGS and parent-team membership
+          #     does NOT propagate to children, so members must be added to
+          #     `grafana-editors` DIRECTLY (being in `521-labs` grants nothing).
+          #
+          #     Blast radius of `Editor` — MEASURED against this deployment
+          #     (Grafana 13.1.0), not assumed. Editor is an ORG-WIDE role and
+          #     this install has no folders (all 45 dashboards live in General),
+          #     so an Editor's scope is every dashboard. That is SAFE here only
+          #     because every platform dashboard is PROVISIONED from a ConfigMap
+          #     by the sidecar under `allowUiUpdates: false`, and Grafana refuses
+          #     UI/API writes to provisioned dashboards regardless of role:
+          #       POST /api/dashboards/db  (overwrite Ceph) -> 400 "Cannot save
+          #                                                    provisioned dashboard"
+          #       DELETE /api/dashboards/uid/platform-ceph-rook -> 400
+          #                                "provisioned dashboard cannot be deleted"
+          #     Control: the same Editor CAN delete a dashboard it created itself
+          #     (200), proving the block is PROVISIONING, not a permission gap.
+          #     So folder-scoping was deliberately NOT done: it would require
+          #     wiping and re-provisioning all 45 dashboards (see the #523 note
+          #     under sidecar.dashboards) plus per-team folder ACL upkeep, to
+          #     defend against a write path GitOps already closes.
+          #     Editors additionally CAN (accepted, stated not discovered):
+          #       create folders; READ datasource definitions; create Grafana
+          #       contact points + Grafana-managed alert rules. The last is
+          #       tolerable because Grafana-managed alerting here is EMPTY —
+          #       all platform alerting is PrometheusRule CRs evaluated by
+          #       Prometheus/Alertmanager, which no Grafana role can reach.
+          #     Editors CANNOT: modify any provisioned dashboard (above), create
+          #       or edit datasources (403 `datasources:create`), list org users
+          #       (403), or reach /api/admin/* (403/404).
           #   - every other authenticated UA-MIS member (any other `UA-MIS:*`
           #     team, or none) -> `Viewer` — dashboards are for CONSUMING, not
           #     editing, per team.
@@ -727,7 +763,7 @@ spec:
               # land on the chooser screen so the admin/password break-glass
               # login stays reachable, never auto-redirected past.
               auto_login: false
-              role_attribute_path: "contains(groups[*], 'UA-MIS:labmx') && 'GrafanaAdmin' || 'Viewer'"
+              role_attribute_path: "contains(groups[*], 'UA-MIS:labmx') && 'GrafanaAdmin' || contains(groups[*], 'UA-MIS:grafana-editors') && 'Editor' || 'Viewer'"
               role_attribute_strict: false
               allow_assign_grafana_admin: true
               # Inert without Grafana Enterprise (Team Sync is an Enterprise-only

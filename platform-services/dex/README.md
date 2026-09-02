@@ -144,7 +144,16 @@ directly (native OIDC support), so the redirect URI is Grafana's own
 | GitHub Team / membership | OIDC group | Grafana role |
 | --- | --- | --- |
 | `labmx` Team (same one ArgoCD RBAC maps to `role:admin`) | `UA-MIS:labmx` | `GrafanaAdmin` (org Admin + server admin) |
+| `grafana-editors` Team (dashboard-authoring grant; direct members only) | `UA-MIS:grafana-editors` | `Editor` (may create/edit own dashboards) |
 | any other authenticated UA-MIS member (any other `UA-MIS:*` team, or none) | — | `Viewer` |
+
+`grafana-editors` is a dedicated, purpose-scoped Team, deliberately NOT a tenant
+team and NOT `labmx`: onboarding a team to dashboard-authoring is adding its
+members to that Team, with no edit to the JMESPath. Because Dex emits team
+**slugs** and parent-team membership does **not** propagate to children, members
+must be added **directly** (being in `521-labs` grants nothing). See
+`platform-services/monitoring/README.md` -> "Granting dashboard-authoring" for
+the measured blast radius of `Editor` on this deployment.
 
 Unlike ArgoCD/Backstage/DB-console, this `grafana-client-secret` key was
 sealed with REAL values in this PR (not a placeholder) — no reseal needed
@@ -184,5 +193,6 @@ curl -sk https://id.capstone.uamishub.com/.well-known/openid-configuration | jq 
 
 # Grafana UI: open https://grafana.capstone.uamishub.com -> "Sign in with Dex
 # (GitHub / UA-MIS)" (the admin/password form stays visible as break-glass). A
-# labmx member lands as GrafanaAdmin; any other UA-MIS member lands as Viewer.
+# labmx member lands as GrafanaAdmin; a grafana-editors member lands as Editor;
+# any other UA-MIS member lands as Viewer.
 ```
