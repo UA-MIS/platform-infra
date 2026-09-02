@@ -87,7 +87,41 @@ broker, SAME "one GitHub OAuth app, N tools" model as ArgoCD/Harbor/Backstage/
 DB-console. `platform-services/dex/configmap.yaml` registers Grafana as the
 `grafana` staticClient; see that dir's README "Grafana static client" for the
 client/secret/redirect-URI details and the role-mapping table (`labmx` ->
-`GrafanaAdmin`, every other UA-MIS member -> `Viewer`).
+`GrafanaAdmin`, `grafana-editors` -> `Editor`, every other UA-MIS member ->
+`Viewer`).
+
+### Granting dashboard-authoring (`Editor`)
+
+Viewers cannot create dashboards. To let a tenant team author their own, add
+its members to the **`UA-MIS/grafana-editors`** GitHub Team — that is the whole
+grant; `role_attribute_path` does not change per team. Because Dex emits team
+**slugs** and parent-team membership does **not** propagate to children, members
+must be added to `grafana-editors` *directly*. The new role takes effect on the
+member's **next Grafana login** (`[auth.generic_oauth] skip_org_role_sync` is
+`false`, so the org role re-syncs from the `groups` claim on every login).
+
+**Why `Editor` is safe here despite being an org-wide role** (measured on
+Grafana 13.1.0, not assumed): this install has **no folders** — all 45
+dashboards live in `General` — so an Editor's scope really is every dashboard.
+The protection is not folder ACLs but **provisioning**: every platform dashboard
+is sidecar-provisioned from a ConfigMap under `allowUiUpdates: false`, and
+Grafana refuses writes to a provisioned dashboard for *any* role —
+`POST /api/dashboards/db` -> `400 Cannot save provisioned dashboard`,
+`DELETE /api/dashboards/uid/platform-ceph-rook` -> `400 provisioned dashboard
+cannot be deleted`. Control: the same Editor *can* delete a dashboard it created
+itself (`200`), proving the block is provisioning rather than a permission gap.
+Folder-scoping was therefore deliberately skipped — it would mean wiping and
+re-provisioning all 45 dashboards (see the `#523` note under
+`sidecar.dashboards`) plus per-team ACL upkeep, to close a path GitOps already
+closes.
+
+Accepted residual exposure — an Editor **can** create folders, **read**
+datasource definitions, and create Grafana contact points and Grafana-managed
+alert rules. That last is tolerable only because Grafana-managed alerting here
+is **empty**: all platform alerting is `PrometheusRule` CRs evaluated by
+Prometheus/Alertmanager, which no Grafana role can reach. An Editor **cannot**
+modify any provisioned dashboard, create or edit datasources (`403
+datasources:create`), list org users (`403`), or reach `/api/admin/*`.
 
 - `[server] domain` / `root_url` are set to the public Traefik host — Grafana
   builds its OAuth `redirect_uri` from `root_url`, and it MUST exactly match
@@ -119,7 +153,9 @@ auto-populate from GitHub Teams.
 
 What's actually shipped instead (OSS-compatible, "soft isolation is fine" per
 the design goal — this is a UX declutter, not an access-control wall; every
-authenticated UA-MIS member is a Grafana **Viewer** and can see every folder):
+authenticated UA-MIS member is a Grafana **Viewer** (or an **Editor**, if in
+`grafana-editors` — see "Granting dashboard-authoring" above) and can see every
+folder):
 
 - **Two folders**, driven by a `grafana_folder` ANNOTATION on each dashboard
   ConfigMap + `grafana.sidecar.dashboards.folderAnnotation: grafana_folder` —
