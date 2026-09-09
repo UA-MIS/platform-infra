@@ -88,7 +88,7 @@ the listener can't auth (the app shows Progressing) — expected pre-credential.
 Both the RUNNER pod (`applicationsets/arc-runner-scaleset-app.yaml` +
 per-team/Crossplane equivalents) and the Kaniko BUILD step pod
 (`hook-template.yaml` + per-team/Crossplane equivalents) **require**
-`capstone.io/ci-build=true` OR a control-plane OptiPlex as a fallback — bare
+`capstone.io/ci-build=true` OR `capstone.io/ci-build-emergency=true` — bare
 `capstone.io/pool=build` is no longer sufficient. This was promoted from a soft
 `preferred` (weight 100) to a `required` term because the scheduler's
 least-allocated scoring kept placing builds on `capstone-w1` (100 Mbit NIC)
@@ -100,8 +100,16 @@ the operator-facing label procedure and the reversal step, and
 ⚠ `capstone.io/ci-build=true` is a **live-only, hand-applied label** — no node
 manifest in this repo sets it. If it is ever removed from every build-pool node
 (e.g. the labelled node is decommissioned with no replacement labelled), CI
-degrades onto the control-plane OptiPlex fallback tier rather than failing
-outright, but at reduced capacity — relabel a fast node promptly.
+**queues loudly** in GitHub Actions rather than falling back anywhere
+automatically — relabel a fast node promptly. There is deliberately **no
+automatic control-plane fallback**: `capstone-n1/n2/n3` run etcd off the same
+writable `/var` partition the CI work volume uses, the Kaniko build container's
+CPU is unbounded, and `capstone-n2` is a known thermal outlier (~88–91°C,
+pending a repaste) — heavy build I/O there risks destabilizing the control
+plane, not just slowing a build. `capstone.io/ci-build-emergency=true` is an
+**opt-in-only** escape hatch (never set by default) an operator can apply to
+any node, including a control plane one, if they judge a genuine incident
+justifies that risk — see `docs/operator/debian-worker-onboarding.md` §6.1.1.
 
 Every job's "Set up job" log prints `CI runner node: <node-name>` via the
 runner's own `ACTIONS_RUNNER_HOOK_JOB_STARTED` pre-job hook (a GitHub

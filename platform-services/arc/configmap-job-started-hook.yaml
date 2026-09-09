@@ -1,9 +1,11 @@
 # CI node-visibility hook (2026-09-09) — makes it possible to see, from the GitHub
 # Actions job log itself, which cluster node a build actually ran on. Without this,
-# a failed build gives no clue whether it landed on the fast ci-build=true node or a
-# fallback OptiPlex — that ambiguity is exactly what made the w1/100-Mbit-NIC root
-# cause (see applicationsets/arc-runner-scaleset-app.yaml) slow to pin down: pods
-# were gone by the time anyone went looking for `spec.nodeName`.
+# a failed build gives no clue which build-pool node it landed on — that ambiguity
+# is exactly what made the w1/100-Mbit-NIC root cause (see
+# applicationsets/arc-runner-scaleset-app.yaml) slow to pin down: pods were gone by
+# the time anyone went looking for `spec.nodeName`. It also makes it obvious if a
+# build ever lands on the opt-in `capstone.io/ci-build-emergency=true` escape hatch
+# (same file), since that should only ever happen during a declared incident.
 #
 # MECHANISM: this is the actions/runner's OWN pre-job hook
 # (`ACTIONS_RUNNER_HOOK_JOB_STARTED`, a GitHub-documented self-hosted-runner

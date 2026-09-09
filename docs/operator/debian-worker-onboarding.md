@@ -414,7 +414,7 @@ ARC (Actions Runner Controller) RUNNER pod and the Kaniko BUILD step pod both
 carry `capstone.io/ci-build=true` in their `requiredDuringSchedulingIgnoredDuringExecution`
 nodeAffinity term (previously it was only a `preferred`, weight-100, soft bias —
 see the history below for why that was not enough). The required candidate set is
-now `capstone.io/ci-build=true` **OR** a control-plane OptiPlex fallback — bare
+now `capstone.io/ci-build=true` **OR** `capstone.io/ci-build-emergency=true` — bare
 `capstone.io/pool=build` is no longer sufficient on its own
 (`platform-services/arc/hook-template.yaml`,
 `platform-services/arc/per-team/hook-template.template.yaml`,
@@ -429,12 +429,51 @@ post-join step for whichever build-pool box should receive CI traffic:
 kubectl label node <build-pool-node> capstone.io/ci-build=true --overwrite
 ```
 
-**Practical consequence of the required-set promotion:** if the ONE labelled node
-(today, `capstone-w2`) is drained, cordoned, or down, and no other node carries
-this label, CI does **not** silently fall back onto a slow or untested pool node —
-it queues on the control-plane OptiPlex fallback tier instead (degraded, not
-dead). If you add a second build-pool node and want it to share CI traffic, it
-MUST get this label explicitly; it will not be picked up automatically.
+**Practical consequence of the required-set promotion — and why there is NO
+automatic control-plane fallback:** if the ONE labelled node (today,
+`capstone-w2`) is drained, cordoned, or down, and no other node carries this
+label, CI **queues loudly** in GitHub Actions ("Waiting for a runner") — it does
+**not** fall back onto `capstone-n1/n2/n3` automatically. An earlier draft of
+this change included an automatic control-plane OR-term as a "degrade, don't
+die" fallback; that was reviewed and rejected. Two concrete reasons:
+
+1. **Shared disk with etcd.** Talos control-plane nodes have exactly ONE
+   writable partition, `/var` — verified live on `capstone-n1`
+   (`/dev/nvme0n1p4`, see `platform-services/local-path-provisioner/configmap.yaml`).
+   The CI work volume (`local-path-ci` StorageClass) writes to that same
+   partition/disk. `etcd`'s data directory is also under `/var` on these nodes.
+   etcd is acutely sensitive to disk-write latency; co-locating heavy Kaniko
+   build I/O there risks destabilizing the **control plane itself**, not just
+   slowing one build.
+2. **Unbounded CPU + known thermal headroom problems.** The Kaniko build
+   container's CPU is deliberately unbounded (only memory is limited — see
+   `platform-services/arc/hook-template.yaml`). `capstone-n2` is a known
+   thermal outlier in this fleet (running ~88–91°C, pending a repaste) even
+   before adding sustained build load — see the OptiPlex thermal history this
+   repo already tracks.
+
+A loud queue is a strictly better failure than a silent quality-of-service
+cliff on the nodes running etcd, especially with no on-call rotation to catch a
+slow etcd degradation overnight. If you genuinely need CI to keep running
+during an incident and accept that risk knowingly, there is a manual escape
+hatch — see below. If you add a second **build-pool** node and want it to
+share CI traffic, it MUST get `capstone.io/ci-build=true` explicitly; it will
+not be picked up automatically.
+
+**Opt-in emergency escape hatch (`capstone.io/ci-build-emergency=true`):** not
+set anywhere by default, and not part of any routine procedure. During a
+genuine incident, an operator who has weighed the etcd/thermal risk above and
+decided it's acceptable in the moment can apply it by hand:
+
+```bash
+kubectl label node <node> capstone.io/ci-build-emergency=true --overwrite
+# and remove it again once the incident is over:
+kubectl label node <node> capstone.io/ci-build-emergency-
+```
+
+This is a deliberate, reviewed, in-the-moment decision — never an automatic
+fallback. Prefer relabelling `capstone-w1` (see below) or waiting for
+`capstone-w2` to come back over reaching for this.
 
 ⚠ **Pick the node by NIC speed, not by which box joined first.** As of 2026-09-09
 the build pool is `capstone-w1` + `capstone-w2` (`capstone.io/pool=build`, both

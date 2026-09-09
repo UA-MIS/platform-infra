@@ -70,11 +70,22 @@ data:
       #
       # CANDIDATE SET (required, OR of two terms): capstone.io/ci-build=true (TODAY: only
       # capstone-w2 — a LIVE-ONLY label applied by hand, not set by any node manifest in
-      # this repo) OR a control-plane OptiPlex (capstone-n1/2/3, ~14.7GiB each — degrade,
-      # not die, if the ci-build node is unavailable). Deliberately DROPS bare
-      # capstone.io/pool=build from the required set: w1 carries that label too and is
-      # exactly the node being excluded. Still excludes the 8GiB Mac workers
-      # (capstone.io/pool=mac-debian — too small for a 4Gi/8Gi build).
+      # this repo) OR capstone.io/ci-build-emergency=true (an OPT-IN, incident-only escape
+      # hatch — NOT set anywhere by default). Deliberately DROPS bare capstone.io/pool=build
+      # from the required set: w1 carries that label too and is exactly the node being
+      # excluded. Still excludes the 8GiB Mac workers (capstone.io/pool=mac-debian — too
+      # small for a 4Gi/8Gi build).
+      #
+      # ── NO AUTOMATIC control-plane fallback (revised 2026-09-09, after review) ──
+      # THIS is the pod whose CPU is UNBOUNDED (only memory is limited, see resources
+      # below), so it is the highest-risk pod for an automatic control-plane fallback: n1-n3
+      # run etcd, and Talos control-plane nodes have exactly ONE writable partition (`/var`)
+      # — the SAME partition/disk the CI work volume uses
+      # (platform-services/local-path-provisioner/configmap.yaml: /dev/nvme0n1p4 on n1).
+      # Unbounded-CPU build I/O sharing a disk with etcd's fsync-sensitive writes risks
+      # destabilizing the control plane, not just slowing a build — and n2 is a known
+      # thermal outlier (~88-91C, pending a repaste). A loud GitHub Actions queue beats a
+      # silent etcd-latency risk. Full rationale: applicationsets/arc-runner-scaleset-app.yaml.
       #
       # REVERSIBLE: `kubectl label node capstone-w1 capstone.io/ci-build=true --overwrite`
       # once its NIC is fixed is the entire fix — no YAML change needed.
@@ -86,13 +97,14 @@ data:
       # (live for nextup/curb/ida-llm/motion/mychef/springais). Change ALL together.
       #
       # TIER BIAS (preferred, soft — now only breaks ties WITHIN the required set):
-      # ci-build=true (100) → control-plane OptiPlex fallback (10). The old weight-50
-      # "any pool=build node" tier is gone: it can never fire once bare pool=build is out
-      # of the required set. (⚠ db1, if still part of the pool, is only ~7.5GiB alloc,
-      # below the 8Gi LIMIT — it is no longer a placement candidate at all under this
-      # required set; re-derive if it needs to come back as a tier.) This PodSpecPatch is
-      # merged verbatim onto the step pod (runner-container-hooks' mergePodSpecWithOptions
-      # assigns top-level fields, no deep-merge).
+      # ci-build=true (100) → the opt-in ci-build-emergency escape hatch (10, so it never
+      # outranks a genuinely vetted node). The old weight-50 "any pool=build node" tier is
+      # gone: it can never fire once bare pool=build is out of the required set. (⚠ db1, if
+      # still part of the pool, is only ~7.5GiB alloc, below the 8Gi LIMIT — it is no longer
+      # a placement candidate at all under this required set; re-derive if it needs to come
+      # back as a tier.) This PodSpecPatch is merged verbatim onto the step pod
+      # (runner-container-hooks' mergePodSpecWithOptions assigns top-level fields, no
+      # deep-merge).
       tolerations:
         - key: capstone.io/control-plane
           operator: Equal
@@ -118,11 +130,27 @@ data:
               # capstone-w2. See the comment block above for the reversal step.
               - matchExpressions:
                   - { key: capstone.io/ci-build, operator: In, values: ["true"] }
-              # FALLBACK — control-plane OptiPlexes (degrade, don't die).
+              # OPT-IN EMERGENCY escape hatch (2026-09-09) — NOT set anywhere by
+              # default. An operator applies this label BY HAND, deliberately, during
+              # an incident (`kubectl label node <node> capstone.io/ci-build-
+              # emergency=true`) to keep CI limping on a node that is otherwise not a
+              # vetted CI candidate. Deliberately EXCLUDES control-plane nodes from the
+              # AUTOMATIC candidate set: n1-n3 run etcd off the SAME writable /var
+              # partition the CI work volume uses (local-path-provisioner/
+              # configmap.yaml — /dev/nvme0n1p4 on n1), and this container's CPU is
+              # UNBOUNDED (only memory is limited, see resources below) — heavy,
+              # unbounded-CPU build I/O landing on etcd's disk risks destabilizing the
+              # CONTROL PLANE, not just slowing a build. n2 is also a known thermal
+              # outlier (~88-91C, pending a repaste). A loud queue when no vetted node
+              # is free is the safer failure than a silent etcd-latency risk. An
+              # operator who judges a genuine emergency justifies the risk anyway can
+              # apply this label to a control-plane node themselves — an explicit,
+              # in-the-moment decision, never an automatic fallback.
               - matchExpressions:
-                  - { key: node-role.kubernetes.io/control-plane, operator: Exists }
+                  - { key: capstone.io/ci-build-emergency, operator: In, values: ["true"] }
           preferredDuringSchedulingIgnoredDuringExecution:
-            # Break ties WITHIN the required set above.
+            # Break ties WITHIN the required set above: the vetted node always wins
+            # over the opt-in emergency escape hatch when both are candidates.
             - weight: 100
               preference:
                 matchExpressions:
@@ -130,7 +158,7 @@ data:
             - weight: 10
               preference:
                 matchExpressions:
-                  - { key: node-role.kubernetes.io/control-plane, operator: Exists }
+                  - { key: capstone.io/ci-build-emergency, operator: In, values: ["true"] }
         # ── SOFT SPREAD across the build pool (node-GUIDED-not-BOUND) ──────────────
         # Prefer to place this build's job/step pod on a pool node that is NOT already
         # anchoring ANOTHER build's runner pod. The runner pods (arc-runner-scaleset-
