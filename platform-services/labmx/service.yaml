@@ -1,0 +1,32 @@
+# Services for both LabMx apps. Port 80 -> the app's own container port, so the
+# Ingresses below can reference `port: { number: 80 }` uniformly.
+#
+# ⚠ The ports are DELIBERATELY UNNAMED, exactly as applied live. Naming them
+# (`name: http`) would be the house style elsewhere in this repo, but an Ingress
+# that resolves a backend by number does not care, and renaming a live Service
+# port is a mutation of a serving object for zero benefit during an adoption. If a
+# ServiceMonitor or a port-name-based NetworkPolicy is ever added for LabMx, add
+# the name THEN, in a change whose only subject is that rename.
+apiVersion: v1
+kind: Service
+metadata:
+  name: hub
+  namespace: labmx
+spec:
+  selector:
+    app: hub
+  ports:
+    - port: 80
+      targetPort: 3000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: attendance
+  namespace: labmx
+spec:
+  selector:
+    app: attendance
+  ports:
+    - port: 80
+      targetPort: 3001
