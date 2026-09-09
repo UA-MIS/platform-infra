@@ -56,32 +56,55 @@ data:
       # nodeSelector for a SOFT, RAM-aware TIER bias (weighted nodeAffinity) fenced by a
       # HARD candidate SET that only excludes nodes too small to build on.
       #
-      # CANDIDATE SET (required, OR of two terms): capstone.io/pool=build (laptop-01 +
-      # ua-mis-db-1) OR a control-plane OptiPlex (capstone-n1/2/3, ~14.7GiB each). This
-      # EXCLUDES the 8GiB Mac workers (capstone.io/pool=mac-debian, ~7.5GiB alloc — too
-      # small for a 4Gi/8Gi Backstage build) and any future unlabeled node. Uses ONLY
-      # labels that exist live today → applies on the next ArgoCD sync, NO `kubectl
-      # label` step required.
+      # ── PROMOTED capstone.io/ci-build=true: PREFERRED → REQUIRED (2026-09-09) ──
+      # THIS is the pod that actually runs `RUN npm ci` (and every other Dockerfile
+      # instruction) for a tenant build, so its placement is the direct cause of the
+      # intermittent `npm ci` ETIMEDOUT / read tcp i/o-timeout failures: capstone-w1's
+      # `eno2` NIC negotiates at 100 Mbit (7-9 MB/s measured) vs capstone-w2's 1000 Mbit
+      # (25-55 MB/s measured; 55 MB/s / 13ms-connect / 20-parallel-<0.51s to
+      # registry.npmjs.org). Under the OLD soft-only preference the scheduler's
+      # least-allocated scorer routinely outweighed the weight-100 preference (w1 ~15%
+      # mem vs w2 ~36%), so builds landed on w1 often enough to fail confusingly ~half
+      # the time. Full rationale + evidence: applicationsets/arc-runner-scaleset-app.yaml.
+      # See also docs/operator/debian-worker-onboarding.md §6.1.1.
       #
-      # TIER BIAS (preferred, soft): laptop-01 (100, matched directly by its own
-      # capstone.io/ci-build=true label) → any other build-pool node e.g. ua-mis-db-1 (50,
-      # capstone.io/pool=build) → OptiPlex (10). The scheduler PREFERS the dedicated
-      # laptop, spills to the rest of the pool, then an OptiPlex, but places the pod on ANY
-      # candidate that can admit the 4Gi request when the preferred tier is full — the
-      # fallback that was missing. (⚠ db1 is only ~7.5GiB alloc, below the 8Gi LIMIT — fine
-      # for a typical ~6Gi build; if a peak build OOMs on db1, swap the db1 and OptiPlex
-      # weights.) This PodSpecPatch is merged verbatim onto the step pod
+      # CANDIDATE SET (required, OR of two terms): capstone.io/ci-build=true (TODAY: only
+      # capstone-w2 — a LIVE-ONLY label applied by hand, not set by any node manifest in
+      # this repo) OR capstone.io/ci-build-emergency=true (an OPT-IN, incident-only escape
+      # hatch — NOT set anywhere by default). Deliberately DROPS bare capstone.io/pool=build
+      # from the required set: w1 carries that label too and is exactly the node being
+      # excluded. Still excludes the 8GiB Mac workers (capstone.io/pool=mac-debian — too
+      # small for a 4Gi/8Gi build).
+      #
+      # ── NO AUTOMATIC control-plane fallback (revised 2026-09-09, after review) ──
+      # THIS is the pod whose CPU is UNBOUNDED (only memory is limited, see resources
+      # below), so it is the highest-risk pod for an automatic control-plane fallback: n1-n3
+      # run etcd, and Talos control-plane nodes have exactly ONE writable partition (`/var`)
+      # — the SAME partition/disk the CI work volume uses
+      # (platform-services/local-path-provisioner/configmap.yaml: /dev/nvme0n1p4 on n1).
+      # Unbounded-CPU build I/O sharing a disk with etcd's fsync-sensitive writes risks
+      # destabilizing the control plane, not just slowing a build — and n2 is a known
+      # thermal outlier (~88-91C, pending a repaste). A loud GitHub Actions queue beats a
+      # silent etcd-latency risk. Full rationale: applicationsets/arc-runner-scaleset-app.yaml.
+      #
+      # REVERSIBLE: `kubectl label node capstone-w1 capstone.io/ci-build=true --overwrite`
+      # once its NIC is fixed is the entire fix — no YAML change needed.
+      #
+      # ⚠ MUST STAY IN SYNC with the identical affinity block on the RUNNER pod in
+      # applicationsets/arc-runner-scaleset-app.yaml, both per-team templates
+      # (platform-services/arc/per-team/{hook-template,runner-scaleset-app}.template.yaml),
+      # and both blocks rendered by platform-services/crossplane/apis/composition.yaml
+      # (live for nextup/curb/ida-llm/motion/mychef/springais). Change ALL together.
+      #
+      # TIER BIAS (preferred, soft — now only breaks ties WITHIN the required set):
+      # ci-build=true (100) → the opt-in ci-build-emergency escape hatch (10, so it never
+      # outranks a genuinely vetted node). The old weight-50 "any pool=build node" tier is
+      # gone: it can never fire once bare pool=build is out of the required set. (⚠ db1, if
+      # still part of the pool, is only ~7.5GiB alloc, below the 8Gi LIMIT — it is no longer
+      # a placement candidate at all under this required set; re-derive if it needs to come
+      # back as a tier.) This PodSpecPatch is merged verbatim onto the step pod
       # (runner-container-hooks' mergePodSpecWithOptions assigns top-level fields, no
-      # deep-merge). The SAME affinity is mirrored on the runner pod in
-      # arc-runner-scaleset-app.yaml and on the per-team templates.
-      #
-      # FIXED (this change): the weight-100 rule used to require `capstone.io/ci-build
-      # DoesNotExist`, which EXCLUDES laptop-01 (it carries ci-build=true) and instead
-      # matched ua-mis-db-1 (pool=build, no ci-build label) — the exact inverse of intent.
-      # Live-observed effect: the scheduler preferred the 8GiB DB/Vault node (db1, weight
-      # 100) over the dedicated 16GiB CI node (laptop-01, only weight 50), landing heavy
-      # 4Gi Backstage builds on db1 → kubelet admission OutOfMemory. laptop-01 is now
-      # matched directly by its own label so it is genuinely top-preferred.
+      # deep-merge).
       tolerations:
         - key: capstone.io/control-plane
           operator: Equal
@@ -103,28 +126,39 @@ data:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
+              # PRIMARY — a node explicitly vetted for CI (fast NIC). TODAY: only
+              # capstone-w2. See the comment block above for the reversal step.
               - matchExpressions:
-                  - { key: capstone.io/pool, operator: In, values: ["build"] }
+                  - { key: capstone.io/ci-build, operator: In, values: ["true"] }
+              # OPT-IN EMERGENCY escape hatch (2026-09-09) — NOT set anywhere by
+              # default. An operator applies this label BY HAND, deliberately, during
+              # an incident (`kubectl label node <node> capstone.io/ci-build-
+              # emergency=true`) to keep CI limping on a node that is otherwise not a
+              # vetted CI candidate. Deliberately EXCLUDES control-plane nodes from the
+              # AUTOMATIC candidate set: n1-n3 run etcd off the SAME writable /var
+              # partition the CI work volume uses (local-path-provisioner/
+              # configmap.yaml — /dev/nvme0n1p4 on n1), and this container's CPU is
+              # UNBOUNDED (only memory is limited, see resources below) — heavy,
+              # unbounded-CPU build I/O landing on etcd's disk risks destabilizing the
+              # CONTROL PLANE, not just slowing a build. n2 is also a known thermal
+              # outlier (~88-91C, pending a repaste). A loud queue when no vetted node
+              # is free is the safer failure than a silent etcd-latency risk. An
+              # operator who judges a genuine emergency justifies the risk anyway can
+              # apply this label to a control-plane node themselves — an explicit,
+              # in-the-moment decision, never an automatic fallback.
               - matchExpressions:
-                  - { key: node-role.kubernetes.io/control-plane, operator: Exists }
+                  - { key: capstone.io/ci-build-emergency, operator: In, values: ["true"] }
           preferredDuringSchedulingIgnoredDuringExecution:
-            # PRIMARY — laptop-01: the DEDICATED CI node, matched directly by its own
-            # label (capstone.io/ci-build=true). Highest weight = top preference.
+            # Break ties WITHIN the required set above: the vetted node always wins
+            # over the opt-in emergency escape hatch when both are candidates.
             - weight: 100
               preference:
                 matchExpressions:
                   - { key: capstone.io/ci-build, operator: In, values: ["true"] }
-            # SECONDARY — any OTHER build-pool node (e.g. ua-mis-db-1, the 8GiB DB/Vault
-            # box) that is not the dedicated CI node. Fallback only.
-            - weight: 50
-              preference:
-                matchExpressions:
-                  - { key: capstone.io/pool, operator: In, values: ["build"] }
-            # FALLBACK — control-plane OptiPlexes (last resort; tolerated above).
             - weight: 10
               preference:
                 matchExpressions:
-                  - { key: node-role.kubernetes.io/control-plane, operator: Exists }
+                  - { key: capstone.io/ci-build-emergency, operator: In, values: ["true"] }
         # ── SOFT SPREAD across the build pool (node-GUIDED-not-BOUND) ──────────────
         # Prefer to place this build's job/step pod on a pool node that is NOT already
         # anchoring ANOTHER build's runner pod. The runner pods (arc-runner-scaleset-

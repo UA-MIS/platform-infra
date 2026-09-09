@@ -32,15 +32,20 @@ data:
       # priorityclass-ci-build.yaml). Rides the hook's top-level PodSpec merge, same as
       # nodeSelector/tolerations below. The build waits for room, never evicts a workload.
       priorityClassName: capstone-ci-build
-      # Node placement for the KANIKO BUILD step pod (CI-fast, #237/#372; SOFT TIER).
-      # Mirrors the shared platform-services/arc/hook-template.yaml. SOFT, RAM-aware tier
-      # bias fenced by a HARD candidate SET so the build PREFERS laptop-01 (matched
-      # directly by ci-build=true), spills to any other build-pool node e.g. ua-mis-db-1,
-      # then a control-plane OptiPlex, but lands on ANY candidate that can admit its
-      # request when the preferred tier is full — and NEVER on the 8GiB Mac workers (too
-      # small for a 4Gi/8Gi build; note this replaces the previous "fall back to Macs"
-      # behaviour, which risked runtime OOM on a Mac). Uses only labels that exist live →
-      # applies on the next ArgoCD sync, no `kubectl label` step.
+      # Node placement for the KANIKO BUILD step pod (CI-fast, #237/#372;
+      # #ci-build-required 2026-09-09). Mirrors the shared
+      # platform-services/arc/hook-template.yaml — see that file (and
+      # applicationsets/arc-runner-scaleset-app.yaml) for the full rationale/evidence.
+      # capstone.io/ci-build=true is now REQUIRED, not merely preferred: capstone-w1's NIC
+      # negotiates at 100 Mbit and was the intermittent cause of `npm ci` ETIMEDOUT
+      # failures inside Kaniko builds. Required set = ci-build=true (TODAY: only
+      # capstone-w2, a LIVE-ONLY hand-applied label) OR capstone.io/ci-build-emergency=true
+      # (an OPT-IN, incident-only escape hatch — NOT set anywhere by default; no automatic
+      # control-plane fallback, since n1-n3 run etcd off the same disk this pod's unbounded
+      # CPU would hammer — see applicationsets/arc-runner-scaleset-app.yaml) — NEVER the
+      # 8GiB Mac workers (too small for a 4Gi/8Gi build). REVERSIBLE: `kubectl label node
+      # capstone-w1 capstone.io/ci-build=true --overwrite` once its NIC is fixed restores
+      # 2-node capacity, no YAML change.
       tolerations:
         - key: capstone.io/control-plane
           operator: Equal
@@ -57,28 +62,28 @@ data:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
+              # PRIMARY — a node explicitly vetted for CI (fast NIC). TODAY: only
+              # capstone-w2.
               - matchExpressions:
-                  - { key: capstone.io/pool, operator: In, values: ["build"] }
+                  - { key: capstone.io/ci-build, operator: In, values: ["true"] }
+              # OPT-IN EMERGENCY escape hatch — NOT set anywhere by default. NO automatic
+              # control-plane fallback (2026-09-09, after review): n1-n3 run etcd off the
+              # SAME writable /var partition the CI work volume uses, and this container's
+              # CPU is UNBOUNDED — see applicationsets/arc-runner-scaleset-app.yaml and
+              # platform-services/arc/hook-template.yaml for the full rationale. An operator
+              # applies this label by hand during a genuine incident.
               - matchExpressions:
-                  - { key: node-role.kubernetes.io/control-plane, operator: Exists }
+                  - { key: capstone.io/ci-build-emergency, operator: In, values: ["true"] }
           preferredDuringSchedulingIgnoredDuringExecution:
-            # PRIMARY — laptop-01: the DEDICATED CI node, matched directly by its own
-            # label (capstone.io/ci-build=true). Highest weight = top preference.
+            # Break ties WITHIN the required set above: the vetted node always wins.
             - weight: 100
               preference:
                 matchExpressions:
                   - { key: capstone.io/ci-build, operator: In, values: ["true"] }
-            # SECONDARY — any OTHER build-pool node (e.g. ua-mis-db-1, the 8GiB DB/Vault
-            # box) that is not the dedicated CI node. Fallback only.
-            - weight: 50
-              preference:
-                matchExpressions:
-                  - { key: capstone.io/pool, operator: In, values: ["build"] }
-            # FALLBACK — control-plane OptiPlexes (last resort; tolerated above).
             - weight: 10
               preference:
                 matchExpressions:
-                  - { key: node-role.kubernetes.io/control-plane, operator: Exists }
+                  - { key: capstone.io/ci-build-emergency, operator: In, values: ["true"] }
       # Resolve the Harbor registry host to Traefik IN-CLUSTER so the Kaniko PUSH
       # never traverses the Cloudflare edge (CF Free/Pro caps request bodies at 100MB
       # → a >100MB image layer 413s). Points the build pod straight at Traefik's

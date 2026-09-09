@@ -84,6 +84,41 @@ the listener can't auth (the app shows Progressing) — expected pre-credential.
     in **`per-team/README.md`** — the container hook can't select a secret per job, so
     isolation requires per-team scale sets.
 
+## CI node placement + visibility (2026-09-09)
+Both the RUNNER pod (`applicationsets/arc-runner-scaleset-app.yaml` +
+per-team/Crossplane equivalents) and the Kaniko BUILD step pod
+(`hook-template.yaml` + per-team/Crossplane equivalents) **require**
+`capstone.io/ci-build=true` OR `capstone.io/ci-build-emergency=true` — bare
+`capstone.io/pool=build` is no longer sufficient. This was promoted from a soft
+`preferred` (weight 100) to a `required` term because the scheduler's
+least-allocated scoring kept placing builds on `capstone-w1` (100 Mbit NIC)
+despite the soft preference, causing intermittent `npm ci` ETIMEDOUT failures
+inside Kaniko builds. See `docs/operator/debian-worker-onboarding.md` §6.1.1 for
+the operator-facing label procedure and the reversal step, and
+`applicationsets/arc-runner-scaleset-app.yaml` for the full evidence/rationale.
+
+⚠ `capstone.io/ci-build=true` is a **live-only, hand-applied label** — no node
+manifest in this repo sets it. If it is ever removed from every build-pool node
+(e.g. the labelled node is decommissioned with no replacement labelled), CI
+**queues loudly** in GitHub Actions rather than falling back anywhere
+automatically — relabel a fast node promptly. There is deliberately **no
+automatic control-plane fallback**: `capstone-n1/n2/n3` run etcd off the same
+writable `/var` partition the CI work volume uses, the Kaniko build container's
+CPU is unbounded, and `capstone-n2` is a known thermal outlier (~88–91°C,
+pending a repaste) — heavy build I/O there risks destabilizing the control
+plane, not just slowing a build. `capstone.io/ci-build-emergency=true` is an
+**opt-in-only** escape hatch (never set by default) an operator can apply to
+any node, including a control plane one, if they judge a genuine incident
+justifies that risk — see `docs/operator/debian-worker-onboarding.md` §6.1.1.
+
+Every job's "Set up job" log prints `CI runner node: <node-name>` via the
+runner's own `ACTIONS_RUNNER_HOOK_JOB_STARTED` pre-job hook (a GitHub
+self-hosted-runner feature, distinct from `ACTIONS_RUNNER_CONTAINER_HOOK_TEMPLATE`
+above) — see `configmap-job-started-hook.yaml`. This makes node placement visible
+directly in the GitHub Actions UI with no workflow-file change, so a future
+placement-related failure doesn't require correlating pod timestamps after the
+fact.
+
 ## Resource posture (local k3d)
 `minRunners: 0` + `maxRunners: 3` + per-runner requests/limits (250m/512Mi →
 2cpu/2Gi) are **values knobs** — they cap a Kaniko build burst from OOMing the

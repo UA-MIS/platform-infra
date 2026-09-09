@@ -1667,13 +1667,25 @@ spec:
                   data:
                     content: |
                       spec:
-                        # --- Node placement for the KANIKO BUILD step pod (#372/#374; SOFT TIER) ---
+                        # --- Node placement for the KANIKO BUILD step pod (#372/#374;
+                        # #ci-build-required 2026-09-09) ---
                         # MUST mirror platform-services/arc/per-team/hook-template.template.yaml
                         # (the reviewed source of truth). WITHOUT these two fields the step pod
-                        # has NO toleration for laptop-01's `capstone.io/dedicated=ci-build:NoSchedule`
-                        # taint (#374) and NO nodeAffinity (#372) → it is REPELLED off the dedicated
-                        # CI node onto the small Mac workers. runner-container-hooks merges these
-                        # top-level PodSpec fields verbatim onto the generated step pod.
+                        # has NO toleration for the CI node's `capstone.io/dedicated=ci-build:
+                        # NoSchedule` taint (#374) and NO nodeAffinity (#372) → it is REPELLED off
+                        # the dedicated CI node onto the small Mac workers. runner-container-hooks
+                        # merges these top-level PodSpec fields verbatim onto the generated step
+                        # pod. THIS is the pod that runs `RUN npm ci` for every tenant image build
+                        # (nextup, curb, ida-llm, motion, mychef, springais, ua-mis), so its
+                        # placement is the direct cause of the intermittent `npm ci` ETIMEDOUT
+                        # failures: capstone.io/ci-build=true was promoted from a soft weight-100
+                        # PREFERRED term to REQUIRED because capstone-w1's NIC negotiates at 100
+                        # Mbit (7-9 MB/s) vs capstone-w2's 1000 Mbit (25-55 MB/s), and the scheduler's
+                        # least-allocated scoring routinely sent builds to w1 anyway despite the
+                        # soft preference. Full evidence in
+                        # applicationsets/arc-runner-scaleset-app.yaml. REVERSIBLE: `kubectl label
+                        # node capstone-w1 capstone.io/ci-build=true --overwrite` once its NIC is
+                        # fixed restores 2-node capacity, no YAML/composition change needed.
                         tolerations:
                           - key: capstone.io/control-plane
                             operator: Equal
@@ -1688,30 +1700,40 @@ spec:
                         affinity:
                           nodeAffinity:
                             # HARD candidate SET (excludes the 8GiB Mac workers — too small for a
-                            # 4Gi/8Gi build): pool=build (laptop-01 + ua-mis-db-1) OR a control-plane
-                            # OptiPlex. Ample fallback (5 candidate nodes) so builds never queue.
+                            # 4Gi/8Gi build, AND now excludes bare pool=build, since capstone-w1's
+                            # 100 Mbit NIC is exactly what this promotion needs to keep CI off of):
+                            # capstone.io/ci-build=true (TODAY: only capstone-w2, a LIVE-ONLY
+                            # hand-applied label) OR capstone.io/ci-build-emergency=true (an
+                            # OPT-IN, incident-only escape hatch — NOT set anywhere by default).
+                            # NO automatic control-plane fallback (2026-09-09, after review): THIS
+                            # is the pod whose CPU is UNBOUNDED (only memory is limited), and n1-n3
+                            # run etcd off the SAME writable /var partition the CI work volume uses
+                            # (platform-services/local-path-provisioner/configmap.yaml —
+                            # /dev/nvme0n1p4 on n1) — heavy unbounded-CPU build I/O sharing a disk
+                            # with etcd's fsync-sensitive writes risks destabilizing the control
+                            # plane, not just slowing a build; n2 is also a known thermal outlier
+                            # (~88-91C, pending a repaste). Full rationale:
+                            # applicationsets/arc-runner-scaleset-app.yaml. An operator who judges a
+                            # genuine emergency justifies the risk anyway can apply
+                            # capstone.io/ci-build-emergency=true to a control-plane node
+                            # themselves — an explicit, in-the-moment decision, never automatic.
                             requiredDuringSchedulingIgnoredDuringExecution:
                               nodeSelectorTerms:
                                 - matchExpressions:
-                                    - { key: capstone.io/pool, operator: In, values: ["build"] }
+                                    - { key: capstone.io/ci-build, operator: In, values: ["true"] }
                                 - matchExpressions:
-                                    - { key: node-role.kubernetes.io/control-plane, operator: Exists }
-                            # SOFT tier bias: laptop-01 (100, matched directly by its own
-                            # ci-build=true label — the DEDICATED CI node) → any other
-                            # build-pool node e.g. ua-mis-db-1 (50) → OptiPlex (10).
+                                    - { key: capstone.io/ci-build-emergency, operator: In, values: ["true"] }
+                            # Break ties WITHIN the required set above: the vetted ci-build node
+                            # always wins over the opt-in emergency escape hatch.
                             preferredDuringSchedulingIgnoredDuringExecution:
                               - weight: 100
                                 preference:
                                   matchExpressions:
                                     - { key: capstone.io/ci-build, operator: In, values: ["true"] }
-                              - weight: 50
-                                preference:
-                                  matchExpressions:
-                                    - { key: capstone.io/pool, operator: In, values: ["build"] }
                               - weight: 10
                                 preference:
                                   matchExpressions:
-                                    - { key: node-role.kubernetes.io/control-plane, operator: Exists }
+                                    - { key: capstone.io/ci-build-emergency, operator: In, values: ["true"] }
                         # ⚠ HARDCODED Traefik ClusterIP — keep in sync with the shared
                         # platform-services/arc/hook-template.yaml (single source).
                         hostAliases:
@@ -1971,14 +1993,21 @@ spec:
                                   storage: "5Gi"
                           template:
                             spec:
-                              # --- Node placement for the RUNNER pod (#372/#374; SOFT TIER) ---
+                              # --- Node placement for the RUNNER pod (#372/#374;
+                              # #ci-build-required 2026-09-09) ---
                               # MUST mirror platform-services/arc/per-team/runner-scaleset-app.template.yaml
                               # (the reviewed source of truth). WITHOUT these the runner pod has NO
-                              # toleration for laptop-01's `capstone.io/dedicated=ci-build:NoSchedule`
+                              # toleration for the CI node's `capstone.io/dedicated=ci-build:NoSchedule`
                               # taint (#374) and NO nodeAffinity (#372), so it is REPELLED off the
-                              # dedicated CI node onto the small Mac workers — leaving the fast 16GiB
-                              # laptop idle while builds pile onto the 8GiB Macs. gha-runner-scale-set
+                              # dedicated CI node onto the small Mac workers. gha-runner-scale-set
                               # passes template.spec.{tolerations,affinity} straight onto the runner pod.
+                              # capstone.io/ci-build=true is now REQUIRED (not merely preferred):
+                              # capstone-w1's NIC negotiates at 100 Mbit and the scheduler's
+                              # least-allocated scoring routinely sent builds there despite the old
+                              # soft weight-100 preference, producing intermittent `npm ci` ETIMEDOUT
+                              # failures. Full evidence: applicationsets/arc-runner-scaleset-app.yaml.
+                              # REVERSIBLE: `kubectl label node capstone-w1 capstone.io/ci-build=true
+                              # --overwrite` once its NIC is fixed restores 2-node capacity.
                               tolerations:
                                 # REMOVED 2026-08-25 — the capstone.io/control-plane PreferNoSchedule
                                 # toleration. This absence is load-bearing, NOT an oversight: it is what
@@ -1989,10 +2018,10 @@ spec:
                                 #     that taint. Dropping this toleration removes n1-n3 from the spread
                                 #     DOMAINS, so spread balances across the build pool (w1+w2) instead of
                                 #     pulling runners onto the control plane.
-                                #   - The taint is PreferNoSchedule (SOFT), so n1-n3 remain SCHEDULABLE
-                                #     without the toleration — they just carry a scheduling penalty and
-                                #     stay reachable via the weight-10 nodeAffinity preference. Fallback
-                                #     preserved; routine placement corrected.
+                                #   - The taint is PreferNoSchedule (SOFT). NOTE (2026-09-09): n1-n3
+                                #     are no longer reachable via nodeAffinity at all except through
+                                #     the opt-in capstone.io/ci-build-emergency=true escape hatch
+                                #     below — this toleration is now dormant for routine placement.
                                 # WHY: with the toleration present, #540's spread treated all 5 nodes as
                                 # equal domains and placed 1 of 5 ida-llm runners on EACH control-plane
                                 # node. That violated the owner's stated preference AND measured slower
@@ -2005,31 +2034,38 @@ spec:
                                   effect: NoSchedule
                               affinity:
                                 nodeAffinity:
-                                  # HARD candidate SET (excludes the 8GiB Mac workers): pool=build
-                                  # (laptop-01 + ua-mis-db-1) OR a control-plane OptiPlex. 5 candidate
-                                  # nodes → ample fallback, builds never queue when laptop is busy.
+                                  # HARD candidate SET: capstone.io/ci-build=true (TODAY: only
+                                  # capstone-w2, a LIVE-ONLY hand-applied label) OR
+                                  # capstone.io/ci-build-emergency=true (an OPT-IN, incident-only
+                                  # escape hatch — NOT set anywhere by default). Deliberately EXCLUDES
+                                  # bare pool=build — capstone-w1 carries that label with a 100 Mbit
+                                  # NIC, and is exactly the node this candidate set excludes.
+                                  #
+                                  # NO automatic control-plane fallback (2026-09-09, after review):
+                                  # n1-n3 run etcd off the SAME writable /var partition the CI work
+                                  # volume uses, and the build triple's CPU is UNBOUNDED — heavy I/O
+                                  # there risks destabilizing the control plane, not just slowing a
+                                  # build (n2 is also a thermal outlier, ~88-91C, pending a repaste).
+                                  # Full rationale: applicationsets/arc-runner-scaleset-app.yaml. An
+                                  # operator judging a genuine emergency can apply
+                                  # ci-build-emergency=true to a control-plane node themselves.
                                   requiredDuringSchedulingIgnoredDuringExecution:
                                     nodeSelectorTerms:
                                       - matchExpressions:
-                                          - { key: capstone.io/pool, operator: In, values: ["build"] }
+                                          - { key: capstone.io/ci-build, operator: In, values: ["true"] }
                                       - matchExpressions:
-                                          - { key: node-role.kubernetes.io/control-plane, operator: Exists }
-                                  # SOFT tier bias: laptop-01 (100, matched directly by its own
-                                  # ci-build=true label — the DEDICATED CI node) → any other
-                                  # build-pool node e.g. ua-mis-db-1 (50) → OptiPlex (10).
+                                          - { key: capstone.io/ci-build-emergency, operator: In, values: ["true"] }
+                                  # Break ties WITHIN the required set above: the vetted ci-build
+                                  # node always wins over the opt-in emergency escape hatch.
                                   preferredDuringSchedulingIgnoredDuringExecution:
                                     - weight: 100
                                       preference:
                                         matchExpressions:
                                           - { key: capstone.io/ci-build, operator: In, values: ["true"] }
-                                    - weight: 50
-                                      preference:
-                                        matchExpressions:
-                                          - { key: capstone.io/pool, operator: In, values: ["build"] }
                                     - weight: 10
                                       preference:
                                         matchExpressions:
-                                          - { key: node-role.kubernetes.io/control-plane, operator: Exists }
+                                          - { key: capstone.io/ci-build-emergency, operator: In, values: ["true"] }
                                 # ── SOFT SPREAD runner pods across the build pool ──────────────────
                                 # One runner pod exists per in-flight build. Soft-prefer a pool node not
                                 # already running another runner pod so concurrent builds spread instead
@@ -2095,9 +2131,21 @@ spec:
                                   env:
                                     - name: ACTIONS_RUNNER_CONTAINER_HOOK_TEMPLATE
                                       value: /home/runner/pod-templates/hook-template.yaml
+                                    # Node visibility (2026-09-09, #ci-build-required) —
+                                    # shared mechanism, see
+                                    # platform-services/arc/configmap-job-started-hook.yaml.
+                                    - name: NODE_NAME
+                                      valueFrom:
+                                        fieldRef:
+                                          fieldPath: spec.nodeName
+                                    - name: ACTIONS_RUNNER_HOOK_JOB_STARTED
+                                      value: /home/runner/ci-hooks/job-started.sh
                                   volumeMounts:
                                     - name: hook-template
                                       mountPath: /home/runner/pod-templates
+                                      readOnly: true
+                                    - name: job-started-hook
+                                      mountPath: /home/runner/ci-hooks
                                       readOnly: true
                                   resources:
                                     requests: { cpu: "250m", memory: "512Mi" }
@@ -2109,6 +2157,15 @@ spec:
                                     items:
                                       - key: content
                                         path: hook-template.yaml
+                                # Node-visibility pre-job hook script — SHARED across all
+                                # tenants (platform-services/arc/configmap-job-started-hook.yaml).
+                                - name: job-started-hook
+                                  configMap:
+                                    name: arc-job-started-hook
+                                    defaultMode: 0755
+                                    items:
+                                      - key: job-started.sh
+                                        path: job-started.sh
                     destination:
                       server: https://kubernetes.default.svc
                       namespace: arc-runners

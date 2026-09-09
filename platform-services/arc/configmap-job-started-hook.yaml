@@ -1,0 +1,46 @@
+# CI node-visibility hook (2026-09-09) — makes it possible to see, from the GitHub
+# Actions job log itself, which cluster node a build actually ran on. Without this,
+# a failed build gives no clue which build-pool node it landed on — that ambiguity
+# is exactly what made the w1/100-Mbit-NIC root cause (see
+# applicationsets/arc-runner-scaleset-app.yaml) slow to pin down: pods were gone by
+# the time anyone went looking for `spec.nodeName`. It also makes it obvious if a
+# build ever lands on the opt-in `capstone.io/ci-build-emergency=true` escape hatch
+# (same file), since that should only ever happen during a declared incident.
+#
+# MECHANISM: this is the actions/runner's OWN pre-job hook
+# (`ACTIONS_RUNNER_HOOK_JOB_STARTED`, a GitHub-documented self-hosted-runner
+# feature — see "Running scripts before or after a job" in GitHub's docs) — a
+# DIFFERENT mechanism from ARC's `ACTIONS_RUNNER_CONTAINER_HOOK_TEMPLATE`
+# (hook-template.yaml, which patches the pod spec of build/step pods). This one is a
+# script the runner executes on ITSELF right before it starts running job steps, and
+# the runner captures its stdout into a log group that appears at the top of every
+# job's "Set up job" output in the GitHub Actions UI — no workflow-file change
+# needed (deliberately: this repo owns platform-infra/.github/workflows/ jointly
+# with other in-flight work, so this hook is wired entirely through the runner pod
+# spec instead).
+#
+# Mounted (with defaultMode 0755, i.e. executable) + wired via
+# ACTIONS_RUNNER_HOOK_JOB_STARTED on the RUNNER container in:
+#   applicationsets/arc-runner-scaleset-app.yaml            (org-wide ua-mis-kaniko)
+#   platform-services/arc/per-team/runner-scaleset-app.template.yaml (per-team fallback)
+#   platform-services/crossplane/apis/composition.yaml       (live per-tenant render)
+# SHARED (not per-team) — the script carries no secret or team-specific content, so
+# it rides the same A1 shared-arc-runners-namespace model as arc-github-app/platform-ca.
+#
+# Cheap + non-secret: reads $NODE_NAME (populated on the runner container via the
+# downward API, fieldRef: spec.nodeName) and echoes it. No cluster API calls, no PII.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arc-job-started-hook
+  namespace: arc-runners
+  labels:
+    platform.capstone/component: platform
+data:
+  job-started.sh: |
+    #!/bin/sh
+    # Printed at the top of every job's "Set up job" log section by the runner's
+    # own pre-job hook mechanism (ACTIONS_RUNNER_HOOK_JOB_STARTED) — see the
+    # ConfigMap header comment for why this exists and how it differs from the
+    # container-hook (hook-template.yaml) that patches build/step pods.
+    echo "CI runner node: ${NODE_NAME:-unknown}"
