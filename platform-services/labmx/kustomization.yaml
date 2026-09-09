@@ -1,0 +1,66 @@
+# platform-services/labmx — LabMx / UA MIS Hub (uamishub.com, www.uamishub.com,
+# attendance.uamishub.com), adopted into GitOps.
+#
+# ── WHY HERE, AND WHY THIS SHAPE
+# Picked up automatically by the platform-services directory generator
+# (applicationsets/platform-services-appset.yaml) as Application
+# `platform-svc-labmx`. Adding this directory IS the ArgoCD declaration — no
+# appset edit, no exclude entry, and no new Application file are needed. The
+# generator's template already carries `automated: {prune, selfHeal}`,
+# `ServerSideApply=true`, and class-wide `ignoreDifferences` for the four
+# webhook-injected `ExternalSecret.spec.data[].remoteRef.*` fields that otherwise
+# keep every ESO-bearing platform app chronically OutOfSync.
+#
+# The WORKLOAD lives here rather than in a nested external-repo Application, which
+# is the OTHER shape in this directory (slidedeck, course-demos, ida-slides all
+# ship only glue + an `application.yaml` pointing at their own app repo). Same
+# reasoning platform-services/agile writes down for itself:
+#
+#   1. There is no app repo whose `deploy/` these could live in. LabMx's source is
+#      not in a UA-MIS repo wired to this cluster, and the site is live NOW — an
+#      adoption cannot be blocked on standing one up.
+#   2. An external repo would need TWO new `sourceRepos` entries in
+#      bootstrap/platform-appproject.yaml, which is INSTALL-OWNED: it reaches the
+#      cluster only via `make bootstrap-reapply`, never via GitOps. Forgetting that
+#      re-apply is a documented, repeated footgun in this repo (every Helm add
+#      above it carries the same warning) and it fails as `InvalidSpecError: repo
+#      not permitted` — i.e. the site's manifests stop reconciling. Sourcing from
+#      platform-infra, which is already the FIRST entry in `sourceRepos`, needs
+#      nothing re-applied.
+#
+# ── WHAT IS DELIBERATELY ABSENT
+#   * sealedsecret-pull.yaml — the `harbor-pull` imagePullSecret. It exists live
+#     (hand-created) and is NOT in this list, so it is NOT GitOps-managed and a
+#     cluster rebuild will NOT restore it. It could not be produced from here: a
+#     SealedSecret must be encrypted against the cluster's sealed-secrets public
+#     cert with `kubeseal`, which is not installed in this environment, and a
+#     fabricated one is worse than none. Regenerate + commit it with (note
+#     PULL_NS — the default is `<NAME>-<ENV>` = `labmx-prod`, which is the WRONG
+#     namespace here):
+#       make harbor-robot NAME=labmx ENV=prod PULL_NS=labmx \
+#         KUBE_CONTEXT=admin@capstone \
+#         KUBECONFIG=clusters/real-talos/talos-kubeconfig \
+#         > platform-services/labmx/sealedsecret-pull.yaml
+#     then add `sealedsecret-pull.yaml` to the list below. That mints a NEW
+#     pull-only robot; the existing hand-made Secret keeps the pods running until
+#     the sealed one replaces it, so there is no outage window.
+#   * netpol.yaml — ns `labmx` has NO NetworkPolicy live (`kubectl -n labmx get
+#     netpol,cnp` -> none), so it is currently unrestricted in both directions.
+#     Adding a default-deny during an adoption would be the single easiest way to
+#     take the site down: its DATABASE_URL egress to `db-tier:3306` and its
+#     ingress from Traefik would both need to be re-allowed correctly, first try,
+#     against a live site. Tracked as a follow-up, not smuggled in here.
+#
+# ⚠ `resources:` is an EXPLICIT list, not a glob (repo convention). A file added
+# to this directory but not listed here renders NOTHING while the PR still merges
+# clean.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - externalsecret-env.yaml
+  - deployment-hub.yaml
+  - deployment-attendance.yaml
+  - service.yaml
+  - ingress.yaml
