@@ -150,13 +150,18 @@ spec:
             # platform-services/arc/priorityclass-ci-build.yaml). Builds wait for room,
             # never evict a running workload.
             priorityClassName: capstone-ci-build
-            # Node placement for the RUNNER pod (CI-fast, #237/#372; SOFT TIER). Mirrors
-            # the org-wide scale set (applicationsets/arc-runner-scaleset-app.yaml) and
-            # the build step-pod placement in per-team/hook-template.template.yaml: SOFT,
-            # RAM-aware tier bias (laptop-01, matched directly by ci-build=true → any
-            # other build-pool node e.g. ua-mis-db-1 → OptiPlex) fenced by a HARD candidate
-            # SET that EXCLUDES the 8GiB Mac workers. Uses only labels that exist live →
-            # applies on the next ArgoCD sync, no `kubectl label` step.
+            # Node placement for the RUNNER pod (CI-fast, #237/#372; #ci-build-required
+            # 2026-09-09). Mirrors the org-wide scale set
+            # (applicationsets/arc-runner-scaleset-app.yaml) and the build step-pod
+            # placement in per-team/hook-template.template.yaml — see the org-wide file
+            # for the full rationale/evidence. capstone.io/ci-build=true is now REQUIRED,
+            # not merely preferred: capstone-w1's NIC negotiates at 100 Mbit and was the
+            # intermittent cause of `npm ci` ETIMEDOUT failures inside Kaniko builds.
+            # Required set = ci-build=true (TODAY: only capstone-w2, a LIVE-ONLY
+            # hand-applied label) OR a control-plane OptiPlex (degrade-not-die fallback) —
+            # NEVER the 8GiB Mac workers. REVERSIBLE: `kubectl label node capstone-w1
+            # capstone.io/ci-build=true --overwrite` once its NIC is fixed restores
+            # 2-node capacity, no YAML change.
             tolerations:
               # REMOVED 2026-08-25 — the capstone.io/control-plane PreferNoSchedule
               # toleration. This absence is load-bearing, NOT an oversight: it is what
@@ -186,24 +191,19 @@ spec:
               nodeAffinity:
                 requiredDuringSchedulingIgnoredDuringExecution:
                   nodeSelectorTerms:
+                    # PRIMARY — a node explicitly vetted for CI (fast NIC). TODAY: only
+                    # capstone-w2.
                     - matchExpressions:
-                        - { key: capstone.io/pool, operator: In, values: ["build"] }
+                        - { key: capstone.io/ci-build, operator: In, values: ["true"] }
+                    # FALLBACK — control-plane OptiPlexes (degrade, don't die).
                     - matchExpressions:
                         - { key: node-role.kubernetes.io/control-plane, operator: Exists }
                 preferredDuringSchedulingIgnoredDuringExecution:
-                  # PRIMARY — laptop-01: the DEDICATED CI node, matched directly by its
-                  # own label (capstone.io/ci-build=true). Highest weight = top preference.
+                  # Break ties WITHIN the required set above.
                   - weight: 100
                     preference:
                       matchExpressions:
                         - { key: capstone.io/ci-build, operator: In, values: ["true"] }
-                  # SECONDARY — any OTHER build-pool node (e.g. ua-mis-db-1, the 8GiB
-                  # DB/Vault box) that is not the dedicated CI node. Fallback only.
-                  - weight: 50
-                    preference:
-                      matchExpressions:
-                        - { key: capstone.io/pool, operator: In, values: ["build"] }
-                  # FALLBACK — control-plane OptiPlexes (last resort; tolerated above).
                   - weight: 10
                     preference:
                       matchExpressions:
@@ -275,9 +275,23 @@ spec:
                   # pod mounts secret harbor-push-__TEAM__ at /kaniko/.docker.
                   - name: ACTIONS_RUNNER_CONTAINER_HOOK_TEMPLATE
                     value: /home/runner/pod-templates/hook-template.yaml
+                  # Node visibility (2026-09-09, #ci-build-required) — same shared
+                  # mechanism as applicationsets/arc-runner-scaleset-app.yaml (see
+                  # platform-services/arc/configmap-job-started-hook.yaml). SHARED
+                  # ConfigMap (no team token) — the script carries no team-specific or
+                  # secret content.
+                  - name: NODE_NAME
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: spec.nodeName
+                  - name: ACTIONS_RUNNER_HOOK_JOB_STARTED
+                    value: /home/runner/ci-hooks/job-started.sh
                 volumeMounts:
                   - name: hook-template
                     mountPath: /home/runner/pod-templates
+                    readOnly: true
+                  - name: job-started-hook
+                    mountPath: /home/runner/ci-hooks
                     readOnly: true
                 resources:
                   # Mirror the shared scaleset (applicationsets/arc-runner-scaleset-app.yaml):
@@ -294,6 +308,15 @@ spec:
                   items:
                     - key: content
                       path: hook-template.yaml
+              # Node-visibility pre-job hook script — SHARED (platform-services/arc/
+              # configmap-job-started-hook.yaml), not per-team.
+              - name: job-started-hook
+                configMap:
+                  name: arc-job-started-hook
+                  defaultMode: 0755
+                  items:
+                    - key: job-started.sh
+                      path: job-started.sh
   destination:
     server: https://kubernetes.default.svc
     namespace: arc-runners

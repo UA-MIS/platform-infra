@@ -409,17 +409,32 @@ kubectl label node mac-debian-01 capstone.io/pool=mac-debian --overwrite
 
 #### 6.1.1 Build-pool nodes only: also label one node `capstone.io/ci-build=true`
 
-The ARC (Actions Runner Controller) Kaniko build-step pod carries a
-`preferredDuringSchedulingIgnoredDuringExecution` nodeAffinity, weight 100, for
-`capstone.io/ci-build=true` (`platform-services/arc/hook-template.yaml` +
-`platform-services/arc/per-team/hook-template.template.yaml`). **No node manifest
-sets this label anywhere in this repo** — like `capstone.io/pool` above, it is a
+⚠ **UPDATED 2026-09-09 — this label is now load-bearing, not just a bias.** The
+ARC (Actions Runner Controller) RUNNER pod and the Kaniko BUILD step pod both
+carry `capstone.io/ci-build=true` in their `requiredDuringSchedulingIgnoredDuringExecution`
+nodeAffinity term (previously it was only a `preferred`, weight-100, soft bias —
+see the history below for why that was not enough). The required candidate set is
+now `capstone.io/ci-build=true` **OR** a control-plane OptiPlex fallback — bare
+`capstone.io/pool=build` is no longer sufficient on its own
+(`platform-services/arc/hook-template.yaml`,
+`platform-services/arc/per-team/hook-template.template.yaml`,
+`applicationsets/arc-runner-scaleset-app.yaml`,
+`platform-services/arc/per-team/runner-scaleset-app.template.yaml`,
+`platform-services/crossplane/apis/composition.yaml`). **No node manifest sets
+this label anywhere in this repo** — like `capstone.io/pool` above, it is a
 custom-prefix label the kubelet can't self-apply, so it is a required, imperative,
-post-join step for whichever build-pool box should receive Kaniko's build traffic:
+post-join step for whichever build-pool box should receive CI traffic:
 
 ```bash
 kubectl label node <build-pool-node> capstone.io/ci-build=true --overwrite
 ```
+
+**Practical consequence of the required-set promotion:** if the ONE labelled node
+(today, `capstone-w2`) is drained, cordoned, or down, and no other node carries
+this label, CI does **not** silently fall back onto a slow or untested pool node —
+it queues on the control-plane OptiPlex fallback tier instead (degraded, not
+dead). If you add a second build-pool node and want it to share CI traffic, it
+MUST get this label explicitly; it will not be picked up automatically.
 
 ⚠ **Pick the node by NIC speed, not by which box joined first.** As of 2026-09-09
 the build pool is `capstone-w1` + `capstone-w2` (`capstone.io/pool=build`, both
@@ -431,13 +446,29 @@ weight-100 affinity was inert (no node carried the label at all), so Kaniko buil
 pods scheduled onto whichever build-pool node was free — including `w1` — and its
 100Mbit NIC was the direct cause of `read tcp ...: i/o timeout` /
 `failed to get filesystem from image` Kaniko failures (worst on large base-image
-pulls, e.g. .NET's `mcr.microsoft.com/dotnet/sdk:8.0`).
+pulls, e.g. .NET's `mcr.microsoft.com/dotnet/sdk:8.0`) **and, once the weight-100
+preference existed but still lost ties to the scheduler's least-allocated scoring,
+intermittent `npm ci` ETIMEDOUT failures inside Kaniko `RUN` steps** — the
+scheduler kept placing builds on `w1` anyway because it scored better on
+memory-allocated-percent than `w2`. That is why the affinity was promoted from
+`preferred` to `required` (see the platform-arc-runner-scaleset Application and
+hook-template.yaml for the full rationale) instead of just re-labelling: a soft
+preference cannot outweigh a scoring tiebreak, only a required term can.
 
 **If `capstone-w2` is ever rebuilt, replaced, or a new build-pool node is added,
 re-apply this label to whichever box has the faster NIC** — do not assume it
 carries over. `capstone-w1` also hosts MinIO's DR target and Ceph OSDs
 (§ live cluster facts above / `docs/operator/dr-backup.md`), so do not re-cable or
-swap its NIC role without checking those dependencies too.
+swap its NIC role without checking those dependencies too. **Reversal, once w1's
+NIC is fixed:** `kubectl label node capstone-w1 capstone.io/ci-build=true
+--overwrite` — that single command restores 2-node CI capacity; no YAML change is
+needed because the required set matches on the label, not a node name.
+
+**Build-log node visibility (2026-09-09):** every CI job's "Set up job" log now
+prints `CI runner node: <node>` via the runner's own pre-job hook
+(`ACTIONS_RUNNER_HOOK_JOB_STARTED`, wired in the same files above +
+`platform-services/arc/configmap-job-started-hook.yaml`) — no more guessing which
+node a failed build ran on after the pod is gone.
 
 ---
 
