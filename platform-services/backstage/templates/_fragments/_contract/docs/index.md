@@ -102,10 +102,26 @@ the bottom of your component's Dockerfile{% if not values.single %} (there is on
 Copy the verbatim block from the bottom of the relevant Dockerfile — {% for c in values.components %}{% if c.buildType != "mobile-artifact" %}`${{ c.context }}/${{ c.dockerfile }}`{% if not loop.last %}, {% endif %}{% endif %}{% endfor %} — into any Debian-base stage
 that runs `apt`. It is the exact, proven pattern the platform's own images use.
 
-> **Base images already come through the platform's Harbor pull-through cache.** Your
-> Dockerfile's `FROM` lines point at `harbor.capstone.uamishub.com/dockerhub-proxy/…`, which
-> proxies Docker Hub and keeps the cohort clear of Docker Hub's rate limits. Keep it that
-> way — swapping a `FROM` back to a bare `docker.io` image is how a build starts failing
-> with `toomanyrequests` halfway through the semester. (A few stages pull from
-> `gcr.io/distroless` or `mcr.microsoft.com` instead; those are not Docker Hub and are not
-> rate-limit exposed.)
+> **Base images already come through a platform Harbor pull-through cache — keep it that
+> way.** Most `FROM` lines point at `harbor.capstone.uamishub.com/dockerhub-proxy/…`
+> (Docker Hub) or `.../mcr-proxy/…` (Microsoft Container Registry, `mcr.microsoft.com`,
+> used by the .NET stack). Swapping a `FROM` back to a bare `docker.io` or
+> `mcr.microsoft.com` image reintroduces **two separate problems the cache exists to
+> avoid**, not just one:
+>
+> - **Rate limits** — Docker Hub throttles anonymous pulls; a bare `docker.io` image is
+>   how a build starts failing with `toomanyrequests` halfway through the semester.
+> - **Bandwidth/timeout** — the CI build pool's nodes are not uniformly fast, and a large
+>   base image (the .NET SDK image is ~800MB) pulled directly can time out inside Kaniko
+>   (`failed to get filesystem from image`) on a slower node even though the same pull
+>   through the cache does not, because the cache always serves from its own in-cluster
+>   storage after the first pull. **This applies to any registry, including MCR and
+>   Docker Hub — it is not a rate-limit problem and going around the rate limiter doesn't
+>   avoid it.** A .NET tenant hit exactly this before `mcr-proxy` existed.
+>
+> A few stages still pull from `gcr.io/distroless` directly (no proxy project for it
+> today) — that's fine **only** because those specific images are small, purpose-built
+> final-stage bases (tens of MB, not hundreds). If you add a large direct pull from any
+> registry that doesn't go through a platform proxy, you are reintroducing the same class
+> of failure — ask the platform team about adding a proxy-cache project for it rather than
+> assuming "not Docker Hub" means "safe."
