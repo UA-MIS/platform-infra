@@ -407,6 +407,38 @@ kubectl label node mac-debian-01 capstone.io/pool=mac-debian --overwrite
 # kubectl taint node mac-debian-01 capstone.io/pool=mac-debian:NoSchedule
 ```
 
+#### 6.1.1 Build-pool nodes only: also label one node `capstone.io/ci-build=true`
+
+The ARC (Actions Runner Controller) Kaniko build-step pod carries a
+`preferredDuringSchedulingIgnoredDuringExecution` nodeAffinity, weight 100, for
+`capstone.io/ci-build=true` (`platform-services/arc/hook-template.yaml` +
+`platform-services/arc/per-team/hook-template.template.yaml`). **No node manifest
+sets this label anywhere in this repo** — like `capstone.io/pool` above, it is a
+custom-prefix label the kubelet can't self-apply, so it is a required, imperative,
+post-join step for whichever build-pool box should receive Kaniko's build traffic:
+
+```bash
+kubectl label node <build-pool-node> capstone.io/ci-build=true --overwrite
+```
+
+⚠ **Pick the node by NIC speed, not by which box joined first.** As of 2026-09-09
+the build pool is `capstone-w1` + `capstone-w2` (`capstone.io/pool=build`, both
+Dell OptiPlex 7080). `capstone-w1`'s `eno2` negotiates at **100 Mbit** (measured
+7–9 MB/s pulling large images) — a cabling/switch-port problem on that box, not a
+software one, and out of scope for a `kubectl label` fix. `capstone-w2` negotiates
+at 1000 Mbit (measured 25 MB/s) and is the currently-labelled node. Before the
+weight-100 affinity was inert (no node carried the label at all), so Kaniko build
+pods scheduled onto whichever build-pool node was free — including `w1` — and its
+100Mbit NIC was the direct cause of `read tcp ...: i/o timeout` /
+`failed to get filesystem from image` Kaniko failures (worst on large base-image
+pulls, e.g. .NET's `mcr.microsoft.com/dotnet/sdk:8.0`).
+
+**If `capstone-w2` is ever rebuilt, replaced, or a new build-pool node is added,
+re-apply this label to whichever box has the faster NIC** — do not assume it
+carries over. `capstone-w1` also hosts MinIO's DR target and Ceph OSDs
+(§ live cluster facts above / `docs/operator/dr-backup.md`), so do not re-cable or
+swap its NIC role without checking those dependencies too.
+
 ---
 
 ## 7. Enabling the host firewall (optional, later)
