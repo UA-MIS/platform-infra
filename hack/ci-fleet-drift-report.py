@@ -29,6 +29,9 @@ FAIL-CLOSED (this is the whole point — read it before changing anything)
 A drift report that returns "no drift" because it read nothing is the exact
 defect this design exists to kill. So:
   * enumeration returning ZERO repos is an ERROR, never "clean"
+  * ARCHIVED repos are dropped from the fleet (they are read-only, so they
+    cannot accept the fix a finding would demand) — but matching repos and
+    finding ALL of them archived is likewise an ERROR, never "clean"
   * any per-repo API failure marks that repo UNKNOWN and fails the run
   * a missing exceptions file NEVER suppresses a finding (it only ever removes
     entries, so its absence can only over-report — the safe direction)
@@ -114,6 +117,46 @@ def live_tenants():
     if total > len(names):
         raise Fatal(f"enumeration truncated: total_count={total} but only "
                     f"{len(names)} returned; paginate before trusting this")
+    # ── ARCHIVED REPOS ARE NOT LIVE TENANTS ──────────────────────────────────
+    # ORDERING IS LOAD-BEARING: this filter runs AFTER the truncation guard
+    # above, never before it. `total_count` is what the search API matched
+    # PRE-filter — archived repos included — so removing them first would shrink
+    # len(names) below total_count and raise a bogus "enumeration truncated" on
+    # every org that holds a single archived tenant. Do not reorder these.
+    #
+    # WHY THIS IS NOT AN ENTRY IN tenants/ci-exceptions.yaml: that file is for
+    # POLICY ("we deliberately keep this tenant off the pipeline"), which is a
+    # human judgement that must be justified and dated. Archived-ness is not a
+    # judgement — it is an objective fact GitHub already reports per repo, and
+    # an archived repo is READ-ONLY: it cannot accept the PR that would fix the
+    # drift being reported against it. Encoding it as an exception would go
+    # stale the moment anyone archives a repo without editing this repo.
+    #
+    # `.get("archived")` and not `["archived"]`: a response missing the field
+    # counts the repo as LIVE. That over-reports, which is the safe direction
+    # everywhere else in this file — never let a missing field hide a tenant.
+    archived = [r["name"] for r in items if r.get("archived")]
+    names = [n for n in names if n not in set(archived)]
+    # The all-archived case, DELIBERATELY fatal and DELIBERATELY worded
+    # differently from the zero-repos check above. Both leave us with no fleet,
+    # but they have different fixes: zero matches means the token or the topic
+    # is broken, whereas "matched N, all archived" means the topic has drifted
+    # onto dead repos (a teardown that stripped nothing) or the fleet really is
+    # gone. An operator must be able to tell which from the message alone, so
+    # do not "simplify" these two into one branch.
+    if not names:
+        raise Fatal(
+            f"tenant enumeration matched {len(archived)} repo(s) with topic "
+            f"'{TENANT_TOPIC}' but EVERY ONE is archived, leaving zero live "
+            f"tenants ({', '.join(archived)}). Either teardown left the topic on "
+            f"dead repos or the fleet is gone — both need a human. Refusing to "
+            f"report 'no drift'.")
+    if archived:
+        # Say so, or the fleet count silently shrinking reads like a narrowed
+        # token. stderr, so `--json` stdout stays machine-readable.
+        print(f"note: skipped {len(archived)} archived repo(s) — not live "
+              f"tenants, and read-only so they cannot accept a fix: "
+              f"{', '.join(archived)}", file=sys.stderr)
     return names
 
 
