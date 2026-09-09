@@ -169,11 +169,27 @@ kubectl -n vault exec -i vault-0 -- sh -s -- <team> <env> \
 # the vault-server-tls Secret across namespaces). Owned by the ESO/Vault onboarding.
 ```
 
-`app-secret` is **zero-config**: `APP_SECRET` is `optional: true` in the base and the
-ExternalSecret uses `deletionPolicy: Delete`, so a fresh app with nothing in Vault
-deploys fine (it reports `secret loaded: false`). (`harbor-pull` is delivered out-of-band
-as a SealedSecret in v1 — see the harbor-pull section above — so it has no ESO value step
-here.)
+`app-secret` is **zero-config** — but not for the reason `optional: true` /
+`deletionPolicy: Delete` alone might suggest. Those two settings govern the *pod's env
+reference* and *what happens when the ExternalSecret is deleted*, respectively; neither
+one makes ESO tolerate a Vault property that is missing from an explicit `data[]` entry.
+ESO processes `spec.data[]` **atomically and in order** — one entry naming an unset
+property fails the *entire* ExternalSecret and ESO writes **no Secret at all**, discarding
+every other key that resolved fine right along with it (this shipped as a real defect
+for one release: a single explicit `data[]` entry for `APP_SECRET` looked zero-config
+because nothing else shared the file, then destroyed a team's other keys the moment they
+added one via the Secrets tab — it broke three tenants before the fix).
+
+The template avoids this with `dataFrom: [{extract: {key: tenants/<team>/<env>/app}}]`
+instead of a `data[]` list: `extract` syncs whatever properties **are** present on the
+Vault object and silently omits what isn't, so a fresh app with nothing in Vault deploys
+fine (`APP_SECRET`'s `optional: true` on the pod env ref just means the container doesn't
+require it — it reports `secret loaded: false`), and a team adding their own key can never
+take out a sibling key that already resolved. `deletionPolicy: Delete` only governs what
+happens if the ExternalSecret itself is deleted (no orphaned Secret) — it does not by
+itself make a missing property non-fatal; that guarantee comes from `dataFrom`/`extract`.
+(`harbor-pull` is delivered out-of-band as a SealedSecret in v1 — see the harbor-pull
+section above — so it has no ESO value step here.)
 
 ### Preview / dynamic namespaces
 
