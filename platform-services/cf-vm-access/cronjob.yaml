@@ -1,0 +1,127 @@
+# =============================================================================
+# cf-vm-access reconciler CronJob (ADR-038).
+#
+# Every 5 min it reconciles Cloudflare SSH access for VM tenants: the desired set is
+# the in-cluster `<app>-ssh` Services (label platform.capstone/access=ssh), and it
+# ensures a matching Tunnel public-hostname route (`<team>-ssh.<domain>`) + Access
+# application for each, and removes stale ones (teardown). See reconcile.py for the
+# full contract + safety guards (catch-all-preserving GET-merge-PUT, preservation
+# assert, empty-desired guard; graceful no-op when unconfigured).
+#
+# ⚠ THE ENFORCE SWITCH — env DRY_RUN below (mirrors crossplane-mr-prune):
+#   "1" (default, as shipped) = report only; logs the plan, writes NOTHING to
+#       Cloudflare. SAFE TO MERGE. A held PR ships this way.
+#   "0" = actually create/update/delete Cloudflare resources. Flip to "0" IN GIT
+#       only AFTER the operator has (a) sealed the CF API token, (b) set the IDs in
+#       configmap-ids.yaml, and (c) reviewed a DRY_RUN=1 pass's logs against the live
+#       tunnel to confirm the plan reproduces every existing rule verbatim and keeps
+#       the hostname-less catch-all last.
+#
+# 5-min cadence is fine: a VM's disk import + first boot take several minutes, so the
+# SSH route being ready within ~5 min of the ssh Service appearing is not the
+# bottleneck. Run on demand with:
+#   kubectl -n cloudflared create job --from=cronjob/cf-vm-access-reconciler cf-vm-access-manual
+# =============================================================================
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cf-vm-access-reconciler
+  namespace: cloudflared
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: cf-vm-access-reconciler
+spec:
+  schedule: "*/5 * * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 300
+      ttlSecondsAfterFinished: 3600
+      template:
+        metadata:
+          labels:
+            platform.capstone/component: platform
+            app.kubernetes.io/name: cf-vm-access-reconciler
+        spec:
+          serviceAccountName: cf-vm-access-reconciler
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: reconciler
+              image: python:3.12-slim   # PINNED — stdlib only, no pip install at runtime
+              command: ["python3", "/scripts/reconcile.py"]
+              env:
+                # ── THE ENFORCE SWITCH (see header) ─────────────────────────
+                - name: DRY_RUN
+                  value: "1"
+                # BLAST-RADIUS GUARD. If discovery returns ZERO ssh Services while
+                # Cloudflare still holds managed routes/apps, the reconciler REFUSES
+                # to mass-delete — that shape is far more likely a broken label
+                # selector or a failed API listing than a real simultaneous teardown
+                # of every VM tenant. Set to "1" only for a deliberate, supervised
+                # full teardown, then set it straight back. (Same lesson as ArgoCD
+                # allowEmpty: a reconciler whose desired state can silently become
+                # empty will eventually delete everything.)
+                - name: ALLOW_EMPTY_DESIRED
+                  value: "0"
+                # Non-secret IDs (configmap-ids.yaml). optional:true so an
+                # unconfigured cluster no-ops instead of CrashLooping.
+                - name: PLATFORM_DOMAIN
+                  valueFrom:
+                    configMapKeyRef:
+                      name: cf-vm-access-config
+                      key: PLATFORM_DOMAIN
+                      optional: true
+                - name: CF_ACCOUNT_ID
+                  valueFrom:
+                    configMapKeyRef:
+                      name: cf-vm-access-config
+                      key: CF_ACCOUNT_ID
+                      optional: true
+                - name: CF_TUNNEL_ID
+                  valueFrom:
+                    configMapKeyRef:
+                      name: cf-vm-access-config
+                      key: CF_TUNNEL_ID
+                      optional: true
+                # The Cloudflare API token — sealed by the operator into Secret
+                # `cloudflare-api-token` (key `token`) in this namespace (README.md).
+                # optional:true so the app syncs + the Job runs (no-op) before go-live.
+                - name: CF_API_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: cloudflare-api-token
+                      key: token
+                      optional: true
+                # Don't try to write .pyc to the read-only root fs.
+                - name: PYTHONDONTWRITEBYTECODE
+                  value: "1"
+              volumeMounts:
+                - name: script
+                  mountPath: /scripts
+                  readOnly: true
+              resources:
+                requests:
+                  cpu: 20m
+                  memory: 64Mi
+                limits:
+                  memory: 128Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+          volumes:
+            - name: script
+              configMap:
+                name: cf-vm-access-script

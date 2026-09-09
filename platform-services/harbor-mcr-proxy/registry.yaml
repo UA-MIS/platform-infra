@@ -1,0 +1,38 @@
+# Microsoft Container Registry endpoint (unblocks .NET tenant CI — see
+# kustomization.yaml). This is the upstream Harbor's proxy-cache project
+# (project.yaml, same dir) pulls THROUGH — it is not itself pullable.
+# Anonymous (no accessId/accessSecretSecretRef): MCR's dotnet/* images are
+# public, same reasoning as the dockerhub registry MR in this repo.
+#
+# providerName: "docker-registry" — confirmed against the LIVE registry object
+# created by hand (`GET /api/v2.0/registries/2` -> "type":"docker-registry").
+# MCR is not one of Harbor's named cloud adapters (ali-acr/aws-ecr/docker-hub/
+# github-ghcr/google-gcr/tencent-tcr/volcengine-cr per
+# `GET /api/v2.0/replication/adapterinfos`) — it's a plain Docker Registry v2
+# endpoint, which is exactly what the generic "docker-registry" adapter type is
+# for.
+#
+# external-name PRE-SET to `/registries/2`: this Registry already exists live
+# (created 2026-09-09 via raw API to unblock CI ahead of this MR). The format
+# (`/registries/<id>`) is not guessed — it's copied verbatim from
+# harbor-dockerhub-proxy/registry.yaml's live MR
+# (`crossplane.io/external-name: /registries/1`, read off the cluster). Setting
+# it here makes the first reconcile a GET against id 2, adopting the existing
+# registry instead of trying (and failing, 409 name-taken) to create a new one.
+apiVersion: registry.harbor.crossplane.io/v1alpha1
+kind: Registry
+metadata:
+  name: mcr
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    crossplane.io/external-name: "/registries/2"
+spec:
+  forProvider:
+    name: mcr
+    description: "Microsoft Container Registry pull-through cache"
+    providerName: docker-registry
+    endpointUrl: https://mcr.microsoft.com
+    insecure: false
+  providerConfigRef:
+    name: default

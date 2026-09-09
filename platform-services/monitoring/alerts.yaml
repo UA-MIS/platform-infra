@@ -406,10 +406,37 @@ spec:
         #     pods on the same node.
         # That regression is the price of ~47s -> ~13s on the per-job externals
         # copy. This alert is the compensating control: it must fire with enough
-        # margin to intervene BEFORE the kubelet's default nodefs eviction
-        # threshold (10% available) starts evicting.
-        # capstone-w1 was already at 64% used / 150G free when this landed, so
-        # the margin there is real but not generous.
+        # margin to intervene BEFORE the kubelet's eviction threshold starts
+        # evicting.
+        #
+        # ── 2026-09-03 CORRECTION (w1 DiskPressure incident) ──────────────────
+        # Two things in the original text were WRONG and cost us an incident:
+        #
+        # 1. "eviction threshold (10% available)" is NOT what binds here. The
+        #    kubelet on the Debian workers sets no evictionHard, so it uses the
+        #    DEFAULTS — and because nodefs and imagefs are the SAME filesystem
+        #    (single /dev/sda2), the binding rule is `imagefs.available<15%`,
+        #    not nodefs' 10%. Measured on capstone-w1 2026-09-03: kubelet
+        #    reported "Threshold quantity: 69707516625, available: 67952744Ki"
+        #    — 69707516625 / 464716759040 = exactly 15.0%. So the real gap
+        #    between this alert (20%) and first eviction (15%) is 5 points
+        #    (~22 GiB on a 433 GiB disk), not the 10 points the comment implied.
+        #
+        # 2. The runbook pointed ONLY at /var/local-path-provisioner. On w1 the
+        #    actual consumer was /var/lib/minio-dr-backup (324.5 G = 94% of
+        #    used space — Velero's Kopia repos + the Thanos block bucket), and
+        #    an operator following this text would have found an empty CI dir
+        #    and moved on. The description below now names the real candidates
+        #    in size order.
+        #
+        # Also note WHY a second, critical-severity rule now exists: this
+        # warning fired continuously for 59.1 HOURS on capstone-w1 before the
+        # incident (verified via ALERTS_FOR_STATE) and was being delivered
+        # successfully to the platform-oncall webhook the whole time. The
+        # failure was not detection and not delivery — it was that a warning
+        # that never escalates reads as background noise. The critical rule
+        # below fires in the 2-point band immediately above first eviction, so
+        # "about to evict" is distinguishable from "getting full".
         - alert: BuildPoolDiskFilling
           expr: >-
             (node_filesystem_avail_bytes{mountpoint="/", fstype!~"tmpfs|overlay"}
@@ -420,14 +447,40 @@ spec:
           annotations:
             summary: "Node {{ $labels.instance }} root filesystem below 20% free"
             description: >-
-              {{ $labels.instance }} has less than 20% free on /. CI work volumes
-              (local-path-ci) are unquoted directories on this filesystem, so a
-              runaway build can fill it and trigger DiskPressure evictions for
-              unrelated pods. Check
-              `du -sh /var/local-path-provisioner/*` on the node and confirm no
-              orphaned job directories remain (teardown is done by a helper pod;
-              if the provisioner is unhealthy, directories leak). Kubelet begins
-              evicting at 10% available.
+              {{ $labels.instance }} has less than 20% free on /. Kubelet begins
+              evicting pods at 15% available on these nodes (nodefs==imagefs, so
+              the default imagefs.available<15% rule binds first) — this alert
+              leaves roughly 5 percentage points of margin, about 22 GiB on a
+              433 GiB disk. Find the consumer in size order, do NOT assume CI:
+              `sudo du -sh /var/lib/minio-dr-backup /var/lib/containerd
+              /var/local-path-provisioner/* /var/log 2>/dev/null | sort -rh`.
+              On capstone-w1 the dominant consumer is the node-local DR store
+              (Velero Kopia repos + Thanos blocks), not CI work volumes; on the
+              other workers a runaway build in local-path-ci is more likely.
+              See docs/operator/disk-headroom.md.
+
+        # Critical tier: the 2-point band immediately above first eviction.
+        # Deliberately NOT the same severity as the 20% warning — see the long
+        # comment above for why a non-escalating warning failed to prompt action
+        # for 59 hours. `for: 5m` (not 15m) because at this level the remaining
+        # headroom is single-digit GiB and a single Kaniko build can cross it.
+        - alert: NodeRootFilesystemNearEviction
+          expr: >-
+            (node_filesystem_avail_bytes{mountpoint="/", fstype!~"tmpfs|overlay"}
+             / node_filesystem_size_bytes{mountpoint="/", fstype!~"tmpfs|overlay"}) < 0.17
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Node {{ $labels.instance }} is within ~2 points of kubelet eviction"
+            description: >-
+              {{ $labels.instance }} has less than 17% free on /; kubelet starts
+              evicting pods at 15% (imagefs.available default). At this level the
+              node is minutes of build output away from evicting unrelated pods —
+              on 2026-09-03 this took out alloy, the VPA recommender and a
+              student team's CI runner, failing their build at
+              "Initialize containers". Act now, do not wait for a maintenance
+              window. Runbook: docs/operator/disk-headroom.md.
 
     # ── (g) TENANT / LAB DELIVERY PATH (FIX-7, BLOCK-1 durable half) ──────────
     # WHY THIS GROUP EXISTS. Two student lab tenants sat completely broken for

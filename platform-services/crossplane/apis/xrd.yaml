@@ -216,6 +216,57 @@ spec:
                   minimum: 8
                   maximum: 32
                   default: 8
+                dbExtensions:
+                  type: array
+                  description: >-
+                    PostgreSQL extensions to install into EACH of this tenant's per-env
+                    databases, as superuser, BEFORE the app's own migrations run. Only
+                    meaningful with `database: postgres` (silently ignored for
+                    mysql/none). Renders one `postgresql.sql.crossplane.io/v1alpha1
+                    Extension` MR per (env, extension) — see composition.yaml.
+                    WHY THIS FIELD EXISTS — the untrusted-extension wall. Postgres lets a
+                    plain database OWNER run `CREATE EXTENSION` only for extensions marked
+                    `trusted`. `vector` (pgvector 0.8.2, shipped in the CNPG image) is
+                    `trusted=f`, so a tenant's own login role — which is deliberately
+                    NOSUPERUSER (see the Role in composition.yaml) — gets
+                    `ERROR: permission denied to create extension "vector"
+                     HINT: Must be superuser to create this extension.`
+                    That is not a misconfiguration a team can fix in their app: an
+                    Alembic/Django/Prisma migration that opens with `CREATE EXTENSION
+                    vector` CANNOT succeed as any correctly-scoped tenant role. The
+                    platform has to install it on the tenant's behalf, once, on the
+                    superuser side. This field is that contract, declared in the claim
+                    instead of hand-run against the live cluster.
+                    Once installed, the app's own `CREATE EXTENSION IF NOT EXISTS vector`
+                    is a clean no-op (`NOTICE: extension "vector" already exists,
+                    skipping`, exit 0) for the non-superuser tenant role, so apps need no
+                    cluster-specific migration edits. ⚠ The bare form WITHOUT
+                    `IF NOT EXISTS` still errors (`extension "vector" already exists`) —
+                    that is an app-side fix, not a platform one.
+                    ⚠ ALLOWLIST, NOT A FREE-TEXT FIELD — this is a security boundary, not
+                    ergonomics. Read the XRD header: a CapstoneTenant XR is a LOW-TRUST
+                    input auto-committed to `main` by the scaffolder with NO human merge,
+                    and the identity that would execute this is `crossplane_provisioner`,
+                    which is SUPERUSER on capstone-tenant-pg (an intentional divergence —
+                    cnpg/tenant-cluster/roles.yaml, the TENANT-PG-DROP fix). An
+                    unconstrained string here would therefore let an auto-generated claim
+                    run `CREATE EXTENSION plpython3u` / `plperlu` (arbitrary code
+                    execution as the OS postgres user) or `dblink` / `postgres_fdw` /
+                    `file_fdw` (read any file, reach any host the DB pod can) on the
+                    cluster that hosts EVERY tenant's database. The enum below is the
+                    whole blast radius, fixed declaratively at admission.
+                    Of the values allowed, only `vector` is actually `trusted=f` and
+                    therefore actually needs this path; the other five are `trusted=t`
+                    and a team could create them itself from a migration. They are listed
+                    for uniformity (verified live against PG 17.9: citext 1.6, hstore 1.8,
+                    pg_trgm 1.6, unaccent 1.1, uuid-ossp 1.1 — all trusted=t).
+                    To allow another extension, widen this enum in a reviewed PR and say
+                    in the PR why it is safe to hand a superuser. That review IS the gate.
+                  default: []
+                  maxItems: 6
+                  items:
+                    type: string
+                    enum: [vector, pg_trgm, citext, uuid-ossp, hstore, unaccent]
             status:
               type: object
               properties:

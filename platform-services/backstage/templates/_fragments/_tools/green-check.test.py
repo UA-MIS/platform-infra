@@ -215,16 +215,43 @@ class BootProbeWiringTests(unittest.TestCase):
         names = [c["name"] for c in r["checks"]]
         self.assertNotIn("boot-probe", names)
 
-    def test_boot_probe_skipped_for_a_frontend_backend_partner_fragment(self):
-        # frontend/react's OWN scenario is frontend-backend (it only fills the 'frontend'
-        # slot, see compose_lib.scenario_for) — it must NOT be independently boot-probed even
-        # when mariadb is available, matching the reference smoke's 19-fragment (single-slot
-        # only) scope. See check_fragment's docstring for why.
-        with patch.object(gc.boot_probe, "boot_probe_component") as m:
-            r = gc.check_fragment("frontend/react", self.workdir, mariadb=object())
+    def test_boot_probe_skipped_for_a_frontend_only_fragment(self):
+        # BEHAVIOUR CONTRACT: a fragment that fills ONLY the 'frontend' slot resolves to the
+        # frontend-backend layout (compose_lib.scenario_for) and must NOT be independently
+        # boot-probed — the probed component would be a partner backend, not the fragment
+        # under test. See check_fragment's docstring.
+        #
+        # This used to be asserted against the REAL frontend/react. Board #207 gave
+        # react/vue/solid the `single` slot (they are now boot-probed — see the next test), so
+        # no real fragment has this shape any more and the assertion had to move to a patched
+        # meta or be deleted. Deleting it would have retired the guard silently: the selection
+        # rule still exists and still matters for any future frontend-only fragment.
+        real_meta, _ = compose_lib.load_meta("frontend/react")
+        fe_only = dict(real_meta, slots=["frontend"])
+        with patch.object(gc, "load_meta", return_value=(fe_only, None)):
+            with patch.object(gc.boot_probe, "boot_probe_component") as m:
+                r = gc.check_fragment("frontend/react", self.workdir, mariadb=object())
+        self.assertEqual(r["scenario"]["layout"], "frontend-backend")
         m.assert_not_called()
         names = [c["name"] for c in r["checks"]]
         self.assertNotIn("boot-probe", names)
+
+    def test_boot_probe_runs_for_the_framework_frontends_added_by_207(self):
+        # Board #207: react/vue/solid declare `single`, so they now resolve to the single
+        # layout and ARE boot-probed — the coverage gap this closes. Pinned as a POSITIVE
+        # assertion so removing `single` from any of them (which would silently drop them from
+        # the sweep again, exactly how the gap was created) fails loudly here.
+        for rel in ("frontend/react", "frontend/vue", "frontend/solid"):
+            with self.subTest(fragment=rel):
+                with patch.object(gc.boot_probe, "boot_probe_component",
+                                  return_value=(True, "fake healthy")) as m:
+                    r = gc.check_fragment(rel, self.workdir, mariadb=object())
+                m.assert_called_once()
+                self.assertEqual(r["scenario"]["layout"], "single")
+                # The probed component is the fragment's OWN single component, not a partner.
+                self.assertEqual(m.call_args[0][0]["name"], "app")
+                self.assertIn("boot-probe", [c["name"] for c in r["checks"]])
+                self.assertTrue(r["ok"], r["errors"])
 
     def test_boot_probe_failure_marks_the_fragment_red(self):
         with patch.object(gc.boot_probe, "boot_probe_component",

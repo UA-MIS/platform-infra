@@ -743,10 +743,13 @@ vault-ca-manifest: ## (ESO+Vault) Emit the per-tenant `vault-ca` ConfigMap (publ
 #   (3) schema-invalid k8s objects,
 #   (4) duplicate CapstoneTenant claims for one team (the 2026-07-09 provider
 #       apply-fight: two XRs co-managing the same team-keyed netpols churned
-#       Cilium policy cluster-wide and starved the Vault raft leader's node).
+#       Cilium policy cluster-wide and starved the Vault raft leader's node),
+#   (5) AppProject role groups that are not the group Dex emits (SEC-021/SEC-006 —
+#       the same defect class twice: a role bound to a string no identity provider
+#       ever produces, which fails SILENTLY as "inert role", never as an error).
 # Run before committing tenancy changes; cluster-independent.
 .PHONY: validate
-validate: ## Static validation of tenant manifests (kubeconform + RBAC-name + stray-file + argocd-rbac-project + claim-uniqueness + dex-board-client guards)
+validate: ## Static validation of tenant manifests (kubeconform + RBAC-name + stray-file + argocd-rbac-project + claim-uniqueness + dex-board-client + appproject-group + vm-guest-network guards + vm-slot-capacity + db-tier-reachability guards)
 	@command -v kubeconform >/dev/null || { echo "ERROR: kubeconform not found (install to ~/.local/bin)."; exit 1; }
 	@# ---- preflight: assert every guard can actually READ its own subject ------
 	@# Each guard below reduces to a `grep`/`find`/glob over a path. If that path
@@ -760,14 +763,27 @@ validate: ## Static validation of tenant manifests (kubeconform + RBAC-name + st
 	    platform-services/argocd-config/argocd-rbac-cm.yaml \
 	    platform-services/dex/configmap.yaml \
 	    platform-services/dex/gen-board-clients.py \
-	    hack/lint-argocd-rbac-projects.py; do \
+	    hack/lint-argocd-rbac-projects.py \
+	    hack/lint-appproject-sourcerepos.py \
+	    hack/lint-vm-tier-bounds.py \
+	    platform-services/backstage/templates/vm-app/template.yaml \
+	    tenants/_template-vm/vm/namespaces/vm-prod.yaml \
+	    hack/lint-workflow-shell.py \
+	    hack/lint-vm-network-config.py \
+	    hack/lint-vm-slot-capacity.py \
+	    hack/lint-db-tier-reachability.py \
+	    platform-services/db-tier/netpol.yaml \
+	    hack/vm-tier-capacity.yaml \
+	    platform-services/backstage/templates/vm-app/skeleton-vm/.devops/chart/base/virtualmachine.yaml \
+	    platform-services/backstage/templates/vm-app/skeleton-vm/.devops/chart/base/cloud-init.yaml \
+	    applicationsets bootstrap; do \
 	    [ -e "$$p" ] || { echo "FAIL: guard input missing: $$p"; fail=1; }; \
 	  done; \
 	  if [ "$$fail" = "1" ]; then \
 	    echo "  A guard cannot pass over a subject it cannot find. If a path moved,"; \
 	    echo "  update this preflight and the guard that reads it — do not let the"; \
 	    echo "  guard silently check nothing."; exit 1; fi
-	@echo "==> [1/6] kubeconform -strict on tenant namespace bundles..."
+	@echo "==> [1/13] kubeconform -strict on tenant namespace bundles..."
 	@# The file list is built with `find`, NOT the glob `tenants/*/namespaces/*.yaml`
 	@# this used to use. That glob is one directory too shallow: it matched only
 	@# tenants/_template/namespaces/*.yaml and never saw the VM tier's
@@ -775,18 +791,18 @@ validate: ## Static validation of tenant manifests (kubeconform + RBAC-name + st
 	@# the repo was never validated — `+ notAField: boom` in it passed cleanly.
 	@files=$$(find tenants -path '*/namespaces/*.yaml' -type f | sort); \
 	  [ -n "$$files" ] || { echo "FAIL: no tenant namespace manifests found under tenants/ —"; \
-	    echo "      guard [1/6] had nothing to validate, which is not a pass."; exit 1; }; \
+	    echo "      guard [1/12] had nothing to validate, which is not a pass."; exit 1; }; \
 	  echo "$$files" | sed 's/^/      + /'; \
 	  kubeconform -strict -summary -kubernetes-version 1.31.5 $$files
-	@echo "==> [2/6] RBAC-name guard: every Role/RoleBinding name must be 'team-developer'..."
+	@echo "==> [2/13] RBAC-name guard: every Role/RoleBinding name must be 'team-developer'..."
 	@bad=$$(grep -rnE '^\s+name:\s+team-[a-z0-9-]+eloper\b' tenants/ | grep -v 'team-developer' || true); \
 	  if [ -n "$$bad" ]; then echo "FAIL: malformed RBAC names (SEC-001 regression):"; echo "$$bad"; exit 1; fi; \
 	  echo "  OK — no malformed RBAC names"
-	@echo "==> [3/6] stray-file guard: tenant dirs may contain only .yaml (recurse-sync safe)..."
+	@echo "==> [3/13] stray-file guard: tenant dirs may contain only .yaml (recurse-sync safe)..."
 	@stray=$$(find tenants -type f ! -name '*.yaml' ! -name 'README.md' || true); \
 	  if [ -n "$$stray" ]; then echo "FAIL: non-manifest files in tenants/ (would break recurse sync):"; echo "$$stray"; exit 1; fi; \
 	  echo "  OK — no stray non-manifest files"
-	@echo "==> [4/6] argocd-rbac project guard: every project token in a 'p, role:...' policy must be an existing AppProject (SEC-006)..."
+	@echo "==> [4/13] argocd-rbac project guard: every project token in a 'p, role:...' policy must be an existing AppProject (SEC-006)..."
 	@# Was a `grep | sed | grep -v` pipeline. It parsed only the `<project>/<app>`
 	@# object form with a `[a-z0-9-]+` token and DISCARDED everything else, so an
 	@# underscore or uppercase letter in a slug — or the bare-project object form
@@ -796,7 +812,7 @@ validate: ## Static validation of tenant manifests (kubeconform + RBAC-name + st
 	@# SEC-006 defect wearing the guard's own uniform. Now parsed per line, in a
 	@# script that can be read and tested. See its docstring.
 	@python3 hack/lint-argocd-rbac-projects.py
-	@echo "==> [5/6] claim-uniqueness guard: at most ONE CapstoneTenant claim per team+semester..."
+	@echo "==> [5/13] claim-uniqueness guard: at most ONE CapstoneTenant claim per team+semester..."
 	@dups=$$(for f in tenants/_claims/*.yaml; do \
 	    [ -f "$$f" ] || continue; \
 	    t=$$(sed -nE 's/^  team: *"?([A-Za-z0-9-]+)"?.*/\1/p' "$$f" | head -1); \
@@ -811,11 +827,115 @@ validate: ## Static validation of tenant manifests (kubeconform + RBAC-name + st
 	    echo "team; a team's primary app is that claim's appName."; \
 	    echo "$$dups"; exit 1; fi; \
 	  echo "  OK — one CapstoneTenant claim per team+semester"
-	@echo "==> [6/6] dex board-client guard: every tenants/_boards/ entry must have its Dex redirect URI (D-186)..."
+	@echo "==> [6/13] dex board-client guard: every tenants/_boards/ entry must have its Dex redirect URI (D-186)..."
 	@# Dex has no wildcard redirect URIs, so a provisioned board whose callback is
 	@# missing from platform-services/dex/configmap.yaml deploys, goes Ready, serves
 	@# its landing page — and fails only when someone clicks "Sign in". Catch it here.
 	@python3 platform-services/dex/gen-board-clients.py --check
+	@echo "==> [7/13] appproject-group guard: every AppProject role group must be 'UA-MIS:<slug>' (SEC-021)..."
+	@# SEC-006 and SEC-021 are the SAME defect in two places, four years of
+	@# codebase apart: an ArgoCD role bound to a group string no identity provider
+	@# emits. It never errors — the role is simply inert and users fall through to
+	@# policy.default — so only a lint catches it. Dex's GitHub connector
+	@# (teamNameField: slug, orgs set) emits ONLY `<org>:<team-slug>`.
+	@# Covers both blueprint paths and the Crossplane generator.
+	@python3 hack/lint-appproject-groups.py
+	@# The format check above cannot see whether a slug is a REAL GitHub team, nor
+	@# whether students are MEMBERS of it (repo collaborators get no group claim).
+	@# Both are required for access to actually work. Cluster/GitHub-dependent, so
+	@# it cannot live in this offline gate — `make verify-appproject-groups` does it.
+	@echo "  NOTE: slug-resolves-to-a-real-GitHub-team is NOT checked here (needs the"
+	@echo "        GitHub API) — run 'make verify-appproject-groups' for that."
+	@echo "==> [8/13] appproject-sourceRepos guard: every Application's repoURL must be permitted by its AppProject..."
+	@# SEC-006 (guard [4/12]) checks that a policy naming a project refers to an
+	@# AppProject that EXISTS. This is the adjacent edge, and it was unguarded: an
+	@# Application naming a real project that FORBIDS its repo. ArgoCD answers with
+	@# InvalidSpecError and simply stops reconciling — and if the app synced even once
+	@# before the restriction landed, it stays Healthy with lastOp "Succeeded" while
+	@# every future change silently fails to deploy. That is how
+	@# crimson-copies-stripped-vm-prod sat Unknown/Unknown on the live masters lab.
+	@# Three outcomes, three messages: fine / project missing / project forbids the repo.
+	@python3 hack/lint-appproject-sourcerepos.py
+	@echo "==> [9/13] vm-tier bounds guard: the VM wizard's maxima must fit the VM tier's quota + LimitRange..."
+	@# The scaffolder form and the namespace bundle are two documents that each look
+	@# reasonable alone. On 2026-08-27 they disagreed — form maximum 16Gi against a
+	@# tier ceiling of 6Gi — and nothing said so. paper-papas was scaffolded at 8Gi,
+	@# the PR merged, ArgoCD synced, the 32Gi disk imported for ten minutes, and only
+	@# THEN did the virt-launcher pod get refused at admission:
+	@#   maximum memory usage per Container is 6Gi, but limit is 17064Mi
+	@# with no pod to inspect and no CrashLoop, because the pod was never created.
+	@# This guard moves that discovery from ten minutes into a provision to authoring
+	@# time. It checks bounds, not style: raise either document and it fails until the
+	@# other follows.
+	@python3 hack/lint-vm-tier-bounds.py
+	@echo "==> [10/13] workflow-shell guard: every embedded shell body must PARSE (dash/bash -n)..."
+	@# A real team was blocked on their first day by ONE APOSTROPHE. A warning message in
+	@# the contract's Python step contained the words 'pip install .' in single quotes,
+	@# inside an `args: -c '...'` that is itself single-quoted. The apostrophes closed the
+	@# quoting early, and every Python component's checks step died with
+	@#     install: 1: Syntax error: Unterminated quoted string
+	@# BEFORE installing anything or running any test — so build-and-push, bump-dev and
+	@# bump-staging were all skipped.
+	@#
+	@# Every guard we had was green when that shipped: validate, sync-check, a 7/7 mutation
+	@# matrix, a third independent implementation agreeing. None of them EXECUTED the tenant
+	@# pipeline against a Python component. The gate was not blind to the defect; nothing ran
+	@# the code path. This guard is the cheap version of running it: no cluster, no runner,
+	@# no tenant — it only tries to parse.
+	@python3 hack/lint-workflow-shell.py
+	@echo "==> [11/13] VM guest-network guard: the VM scaffold's networking must not be MAC-pinned..."
+	@# A VM tenant scaffolded without an explicit `networkData` works on its FIRST
+	@# boot and loses all guest networking on its SECOND, permanently and silently.
+	@# KubeVirt masquerade hands the guest the launcher POD's MAC, the CNI
+	@# regenerates that MAC per pod, cloud-init's fallback netplan is pinned to the
+	@# MAC it saw at first boot, and cloud-init does not re-apply network config
+	@# unless the instance-id changes -- which a restart does not.
+	@#
+	@# Measured on paper-papas 2026-08-31: VMI Running, VMI Ready, ssh Service with
+	@# a live Endpoint, sshd listening in the guest -- and the launcher tap device at
+	@# RX 0 bytes / 0 packets for three days. Every layer above the guest looked
+	@# healthy, which is why the search went to the tunnel, the NetworkPolicy and
+	@# sshd first. This guard keeps the two fixes (name-matched networkData, and
+	@# per-boot network re-application) from being edited away by anyone who has not
+	@# spent that day.
+	@python3 hack/lint-vm-network-config.py
+	@echo "==> [12/13] VM slot guard: a VM tenant that cannot schedule fails SILENTLY..."
+	@# The VM chart pins VMs to control-plane nodes and spreads them one per node
+	@# with a REQUIRED podAntiAffinity, so the tenant past the last slot never
+	@# schedules. It does not say so: the VirtualMachine sits at `Starting`, the
+	@# VMI at `Pending`, NO launcher pod is ever created (so there is nothing to
+	@# describe and no CrashLoopBackOff), and ArgoCD keeps reporting Synced. It
+	@# looks like a slow boot, forever.
+	@#
+	@# The slot count is DECLARED in hack/vm-tier-capacity.yaml rather than read
+	@# from a cluster, because this target is cluster-independent by design. A
+	@# declared number can be wrong, but it is wrong visibly, in a diff. Bump it
+	@# in the same PR that adds a control-plane node.
+	@python3 hack/lint-vm-slot-capacity.py
+	@echo "==> [13/13] db-tier reachability guard: a namespace that loses its team label loses its DATABASE, silently..."
+	@# ns db-tier default-denies; a namespace gets in EITHER by an explicit by-name
+	@# rule in platform-services/db-tier/netpol.yaml OR by carrying the
+	@# `platform.capstone/team` label that `allow-ingress-tenant-namespaces` matches
+	@# on EXISTENCE. Delete that label and Cilium blackholes every DB connection —
+	@# which the client sees as a connect TIMEOUT, never "connection refused", so it
+	@# reads as a slow database rather than a policy drop.
+	@#
+	@# Added the day LabMx (uamishub.com) was adopted into GitOps, after measuring
+	@# that `make validate` was BLIND to it: deleting `platform.capstone/team` from
+	@# platform-services/labmx/namespace.yaml still printed `validate: PASS`, because
+	@# guard [1/13]'s kubeconform pass only globs `tenants/*/namespaces/*.yaml` and
+	@# nothing else in this target reads platform-services/ at all. LabMx's
+	@# DATABASE_URL points straight at capstone-mariadb-mariadb-cluster.db-tier, and
+	@# `labmx` is in no by-name rule — the label is the only thing holding the site's
+	@# database open.
+	@#
+	@# OPT-IN by a `platform.capstone/db-tier-client: "true"` namespace label: the
+	@# guard cannot infer who talks to a database (connection strings live in Vault,
+	@# not git), so it does not guess. Zero false-positive surface for the namespaces
+	@# that never touch db-tier. It ALSO asserts the db-tier side still carries the
+	@# `platform.capstone/team: Exists` selector — deleting that one rule cuts off
+	@# every tenant at once, and nothing was watching it either.
+	@python3 hack/lint-db-tier-reachability.py
 	@echo "validate: PASS"
 
 # ---- tenant credential audit (SEC-037) -------------------------------------
@@ -837,6 +957,59 @@ validate: ## Static validation of tenant manifests (kubeconform + RBAC-name + st
 .PHONY: audit-tenant-credentials
 audit-tenant-credentials: ## Find platform-shared credentials in tenant-reachable namespaces (needs a cluster)
 	@python3 hack/audit-tenant-credentials.py
+
+# ---- AppProject group resolution (online companion to validate [7/12]) -------
+# validate [7/12] proves the group STRING is well-formed. It cannot prove the two
+# things that decide whether a student can actually sync:
+#   (a) the slug is a real GitHub team, and
+#   (b) the students are MEMBERS of that team (repo COLLABORATORS get no group
+#       claim from Dex at all, so they hold no team-scoped ArgoCD access).
+# Both failed silently for real tenants during the SEC-021 audit, so this target
+# exists to make them loud. Needs `gh` authenticated + cluster read access.
+.PHONY: verify-appproject-groups
+verify-appproject-groups: ## Check every live AppProject role group resolves to a real GitHub team with members
+	@python3 hack/verify-appproject-groups.py
+
+# ---- server-side apply check (online companion to validate [8/12]) -----------
+# THE LESSON THIS TARGET EXISTS FOR. An AppProject merged with a 337-character
+# spec.description. `make validate` passed. `kubeconform -strict` passed. `kubectl apply
+# --dry-run=CLIENT` passed. The API server then REJECTED it:
+#     spec.description: Too long: may not be longer than 255
+# so the object was never created, and the Application that had already been repointed at
+# it named a project that did not exist. Structural schema validation is BLIND to a CRD's
+# own field constraints — and kubeconform cannot even load a schema for AppProject
+# ("could not find schema for AppProject"). Only --dry-run=SERVER sees it, because only
+# the API server runs the CRD's validation.
+#
+# DELIBERATELY NOT PART OF `validate`, for the same reason as verify-appproject-groups
+# above: `validate` is cluster-independent by design so it runs in CI and on a laptop with
+# no kubeconfig. This one needs a live API server. validate [8/12] carries the cheap offline
+# half (the known 255-char limit, read out of the live CRD); this is the authoritative
+# check that also covers constraints nobody has hardcoded yet.
+#
+# Read-only: --dry-run=server changes nothing. Override KUBE_CONTEXT for Talos.
+.PHONY: verify-argocd-apply
+verify-argocd-apply: ## Server-side dry-run every ArgoCD Application/AppProject (catches CRD field limits kubeconform cannot). Needs a cluster.
+	@echo "==> server-side dry-run of ArgoCD manifests (context: $(KUBE_CONTEXT))"
+	@# `tenants/_*` is EXCLUDED, and not arbitrarily: those are the un-rendered blueprints
+	@# (tenants/_template, tenants/_template-vm) carrying `__TEAM__` / `__APPNAME__`
+	@# placeholders, which the API server rejects as invalid RFC-1123 names. The exclusion
+	@# is the SAME rule ArgoCD itself applies — applicationsets/tenants-appset.yaml
+	@# excludes `path: tenants/_*` from the tenant sync — so this checks exactly the set
+	@# that actually reaches a cluster, and nothing that never could.
+	@files=$$(grep -rl -E '^kind: (Application|AppProject)$$' --include='*.yaml' \
+	    tenants applicationsets bootstrap 2>/dev/null | grep -v '^tenants/_' | sort); \
+	  [ -n "$$files" ] || { echo "FAIL: found no Application/AppProject manifests to check —"; \
+	    echo "      a dry-run over nothing is not a pass."; exit 1; }; \
+	  n=0; bad=0; \
+	  for f in $$files; do \
+	    n=$$((n+1)); \
+	    out=$$(kubectl --context "$(KUBE_CONTEXT)" apply --dry-run=server -f "$$f" 2>&1) || { \
+	      echo "FAIL: $$f"; echo "$$out" | sed 's/^/        /'; bad=$$((bad+1)); }; \
+	  done; \
+	  echo "  checked $$n manifest(s), $$bad rejected by the API server"; \
+	  [ "$$bad" -eq 0 ] || exit 1; \
+	  echo "  OK — every Application/AppProject is accepted by the live API server"
 
 # ---- reversible tenant on/off switch ---------------------------------------
 # Pause a tenant (stop it running + make it VANISH from k9s) and bring it back,

@@ -1,0 +1,20 @@
+# Sprint board for team `ss-evan-and-emily` — MIS 521 lab team.
+#
+# ⚠ The GitHub team `UA-MIS/ss-evan-and-emily` DOES NOT EXIST YET (checked
+# against the API when this was written, 404). The board will deploy and pass
+# readiness regardless — the team is only consulted at sign-in — so until the
+# team exists, every member sees a 403 rather than the board. Create the team,
+# then sign in; nothing here needs to change when it appears.
+#
+# The repo below does not exist yet either. That one is harmless: it only scopes
+# branch creation and PR linking, both of which fail soft.
+#
+# Rendered by applicationsets/agile-boards-appset.yaml into the shared
+# `agile-boards` namespace, from the ONE shared image. Host is derived:
+# ss-evan-and-emily-agile.capstone.uamishub.com
+#
+# De-provision = `git rm` this file.
+team: ss-evan-and-emily
+repos: UA-MIS/ss-evan-and-emily
+title: SS Evan and Emily Board
+accent: "#9e1b32"

@@ -1,0 +1,45 @@
+# Harbor MCR (Microsoft Container Registry) pull-through cache. Same shape as
+# harbor-dockerhub-proxy/ (see that dir's kustomization.yaml for the general
+# rationale — directory-generator pickup, no new Application file, no new
+# AppProject sourceRepos entry). This one exists because `backend/Dockerfile`
+# in tenant .NET repos (next-up et al.) pulls `mcr.microsoft.com/dotnet/sdk:8.0`
+# and `mcr.microsoft.com/dotnet/aspnet:8.0` DIRECTLY over the internet inside the
+# Kaniko build step — on capstone-w1's 100Mbit NIC that pull was slow enough to
+# make Kaniko's "read tcp ...: i/o timeout"/"failed to get filesystem from image"
+# failure the dominant CI failure mode for any .NET tenant. Docker Hub already
+# gets cached this way (harbor-dockerhub-proxy/); MCR did not.
+#
+# Two Crossplane provider-harbor managed resources: a Registry endpoint pointed
+# at MCR, and a Project with proxy_cache enabled against it (mcr-proxy). Picked
+# up by the platform-services directory-generator ApplicationSet
+# (applicationsets/platform-services-appset.yaml) as
+# `platform-svc-harbor-mcr-proxy` — no new Application file needed; no new Helm
+# chart source, so no AppProject sourceRepos change needed either (both MRs are
+# provider-harbor CRDs already installed, group harbor.crossplane.io, applied
+# from THIS git repo like every other Crossplane MR in this repo).
+#
+# ⚠ ADOPTING PRE-EXISTING LIVE OBJECTS, not creating fresh ones. Both the
+# `mcr` Registry (id=2) and the `mcr-proxy` Project (project_id=17222,
+# registry_id=2) were already created by hand via the raw Harbor API on
+# 2026-09-09 to unblock CI immediately, ahead of this declarative form landing.
+# Both MRs below carry a pre-set `crossplane.io/external-name` annotation
+# (`/registries/2` and `/projects/17222` respectively — the exact format
+# provider-harbor v0.1.1 itself writes onto the live dockerhub/dockerhub-proxy
+# MRs, confirmed by reading those live objects) so the FIRST reconcile is a GET
+# against that id, not a POST — it adopts the hand-made objects instead of
+# conflicting with them (Harbor would 409 on a create-by-name against an
+# already-taken registry/project name otherwise). Depends on: provider-harbor +
+# its ProviderConfig `default` (already live,
+# platform-services/crossplane/{providers,config}/) — no explicit ordering
+# needed here for the same reason harbor-dockerhub-proxy/ needs none.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - registry.yaml
+  - project.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false

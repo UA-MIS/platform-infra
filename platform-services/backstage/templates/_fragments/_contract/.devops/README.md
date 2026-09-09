@@ -95,9 +95,22 @@ Behaviour worth knowing:
   on every data route.
 - **Bounded retry.** 3 attempts, 5s apart, then the pod stays in `Init`. This absorbs
   replicas racing the same migration on a fresh environment and brief DB unavailability.
-- **You can change it.** Edit `migrate:` in `components.yaml` (e.g. append a seed step).
-  Migration tooling must already be in your runtime image, and the command runs under
-  `/bin/sh -c`.
+- **Changing it means editing TWO files.** `migrate:` in `components.yaml` is read at
+  SCAFFOLD time only. Like the rest of `chart/`, `deployments.yaml` is static rendered
+  YAML (see "Adding a component" above) — nothing re-reads `components.yaml` at deploy
+  time, and there is no re-render step. The command that actually runs is the literal
+  string baked into the `migrate` initContainer in `chart/base/deployments.yaml`. To
+  change what your migration does, edit **both**: `components.yaml` (the declaration)
+  and `chart/base/deployments.yaml` (what runs). Editing only the first changes nothing
+  observable. If your project is single-component, prod swaps the Deployment for
+  `chart/overlays/prod/rollout.yaml`, which carries its own copy of the block — edit
+  that too, or migrations silently stop running in production only.
+- **The tooling has to be in your image.** The command runs under `/bin/sh -c` inside
+  the component's own image. If the binary isn't installed there, the initContainer
+  fails 3 times and the pod wedges in `Init` — so a starter that self-migrates at boot
+  (`create_all`, `CREATE TABLE IF NOT EXISTS`, `EnsureCreated()`) ships `migrate: ""`
+  on purpose. Adopting a migration tool means adding it to your runtime dependencies
+  AND copying its config into the image, not just filling in this field.
 
 ## Secrets — External Secrets Operator + Vault (ADR-030 B1)
 

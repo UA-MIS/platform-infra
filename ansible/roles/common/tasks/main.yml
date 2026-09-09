@@ -125,6 +125,36 @@
     - { name: fs.inotify.max_user_instances, value: "1024" }
     - { name: fs.inotify.max_user_watches, value: "524288" }
 
+# --- Bound the systemd journal (2026-09-03 capstone-w1 DiskPressure incident) ---
+# The journal is unbounded by default on Debian and had grown to 3.4 G on
+# capstone-w1 — not the root cause of that incident (the node-local DR store at
+# 324.5 G was), but 3.4 G was a meaningful share of the 3.88 GiB of margin the
+# node had left above the kubelet's 15% eviction line, and it regrows silently.
+# SystemKeepFree is the load-bearing half: it makes journald back off when the
+# FILESYSTEM is tight, not just when the journal is large.
+# Applied live to capstone-w1 on 2026-09-03; this makes it permanent and applies
+# it to every worker.
+- name: Ensure journald drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/journald.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Cap systemd journal size so it cannot eat node disk headroom
+  ansible.builtin.copy:
+    dest: /etc/systemd/journald.conf.d/10-capstone-cap.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible (capstone). See docs/operator/disk-headroom.md.
+      [Journal]
+      SystemMaxUse=200M
+      SystemKeepFree=2G
+  notify: restart systemd-journald
+
 - name: Flush handlers so sysctls apply before later roles
   ansible.builtin.meta: flush_handlers
 

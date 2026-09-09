@@ -144,6 +144,16 @@ spec:
       required:
         - baseImage
         - sshPubKey
+        - githubUsernames
+        # REQUIRED, not optional-with-a-blank-default. Wiring this input (below) fixed
+        # the annotation always rendering as `""`, but an input that is merely PRESENT
+        # can still be left blank — and a blank one produces a Cloudflare Access
+        # application that admits NOBODY, which from a student's laptop is
+        # indistinguishable from a missing tunnel route or a broken VM. The failure is
+        # silent on every side: the scaffold succeeds, the PR merges, the reconciler
+        # creates the app, and the first person to try to connect is the one who finds
+        # out. Requiring it moves that discovery to the wizard form.
+        - teamEmails
       properties:
         # BRING-YOUR-OWN / IMPORTED DISK IMAGE (ADR-032 §1, §4). The "image" is a whole
         # OS disk CDI imports into a PVC — NOT a container build. Point this at:
@@ -166,6 +176,18 @@ spec:
             cloud-init. Override with your own image; for an http(s) cloud-image URL,
             edit the DataVolume source in .devops/chart/base/virtualmachine.yaml.
           default: docker://quay.io/containerdisks/fedora:40
+        # ⚠ THESE MAXIMA ARE DERIVED FROM THE VM TIER'S CEILING, NOT CHOSEN.
+        # They must stay <= what tenants/_template-vm/vm/namespaces/vm-prod.yaml's
+        # ResourceQuota and LimitRange will actually admit, with KubeVirt's own
+        # overhead counted. hack/lint-vm-tier-bounds.py enforces that and fails CI
+        # if the two drift apart.
+        #
+        # This is not theoretical: on 2026-08-27 this form advertised maximum 16 GiB
+        # against a tier whose ceiling was 6 GiB. paper-papas was scaffolded at
+        # 8 GiB — accepted by the form, merged, synced, disk imported — and the
+        # virt-launcher pod was then refused outright. The form is the last place a
+        # student can be told "no" cheaply; after this point the failure costs a
+        # provision cycle.
         cpuCores:
           title: vCPUs
           type: integer
@@ -174,6 +196,8 @@ spec:
             like a container). Sized for a real app; keep modest on the shared cluster.
           default: 2
           minimum: 1
+          # 8 + KubeVirt overhead + a transient CDI importer fits the tier's
+          # requests.cpu/limits.cpu of 12 with room to spare.
           maximum: 8
         memoryGi:
           title: Memory (GiB)
@@ -183,7 +207,23 @@ spec:
             not overcommit; the VM-tier quota caps this). Sized for a real app.
           default: 4
           minimum: 1
-          maximum: 16
+          # LOWERED from 16, which the tier could never have run. The tier ceiling is
+          # 12Gi; a guest costs guest + ~340Mi KubeVirt overhead, and a transient CDI
+          # importer (~600Mi) coexists during the disk import, so the largest guest
+          # that actually fits is ~11Gi. Set to 10 to keep a GiB of slack, on the
+          # same principle as the quota itself: a bound that only just fits is one
+          # overhead change away from breaking every VM at once.
+          #
+          # LOWERED AGAIN, 10 -> 8, on 2026-08-31. The VM chart now asks for
+          # `memoryGi + 2` as its container memory LIMIT, because KubeVirt's own
+          # ~400Mi overhead estimate assumes KVM and this cluster runs QEMU TCG
+          # (useEmulation:true), where the measured overhead reached 1.3Gi and a VM
+          # was OOM-killed mid-build. See the long note at `memory:` in
+          # skeleton-vm/.devops/chart/base/virtualmachine.yaml. With that +2Gi, a
+          # 10Gi guest would ask for a 12Gi limit — EXACTLY the tier LimitRange
+          # ceiling, leaving nothing for the CDI importer. 8 restores the slack this
+          # bound was lowered to 10 to preserve in the first place.
+          maximum: 8
         diskGi:
           title: Root disk (GiB)
           type: integer
@@ -220,6 +260,68 @@ spec:
             key is set. This is a public key — safe to store in git.
           pattern: '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256|sk-ssh-ed25519@openssh.com|sk-ecdsa-sha2-nistp256@openssh.com) [A-Za-z0-9+/=]+( .*)?$'
           ui:help: 'Run `cat ~/.ssh/id_ed25519.pub` (or generate one with `ssh-keygen -t ed25519`) and paste the single-line output.'
+        # THE TEAM ROSTER — this is what makes SSH onboarding SELF-SERVICE (ADR-032a).
+        # Each member's PUBLIC keys are pulled from https://github.com/<user>.keys into
+        # the guest: once by cloud-init's `ssh_import_id` on first boot, and then every
+        # 5 minutes by a systemd timer the same cloud-init installs.
+        #
+        # THE TIMER IS NOT BELT-AND-BRACES, IT IS THE POINT. cloud-init runs ONCE. On
+        # day one NOBODY on the team has uploaded a key yet — the VM is built before
+        # they get there — so a first-boot-only import would import nothing and leave
+        # every student locked out, with no one already inside to let them in. With the
+        # timer: the student adds their key to GitHub and can SSH in ~5 minutes later,
+        # with no instructor in the loop.
+        #
+        # ⚠ THE PREREQUISITE IS REAL AND IS NOT SAFE TO ASSUME. Most students have NO
+        # SSH key on their GitHub account (sampled 2026-08-28 across a live MIS 521
+        # roster: 1 of 3 members had any). For those members this imports nothing and
+        # they simply cannot log in — with NO error anywhere they will see. The
+        # generated repo README leads with `ssh-keygen` + "paste it into
+        # github.com/settings/keys" as step one for exactly this reason; do not drop it.
+        #
+        # Membership is STATIC per boot on purpose: changing WHO is on the team is a
+        # repo edit + rebuild. Resolving it live would mean a GitHub token on the guest,
+        # and a student dev-VM is not a place to keep a credential. Only KEYS refresh.
+        githubUsernames:
+          title: Team GitHub usernames
+          type: array
+          minItems: 1
+          items:
+            type: string
+            pattern: '^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$'
+          description: >-
+            The GitHub username of every team member (yours included). Their public SSH
+            keys are imported into the VM automatically and refreshed every 5 minutes,
+            so nobody has to send anyone a key. Anyone added here can SSH in as soon as
+            they add a key to their GitHub account.
+          ui:help: 'The username from github.com/<username> — not an email. Add every teammate; you can change the list later by editing .devops/chart/base/cloud-init.yaml.'
+        # The team's university emails — rendered into the `<app>-ssh` Service's
+        # platform.capstone/ssh-access-emails annotation, which the cf-vm-access
+        # reconciler (ADR-038) turns into the Cloudflare Access Allow policy for
+        # <team>-ssh.<domain>.
+        #
+        # ⚠ THIS WAS A REAL, SHIPPED GAP. skeleton-vm/.devops/chart/base/ssh-service.yaml
+        # has always consumed `${{ values.teamEmails }}`, but this template never PASSED
+        # it — so every VM tenant scaffolded to date rendered the annotation as `""`.
+        # That file's own header warns, correctly, that an empty value "PRODUCES AN APP
+        # THAT ADMITS NOBODY, and from a student's laptop that is INDISTINGUISHABLE from
+        # a missing tunnel route". Verified live on paper-papas 2026-08-28:
+        # `platform.capstone/ssh-access-emails: ""`. Wiring the input closes it.
+        #
+        # NOT a secret — the same university emails already in the GitHub org.
+        teamEmails:
+          title: Team emails (Cloudflare Access allow-list)
+          type: string
+          description: >-
+            Comma-separated university emails for everyone who may SSH to this VM. This
+            becomes the Cloudflare Access policy on <team>-ssh.uamishub.com — the gate in
+            FRONT of the VM's sshd. Leave nobody out: an address that is not here cannot
+            reach the host at all, no matter what SSH key they have.
+          # No `default: ''` — a blank default plus `required` is a field the form will
+          # happily accept empty. The pattern demands at least one address that looks
+          # like an email, and tolerates spaces after the commas.
+          pattern: '^\s*[^@,\s]+@[^@,\s]+\.[^@,\s]+\s*(,\s*[^@,\s]+@[^@,\s]+\.[^@,\s]+\s*)*$'
+          ui:help: 'e.g. astudent@crimson.ua.edu, bstudent@crimson.ua.edu'
 
     # NOTE (same as new-capstone-project): there is intentionally NO repoUrl input — the
     # repo is created at github.com/UA-MIS/<appName> (owner fixed; repo name = app name),
@@ -264,6 +366,25 @@ spec:
           diskGi: ${{ parameters.diskGi }}
           port: ${{ parameters.port }}
           sshPubKey: ${{ parameters.sshPubKey }}
+          githubUsernames: ${{ parameters.githubUsernames }}
+          teamEmails: ${{ parameters.teamEmails }}
+          # The Cloudflare Access PER-APPLICATION SSH CA public key.
+          #
+          # ⚠ THE SAME SHIPPED GAP AS teamEmails ABOVE, one field over.
+          # skeleton-vm/.devops/chart/base/cloud-init.yaml has always consumed
+          # `${{ values.cfAccessCaPub }}` at /etc/ssh/cf_access_ca.pub, but this
+          # template never DEFINED or PASSED it — so every VM scaffolded to date was
+          # born with an empty CA file, i.e. cert auth off. Passing it closes the
+          # loop; it is intentionally NOT a wizard question, because the CA does not
+          # exist until the Access application does, which is after scaffold. It
+          # stays empty at birth (harmless — the guest is key-only until then) and
+          # the operator commits the real key during onboarding.
+          #
+          # If you set this, it MUST be the per-application CA, NOT the
+          # account-global / Access-for-Infrastructure one. The two are visually
+          # identical and the wrong one fails with no diagnostic. See the two-CA
+          # warning in docs/operator/vm-ssh-cloudflare-access.md.
+          cfAccessCaPub: ''
           destination: ${{ ("github.com?owner=UA-MIS&repo=" + parameters.appName) | parseRepoUrl }}
         # ⚠ INDENTATION IS LOAD-BEARING (new-capstone-project lesson): this key MUST be
         # nested under `input:` (8-space indent, a sibling of url:/values:). Misplaced at
@@ -294,15 +415,35 @@ spec:
         # picks it up via filters.topic.include — org-wide discovery with no topic
         # filter would ingest catalog-info.yaml from ANY of the org's other repos.
         topics: ['capstone-tenant']
-        # Set the repo Actions variable RUNNER_SCALE_SET so this tenant's CI runs on ITS
-        # OWN per-team runner scale-set (<team>-kaniko), which injects the tenant's own
-        # harbor-push-<team> cred. Without it the workflow's `${{ vars.RUNNER_SCALE_SET ||
-        # 'ua-mis-kaniko' }}` falls back to the SHARED ua-mis-kaniko runner (backstage's
-        # push cred) -> `UNAUTHORIZED: action: push` to <team>/<app>. Built into
-        # publish:github (@0.9.10 calls actions.createRepoVariable) — no Backstage rebuild;
-        # requires the platform GitHub App to have Actions Variables: read/write. (Fix A.)
-        repoVariables:
-          RUNNER_SCALE_SET: ${{ parameters.team }}-kaniko
+        # ── NO RUNNER_SCALE_SET HERE. This is the VM template. ────────────────
+        #
+        # The CONTAINER templates set the repo Actions variable RUNNER_SCALE_SET to
+        # `<team>-kaniko` so a tenant's CI runs on its OWN per-team runner scale set,
+        # which injects that tenant's `harbor-push-<team>` credential. Without it the
+        # workflow's `${{ vars.RUNNER_SCALE_SET || 'ua-mis-kaniko' }}` falls back to
+        # the SHARED runner (backstage's push cred) and the image push fails with
+        # `UNAUTHORIZED: action: push` to <team>/<app>. That reasoning is correct —
+        # for container tenants.
+        #
+        # IT IS FALSE FOR VM TENANTS, and setting the variable here was a real bug
+        # rather than a harmless extra. Per-team scale sets are created by the
+        # container `CapstoneTenant` Composition, which a VM tenant NEVER uses, so
+        # `<team>-kaniko` does not exist for these repos. A workflow labelled for a
+        # runner that does not exist does not fail — it QUEUES, silently, until
+        # GitHub times it out 24 hours later. paper-papas carried
+        # `RUNNER_SCALE_SET=paper-papas-kaniko` from scaffold time and consequently
+        # had never completed a single CI run; 13 runs were sitting queued against a
+        # label nothing would ever answer. Note also that changing the variable does
+        # NOT re-target an already-queued run — those have to be cancelled by hand.
+        #
+        # And there is nothing for a per-team runner to do here anyway: a VM tenant
+        # builds no image and pushes to no registry (ADR-032 §6 — the VM CI only
+        # VALIDATES manifests, see .devops/ci/validate-vm.py). It wants the shared
+        # runner, which is what omitting the variable gets it.
+        #
+        # So: do not add a `repoVariables:` block to this template. If a future VM
+        # tenant genuinely needs a dedicated runner, create the scale set FIRST and
+        # confirm the label exists — a missing label is invisible until the timeout.
         protectDefaultBranch: true
         requireCodeOwnerReviews: true
         # Role-based access by GitHub TEAM (not creator): the project team gets push,
@@ -474,17 +615,50 @@ spec:
             && git commit -m "harbor pull robot (vm): team-${{ parameters.team }}"
           ```
 
-          **3) SSH public transport (ADR-032a D2) — Cloudflare dashboard steps, NOT
-          git** (the tunnel is token-based/remotely-managed; there is no in-cluster
-          `ingress:` config to commit for this). Full steps: `docs/operator/vm-ssh-cloudflare-access.md`. Summary:
+          **3) Shell access — the WEB CONSOLE is the default door.** The VM serves a
+          browser terminal itself, so a student needs nothing but their GitHub login:
+          no SSH key, no certificate, no client install.
+
+          The console ships **CLOSED**: the chart creates the console Service but not
+          its Ingress, which lives in the opt-in `console-public` kustomize component
+          and is commented out in the tenant's prod overlay. Two steps, IN THIS ORDER:
+          - **First**, Zero Trust → Access controls → Applications → Add → Self-hosted,
+            domain `${{ parameters.team }}-console.uamishub.com`, policy **Allow** =
+            team-${{ parameters.team }}'s UA-MIS emails.
+          - **Then** uncomment the `components:` block in the tenant repo's
+            `.devops/chart/overlays/prod/kustomization.yaml` and merge.
+          - ⚠ That Access policy is the ONLY wall in front of a root-capable shell.
+            Allow only. Never Bypass, never Service Auth. Doing these two steps in the
+            wrong order publishes an unauthenticated root shell — the hostname rides
+            the existing `*.uamishub.com` route and is live the moment ArgoCD syncs.
+          - Verify from OUTSIDE the cluster, and treat this as the acceptance test:
+            `curl -sSI https://${{ parameters.team }}-console.uamishub.com/ | head -1`
+            → **302** = Access is in front of it (correct); **200** = open to the
+            internet, close it now; **502** = published but ttyd is not up.
+          - No tunnel change is needed — `*.uamishub.com` already routes to Traefik.
+
+          **SSH (the advanced path) — Cloudflare dashboard steps, NOT git** (the
+          tunnel is token-based/remotely-managed; there is no in-cluster `ingress:`
+          config to commit for this). Full steps:
+          `docs/operator/vm-ssh-cloudflare-access.md`. Summary:
           - Zero Trust → Networks → Tunnels → platform tunnel → Public Hostname → Add:
-            subdomain `ssh.${{ parameters.appName }}`, domain `capstone.uamishub.com`,
+            subdomain `${{ parameters.team }}-ssh`, domain `uamishub.com`,
             Type `SSH`, URL
             `${{ parameters.appName }}-ssh.${{ parameters.team }}-vm-prod.svc.cluster.local:22`.
-          - Zero Trust → Access → Applications → Add → Self-hosted, domain
-            `ssh.${{ parameters.appName }}.capstone.uamishub.com`, policy Allow =
+            Put this rule ABOVE the `*.uamishub.com` catch-all — first match wins, and
+            SSH carries no Host header, so it cannot ride the shared HTTP route.
+          - Zero Trust → Access controls → Applications → Add → Self-hosted, domain
+            `${{ parameters.team }}-ssh.uamishub.com`, policy Allow =
             team-${{ parameters.team }}'s UA-MIS emails.
           - Confirm the CNAME Cloudflare auto-creates for that hostname in DNS.
+
+          > **Hostnames are ONE label under the apex, and that is a TLS constraint.**
+          > The certificate is `DNS:uamishub.com, DNS:*.uamishub.com` — a single-level
+          > wildcard. `${{ parameters.team }}-console.uamishub.com` is covered; a
+          > dotted `console.${{ parameters.team }}.uamishub.com` or the older
+          > `ssh.<app>.capstone.uamishub.com` is two or three labels and fails the TLS
+          > handshake BEFORE Cloudflare Access loads — which looks nothing like an
+          > auth error and has already cost this project real debugging time.
 
           > **No CI push robot** — the VM path has no Kaniko build (ADR-032 §6 CI). The
           > only image work, if any, is an OPTIONAL future disk-bake pipeline (v2.1).
@@ -513,19 +687,31 @@ spec:
              VirtualMachine; CDI imports the disk and cloud-init runs your app on first boot.
           Your VM will be reachable at `https://${{ parameters.appName }}.capstone.uamishub.com`.
 
-          **SSH in (pet dev-VM).** Your VM is a real machine you own: `ssh` in with a
-          **standard client** using the key you provided (no VPN, no extra tooling), then
-          `git clone` your app repo and run your stack right on the box. cloud-init installs
-          your public key and turns password login OFF. Public SSH rides the platform's
-          existing Cloudflare Tunnel (ADR-032a D2, $0, no LoadBalancer) at
-          `ssh.${{ parameters.appName }}.capstone.uamishub.com`, gated by a Cloudflare
-          Access login — connect with `ssh -o ProxyCommand='cloudflared access ssh
-          --hostname ssh.${{ parameters.appName }}.capstone.uamishub.com'
-          <cloud-user>@ssh.${{ parameters.appName }}.capstone.uamishub.com`, or just open
-          that URL in a browser for a zero-install rendered terminal. This route is wired
-          by an **operator dashboard step after your onboarding PR merges** (see the PR
-          checklist below / `docs/operator/vm-ssh-cloudflare-access.md`) — until then your
-          VM is reachable at its HTTP URL but not over SSH.
+          **Get a shell — open the web console.** Your VM is a real machine you own.
+          The simplest way in is a browser: open
+          `https://${{ parameters.team }}-console.uamishub.com`, sign in with GitHub,
+          and you get a terminal on the box. **That is the whole procedure** — no SSH
+          key to generate, no certificate, no client to install. Your GitHub login is
+          the only credential. Everyone on the team gets their own independent shell,
+          so you can all be on at once.
+
+          From there, `git clone` your app repo and run your stack right on the VM.
+
+          **SSH in (the advanced path).** If you would rather use a standard `ssh`
+          client, that works too. cloud-init imports the GitHub public keys of
+          everyone on the team roster and refreshes them every 5 minutes, and turns
+          password login OFF. Public SSH rides the platform's existing Cloudflare
+          Tunnel (ADR-032a D2, $0, no LoadBalancer) at
+          `${{ parameters.team }}-ssh.uamishub.com`, gated by a Cloudflare Access
+          login — connect with `ssh -o ProxyCommand='cloudflared access ssh --hostname
+          ${{ parameters.team }}-ssh.uamishub.com'
+          <cloud-user>@${{ parameters.team }}-ssh.uamishub.com`. Add your key at
+          <https://github.com/settings/keys> and wait ~5 minutes.
+
+          Both routes are wired by an **operator dashboard step after your onboarding
+          PR merges** (see the PR checklist below /
+          `docs/operator/vm-ssh-cloudflare-access.md`) — until then your VM is
+          reachable at its HTTP URL but the console and SSH are not yet open.
           Your rootdisk **persists across reboots** (it is a pet, not immutable) — but note
           in-VM changes are NOT in git, so push anything you want to keep back to the repo.
 

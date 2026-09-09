@@ -1,0 +1,14 @@
+# Sprint board for team `paper-papas` — MIS 521 lab team.
+#
+# Added by hand rather than emitted by the scaffolder: these lab teams are being
+# onboarded ahead of their projects. The file is still the whole declaration.
+#
+# Rendered by applicationsets/agile-boards-appset.yaml into the shared
+# `agile-boards` namespace, from the ONE shared image. Host is derived:
+# paper-papas-agile.capstone.uamishub.com
+#
+# De-provision = `git rm` this file.
+team: paper-papas
+repos: UA-MIS/paper-papas
+title: Paper Papas Board
+accent: "#9e1b32"

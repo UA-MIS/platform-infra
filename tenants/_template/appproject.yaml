@@ -155,7 +155,25 @@ spec:
       policies:
         - p, proj:__TEAM__:developer, applications, get, __TEAM__/*, allow
         - p, proj:__TEAM__:developer, applications, sync, __TEAM__/*, allow
+        # Pod logs for THIS team's apps only. Students can read logs today only
+        # because `policy.default: role:readonly` grants `logs, get, */*`
+        # CLUSTER-WIDE — the hole SEC-022 closes. Granting the scoped version in
+        # the same change that makes this role live means there is never a window
+        # where a student cannot read their own app's logs.
+        - p, proj:__TEAM__:developer, logs, get, __TEAM__/*, allow
         # Explicitly NO delete, NO override, NO action/* — least privilege.
       groups:
-        # Phase 2: replace with the Keycloak group, e.g. UA-MIS:team-__TEAM__.
-        - __TEAM__-developers
+        # SEC-021: MUST be the group Dex actually emits. Dex's GitHub connector
+        # (teamNameField: slug, orgs set) emits ONLY `<org>:<team-slug>` — e.g.
+        # `UA-MIS:ida-llm`. It never emits `__TEAM__-developers`, so the previous
+        # value matched nothing: the role was inert and every student fell through
+        # to `policy.default: role:readonly`, unable to sync even their own app.
+        # Same form already proven on the db-console forwardAuth gate
+        # (`allowed_groups=UA-MIS:<team>`) — copied, not re-derived.
+        #
+        # ⚠ This is a REAL tenancy boundary now, not a dead string. Two things
+        # must ALSO hold or it silently grants nothing: `__TEAM__` must be a real
+        # GitHub team slug, and the students must be MEMBERS of that team —
+        # repo collaborators receive no group claim at all.
+        # `make validate` guard [7/7] checks the format; membership it cannot.
+        - UA-MIS:__TEAM__

@@ -1,0 +1,71 @@
+# `labmx` namespace — LabMx / UA MIS Hub (uamishub.com, www.uamishub.com,
+# attendance.uamishub.com). Migrated off Azure App Service + a DigitalOcean
+# droplet on 2026-09-08 and, until this directory, existed ONLY as a set of
+# hand-run `kubectl apply`s: a cluster rebuild would not have brought the site
+# back. This adopts the live objects into GitOps.
+#
+# ⚠ THE TWO `platform.capstone/*` LABELS BELOW ARE LOAD-BEARING, NOT DECORATION.
+# LabMx's DATABASE_URL points at `capstone-mariadb-mariadb-cluster.db-tier.svc
+# .cluster.local:3306`, and ns `db-tier` runs a default-deny
+# (platform-services/db-tier/netpol.yaml `zz-default-deny`). The ONLY rule that
+# admits this namespace is `allow-ingress-tenant-namespaces`, whose selector is a
+# label-EXISTENCE match:
+#     namespaceSelector.matchExpressions:
+#       - key: platform.capstone/team
+#         operator: Exists
+#     ports: 5432 (CNPG) + 3306 (MariaDB)
+# `labmx` appears in NO by-name rule in that file (verified: `grep -n labmx
+# platform-services/db-tier/netpol.yaml` -> no match). Drop
+# `platform.capstone/team` here and every LabMx database connection is blackholed
+# by Cilium — which surfaces as a connect TIMEOUT, not "connection refused", so
+# it reads like a slow database rather than a policy drop (see the
+# scrape-timeout-vs-refused note). `platform.capstone/env` is NOT read by that
+# selector; it is kept because it is half of the platform's namespace-identity
+# convention and because the Vault path below is keyed on it.
+#
+# NOT a Crossplane tenant: there is no `tenants/_claims/labmx.yaml` CapstoneTenant
+# claim and none is added here. LabMx is a platform-operated production site, not a
+# scaffolded student project — it has no per-team AppProject, no dev/staging/preview
+# tiers, and no student RBAC. It borrows the tenant NAMESPACE LABELS (which is what
+# db-tier keys on) without borrowing the tenant lifecycle.
+#
+# PodSecurity: `enforce: restricted` is an INTENTIONAL ADDITION over what was
+# applied live (the hand-made namespace carried no PSA labels at all). It was
+# verified against the RUNNING pods before being committed:
+#     kubectl label --dry-run=server --overwrite ns labmx \
+#       pod-security.kubernetes.io/enforce=restricted \
+#       pod-security.kubernetes.io/enforce-version=v1.31
+#     -> namespace/labmx labeled (server dry run)     [no violation warnings]
+# PSA emits `Warning: existing pods in namespace "labmx" violate the new
+# PodSecurity enforce level ...` when a live pod would be rejected; it emitted
+# nothing, so both Deployments' securityContexts already satisfy `restricted`.
+# `enforce-version` is PINNED to v1.31 on purpose: without the pin, a future
+# control-plane upgrade silently re-evaluates these pods against a NEWER, stricter
+# `restricted` ruleset and can start refusing pod creation at the next rollout,
+# with no diff in this repo to blame.
+#
+# Ships via the platform-services directory generator
+# (applicationsets/platform-services-appset.yaml) -> Application `platform-svc-labmx`.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: labmx
+  labels:
+    # --- load-bearing (db-tier NetworkPolicy admission) ---
+    platform.capstone/team: labmx
+    platform.capstone/env: prod
+    # Opts this namespace into `make validate` guard [13/13]
+    # (hack/lint-db-tier-reachability.py), which FAILS the build if the
+    # `platform.capstone/team` label above is ever removed without an accompanying
+    # by-name rule being added to platform-services/db-tier/netpol.yaml. Purely a
+    # declaration of intent — no controller reads it. It exists because the guard
+    # cannot infer db-tier clienthood on its own: the connection string lives in
+    # Vault, not in git.
+    platform.capstone/db-tier-client: "true"
+    # --- platform conventions (agile/ precedent) ---
+    platform.capstone/component: platform
+    goldilocks.fairwinds.com/enabled: "true"
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.31
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted

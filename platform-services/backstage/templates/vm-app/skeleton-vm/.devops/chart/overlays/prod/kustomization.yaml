@@ -10,6 +10,29 @@ kind: Kustomization
 namespace: ${{ values.team }}-vm-prod
 resources:
   - ../../base
+
+# ── THE WEB CONSOLE'S PUBLIC DOOR — OFF BY DEFAULT ──────────────────────────
+# Uncommenting this publishes a browser shell at
+# `${{ values.team }}-console.uamishub.com`. Anyone who gets past Cloudflare Access
+# lands in a shell that can sudo, and Access is the ONLY wall in front of it — the
+# hostname rides the existing `*.uamishub.com` tunnel rule, so it is live the moment
+# ArgoCD syncs, with no tunnel change to slow it down.
+#
+# DO THIS IN ORDER:
+#   1. Create the Cloudflare Access application for that exact hostname, with an
+#      Allow policy scoped to this team. Never Bypass, never Service Auth.
+#   2. Uncomment the two lines below and open a PR.
+#   3. Verify from OUTSIDE the cluster — a 302 to the Access login is correct;
+#      a 200 means the shell is open to the internet and must be closed:
+#        curl -sSI https://${{ values.team }}-console.uamishub.com/ | head -1
+#
+# Until then the console still works in-cluster (the Service is in the base) and the
+# guest still runs ttyd — only the public route is withheld. See
+# ../../components/console-public/kustomization.yaml, which also explains why this
+# is a guardrail rather than an interlock.
+#
+# components:
+#   - ../../components/console-public
 # env-specific selector labels (§3.1). semester is the cohort slug (year-first).
 labels:
   - pairs:
