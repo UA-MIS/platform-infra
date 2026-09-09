@@ -19,6 +19,10 @@ WHAT IT REPORTS
   §6.2  For every live tenant: does its pipeline CALL the reusable workflow, or
         carry a local COPY? If it calls it, at which ref — and is that the ref
         the platform currently ships? If it carries a copy, how stale is it?
+        "Live" excludes ARCHIVED repos (see live_tenants()) — the topic search
+        does not stop matching a repo just because it was retired, and archived
+        repos cannot run CI or receive a fix PR at all, so counting them as
+        drift is not actionable, only noisy.
   §6.3  Is the `v1` tag still moving? The design's neat consequence is that
         because `v1` only advances on a green canary, the tag's staleness is a
         health signal. See `tag_staleness()` for why raw AGE is the wrong metric
@@ -29,6 +33,8 @@ FAIL-CLOSED (this is the whole point — read it before changing anything)
 A drift report that returns "no drift" because it read nothing is the exact
 defect this design exists to kill. So:
   * enumeration returning ZERO repos is an ERROR, never "clean"
+  * enumeration returning repos that are ALL archived is ALSO an error, never
+    a clean fleet of zero — see live_tenants()
   * any per-repo API failure marks that repo UNKNOWN and fails the run
   * a missing exceptions file NEVER suppresses a finding (it only ever removes
     entries, so its absence can only over-report — the safe direction)
@@ -102,18 +108,59 @@ def live_tenants():
     if items is None:
         raise Fatal("tenant enumeration returned no 'items' key — refusing to "
                     "report a clean fleet from a malformed response")
-    names = sorted(r["name"] for r in items)
-    # THE fail-closed check. An empty fleet is indistinguishable from a revoked
-    # token, a renamed topic, or a search-index hiccup — so it is never 'clean'.
-    if not names:
+    all_names = sorted(r["name"] for r in items)
+    # THE fail-closed check, on the UNFILTERED result. An empty raw result is
+    # indistinguishable from a revoked token, a renamed topic, or a search-index
+    # hiccup — so it is never 'clean'. This runs BEFORE archived-filtering below:
+    # filtering first would make "the token is broken" and "every topic-tagged
+    # repo happens to be archived" collapse into the same zero, which is exactly
+    # the ambiguity this check exists to remove.
+    if not all_names:
         raise Fatal(
             f"tenant enumeration returned ZERO repos with topic '{TENANT_TOPIC}'. "
             f"That is almost certainly a broken token, a lost topic, or a search "
             f"outage — not an empty platform. Refusing to report 'no drift'.")
-    total = data.get("total_count", len(names))
-    if total > len(names):
+    # Truncation guard, ALSO against the unfiltered count. `total_count` is
+    # GitHub's count of the raw search hit set, not of any filtered subset — a
+    # fleet with many archived repos must not look "truncated" just because
+    # filtering shrinks it below `total_count`. Archived-filtering happens
+    # strictly AFTER this comparison, never before it.
+    total = data.get("total_count", len(all_names))
+    if total > len(all_names):
         raise Fatal(f"enumeration truncated: total_count={total} but only "
-                    f"{len(names)} returned; paginate before trusting this")
+                    f"{len(all_names)} returned; paginate before trusting this")
+
+    # Exclude ARCHIVED repos. `topic:capstone-tenant` keeps matching a repo
+    # forever — archiving it is the org's actual decommission signal, and an
+    # archived repo cannot run CI or receive a fix PR at all (GitHub rejects
+    # every push to one), so counting it as "drift" is not actionable, only
+    # noisy: this is exactly how swamiapp/swami-student3/computa/meow/teardown/
+    # tenantv1 (6 of the 13 repos this search matched at the time this comment
+    # was written) kept showing up as live-tenant drift for weeks after they
+    # were retired. The search response already carries `archived` per item —
+    # a hard fact GitHub itself asserts — so this is enumeration correctness,
+    # not a policy call: it does NOT belong in tenants/ci-exceptions.yaml, which
+    # is for judgment-call opt-outs a human chose and must periodically review
+    # (see load_exceptions()). A hand-maintained exceptions entry for a fact the
+    # API already states is the same class of bug as the hand-maintained script
+    # list ci-scripts-sync-check.yaml's own header warns against: it silently
+    # goes stale the moment another repo is archived and nobody remembers to
+    # add it.
+    names = sorted(r["name"] for r in items if not r.get("archived"))
+    # A SECOND, separate fail-closed check — deliberately not merged with the one
+    # above. A non-empty raw result does not guarantee a non-empty LIVE result:
+    # if every topic-tagged repo turns out to be archived, that is observationally
+    # identical to "the topic is now stale" or "something just mass-archived the
+    # fleet", neither of which is a genuine clean fleet of zero. Silently
+    # returning [] here would let main() print "0 live tenants" and exit 0 —
+    # exactly the vacuous-pass shape this whole script exists to refuse.
+    if not names:
+        raise Fatal(
+            f"tenant enumeration found {len(all_names)} repo(s) with topic "
+            f"'{TENANT_TOPIC}', but ALL of them are archived. That is not a "
+            f"clean fleet of zero live tenants — it means the topic is stale "
+            f"(every repo it ever named has since been retired) or the fleet "
+            f"was just mass-archived. Refusing to report 'no drift'.")
     return names
 
 
