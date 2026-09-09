@@ -8,7 +8,29 @@
 # rootless + minimal.
 
 # ---- build stage ----
-FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+#
+# Base images resolve through the platform's Harbor MCR pull-through cache
+# (mcr-proxy) instead of mcr.microsoft.com directly — same reason every other
+# template goes through dockerhub-proxy: on the CI build pool's slower node
+# (100Mbit NIC), a direct ~800MB SDK pull inside Kaniko times out
+# ("failed to get filesystem from image"). This bit the first .NET tenant
+# (next-up) hard enough to be the dominant CI failure mode for that repo.
+#
+# FLOATING TAG, not digest-pinned — deliberately, to match this repo's own
+# other proxied templates (dockerhub-proxy/library/node, /python, /golang,
+# etc. all use a floating tag through the proxy; none of them pin). A digest
+# baked into a SCAFFOLDER TEMPLATE is a different problem than one in a
+# single repo: it freezes at whatever moment this file was last edited, with
+# no owner and no refresh signal, so every team scaffolded after that point
+# silently starts on an aging .NET base with nothing prompting a bump. A
+# floating tag through the proxy fixes the actual root cause
+# (bandwidth/timeout, not Docker Hub rate limits) without introducing that
+# orphaned-pin problem. (Contrast: UA-MIS/next-up's OWN backend/Dockerfile —
+# scaffolded from this template before this fix — digest-pins this, because
+# that repo's CI already digest-pins every base/tool image it pulls as an
+# established per-repo security posture; new scaffolds inherit this
+# template's proxied-floating-tag convention instead.)
+FROM harbor.capstone.uamishub.com/mcr-proxy/dotnet/sdk:8.0 AS build
 WORKDIR /src
 
 # Restore first (cached layer) — copy only the project file so a code-only change does
@@ -21,7 +43,9 @@ COPY . .
 RUN dotnet publish App.csproj -c Release -o /app/publish --no-restore /p:UseAppHost=false
 
 # ---- final stage ----
-FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS final
+#
+# Same mcr-proxy + floating-tag rationale as the build stage above.
+FROM harbor.capstone.uamishub.com/mcr-proxy/dotnet/aspnet:8.0 AS final
 WORKDIR /app
 
 # Run as a non-root UID. The k8s securityContext pins runAsUser 65532 +

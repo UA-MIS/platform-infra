@@ -49,11 +49,21 @@ change one, set it again. See `.devops/secrets/README.md` for the full pattern.
 The starter uses `EnsureCreated()` for convenience. Before shipping schema changes,
 switch to real migrations — see `app/Migrations/README.md`.
 
+## Base images already come through a platform Harbor pull-through cache
+
+The starter's `FROM` lines point at `harbor.capstone.uamishub.com/mcr-proxy/dotnet/*`, not
+`mcr.microsoft.com` directly — a platform pull-through cache of Microsoft Container
+Registry. Keep it that way: pulling `mcr.microsoft.com` directly inside a Kaniko build can
+time out on the CI build pool's slower nodes (the SDK image is ~800MB), because the cache
+serves from its own in-cluster storage after the first pull and a direct pull does not. If
+you swap a `FROM` back to a bare `mcr.microsoft.com` image, you're reintroducing that
+failure mode.
+
 ## Switching to a custom base image (apt) — read before you do
 
-The starter uses the official `mcr.microsoft.com/dotnet/*` images, which need no `apt`.
-If you switch a build/runtime stage to a Debian-family base and run `apt-get`, your CI
-build can fail on the platform runners because the runner egress allows external
-**:443 only** (no :80) and slim Debian bases ship no `ca-certificates`. Rewrite apt
-sources to HTTPS and bootstrap `ca-certificates` first — the platform's own images use
-that exact pattern. Ask the platform team if you hit this.
+The starter's `dotnet/*` images need no `apt`. If you switch a build/runtime stage to a
+Debian-family base and run `apt-get`, your CI build can fail on the platform runners
+because the runner egress allows external **:443 only** (no :80) and slim Debian bases
+ship no `ca-certificates`. Rewrite apt sources to HTTPS and bootstrap `ca-certificates`
+first — the platform's own images use that exact pattern. Ask the platform team if you
+hit this.
