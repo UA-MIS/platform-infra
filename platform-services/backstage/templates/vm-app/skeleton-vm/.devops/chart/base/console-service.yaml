@@ -1,0 +1,49 @@
+# WEB CONSOLE Service — the in-cluster endpoint for the browser terminal (ttyd)
+# running INSIDE the guest.
+#
+# This is the DEFAULT way a student gets a shell. It is an ordinary HTTP Service, on
+# the ordinary HTTP path, because that is the entire point: the SSH path needs
+# Cloudflare to mint a short-lived certificate, which needs the legacy per-application
+# CA — the one piece that is currently blocked on this account and that Cloudflare
+# itself marks "not recommended for new deployments". Nothing here needs a
+# certificate, a CA, or an SSH key of any kind.
+#
+# Same selector as the app Service: KubeVirt masquerade networking puts the guest
+# behind the virt-launcher pod, so a normal Service/Ingress/NetworkPolicy stack works
+# unchanged (ADR-032 §2b).
+#
+# NO NEW NetworkPolicy IS REQUIRED for this port. The tenant's
+# `allow-ingress-traefik-and-intra-ns` policy admits kube-system (Traefik) with NO
+# port restriction, so :7681 is already reachable from the ingress tier — verified
+# against the live policy in `paper-papas-vm-prod`. Do not add a redundant per-port
+# rule; if that policy is ever narrowed to specific ports, THIS port must be in it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${{ values.appName }}-console
+  labels:
+    app.kubernetes.io/name: ${{ values.appName }}
+    platform.capstone/team: ${{ values.team }}
+    # Marks this as the team's web-console endpoint. Reserved for a future reconciler
+    # pass that provisions the console's Access application automatically, the way
+    # `platform.capstone/access: ssh` already does for the SSH host.
+    platform.capstone/access: console
+  annotations:
+    # The team's allowed emails — the Allow policy for the console's Access app.
+    #
+    # ⚠ THE ACCESS POLICY IS THE ONLY WALL IN FRONT OF A ROOT-CAPABLE SHELL.
+    # It must be Allow, scoped to the team. It must NEVER be Bypass or Service Auth —
+    # a Bypass policy here is an unauthenticated shell on the public internet, and
+    # Cloudflare does not support either on browser-rendered apps anyway.
+    platform.capstone/console-access-emails: "${{ values.teamEmails }}"
+spec:
+  type: ClusterIP
+  selector:
+    kubevirt.io/domain: ${{ values.appName }}
+  ports:
+    - name: http
+      port: 80
+      # ttyd's listen port inside the guest (see capstone-console.service in
+      # cloud-init.yaml). Keep the two in step.
+      targetPort: 7681
+      protocol: TCP

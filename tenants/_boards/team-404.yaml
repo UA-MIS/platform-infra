@@ -1,0 +1,38 @@
+# Sprint board for team `team-404` — MIS 521 lab team.
+#
+# RENAMED from `lab-team-3` on 2026-08-31, following the GitHub team rename
+# `UA-MIS/lab-team-3` -> `UA-MIS/team-404`. The file stem and the `team:` key were
+# moved in ONE commit, as the generator requires — it refuses a file whose stem and
+# `team:` disagree, which is what stops a team quietly acquiring two boards.
+#
+# WHY THE RENAME WAS NOT OPTIONAL. Dex runs `teamNameField: slug` and emits
+# `UA-MIS:<slug>` from team MEMBERSHIP only. After the GitHub rename the members
+# carry `UA-MIS:team-404`, while this board still authorized `UA-MIS:lab-team-3` —
+# a group nobody is in and which no longer exists. The board was up, gated, and
+# nobody could get in; sign-in fails looking like a permissions bug rather than a
+# stale slug. The host, the Dex redirect URI and APP_URL all derive from the slug,
+# so they move together.
+#
+# THE OLD BOARD'S DATA DOES NOT MOVE. Each board gets its own Postgres schema in the
+# shared `agile_boards` database, named from the slug — so this rename points the
+# board at a NEW, EMPTY schema (`team_404`) and leaves the old one (`lab_team_3`)
+# behind. That was checked before the rename rather than assumed: `lab_team_3` held
+# 5 schema_migrations rows and ZERO work_items, sprints, comments, board_pages,
+# activity, api_tokens and board_settings, so nothing was stranded. (For contrast,
+# `ida_llm` held 47 work_items — the query does find data when there is data.) The
+# empty `lab_team_3` schema is now an orphan and can be dropped at leisure.
+#
+# The GitHub team `UA-MIS/team-404` EXISTS (verified against the API). The repo
+# `UA-MIS/team-404` is created as part of the same VM-tenant onboarding; until it
+# exists the reference is harmless — it only scopes branch creation and PR linking,
+# both of which fail soft.
+#
+# Rendered by applicationsets/agile-boards-appset.yaml into the shared
+# `agile-boards` namespace, from the ONE shared image. Host is derived:
+# team-404-agile.capstone.uamishub.com
+#
+# De-provision = `git rm` this file.
+team: team-404
+repos: UA-MIS/team-404
+title: Team 404 Board
+accent: "#9e1b32"

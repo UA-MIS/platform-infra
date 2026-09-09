@@ -1,0 +1,65 @@
+# ============================================================================
+# COMPONENT: console-public — publishes the web console at
+#   <team>-console.uamishub.com
+#
+# THIS IS OFF BY DEFAULT, AND THAT IS THE POINT. Enabling it creates the public
+# door to a shell that can sudo. Turn it on only AFTER the Cloudflare Access
+# application for that hostname exists.
+#
+# ── WHY THE GATE IS HERE AND NOT IN THE GUEST ───────────────────────────────
+# The exposure lives in the Ingress plus the shared `*.uamishub.com` tunnel rule,
+# NOT in the ttyd daemon. The console Service is a ClusterIP: it is reachable only
+# from inside the cluster and is not a public risk, so it stays in `base` and the
+# guest keeps running ttyd unconditionally. Only the Ingress — the thing that
+# actually puts a shell on the internet — is gated.
+#
+# The alternative (ship the systemd unit disabled and have an operator enable it
+# in the guest) was rejected deliberately: that control lives INSIDE the VM, so an
+# operator would need SSH to switch on the very feature that exists BECAUSE
+# students cannot be expected to have SSH. It is also invisible to GitOps — you
+# could not tell from this repo whether a tenant's console is public — and it does
+# not survive a rebuild, where the console would silently vanish in a way that
+# looks identical to a crash-looping unit.
+#
+# Gating the Ingress instead is declarative, reviewable in a PR diff, answerable
+# from the repo ("is this team's console public?"), survives rebuilds, and needs no
+# Cloudflare credential.
+#
+# ⚠ HONEST LIMIT — THIS IS A GUARDRAIL, NOT AN INTERLOCK.
+# Nothing here verifies that a Cloudflare Access application actually exists. A
+# person can still enable this component before creating one, and the result is an
+# unauthenticated root shell on the public internet. What this changes is the
+# DEFAULT: the unsafe state stops happening automatically to every scaffolded
+# tenant and becomes a deliberate, reviewable commit by a named person. That is the
+# real win and it should not be oversold as more than it is.
+#
+# The actual interlock is to extend the cf-vm-access reconciler (ADR-038) to
+# provision the console's Access application and the Ingress together, in one pass,
+# so the ordering cannot be got wrong. The console Service already carries the
+# `platform.capstone/access: console` label and the
+# `platform.capstone/console-access-emails` annotation for exactly that. It needs a
+# Cloudflare API token, so it is deliberately not attempted here.
+#
+# ── HOW TO ENABLE (two steps, in this order) ────────────────────────────────
+#   1. Create the Cloudflare Access application FIRST:
+#        Zero Trust -> Access -> Applications -> Add -> Self-hosted
+#          Application domain : <team>-console.uamishub.com
+#          Policy             : Allow, scoped to this team's emails
+#        NEVER Bypass and NEVER Service Auth. Cloudflare does not support either on
+#        browser-rendered applications, and a Bypass policy here is literally an
+#        unauthenticated sudo-capable shell on the public internet.
+#
+#   2. Uncomment the `components:` block in
+#      .devops/chart/overlays/prod/kustomization.yaml, then open a PR.
+#
+#   3. VERIFY, from outside the cluster — this is the whole check:
+#        curl -sSI https://<team>-console.uamishub.com/ | head -1
+#          HTTP/2 302  -> correct: Cloudflare Access is in front of it
+#          HTTP/2 200  -> STOP. The shell is open to the internet. Disable and fix.
+#        (A 502 means the Ingress exists but ttyd is not up — see cloud-init.)
+# ============================================================================
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - console-ingress.yaml

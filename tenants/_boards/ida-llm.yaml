@@ -1,0 +1,40 @@
+# Sprint board for team `ida-llm` — added by hand, ahead of the scaffolder.
+#
+# ⚠ THIS TEAM ALREADY HAS A BOARD, and it is still running. `ida-llm` is the
+# last board on the PRE-CHART pattern: it runs from the tenant's own repo inside
+# the tenant namespace `ida-llm-prod`, on host ida-agile.capstone.uamishub.com,
+# with its OWN Dex staticClient (`ida-agile`, see platform-services/dex/
+# configmap.yaml). This file does NOT migrate it and does NOT replace it.
+#
+# The two coexist deliberately, on purpose, for now:
+#
+#            OLD (leave alone)                  NEW (this file)
+#   host     ida-agile.capstone...              ida-llm-agile.capstone...
+#   ns       ida-llm-prod                       agile
+#   source   the tenant's own repo              the shared chart
+#   dex      staticClient `ida-agile`           a redirectURI on `agile-board`
+#
+# Different host, different namespace, different Dex client — so nothing here
+# contends with the old board. The owner is porting his 45 items and 4 sprints
+# BY HAND (a scripted seed was offered and explicitly declined); the old board
+# gets torn down separately once he is satisfied, which is a `git rm` on the
+# tenant repo's manifests and the removal of the `ida-agile` staticClient — NOT
+# something this file's lifecycle touches.
+#
+# Until that teardown, deleting the `ida-agile` staticClient breaks a board that
+# is in daily use. It is not redundant with the generated list below; it serves
+# a host the generator has no way to emit.
+#
+# The GitHub team UA-MIS/ida-llm exists with 5 members (verified against the API
+# when this was written), so sign-in works on arrival — unlike the lab-team
+# boards, which deploy green and 403 every member until their team is created.
+#
+# Rendered by applicationsets/agile-boards-appset.yaml into the shared `agile`
+# namespace, from the ONE shared image. Host is derived:
+# ida-llm-agile.capstone.uamishub.com
+#
+# De-provision = `git rm` this file.
+team: ida-llm
+repos: UA-MIS/ida-llm
+title: IDA-LLM Board
+accent: "#9e1b32"

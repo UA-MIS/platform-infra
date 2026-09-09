@@ -1,0 +1,38 @@
+# ============================================================================
+# VM-TIER SLOT COUNT — how many VM tenants the cluster can actually run.
+#
+# THIS NUMBER IS DECLARED BY A HUMAN, ON PURPOSE. It is not inferred from the
+# live cluster, and that is the point: `make validate` is cluster-independent by
+# design (it runs in CI and on a laptop with no kubeconfig), and a number
+# inferred at lint time would be read from whatever cluster happened to be in
+# the kubeconfig — which is a lint that lies. A declared number can be wrong,
+# but it is wrong VISIBLY, in a diff, with a name attached.
+#
+# WHERE THE NUMBER COMES FROM. The VM chart pins VMs to control-plane nodes with
+# a REQUIRED nodeAffinity, and spreads them one-per-node with a REQUIRED
+# podAntiAffinity on topologyKey kubernetes.io/hostname over all namespaces:
+#
+#     platform-services/backstage/templates/vm-app/skeleton-vm/
+#       .devops/chart/base/virtualmachine.yaml
+#
+# So the number of VM tenants that can be RUNNING at once is exactly the number
+# of schedulable control-plane nodes. There are three: capstone-n1, capstone-n2,
+# capstone-n3.
+#
+# WHY A GUARD EXISTS AT ALL. Exceeding this does not fail loudly. The VM is
+# admitted, the DataVolume imports fine, and then the VirtualMachine sits at
+# `Starting` with its VMI `Pending` and NO POD TO INSPECT, because the launcher
+# is never created. `kubectl get pods` in the tenant namespace is empty; ArgoCD
+# reports the Application Synced. There is nothing to look at, which is the
+# worst shape a capacity limit can have. The guard converts that into a red CI
+# check at the exact moment someone onboards the tenant that would not fit.
+#
+# WHEN YOU ADD A CONTROL-PLANE NODE: bump this number in the same PR that
+# onboards it. When you relax the anti-affinity to `preferred`, this file stops
+# describing a hard wall and the guard should be revisited, not just bumped.
+# ============================================================================
+slots: 3
+nodes:
+  - capstone-n1
+  - capstone-n2
+  - capstone-n3

@@ -142,16 +142,85 @@ spec:
             cpu: "1"
             memory: 512Mi
 
-        # The one scheduled backup this PR asks for: ALL namespaces + PVs, daily,
-        # 30-day retention. excludedNamespaces:[minio] avoids the backup store
-        # backing up itself (see header) — every other namespace is included.
+        # Scheduled backups: ALL namespaces + PVs. excludedNamespaces:[minio]
+        # avoids the backup store backing up itself (see header) — every other
+        # namespace is included.
+        #
+        # ── 2026-09-03: 30 dailies -> 6 dailies + weeklies (grandfather-son) ──
+        # ROOT CAUSE of the capstone-w1 DiskPressure incident. The store had
+        # grown to 324.5 G on a 433 GiB node-local disk (94% of everything used
+        # on that node), pinning it at the kubelet's 15% imagefs eviction line
+        # and evicting alloy, the VPA recommender and student CI runner pods.
+        #
+        # The driver is NOT total data volume — it is SNAPSHOT COUNT times poor
+        # deduplication. Kopia is content-addressed, so it dedupes well across
+        # snapshots of files that DON'T change and badly across files that are
+        # rewritten in place. Measured on 2026-09-03 (live PVC usage from
+        # kubelet_volume_stats_used_bytes vs `du` of each per-namespace Kopia
+        # repo, at 29 retained dailies):
+        #
+        #   namespace    live data   kopia repo   multiplier
+        #   vault          2.7 GiB      44 G        16.5x   <- raft/BoltDB rewrite
+        #   monitoring    18.1 GiB     108 G         6.0x   <- TSDB/WAL churn
+        #   harbor        15.2 GiB      52 G         3.4x
+        #   db-tier       14.4 GiB      28 G         1.9x   <- CNPG files stable
+        #   VM tenants    12.5 GiB      19.6 G       1.6x   <- disk images static
+        #
+        # i.e. Vault's 2.7 GiB of real state costs 44 G because every nightly
+        # snapshot of a live BoltDB file is nearly all-new content. Cutting the
+        # retained snapshot count is therefore close to a linear reduction on
+        # exactly the repos that are worst.
+        #
+        # ── WHAT THIS COSTS IN RECOVERY TERMS (the owner's call, stated plainly)
+        # BEFORE: 30 restore points, one per day, covering 30 days. Any incident
+        #         discovered within 30 days can be rewound to the previous day,
+        #         so worst-case data loss on restore is ~24h at any age.
+        # AFTER:  ~10 restore points. Mon-Sat dailies kept 7 days + Sunday fulls
+        #         kept 30 days. Within the last week, unchanged (~24h). Between
+        #         8 and 30 days old, granularity drops from daily to WEEKLY:
+        #         worst-case data loss on restore becomes ~7 days, not ~24h.
+        #
+        # The concrete scenario this trades away: a silent corruption that began
+        # ~12 days ago and is only noticed now. Today you could restore to day
+        # 11. After this change the nearest point is the previous Sunday, so you
+        # could lose up to 6 additional days of good work on top.
+        #
+        # The judgement being offered (NOT unilaterally taken — adjust the two
+        # ttls below to move the dial): for a teaching cluster whose realistic
+        # failure modes are "a team broke their own namespace yesterday" and
+        # "a node died", near-daily granularity for a week plus monthly-depth
+        # weeklies is the right shape, and 20 of the 30 dailies were buying
+        # very little while costing the node it lives on. If long-tail silent
+        # corruption is the bigger worry, raise the daily ttl to 336h (14d)
+        # first — that is the cheapest place to buy granularity back, because
+        # dailies are what dedupe worst.
+        #
+        # NOTE this alone does not make the store safe: it must be paired with
+        # the MinIO bucket quotas (docs/operator/disk-headroom.md), which make
+        # overrun fail the BACKUP loudly instead of failing the NODE silently.
         schedules:
+          # Mon-Sat. Sunday is deliberately left to the weekly schedule below so
+          # the two never both run at 04:00 and double the nightly I/O.
           daily-full-backup:
             disabled: false
-            schedule: "0 4 * * *"
+            schedule: "0 4 * * 1-6"
             useOwnerReferencesInBackup: false
             template:
-              ttl: "720h0m0s"
+              ttl: "168h0m0s"     # 7 days
+              includedNamespaces:
+                - "*"
+              excludedNamespaces:
+                - minio
+              defaultVolumesToFsBackup: true
+
+          # Sunday full, kept 30 days — preserves the existing 30-day DEPTH,
+          # at weekly rather than daily granularity beyond the first week.
+          weekly-full-backup:
+            disabled: false
+            schedule: "0 4 * * 0"
+            useOwnerReferencesInBackup: false
+            template:
+              ttl: "720h0m0s"     # 30 days
               includedNamespaces:
                 - "*"
               excludedNamespaces:

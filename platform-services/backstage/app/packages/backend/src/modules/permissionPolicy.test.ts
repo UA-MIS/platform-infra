@@ -63,7 +63,22 @@ describe('CapstoneTeamPermissionPolicy', () => {
     // The conditional scopes to the CATALOG plugin and is an anyOf of: the IS_ENTITY_OWNER
     // rule carrying the user's claims (the per-team boundary — the spine), OR IS_ENTITY_KIND
     // User/Group (self/org-graph read so the user can see their own User/Groups under
-    // permission.enabled). Asserting the serialized shape proves the wiring is real.
+    // permission.enabled), OR IS_ENTITY_KIND Template. Asserting the serialized shape proves
+    // the wiring is real.
+    //
+    // The Template arm was added by #397 ("Allow all authenticated users to view Backstage
+    // templates", 7cc34ea, 2026-07-14), which changed permissionPolicy.ts and did NOT touch
+    // this file — so this expectation sat stale for six weeks. Nothing caught it because no
+    // workflow has ever run these tests (#232); this assertion is the first thing the new
+    // portal-tests gate found. The direction of the fix was checked rather than assumed: the
+    // test was updated to match the code ONLY because #397's PR body, commit message and the
+    // policy's own inline comments all state the widening as the deliberate intent, and the
+    // test's last commit (727d498, 2026-07-03) predates the change by 11 days.
+    //
+    // WHAT THIS ARM MEANS, stated plainly because it is a read-access widening: every
+    // authenticated org member can READ all scaffolder Templates regardless of spec.owner.
+    // Editing them is still restricted via spec.owner. Components/APIs/Systems/Resources
+    // remain ownership-filtered by the IS_ENTITY_OWNER arm above — the spine did not open.
     expect(decision.pluginId).toBe('catalog');
     expect(decision.conditions).toMatchObject({
       anyOf: [
@@ -77,6 +92,11 @@ describe('CapstoneTeamPermissionPolicy', () => {
           resourceType: 'catalog-entity',
           params: { kinds: ['User', 'Group'] },
         },
+        {
+          rule: 'IS_ENTITY_KIND',
+          resourceType: 'catalog-entity',
+          params: { kinds: ['Template'] },
+        },
       ],
     });
   });
@@ -88,12 +108,15 @@ describe('CapstoneTeamPermissionPolicy', () => {
     // The key guard (plan R4): empty ownership must still be a CONDITIONAL, never ALLOW.
     expect(decision.result).toBe(AuthorizeResult.CONDITIONAL);
     expect(decision.result).not.toBe(AuthorizeResult.ALLOW);
-    // Empty claims -> the IS_ENTITY_OWNER arm matches no owned entities; only the
-    // User/Group org-graph arm remains. NOT allow-all (Components/APIs stay filtered).
+    // Empty claims -> the IS_ENTITY_OWNER arm matches no owned entities; the User/Group
+    // org-graph arm and the Template arm (#397, see the note above) remain. Still NOT
+    // allow-all: Components/APIs/Systems/Resources stay filtered, which is the guard this
+    // test exists for.
     expect((decision as ConditionalPolicyDecision).conditions).toMatchObject({
       anyOf: [
         { rule: 'IS_ENTITY_OWNER', params: { claims: [] } },
         { rule: 'IS_ENTITY_KIND', params: { kinds: ['User', 'Group'] } },
+        { rule: 'IS_ENTITY_KIND', params: { kinds: ['Template'] } },
       ],
     });
   });

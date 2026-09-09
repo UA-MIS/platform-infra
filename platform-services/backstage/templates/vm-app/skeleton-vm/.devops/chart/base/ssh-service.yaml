@@ -20,19 +20,45 @@
 # RESOLVED (ADR-032a D2, cheapest/easiest): the shipped public path is the
 # **Cloudflare Tunnel `ssh://` route** — reuses the existing $0 tunnel, no
 # LoadBalancer, no paid Spectrum. A Cloudflare Tunnel Public Hostname
-# (`ssh.${{ values.appName }}.capstone.uamishub.com`, Service type SSH) points
-# DIRECTLY at this Service, fronted by a Cloudflare Access application (Zero Trust
-# free tier). That Public Hostname + Access app are Cloudflare-dashboard steps (the
-# tunnel is token-based/remotely-managed, so there is no in-cluster ingress config to
-# template for the route itself) — see docs/operator/vm-ssh-cloudflare-access.md for
-# the exact steps and the two documented end-user connect commands.
+# (`<team>-ssh.uamishub.com`, Service type SSH) points DIRECTLY at this Service,
+# fronted by a Cloudflare Access application (Zero Trust free tier).
+#
+# The hostname is a SINGLE label under the APEX. That is a TLS constraint, not a
+# preference: the live certificate is `DNS:uamishub.com, DNS:*.uamishub.com` — a
+# ONE-level wildcard — so `<team>-ssh.uamishub.com` is covered and a dotted
+# `ssh.<team>.uamishub.com` is not (the HTTPS/Access handshake fails outright).
+#
+# Those Cloudflare-side objects are NO LONGER dashboard steps: the cf-vm-access
+# reconciler (platform-services/cf-vm-access, ADR-038) discovers this Service by its
+# label and provisions the route + Access app automatically, and removes them when
+# the Service goes away. See docs/operator/vm-ssh-cloudflare-access.md.
 apiVersion: v1
 kind: Service
 metadata:
   name: ${{ values.appName }}-ssh
   labels:
     app.kubernetes.io/name: ${{ values.appName }}
+    # The team slug the public SSH hostname is built from: <team>-ssh.<domain>.
+    # The reconciler prefers this label and falls back to stripping `-vm-<env>` off
+    # the namespace, so an omitted label degrades rather than breaks — but set it.
+    platform.capstone/team: ${{ values.team }}
+    # DESIRED-STATE MARKER for the cf-vm-access reconciler (ADR-038). This label is
+    # how the platform enumerates which VM tenants need a Cloudflare SSH route +
+    # Access app. Add the Service, the hostname appears; delete it, the hostname is
+    # removed on the next pass. Nothing is keyed on a hardcoded tenant name.
     platform.capstone/access: ssh
+  annotations:
+    # The team's allowed SSH emails — becomes the Cloudflare Access application's
+    # Allow policy for <team>-ssh.<domain>. SSH has no OIDC of its own, so Access is
+    # the auth in front of the hostname; sshd cert-trust is downstream of it.
+    #
+    # ⚠ AN EMPTY VALUE HERE PRODUCES AN APP THAT ADMITS NOBODY, and from a student's
+    # laptop that is INDISTINGUISHABLE from a missing tunnel route. Both just fail to
+    # connect. If SSH does not work, check this annotation before you touch the tunnel.
+    #
+    # NOT a secret — the same university emails already in the GitHub org.
+    # Comma-separated; edit + push to change who may connect.
+    platform.capstone/ssh-access-emails: "${{ values.teamEmails }}"
 spec:
   type: ClusterIP
   selector:

@@ -10,11 +10,14 @@
 import { AuthorizeResult } from '@backstage/plugin-permission-common';
 import { NotAllowedError, NotFoundError } from '@backstage/errors';
 
-// ── Mock VaultClient: record deleteKey calls ──────────────────────────────────────────────
+// ── Mock VaultClient: record setKey + deleteKey calls ─────────────────────────────────────
 const vaultDeleteCalls: Array<{ path: string; key: string }> = [];
+const vaultSetCalls: Array<{ path: string; key: string }> = [];
 jest.mock('./vaultClient', () => ({
   VaultClient: jest.fn().mockImplementation(() => ({
-    setKey: jest.fn(async () => {}),
+    setKey: jest.fn(async (path: string, key: string) => {
+      vaultSetCalls.push({ path, key });
+    }),
     deleteKey: jest.fn(async (path: string, key: string) => {
       vaultDeleteCalls.push({ path, key });
     }),
@@ -72,7 +75,12 @@ jest.mock('@octokit/rest', () => ({
 }));
 
 // eslint-disable-next-line import/first
-import { listSecrets, deleteSecret, listMyProjects } from './sealCore';
+import {
+  listSecrets,
+  deleteSecret,
+  listMyProjects,
+  sealAndPublish,
+} from './sealCore';
 
 const TARGET_REF = 'component:default/my-app';
 const OWNER_GROUP = 'group:default/team-alpha';
@@ -197,8 +205,39 @@ function writtenFiles(): Record<string, string> {
   return out;
 }
 
+/**
+ * The SEC-057 attack file: a repo-owned overlay ExternalSecret whose remoteRef.key has been
+ * edited to aim at ANOTHER team's Vault object. Byte-for-byte the shipped shape otherwise —
+ * the only difference is the one line a student can change in their own repository.
+ */
+function tamperedEs(env: string, victimKey: string): string {
+  return shippedEs(env).replace(
+    `key: tenants/team-alpha/${env}/app`,
+    `key: ${victimKey}`,
+  );
+}
+
+function serveTamperedEs(env: string, victimKey: string) {
+  octokitCalls.getContent.mockImplementation(async (opts: any) => {
+    if (opts.path === overlayEs(env)) {
+      return {
+        data: {
+          sha: `sha-${env}`,
+          content: Buffer.from(tamperedEs(env, victimKey), 'utf8').toString(
+            'base64',
+          ),
+        },
+      } as any;
+    }
+    const e = new Error('Not Found') as Error & { status: number };
+    e.status = 404;
+    throw e;
+  });
+}
+
 beforeEach(() => {
   vaultDeleteCalls.length = 0;
+  vaultSetCalls.length = 0;
   Object.values(octokitCalls).forEach(m => (m as jest.Mock).mockReset());
   octokitCalls.reposGet.mockImplementation(async () => ({
     data: { default_branch: 'main' },
@@ -217,6 +256,125 @@ beforeEach(() => {
     const e = new Error('Not Found') as Error & { status: number };
     e.status = 404;
     throw e;
+  });
+});
+
+/*
+ * SEC-057 (#183) — the destination, not the identity.
+ *
+ * The caller here is a LEGITIMATE, fully-authorized owner of my-app: the permission check
+ * passes and the owner intersection passes. That is the whole point — this is not an authz
+ * bypass, and no authz test would have caught it. The attack is that the WRITE TARGET was read
+ * verbatim out of a file in the caller's own repository, so owning one app granted write access
+ * to every other team's Vault object under the `secret/data/tenants/*` policy glob.
+ */
+describe('SEC-057: the Vault destination is checked against the derived team', () => {
+  const VICTIM = 'tenants/wizarddress/prod/app';
+
+  it('SEAL: refuses a repo file aiming at another team, and writes NOTHING to Vault', async () => {
+    serveTamperedEs('prod', VICTIM);
+    await expect(
+      sealAndPublish(makeDeps([OWNER_GROUP]), {
+        credentials: CREDS,
+        entityRef: TARGET_REF,
+        key: 'APP_SECRET',
+        value: 'pwned',
+        envs: ['prod'],
+      }),
+    ).rejects.toThrow(NotAllowedError);
+
+    // The security assertion: the victim's object was never touched.
+    expect(vaultSetCalls).toEqual([]);
+    // ...and no git side effect either (fails closed BEFORE the branch/PR machinery).
+    expect(octokitCalls.createOrUpdateFileContents).not.toHaveBeenCalled();
+    expect(octokitCalls.pullsCreate).not.toHaveBeenCalled();
+  });
+
+  it('DELETE: refuses the same tampered file, and deletes NOTHING from Vault', async () => {
+    serveTamperedEs('prod', VICTIM);
+    await expect(
+      deleteSecret(makeDeps([OWNER_GROUP]), {
+        credentials: CREDS,
+        entityRef: TARGET_REF,
+        key: 'app-secret',
+      }),
+    ).rejects.toThrow(NotAllowedError);
+    expect(vaultDeleteCalls).toEqual([]);
+  });
+
+  it('the refusal NAMES the file, the bad value and the fix (no TA — the message is the support experience)', async () => {
+    serveTamperedEs('prod', VICTIM);
+    const err = await sealAndPublish(makeDeps([OWNER_GROUP]), {
+      credentials: CREDS,
+      entityRef: TARGET_REF,
+      key: 'APP_SECRET',
+      value: 'pwned',
+      envs: ['prod'],
+    }).catch((e: unknown) => e);
+
+    // Narrow deliberately rather than casting. `.catch()` widens the result to
+    // `Error | <success shape>`, and the assertions below are only meaningful against a
+    // rejection: if this call ever RESOLVES, the seal went through against the victim's
+    // path, which is precisely the regression this test exists to catch. Fail loudly here
+    // instead of letting a wrong-shaped value make the assertions vacuous.
+    if (!(err instanceof Error)) {
+      throw new Error(
+        `expected sealAndPublish to reject with an Error, but it resolved with: ${JSON.stringify(
+          err,
+        )}`,
+      );
+    }
+
+    expect(err.message).toContain('.devops/chart/overlays/prod/app-secret.externalsecret.yaml');
+    expect(err.message).toContain(VICTIM); // what it found
+    expect(err.message).toContain('tenants/team-alpha/prod/app'); // what it should be
+    expect(err.message).toContain('Nothing was written'); // the reassurance
+  });
+
+  it('REGRESSION GUARD: the legitimate, untampered path still seals normally', async () => {
+    serveEs({ prod: [] });
+    await sealAndPublish(makeDeps([OWNER_GROUP]), {
+      credentials: CREDS,
+      entityRef: TARGET_REF,
+      key: 'NEW_KEY',
+      value: 'v',
+      envs: ['prod'],
+    });
+    // The whole cohort uses this path every time they save a secret. If this test ever fails,
+    // the constraint is too tight and the Secrets tab is broken for everyone.
+    expect(vaultSetCalls).toEqual([
+      { path: 'tenants/team-alpha/prod/app', key: 'NEW_KEY' },
+    ]);
+  });
+
+  it('a file that declares NO key at all still falls back to the derived path (unchanged)', async () => {
+    const noKey = shippedEs('prod')
+      .split('\n')
+      .filter(l => !l.trim().startsWith('key: '))
+      .join('\n');
+    octokitCalls.getContent.mockImplementation(async (opts: any) => {
+      if (opts.path === overlayEs('prod')) {
+        return {
+          data: {
+            sha: 'sha-prod',
+            content: Buffer.from(noKey, 'utf8').toString('base64'),
+          },
+        } as any;
+      }
+      const e = new Error('Not Found') as Error & { status: number };
+      e.status = 404;
+      throw e;
+    });
+    await sealAndPublish(makeDeps([OWNER_GROUP]), {
+      credentials: CREDS,
+      entityRef: TARGET_REF,
+      key: 'K',
+      value: 'v',
+      envs: ['prod'],
+    });
+    expect(vaultSetCalls).toEqual([
+      { path: 'tenants/team-alpha/prod/app', key: 'K' },
+    ]);
   });
 });
 

@@ -1,0 +1,48 @@
+# mcr-proxy: the pull-through cache project for MCR (see kustomization.yaml).
+# registryIdRef resolves the numeric registry_id from registry.yaml's Registry
+# MR (same dir) — standard Crossplane cross-resource reference, avoids
+# hardcoding an ID that only exists after the Registry is created. Mirrors
+# harbor-dockerhub-proxy/project.yaml's registryIdRef-over-hardcoded-registryId
+# reasoning exactly (see that file's comment for the full incident writeup on
+# why the ref, not a literal ID, is correct here).
+#
+# public: true — deliberately, for the same reason as dockerhub-proxy: this
+# caches images that are ALREADY public on MCR (dotnet/sdk, dotnet/aspnet),
+# so every existing pull path (tenant CI runners, Kaniko build-step
+# containers) can use it unauthenticated with zero new credential plumbing.
+#
+# forceDestroy: true — mirrors dockerhub-proxy/project.yaml: a cache project
+# will be non-empty after any use, and Harbor refuses to delete a non-empty
+# project without this set. No data-loss implication (reconstructible cache of
+# a public upstream).
+#
+# vulnerabilityScanning: false — proxy-cached upstream content, not
+# platform-built; scanning it is not actionable here (same call as
+# dockerhub-proxy).
+#
+# ⚠ ADOPTING a pre-existing live object, not creating one. `mcr-proxy` already
+# exists (project_id=17222, registry_id=2 — created by hand on 2026-09-09,
+# `GET /api/v2.0/projects/17222` confirms both). The external-name annotation
+# below is pre-set to `/projects/17222` (format copied verbatim from
+# harbor-dockerhub-proxy/project.yaml's live MR:
+# `crossplane.io/external-name: /projects/17218`, read off the cluster) so the
+# first reconcile GETs id 17222 instead of trying to create a project named
+# "mcr-proxy" that already exists (which would 409).
+apiVersion: project.harbor.crossplane.io/v1alpha1
+kind: Project
+metadata:
+  name: mcr-proxy
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    crossplane.io/external-name: "/projects/17222"
+spec:
+  forProvider:
+    name: mcr-proxy
+    public: true
+    registryIdRef:
+      name: mcr
+    vulnerabilityScanning: false
+    forceDestroy: true
+  providerConfigRef:
+    name: default

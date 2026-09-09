@@ -1,0 +1,109 @@
+# ════════════════════════════════════════════════════════════════════════════
+# LabMx Ingresses — PORTED WITH ZERO SEMANTIC DEVIATION FROM THE LIVE OBJECTS.
+#
+# This file is the highest-risk part of the adoption: uamishub.com is serving
+# real users right now, and these two Ingresses are the only thing routing them.
+# The rule applied here is that a GitOps ADOPTION must be a no-op sync. Every
+# "improvement" below was considered and deliberately NOT made, because each one
+# would have made the first ArgoCD sync a live routing change dressed up as
+# housekeeping.
+#
+# ── DEVIATION 1 NOT TAKEN: `kubernetes.io/ingress.class` -> `ingressClassName`
+# The annotation is deprecated (has been since k8s 1.18) and the house style
+# elsewhere is `ingressClassName: traefik` (platform-services/agile-boards/chart/
+# templates/ingress.yaml) or nothing at all, relying on the default IngressClass
+# (platform-services/lab-hosting/chart/templates/ingress.yaml, slidedeck).
+#
+# The IngressClass DOES exist — `kubectl get ingressclass` returns
+# `traefik / traefik.io/ingress-controller`, age 82d — so the swap would very
+# probably work. "Very probably" is the problem. Traefik resolves the annotation
+# and `ingressClassName` through DIFFERENT code paths, and the failure mode of
+# getting it wrong is not a crash: the Ingress simply stops being claimed by any
+# controller, Traefik drops the router, and the site 404s at the edge while every
+# object in the namespace still reports Healthy and ArgoCD still reports Synced.
+# There is no benefit to weigh against that on the day of a migration. Left
+# EXACTLY as live; the annotation is still honoured by Traefik v3.
+#
+#   Follow-up (separate PR, one host at a time, with a curl check between):
+#   swap to `ingressClassName: traefik` starting with attendance.uamishub.com.
+#
+# ── DEVIATION 2 NOT TAKEN: adding a `tls:` block
+# agile-boards and lab-hosting both carry `tls: { hosts: [...] }` with no
+# secretName. The live LabMx Ingresses carry none, and adding one here would be
+# cargo-culting: TLS for these hosts is terminated at CLOUDFLARE, and the tunnel
+# delivers plain HTTP to `traefik.kube-system.svc.cluster.local:80` (a single
+# catch-all cloudflared ingress rule — see the lab-hosting ingress header for the
+# measured description of that path). An in-cluster `tls:` block would create a
+# second, TLS router for these hosts that nothing routes to. `kubectl get ing -n
+# labmx` shows `PORTS 80` for both, which is the live confirmation.
+#
+# ── DEVIATION 3 NOT TAKEN: the `www.` -> apex redirect
+# `www.uamishub.com` and `uamishub.com` are BOTH served directly by `hub`, as two
+# rules on one Ingress. A Traefik RedirectRegex Middleware would be tidier SEO.
+# It is also a behaviour change to a live site and belongs in its own PR.
+#
+# ── HOST/CERT NOTE (why these three hosts are free at the edge)
+# Cloudflare Universal SSL covers the apex plus ONE wildcard level, so
+# `uamishub.com`, `www.uamishub.com` and `attendance.uamishub.com` are all inside
+# the existing certificate and the existing `*.uamishub.com` tunnel Public
+# Hostname (D-044/ADR-028). A DOTTED two-level host would NOT be — relevant only
+# if someone later adds e.g. `x.attendance.uamishub.com`, which would need a paid
+# Advanced Certificate.
+#
+# ── WHAT ARGOCD WILL DO ON FIRST SYNC
+# Adopt these two existing objects (add its tracking annotation) and diff nothing
+# else. The unrelated `labmx-preflight` Ingress that exists live in this namespace
+# is NOT in this kustomization and will NOT be pruned: ArgoCD only prunes objects
+# carrying its own tracking metadata, and that one has none.
+# ════════════════════════════════════════════════════════════════════════════
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hub
+  namespace: labmx
+  annotations:
+    # DEPRECATED BUT LIVE — see DEVIATION 1 above. Do not "modernize" this in a
+    # drive-by; it is the only thing binding these hosts to Traefik today.
+    kubernetes.io/ingress.class: traefik
+spec:
+  rules:
+    - host: uamishub.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: hub
+                port:
+                  number: 80
+    - host: www.uamishub.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: hub
+                port:
+                  number: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: attendance
+  namespace: labmx
+  annotations:
+    kubernetes.io/ingress.class: traefik
+spec:
+  rules:
+    - host: attendance.uamishub.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: attendance
+                port:
+                  number: 80
