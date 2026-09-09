@@ -42,8 +42,12 @@ on:
     - cron: "0 6 * * *"
   workflow_dispatch:
   pull_request:
-    # Validate the report's own code when it changes — but see the `continue-on-error`
-    # note below: on a PR this must not fail the PR for pre-existing fleet drift.
+    # Validate the report's own code when it changes — but a PR must not (a) fail
+    # for pre-existing fleet drift, or (b) require the org-wide FLEET_READ_APP_ID /
+    # FLEET_READ_APP_PRIVATE_KEY secrets, which a PR branch cannot be trusted with.
+    # See "Validate the report's own code" below: the live-scan steps are skipped
+    # entirely on this trigger (`if: github.event_name != 'pull_request'`) in favor
+    # of a credential-free self-check of the script and the exceptions file.
     paths:
       - ".github/workflows/ci-fleet-drift-report.yaml"
       - "hack/ci-fleet-drift-report.py"
@@ -63,6 +67,13 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Mint a READ-ONLY org-wide installation token
+        # Never on a PR: only schedule/workflow_dispatch actually scan the fleet.
+        # A PR touching this workflow's own files is validated below with NO
+        # credentials at all — see "Validate the report's own code" — so this
+        # step has nothing to do on that trigger, and skipping it here (rather
+        # than letting it run and possibly fail) is what makes the PR path work
+        # BEFORE the FLEET_READ_APP_ID / FLEET_READ_APP_PRIVATE_KEY secrets exist.
+        if: ${{ github.event_name != 'pull_request' }}
         id: apptoken
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
         with:
@@ -74,6 +85,9 @@ jobs:
           permission-metadata: read
 
       - name: Fleet drift report
+        # Same reasoning as the mint step above: a live fleet scan needs the
+        # org-wide token, which does not exist on the pull_request trigger.
+        if: ${{ github.event_name != 'pull_request' }}
         id: run
         env:
           GH_TOKEN: ${{ steps.apptoken.outputs.token }}
@@ -81,6 +95,30 @@ jobs:
           set -uo pipefail
           python3 hack/ci-fleet-drift-report.py | tee /tmp/report.txt
           echo "rc=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate the report's own code (PR-only — no credentials, no live API)
+        # This is the trigger's whole job: a PR that edits ci-fleet-drift-report.py
+        # / this workflow / ci-exceptions.yaml gets a real signal on its OWN code
+        # without needing the org-wide FLEET_READ_APP secrets, which a PR branch
+        # cannot be trusted with anyway. `--help` exercises argparse and exits
+        # before main() makes a single `gh api` call, so this catches a syntax
+        # error or a broken CLI surface with zero network access.
+        if: ${{ github.event_name == 'pull_request' }}
+        run: |
+          set -euo pipefail
+          python3 -m py_compile hack/ci-fleet-drift-report.py
+          python3 hack/ci-fleet-drift-report.py --help
+          python3 - <<'PYEOF'
+          import yaml
+          with open("tenants/ci-exceptions.yaml") as f:
+              doc = yaml.safe_load(f) or {}
+          entries = doc.get("exempt") or []
+          assert isinstance(entries, list), "tenants/ci-exceptions.yaml: 'exempt' must be a list"
+          for e in entries:
+              assert isinstance(e, dict) and "repo" in e, f"tenants/ci-exceptions.yaml: bad entry {e!r}"
+          print(f"tenants/ci-exceptions.yaml OK ({len(entries)} exempt entr{'y' if len(entries)==1 else 'ies'})")
+          PYEOF
+          echo "OK: report script imports/compiles, --help works, ci-exceptions.yaml parses. No live fleet scan run (needs FLEET_READ_APP_ID/FLEET_READ_APP_PRIVATE_KEY, which this trigger does not use)."
 
       - name: Publish the report to the job summary
         if: always()
