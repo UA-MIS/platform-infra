@@ -1,0 +1,48 @@
+# Persistent storage for the npm proxy-cache (2026-09-10 npm ci incident,
+# owner directive: "build dependencies should be stored permanently and
+# locally... THIS is where our storage is useful, not for tenant storage").
+#
+# ceph-block (Rook-Ceph RBD, replica-3) -- the cluster's default distributed
+# block SC, same class db-tier/vault/cnpg already trust for data that must
+# survive a node loss (platform-services/vault/raft-snapshot.yaml,
+# platform-services/cnpg/cluster/cluster.yaml). NOT local-hostpath (the minio
+# pattern): minio is pinned off Ceph on purpose (it IS the disaster-recovery
+# target for a Ceph-wide failure); this cache has no such correlated-failure
+# concern, and it needs to keep working across a node loss the way every
+# other Ceph-backed service on this platform does -- if it lived on one
+# node's local disk instead, losing that node would both take the cache
+# offline AND force it to warm back up from empty exactly when the platform
+# can least afford registry.npmjs.org dependency.
+#
+# SIZING: 50Gi. Ceph has 487Gi available cluster-wide as of this writing.
+# This is NOT a size-of-npm-registry estimate (npm has millions of packages);
+# it is sized for what THIS platform's tenants actually pull: five active
+# Node tenants (mychef, next-up, curb-web, springais, ida-llm) each with a
+# few hundred packages, plus whatever future tenants the scaffolder onboards.
+# A warm cache of every distinct package+version this platform has ever
+# built against is measured in the hundreds of MB to low single-digit GB, not
+# tens of GB -- 50Gi leaves 10-20x headroom for years of onboarding growth
+# without claiming a large slice of the shared pool. ceph-block has
+# allowVolumeExpansion: true (confirmed elsewhere on this platform,
+# monitoring/tempo.yaml), so this grows online, without a migration, if that
+# assumption is ever wrong.
+#
+# NOT scheduled on capstone-w1 (see statefulset.yaml nodeAffinity) --
+# w1's root filesystem is at 92%; Ceph OSDs are distributed across the fleet
+# so the PV itself is not pinned to w1's local disk regardless, but the pod
+# is kept off that node explicitly anyway, per the owner's explicit directive
+# for this build.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: npm-mirror-storage
+  namespace: npm-mirror
+  labels:
+    platform.capstone/component: platform
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ceph-block
+  resources:
+    requests:
+      storage: 50Gi

@@ -1,0 +1,18 @@
+# npm-mirror namespace (2026-09-10 npm ci incident, Part 2 permanent fix). An
+# in-cluster Verdaccio proxy-cache for npm packages, the same move as
+# platform-services/harbor-dockerhub-proxy and harbor-mcr-proxy made for
+# container images: stop every tenant build depending on the public npm
+# registry's availability, and stop paying its egress path's latency/timeout
+# characteristics on every single install.
+#
+# Recommend-only (Off) Goldilocks label, like minio/vault -- this is a
+# single-replica stateful singleton (see statefulset.yaml), never in the Auto
+# right-sizing policy (an eviction would interrupt in-flight builds cluster-
+# wide while the pod reschedules).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: npm-mirror
+  labels:
+    platform.capstone/component: platform
+    goldilocks.fairwinds.com/enabled: "true"

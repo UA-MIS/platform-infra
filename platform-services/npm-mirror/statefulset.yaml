@@ -1,0 +1,159 @@
+# npm-mirror StatefulSet (2026-09-10 npm ci incident, Part 2 permanent fix).
+#
+# StatefulSet, not Deployment, replicas fixed at 1 -- same reasoning as
+# platform-services/minio/statefulset.yaml: Verdaccio's default storage
+# backend is a local filesystem tree on the one PVC (pvc.yaml), which is
+# RWO and unsafe for two writers at once. A StatefulSet gives it a stable
+# network identity (npm-mirror-0.npm-mirror.npm-mirror.svc) and, combined
+# with `updateStrategy: RollingUpdate` + replicas:1, the old pod is always
+# fully terminated before the new one starts (no brief two-pod overlap
+# against the same RWO volume the way a Deployment's default rolling update
+# could produce).
+#
+# NOT a Helm chart: Verdaccio's own community Helm chart is a third-party
+# maintenance surface this platform does not need for a single-container,
+# single-PVC workload -- same "hand-rolled manifests" call minio's header
+# already made for the identical shape of problem.
+#
+# FAILURE MODE (why this is not a build-blocking SPOF): if this pod is down
+# (crash, reschedule, node drain), tenant builds do not hang forever waiting
+# on it -- the SAME retry loop Part 1 already ships in every tenant
+# Dockerfile/CI step (4 attempts, 15/30/45s backoff, ~90s total) covers a
+# routine pod restart transparently, because Kubernetes typically has a
+# replacement Service endpoint back within that window. A genuinely extended
+# outage (node failure, PVC issue) does turn into real build failures for any
+# tenant whose .npmrc points at this mirror -- there is no automatic
+# fallback to the public registry once a tenant's config names this registry
+# -- which is exactly why Part 1's tenant-repo PRs do NOT flip that registry
+# today (see platform-services/npm-mirror/README.md "Rollout"): today's
+# incident fix does not take on this instance as a new dependency, so this
+# mirror can never make today's outage worse. Multi-replica HA is a
+# documented future enhancement (README.md), not built now -- Verdaccio's
+# free-tier storage plugin is single-node by design; real HA needs a shared
+# backend (e.g. its S3/Ceph-RGW storage plugin), which is more moving parts
+# than this incident's timeline justifies.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: npm-mirror
+  namespace: npm-mirror
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: npm-mirror
+spec:
+  serviceName: npm-mirror
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: npm-mirror
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        platform.capstone/component: platform
+        app.kubernetes.io/name: npm-mirror
+    spec:
+      # Owner directive (2026-09-10): do not put this on capstone-w1 -- its
+      # root filesystem is at 92%. Ceph OSDs are distributed so the PVC's
+      # actual data placement is not pinned to w1 regardless, but the pod
+      # itself (logs, ephemeral storage, ordinary container overhead) is kept
+      # off that node explicitly, belt-and-suspenders.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: NotIn
+                    values:
+                      - capstone-w1
+      securityContext:
+        # Matches the upstream verdaccio/verdaccio image's built-in user
+        # (uid 10001, confirmed: `docker inspect verdaccio/verdaccio:6.10.3`
+        # -> Config.User "10001"). fsGroup so the Ceph RBD volume mount is
+        # group-writable by that uid.
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: verdaccio
+          # Pulled through the platform's own Harbor Docker Hub pull-through
+          # cache (dockerhub-proxy), same as every other tenant/platform
+          # image -- verdaccio/verdaccio is a non-"library" Docker Hub repo,
+          # same path shape as the nginxinc/nginx-unprivileged precedent
+          # (curb-web frontend/Dockerfile): namespace segment kept, no
+          # "library/" prefix.
+          image: harbor.capstone.uamishub.com/dockerhub-proxy/verdaccio/verdaccio:6.10.3@sha256:7b067a47ae51fb9dff3dcdce60ec0a2cbd7650c208cb4b9f6d37cb1b09b39d43
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: 4873
+          env:
+            - name: VERDACCIO_PORT
+              value: "4873"
+          volumeMounts:
+            - name: config
+              mountPath: /verdaccio/conf
+              readOnly: true
+            - name: storage
+              mountPath: /verdaccio/storage
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          # /-/ping is Verdaccio's well-known health endpoint (confirmed live:
+          # returns HTTP 200 "{}"). initialDelay generous because the FIRST
+          # boot has to lay down the htpasswd file + storage DB on a fresh
+          # Ceph RBD volume.
+          livenessProbe:
+            httpGet:
+              path: /-/ping
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /-/ping
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: config
+          configMap:
+            name: npm-mirror-config
+        - name: storage
+          persistentVolumeClaim:
+            claimName: npm-mirror-storage
+---
+# ClusterIP only -- no ingress. Consumed in-cluster only (tenant CI build
+# pods), same posture as harbor-core and the other proxy-cache services.
+apiVersion: v1
+kind: Service
+metadata:
+  name: npm-mirror
+  namespace: npm-mirror
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: npm-mirror
+spec:
+  selector:
+    app.kubernetes.io/name: npm-mirror
+  ports:
+    - name: http
+      port: 4873
+      targetPort: http

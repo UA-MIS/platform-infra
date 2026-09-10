@@ -134,6 +134,39 @@ spec:
         # hardening/netpol-controlplane/vault-unsealer-netpol.yaml.
         - protocol: TCP
           port: 8200   # vault-unsealer (seal-status GET + unseal PUT)
+    # npm-mirror.npm-mirror.svc:4873 (2026-09-10 npm ci incident, Part 2 permanent
+    # fix) -- the in-cluster Verdaccio npm proxy-cache (platform-services/npm-mirror).
+    #
+    # A SEPARATE namespaceSelector rule, NOT another port on the ipBlock:10.96.0.0/12
+    # block above -- deliberately, based on a live finding this fix's own verification
+    # turned up (kubectl + hubble, 2026-09-10): adding :4873 to that ipBlock rule's
+    # port list did NOT actually admit traffic to the freshly-created npm-mirror pod,
+    # even though it was confirmed present in `cilium endpoint get`'s realized policy
+    # -- hubble showed the SYN still "Policy denied DROPPED". Reusing an
+    # ALREADY-allowed port (8080) on the new pod made no difference either, which
+    # rules out a port-number explanation. Best-evidence read: Cilium's
+    # CIDR-to-identity derivation for that ipBlock rule had already resolved
+    # 10.96.0.0/12 against the identities it knew about when THAT rule was last
+    # (re)compiled (harbor-core, Traefik, vault-unsealer -- all long-lived) and does
+    # not pick up a brand-new backend on that same CIDR promptly -- the same class of
+    # "CIDR-based selectors do not match in-cluster entities" gap this file's SEC-019
+    # caveat already documents for the node-LAN/tailnet excepts, just showing up
+    # differently here. A direct namespaceSelector rule uses identity matching
+    # straight away, no CIDR-derivation step, and DID work immediately in the same
+    # live test.
+    #
+    # STATED EXPLICITLY, NOT A SILENT WIDENING: this is the only change this PR makes
+    # to this file. Like every other rule in this policy, it does not take effect on
+    # merge alone; this file is MANUAL-SYNC gated (see this policy's own Application,
+    # platform-netpol-runners) -- an operator must run
+    # `argocd app sync platform-netpol-runners` to apply it.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: npm-mirror
+      ports:
+        - protocol: TCP
+          port: 4873   # npm-mirror (Verdaccio npm proxy-cache) -- Service port == pod port
     # External HTTPS:443 ONLY — GitHub (clone/Actions API/job token) + base-image
     # pulls. Port-scoped (no FQDN egress until Cilium).
     #

@@ -1,0 +1,19 @@
+# npm-mirror (2026-09-10 npm ci incident, Part 2 permanent fix) -- Verdaccio
+# in-cluster npm proxy-cache. Picked up by the platform-services directory
+# generator ApplicationSet (applicationsets/platform-services-appset.yaml) as
+# `platform-svc-npm-mirror` -- no new Application file needed, no new Helm
+# chart source, so no AppProject sourceRepos change needed either (plain
+# manifests, same as minio/dex/cloudflared/vault-unsealer).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - pvc.yaml
+  - configmap.yaml
+  - statefulset.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false

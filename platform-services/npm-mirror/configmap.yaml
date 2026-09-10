@@ -1,0 +1,103 @@
+# Verdaccio configuration (2026-09-10 npm ci incident, Part 2 permanent fix).
+#
+# WHY VERDACCIO: it is the standard lightweight self-hosted npm registry --
+# single Node process, no external DB, first-class "uplink" proxy-cache
+# support (exactly the Harbor dockerhub-proxy pattern, for npm instead of
+# OCI images), and it is what most self-hosted-npm-mirror writeups converge
+# on for this scale. Alternatives considered: Nexus Repository / Artifactory
+# (both do far more than this platform needs -- JVM-based, heavier to run
+# and operate, and this platform has no other artifact-repo need that would
+# justify the extra operational surface); a raw nginx cache in front of
+# registry.npmjs.org (no package-aware storage, no web UI, reinvents what
+# Verdaccio already does correctly, including npm's own protocol quirks).
+#
+# PUBLISHING IS EFFECTIVELY DISABLED. `auth.htpasswd.max_users: -1` disables
+# self-registration entirely, so there are no accounts and `publish:
+# $authenticated` on every package pattern below can never be satisfied --
+# nobody can publish or unpublish through this instance. That is
+# deliberate: this mirror exists to CACHE the public registry, not to host
+# private packages, so there is no publish workflow to protect and no
+# credential to plumb into every tenant's CI (mirrors the reasoning in
+# platform-services/harbor-dockerhub-proxy/project.yaml for `public: true`).
+#
+# FALL-THROUGH FOR UNSEEN PACKAGES: every package pattern's `proxy: npmjs`
+# means a package this mirror has never cached is fetched live from
+# registry.npmjs.org on first request, cached, and served locally from then
+# on -- exactly the requirement ("a package we have never seen still
+# resolves"). The uplink's generous timeout/retry below absorbs the SAME
+# flaky-egress path Part 1 works around at the tenant-build layer, so a
+# cache-miss during a stall does not immediately fail the calling `npm ci`
+# (whose own Dockerfile/CI-level retry loop, shipped in Part 1, is the
+# second line of defense if this uplink attempt is still unlucky).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: npm-mirror-config
+  namespace: npm-mirror
+  labels:
+    platform.capstone/component: platform
+data:
+  config.yaml: |
+    storage: /verdaccio/storage/data
+    plugins: /verdaccio/plugins
+
+    web:
+      title: UA-MIS npm mirror
+      enabled: true
+
+    auth:
+      htpasswd:
+        file: /verdaccio/storage/htpasswd
+        max_users: -1
+
+    uplinks:
+      npmjs:
+        url: https://registry.npmjs.org/
+        timeout: 60s
+        max_fails: 3
+        fail_timeout: 5m
+        cache: true
+
+    packages:
+      '@*/*':
+        access: $all
+        publish: $authenticated
+        unpublish: $authenticated
+        proxy: npmjs
+
+      '**':
+        access: $all
+        publish: $authenticated
+        unpublish: $authenticated
+        proxy: npmjs
+
+    server:
+      # 0 disables the HTTP keep-alive idle timeout entirely (Verdaccio's own
+      # default config comment: this makes the server behave like Node <8,
+      # which had none). NOT left at a small value: live verification
+      # (2026-09-10) hit a real bug here -- a 47MB cold-cache tarball
+      # (@next/swc-linux-x64-musl) took 102s to stream end-to-end even for an
+      # in-cluster, same-node client, and a keepAliveTimeout of 60 killed the
+      # connection out from under that still-in-flight request (client saw
+      # ECONNRESET/"aborted" on the NEXT request queued on the same
+      # keep-alive socket). A registry whose whole job is surviving slow
+      # transfers cannot itself impose a timeout shorter than the transfers
+      # it serves.
+      keepAliveTimeout: 0
+
+    listen:
+      - 0.0.0.0:4873
+
+    # Native-binary packages (e.g. @next/swc-*, esbuild platform binaries) run
+    # tens of MB; the default 10mb would reject exactly the large transfers
+    # this mirror exists to make reliable.
+    max_body_size: 200mb
+
+    middlewares:
+      audit:
+        enabled: true
+
+    log:
+      type: stdout
+      format: pretty
+      level: http
