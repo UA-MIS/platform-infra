@@ -1,0 +1,31 @@
+# See replication-mcr-dotnet-sdk.yaml for the full rationale (pull, no-delete,
+# manual trigger, digest-pin preservation). Same shape, dotnet/aspnet repo.
+#
+# ⚠ ADOPTING a pre-existing live policy (id=5), hand-created + executed
+# successfully on 2026-09-10 (execution evidence: policy_id=5, succeed=1/1).
+apiVersion: registry.harbor.crossplane.io/v1alpha1
+kind: Replication
+metadata:
+  name: base-images-mcr-dotnet-aspnet
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    crossplane.io/external-name: "/replication/policies/5"
+spec:
+  forProvider:
+    name: base-images-mcr-dotnet-aspnet
+    description: "MCR dotnet/aspnet -> base-images permanent mirror"
+    action: pull
+    registryIdRef:
+      name: mcr
+    destNamespace: base-images
+    destNamespaceReplace: 0
+    schedule: manual
+    filters:
+      - name: "dotnet/aspnet"
+        tag: "8.0"
+    deletion: false
+    override: true
+    enabled: true
+  providerConfigRef:
+    name: default

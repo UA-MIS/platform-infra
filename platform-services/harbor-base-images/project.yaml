@@ -1,0 +1,56 @@
+# base-images: the PERMANENT local mirror of every base image the platform's
+# build path pulls FROM (Dockerfile FROM lines, CI job `container:` images, the
+# Kaniko executor itself, and scaffolder skeleton base images). This is NOT a
+# proxy-cache project — it holds real, retained copies with NO retention policy,
+# so nothing here is ever evicted by age or by GC. Contrast with
+# harbor-dockerhub-proxy/ and harbor-mcr-proxy/ (proxy_cache projects, retention
+# rule nDaysSinceLastPull=7 + nightly GC — the EXACT mechanism this project
+# exists to stop being the source of build failures for: a team that goes a week
+# between pushes gets its cached base image evicted and the next build re-pulls
+# from the internet, sometimes into a network timeout on capstone-w1's uplink).
+#
+# public: true — same reasoning as the proxy projects: every pull path (tenant
+# Dockerfiles inside Kaniko, CI job containers, the ARC container hook) reads
+# from here with ZERO new pull-side credentials. This mirror only ever holds
+# upstream-public content (Docker Hub official/verified images, MCR .NET
+# images, GCR kaniko-executor + distroless) — making the read side public adds
+# no exposure beyond what already exists via the proxy projects.
+#
+# vulnerabilityScanning: false — same call as the proxy projects: this is
+# upstream content the platform does not build, so a scan finding here is not
+# actionable by the platform (it would need to flow upstream, not to a tenant).
+#
+# forceDestroy: true — mirrors the proxy projects' reasoning: a project that
+# holds artifacts refuses to delete without this, and this project holds no
+# source-of-truth content (everything is a reconstructible copy of a public
+# upstream reference).
+#
+# NO RetentionPolicy MR in this directory, and none should ever be added here —
+# that is the entire point of this project's existence. If someone is tempted
+# to add one "to save space" later: read the owner directive this project was
+# built to satisfy (permanent, not cached) and the disk math in
+# docs/operator/harbor.md before doing it.
+#
+# ⚠ ADOPTING a pre-existing live object, not creating one. `base-images` was
+# hand-created on 2026-09-10 via the raw Harbor API (project_id=17223) to
+# populate and verify the mirror end-to-end BEFORE landing this declarative
+# form (same bootstrap sequence as harbor-mcr-proxy/'s mcr-proxy adoption — see
+# that file's comment for the general pattern). The external-name annotation
+# below (`/projects/17223`) makes the first reconcile a GET, adopting the
+# hand-made project instead of a 409 create-conflict.
+apiVersion: project.harbor.crossplane.io/v1alpha1
+kind: Project
+metadata:
+  name: base-images
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    crossplane.io/external-name: "/projects/17223"
+spec:
+  forProvider:
+    name: base-images
+    public: true
+    vulnerabilityScanning: false
+    forceDestroy: true
+  providerConfigRef:
+    name: default

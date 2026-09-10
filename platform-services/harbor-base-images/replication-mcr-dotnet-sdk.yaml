@@ -1,0 +1,57 @@
+# Pull-based replication: MCR dotnet/sdk -> base-images (this project). ONE
+# Replication MR per SOURCE REPO (not a blanket wildcard) — deliberate curation,
+# not "mirror everything MCR ever publishes". Adding a new needed tag (e.g. a
+# 9.0 SDK) is a one-line PR editing the `tag` filter to a brace-alternation
+# (`{8.0,9.0}`) — that IS "how a new version gets in", reviewed like any other
+# change to this repo.
+#
+# action: pull, deletion: false (NEVER delete the local copy, even if the tag
+# is removed upstream — this is the whole point of this project existing),
+# override: true (a re-run MAY update the tag's manifest if MCR republishes the
+# same tag with new content, but never removes anything). schedule: manual —
+# see dockerhub-mirror-cronjob.yaml's header comment for why this project uses
+# manual/on-demand triggering rather than a blind nightly cron for the
+# Harbor-native replications (MCR + GCR): these two sources replicate cleanly
+# and cheaply (confirmed by execution, see PR description), so a human/CI
+# triggers `POST .../replication/executions` when the filter list changes
+# (bump PR merges -> one execution -> done), rather than re-running a no-op
+# nightly forever.
+#
+# next-up's backend/Dockerfile pins `dotnet/sdk@sha256:...` (SEC digest-pin,
+# owner directive: preserve that convention, do not regress it to a tag). This
+# replication does NOT break that: pull-based replication copies the manifest
+# and blobs byte-for-byte (content-addressed), so the SAME digest exists at
+# harbor.capstone.uamishub.com/base-images/dotnet/sdk@sha256:... once mirrored
+# — only the PROJECT segment of next-up's FROM line changes (mcr-proxy ->
+# base-images), the digest itself is untouched.
+#
+# ⚠ ADOPTING a pre-existing live policy (id=3), hand-created + executed
+# successfully via the raw API on 2026-09-10 to populate and verify this image
+# before landing this declarative form (execution evidence: policy_id=3,
+# succeed=1/1). external-name below makes the first reconcile a GET.
+apiVersion: registry.harbor.crossplane.io/v1alpha1
+kind: Replication
+metadata:
+  name: base-images-mcr-dotnet-sdk
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    crossplane.io/external-name: "/replication/policies/3"
+spec:
+  forProvider:
+    name: base-images-mcr-dotnet-sdk
+    description: "MCR dotnet/sdk -> base-images permanent mirror"
+    action: pull
+    registryIdRef:
+      name: mcr
+    destNamespace: base-images
+    destNamespaceReplace: 0
+    schedule: manual
+    filters:
+      - name: "dotnet/sdk"
+        tag: "8.0"
+    deletion: false
+    override: true
+    enabled: true
+  providerConfigRef:
+    name: default

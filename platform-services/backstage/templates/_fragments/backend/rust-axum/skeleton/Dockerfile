@@ -22,14 +22,14 @@
 # limits across every team's CI, verified working end-to-end (cache-hit proof
 # in artifacts/implementation/b4-harbor-proxy-cache.evidence.yaml). Same image,
 # same tag, different registry host -- purely a pull-path change.
-FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/rust:1-slim AS build
+FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/rust:1-slim AS build   # NOT YET in base-images (mirror population pending)
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 RUN cargo build --release --locked
 
 # ---- runtime stage (distroless cc, non-root) ----
-FROM gcr.io/distroless/cc-debian12:nonroot AS final
+FROM harbor.capstone.uamishub.com/base-images/distroless/cc-debian12:nonroot AS final
 WORKDIR /app
 COPY --from=build /src/target/release/app /app/app
 

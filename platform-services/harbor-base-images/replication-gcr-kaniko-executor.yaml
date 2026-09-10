@@ -1,0 +1,48 @@
+# See replication-gcr-distroless-static.yaml for rationale. This mirrors the
+# Kaniko executor image ITSELF — every tenant build (and the reusable
+# tenant-build.yaml / backstage-process-build-push.yaml) runs
+# `uses: docker://gcr.io/kaniko-project/executor@sha256:...`. A GitHub Actions
+# `docker://` step pulls at RUNTIME on the runner, same as any other image
+# reference — repointing it to `docker://harbor.capstone.uamishub.com/
+# base-images/kaniko-project/executor@sha256:...` needs no new credential (the
+# project is public) and removes GCR from the CI build path's network
+# dependency entirely, same win as the existing dockerhub/mcr proxies.
+#
+# Digest-pinned upstream (SEC, D-030: `gcr.io/kaniko-project/executor@sha256:
+# c3109d5926a997b100c4343944e06c6b30a6804b2f9abe0994d3de6ef92b028e # v1.23.2-debug`).
+# Preserved here via an exact tag filter (v1.23.2-debug) — pull-based
+# replication copies content-addressed, so the SAME digest resolves at the
+# mirrored path; only the registry/project prefix changes in consumers.
+# Bumping the pinned version = add the new tag to a future replication (or
+# widen this filter to a brace list) in the SAME PR that bumps the digest in
+# every consumer — one change, reviewed together, exactly like today's
+# digest-bump PRs.
+#
+# ⚠ ADOPTING a pre-existing live policy (id=7), hand-created + executed
+# successfully on 2026-09-10 (execution evidence: policy_id=7, succeed=1/1).
+apiVersion: registry.harbor.crossplane.io/v1alpha1
+kind: Replication
+metadata:
+  name: base-images-gcr-kaniko-executor
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    crossplane.io/external-name: "/replication/policies/7"
+spec:
+  forProvider:
+    name: base-images-gcr-kaniko-executor
+    description: "GCR kaniko-project/executor -> base-images permanent mirror"
+    action: pull
+    registryIdRef:
+      name: gcr
+    destNamespace: base-images
+    destNamespaceReplace: 0
+    schedule: manual
+    filters:
+      - name: "kaniko-project/executor"
+        tag: "v1.23.2-debug"
+    deletion: false
+    override: true
+    enabled: true
+  providerConfigRef:
+    name: default

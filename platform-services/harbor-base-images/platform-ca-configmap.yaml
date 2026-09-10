@@ -1,0 +1,28 @@
+# Committed copy of platform-services/arc/platform-ca-configmap.yaml's CA cert,
+# in the `harbor` namespace instead of `arc-runners`, for
+# dockerhub-mirror-cronjob.yaml (same dir) to mount. Same cert, same
+# public/non-secret nature, same "COMMITTED COPY — goes stale on CA rotation,
+# proper fix is a cert-manager trust-manager Bundle" caveat as the original.
+# Duplicated rather than shared because ConfigMaps are namespace-scoped and
+# this CronJob intentionally runs in `harbor` (co-located with the
+# harbor-admin-adjacent robot secret), not `arc-runners`.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: platform-ca
+  namespace: harbor
+  labels:
+    platform.capstone/component: platform
+data:
+  ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    MIIBgjCCASigAwIBAgIUAd3DM9aqHXUp1CnmoNALdv4X4mcwCgYIKoZIzj0EAwIw
+    HzEdMBsGA1UEAxMUY2Fwc3RvbmUtcGxhdGZvcm0tY2EwHhcNMjYwNjE4MDMwNTM4
+    WhcNMzYwNjE1MDMwNTM4WjAfMR0wGwYDVQQDExRjYXBzdG9uZS1wbGF0Zm9ybS1j
+    YTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABKkY0iZxKzIGcXu113AEsQwTVWVg
+    oK1KWF6iIg5QpV/1FXgklWR6np7CEqBnF7AQDmF4F2bY6IotsXHYmumxATajQjBA
+    MA4GA1UdDwEB/wQEAwICpDAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQWBBS0asdw
+    cA3QqHVfPkvpXvl9uA9kWjAKBggqhkjOPQQDAgNIADBFAiBagX6h2+w0L4Z7+IYZ
+    i91CA/MNPWHfVR4w3tJ7GoayzwIhAL9aDIRHoM60FGhpF7b9JElBBuaJ93eRhCR2
+    fbbGD1Wk
+    -----END CERTIFICATE-----

@@ -1,0 +1,52 @@
+# Curated Docker Hub image list for dockerhub-mirror-cronjob.yaml (same dir).
+# ONE exact `<repo>:<tag>` per line — deliberate curation, never a wildcard.
+# "How does a new version get in": add a line here (a normal, reviewable PR),
+# then either wait for the next scheduled run or trigger one immediately
+# (`kubectl create job --from=cronjob/dockerhub-mirror-populate -n harbor
+# dockerhub-mirror-populate-manual-$(date +%s)`). Removing a line does NOT
+# delete anything already mirrored — the CronJob only ever adds/updates
+# (crane copy is a push, never a delete), so an old entry simply stops being
+# refreshed, it is never cleaned up automatically. That is intentional: an
+# image a tenant still depends on must never vanish just because this list
+# was tidied.
+#
+# Every entry here corresponds 1:1 to a FROM line, CI `container:` image, or
+# scaffolder fragment base image found in: next-up, mychef, curb-web, ida-llm,
+# springais, attributeextractor, and platform-services/backstage/templates/
+# _fragments/**. See the platform-infra PR description for the full mapping.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dockerhub-mirror-list
+  namespace: harbor
+  labels:
+    platform.capstone/component: platform
+data:
+  images.txt: |
+    library/python:3.12-slim
+    library/python:3.11-slim
+    library/python:3.12-slim-bookworm
+    library/node:22-alpine
+    library/node:18-alpine
+    library/node:24.16-alpine
+    library/node:24.16-trixie-slim
+    library/node:24.16-trixie
+    library/node:24-trixie
+    library/node:24-trixie-slim
+    library/node:22-bookworm-slim
+    library/nginx:1.27-alpine
+    library/nginx:1.29-alpine
+    nginxinc/nginx-unprivileged:1.27-alpine
+    library/golang:1.23
+    library/golang:1.23-alpine
+    library/golang:1.26-alpine
+    library/composer:2
+    library/php:8.4-cli
+    library/ruby:3.3-slim
+    library/ruby:3.3
+    library/rust:1-slim
+    library/rust:1-slim-trixie
+    library/maven:3.9-eclipse-temurin-21
+    library/eclipse-temurin:21-jre
+    library/postgres:17-alpine
+    library/python:3-slim

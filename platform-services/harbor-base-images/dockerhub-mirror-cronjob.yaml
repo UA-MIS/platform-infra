@@ -1,0 +1,168 @@
+# Docker Hub population for base-images (project.yaml, same dir) — a plain
+# Kubernetes CronJob running `crane copy`, NOT a Harbor-native Replication MR
+# like the MCR/GCR sources use (replication-mcr-*.yaml, replication-gcr-*.yaml).
+#
+# WHY NOT REPLICATION FOR DOCKER HUB (verified by execution, 2026-09-10):
+# Harbor's pull-based replication engine LISTS the source repo's tags (or the
+# namespace's repos) server-side before applying the name/tag filter. Docker
+# Hub's Hub API caps that listing for an ANONYMOUS caller and 403s once the
+# result set is large enough:
+#   "get tags for repo 'nginxinc/nginx-unprivileged' from DockerHub error:
+#    403 -- pagination offset too large for anonymous requests; sign in to
+#    page further"
+# This reproduced for BOTH the "library" official-image namespace (tested:
+# library/nginx) AND a small third-party org (nginxinc/nginx-unprivileged) —
+# it is not a "library is huge" problem, it is "Docker Hub's listing API
+# requires auth past a shallow page depth, full stop." MCR and GCR replicated
+# cleanly (execution evidence: policy_id 3,4,5,6,7 all Succeed 1/1) because
+# their generic docker-registry v2 adapters use a single unpaginated
+# `/v2/_catalog` + `/v2/<repo>/tags/list` call, not Docker Hub's proprietary
+# Hub API.
+#
+# `crane copy` sidesteps the LISTING problem entirely: it resolves ONE exact
+# tag reference directly (`GET /v2/<repo>/manifests/<tag>`), never lists
+# anything, so the pagination cap never applies.
+#
+# SOURCE IS mirror.gcr.io, NOT docker.io DIRECTLY — a second, independent
+# Docker Hub limitation found by execution: pulling ~20 images anonymously
+# from docker.io in one run tripped Docker Hub's separate anonymous PULL RATE
+# LIMIT ("TOOMANYREQUESTS: You have reached your unauthenticated pull rate
+# limit"), which is IP-bucketed — the whole cluster's egress shares one
+# budget, so this bites at cluster scale even though a single `docker pull`
+# never would. `mirror.gcr.io` is Google's public, anonymous, read-through
+# cache of Docker Hub (the same mirror Kubernetes' own docs recommend for
+# exactly this reason) — it is not subject to Docker Hub's rate limit because
+# the request never reaches Docker Hub for an already-cached tag. Confirmed
+# working end-to-end: `mirror.gcr.io/library/node:22-alpine` copied clean via
+# this exact path immediately after `docker.io/library/node:22-alpine` had
+# 429'd in the same session.
+#
+# WHY hostAliases + platform-ca (not the public hostname): confirmed by
+# execution — going out through the public Cloudflare-fronted hostname hit
+# Cloudflare's 100MB per-request body cap on several of the larger/multi-arch
+# node:* blobs (`413 Payload Too Large... <center>cloudflare</center>`), plus
+# assorted `502`/`504`/stream PROTOCOL_ERROR under sustained load. This is the
+# SAME known gap as docs/operator/gotchas-and-lessons.md's registry-internal-
+# routing entry (CF 100MB cap; fix = in-cluster hostAliases to Traefik's
+# ClusterIP). Routing this Job the same way ARC's Kaniko build pods already do
+# (hook-template.yaml's hostAliases + platform-ca mount) made every retry of
+# the same failing images succeed cleanly — confirmed by execution
+# (library/postgres:17-alpine, previously 413-ing over the public path,
+# copied clean over hostAliases+CA).
+#
+# DIGEST-PINNED CONSUMERS (next-up's dotnet/sdk+aspnet, the reusable checks-
+# job matrix's golang/python/maven/rust/ruby/composer/node/dotnet-sdk step
+# pins, tenant-build.yaml's two node@sha256 job containers): this CronJob only
+# ever fetches by TAG, so it keeps the tag's CURRENT content mirrored, but a
+# consumer pinned to a SPECIFIC historical digest needs that exact digest
+# fetched once, separately (`crane copy <src>@sha256:<d> harbor.../base-images/
+# <repo>@sha256:<d>`), same as any digest-pin bump today. This list existing
+# does not replace that one-time step when a NEW digest pin is introduced or
+# bumped -- see the platform-infra PR description for the full one-time
+# by-digest fetch log for every pin that existed at mirror-creation time.
+#
+# NEVER DELETES: `crane copy` has no delete verb, the RobotAccount credential
+# it authenticates as (robotaccount-mirror-push.yaml) has no delete permission
+# on the project, and this manifest contains no delete/prune/GC step anywhere.
+# "Never evict" is therefore a structural property of the mechanism, not just
+# a policy choice.
+#
+# SCHEDULE: nightly (02:00, ahead of the proxy projects' 02:30 GC — no
+# interaction, different projects, just avoiding a coincidental resource
+# clash). A run that copies nothing new is a fast no-op (crane's manifest HEAD
+# short-circuits unchanged digests). REFRESH/NEW-IMAGE FLOW: add a line to
+# dockerhub-mirror-configmap.yaml (same dir) in a normal PR; the next
+# scheduled run picks it up, or trigger immediately with
+# `kubectl create job --from=cronjob/dockerhub-mirror-populate -n harbor
+# dockerhub-mirror-populate-manual-$(date +%s)`.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: dockerhub-mirror-populate
+  namespace: harbor
+  labels:
+    platform.capstone/component: platform
+spec:
+  schedule: "0 2 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 3600
+      template:
+        metadata:
+          labels:
+            platform.capstone/component: platform
+        spec:
+          restartPolicy: Never
+          hostAliases:
+            - ip: "10.97.22.53"   # kube-system/traefik ClusterIP — see header comment
+              hostnames:
+                - harbor.capstone.uamishub.com
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: crane
+              image: gcr.io/go-containerregistry/crane:debug
+              imagePullPolicy: IfNotPresent
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              env:
+                - name: SSL_CERT_FILE
+                  value: /platform-ca/ca.crt
+                - name: HOME
+                  value: /home/mirror
+                - name: ROBOT_USER
+                  value: "robot$base-images+mirror-push"   # deterministic: robot$<project>+<robot-name>
+                - name: ROBOT_PW
+                  valueFrom:
+                    secretKeyRef:
+                      name: base-images-mirror-push
+                      key: attribute.secret
+              command:
+                - sh
+                - -c
+                - |
+                  set -e
+                  crane auth login harbor.capstone.uamishub.com -u "$ROBOT_USER" -p "$ROBOT_PW"
+                  FAIL=0
+                  while IFS= read -r img; do
+                    [ -z "$img" ] && continue
+                    echo "=== COPYING $img ==="
+                    if crane copy "mirror.gcr.io/${img}" "harbor.capstone.uamishub.com/base-images/${img}"; then
+                      echo "=== OK $img ==="
+                    else
+                      echo "=== FAILED $img ==="
+                      FAIL=1
+                    fi
+                  done < /lists/images.txt
+                  if [ "$FAIL" = "1" ]; then
+                    echo "ONE OR MORE COPIES FAILED — see FAILED lines above"
+                    exit 1
+                  fi
+                  echo "ALL COPIES SUCCEEDED"
+              volumeMounts:
+                - name: platform-ca
+                  mountPath: /platform-ca
+                - name: lists
+                  mountPath: /lists
+                - name: home
+                  mountPath: /home/mirror
+          volumes:
+            - name: platform-ca
+              configMap:
+                name: platform-ca
+            - name: lists
+              configMap:
+                name: dockerhub-mirror-list
+            - name: home
+              emptyDir: {}

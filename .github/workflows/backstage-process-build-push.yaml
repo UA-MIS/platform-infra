@@ -219,7 +219,11 @@ jobs:
       # it already stops Kaniko holding compressed layers in RAM, which covers both
       # the cache-repo write and the destination push on the same big layer.
       - name: Build (and push) with Kaniko
-        uses: docker://gcr.io/kaniko-project/executor:v1.23.2-debug
+        # Repointed to base-images (permanent mirror) + digest-pinned to match
+        # the SEC/D-030 convention used everywhere else this image is
+        # referenced (tenant-build.yaml, every tenant's build-and-push.yaml) --
+        # this was the one unpinned, GCR-direct outlier.
+        uses: docker://harbor.capstone.uamishub.com/base-images/kaniko-project/executor@sha256:c3109d5926a997b100c4343944e06c6b30a6804b2f9abe0994d3de6ef92b028e # v1.23.2-debug
         with:
           entrypoint: /busybox/sh
           args: >-

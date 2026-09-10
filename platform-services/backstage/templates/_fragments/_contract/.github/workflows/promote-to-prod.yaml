@@ -89,7 +89,7 @@ jobs:
     # 127; live-confirmed, readiness-report-2026-08-19.md). Parity with build-and-push
     # .yaml's bump-dev job, which uses the same full image for the same reason.
     container:
-      image: node:24-trixie
+      image: harbor.capstone.uamishub.com/base-images/library/node:24-trixie   # was a raw unprefixed pull (bypassed the proxy entirely); repointed to the permanent mirror
     steps:
       - name: Guard — from must not be prod (to is fixed at prod)
         run: |

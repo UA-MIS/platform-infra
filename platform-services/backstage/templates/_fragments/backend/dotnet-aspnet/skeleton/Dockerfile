@@ -30,7 +30,7 @@
 # per-repo security posture, so it correctly keeps that convention. This
 # template's convention, inherited by every future team, is the proxied
 # floating tag every other stack here already uses.)
-FROM harbor.capstone.uamishub.com/mcr-proxy/dotnet/sdk:8.0 AS build
+FROM harbor.capstone.uamishub.com/base-images/dotnet/sdk:8.0 AS build
 WORKDIR /src
 
 # Restore first (cached layer) — copy only the project file so a code-only change does
@@ -45,7 +45,7 @@ RUN dotnet publish App.csproj -c Release -o /app/publish --no-restore /p:UseAppH
 # ---- final stage ----
 #
 # Same mcr-proxy + floating-tag rationale as the build stage above.
-FROM harbor.capstone.uamishub.com/mcr-proxy/dotnet/aspnet:8.0 AS final
+FROM harbor.capstone.uamishub.com/base-images/dotnet/aspnet:8.0 AS final
 WORKDIR /app
 
 # Run as a non-root UID. The k8s securityContext pins runAsUser 65532 +
