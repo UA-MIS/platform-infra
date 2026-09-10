@@ -49,6 +49,22 @@ spec:
       # gid=65533(nogroup) -- no root step, no chown initContainer needed
       # (unlike minio's hostPath case): ceph-block is a real CSI volume, so
       # the kubelet's fsGroup chown on first mount just works.
+      # Owner directive (2026-09-10): do not put this on capstone-w1 -- its
+      # root filesystem is at 92%. ceph-block IS cluster-wide (the PVC's
+      # data placement is not pinned to any one node's local disk regardless
+      # of where this pod runs), but the pod itself still needs to be kept
+      # off that node explicitly -- confirmed this was a live gap, not just
+      # theoretical: without this affinity, the scheduler put this exact pod
+      # on capstone-w1 on its very first (re)schedule.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: NotIn
+                    values:
+                      - capstone-w1
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
