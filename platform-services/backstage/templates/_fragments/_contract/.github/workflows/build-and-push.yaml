@@ -68,6 +68,27 @@ on:
 permissions:
   contents: read
 
+# ---------------------------------------------------------------------------
+# NPM NETWORK RESILIENCE (defence in depth). This runner reaches the npm
+# registry over an egress path that intermittently times out mid-transfer
+# (UA-MIS/mychef run 34420522887, frontend job: `npm error network read
+# ETIMEDOUT` / errno -110, ~20s into the install). npm's own retry defaults
+# (2 attempts) are too impatient for this path.
+#
+# This env block covers the `checks` job's plain `npm ci` step below. It does
+# NOT cover the Kaniko image build (each fragment's Dockerfile) -- workflow
+# env vars do not propagate into a Kaniko build's layers, and UA-MIS/ida-llm
+# proved (PRs #74 -> #75) that this alone is not even sufficient for a plain
+# `npm ci` against this failure mode (it can fail in ~20s, faster than any
+# backoff schedule engages). See each Node/frontend/fullstack fragment's
+# Dockerfile and the `checks` job's Node step below for the explicit retry
+# loops that are the layers actually proven to survive it.
+env:
+  npm_config_fetch_retries: "5"
+  npm_config_fetch_retry_mintimeout: "10000"
+  npm_config_fetch_retry_maxtimeout: "60000"
+  npm_config_fetch_timeout: "300000"
+
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
@@ -281,9 +302,19 @@ jobs:
           args: >-
             -c 'set -eu;
             cd "$GITHUB_WORKSPACE/${{ matrix.context }}";
+            npm_install() {
             if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then echo "==> npm ci (lockfile present)";
-            npm ci || { echo "::error::package-lock.json is OUT OF SYNC with package.json, so npm ci stopped. That is what npm ci is for, and CI will not rewrite your lockfile for you. TO FIX — both steps, and the second is the one people miss: (1) run  npm install  locally, which updates package-lock.json; (2) COMMIT it —  git add package-lock.json && git commit -m \"sync lockfile\" && git push. If you run npm install but do not commit the lockfile, the next build fails with this same message."; exit 1; };
+            npm ci || { echo "::error::package-lock.json is OUT OF SYNC with package.json, so npm ci stopped. That is what npm ci is for, and CI will not rewrite your lockfile for you. TO FIX — both steps, and the second is the one people miss: (1) run  npm install  locally, which updates package-lock.json; (2) COMMIT it —  git add package-lock.json && git commit -m \"sync lockfile\" && git push. If you run npm install but do not commit the lockfile, the next build fails with this same message."; return 1; };
             else echo "==> npm install (no lockfile — commit one to switch to fast reproducible npm ci)"; npm install; fi;
+            };
+            n=1;
+            until npm_install; do
+            if [ "$n" -ge 4 ]; then echo "::error::npm install failed 4 times; this is not a blip. (If the message above says the lockfile is out of sync, that is the real cause -- fix it as described; a network blip would have succeeded by now.)"; exit 1; fi;
+            wait=$((n * 15));
+            echo "::warning::npm install failed (attempt ${n}/4) -- retrying in ${wait}s";
+            n=$((n + 1));
+            sleep "$wait";
+            done;
             echo "==> lint (if present)"; npm run lint --if-present;
             echo "==> typecheck (if present)"; npm run typecheck --if-present;
             if npm run | grep -qE "^[[:space:]]+test"; then echo "==> npm test"; npm test;
