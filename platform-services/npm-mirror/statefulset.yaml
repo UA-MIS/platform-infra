@@ -1,0 +1,183 @@
+# Verdaccio npm registry mirror — single-node StatefulSet (stable identity,
+# matches the lab-mariadb/minio precedent for a single-replica, PVC-backed
+# service: a Deployment's default RollingUpdate would try to run two pods
+# against one RWO volume on an image bump; StatefulSet's default
+# OrderedReady/Recreate never does).
+#
+# WHY VERDACCIO (not Nexus/Artifactory/a hosted npm-registry-couchapp fork):
+# it is a single lightweight Node.js process with no external DB dependency
+# (unlike Nexus/Artifactory, which want their own Postgres and a much bigger
+# resource footprint for a job this fleet needs done in one npm-only cache) --
+# the same "smallest thing that does the job" reasoning as this fleet's other
+# single-purpose proxy caches (harbor-dockerhub-proxy, harbor-mcr-proxy).
+# Verdaccio is also the de-facto standard lightweight npm proxy (huge install
+# base, actively maintained, official Docker image) rather than a hand-rolled
+# reverse-proxy-plus-disk-cache in front of registry.npmjs.org, which would be
+# more code for this platform to own for the same result.
+#
+# WHY STORED PERMANENTLY, NOT MERELY CACHED (explicit owner directive): this
+# PVC is real persistent storage, not an ephemeral/emptyDir cache that a pod
+# reschedule or node drain would silently discard. A lost cache after a
+# reschedule would just mean "the next build is slow again", but the owner's
+# intent is that build dependencies accumulate here permanently -- this is
+# where the platform's Ceph capacity is meant to be spent, not on tenant
+# storage. See ceph-block's volumeClaimTemplate below.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: npm-mirror
+  namespace: npm-mirror
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: npm-mirror
+spec:
+  serviceName: npm-mirror
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: npm-mirror
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        platform.capstone/component: platform
+        app.kubernetes.io/name: npm-mirror
+    spec:
+      # Verified live (docker exec ... id) against verdaccio/verdaccio:5:
+      # the image's own entrypoint already runs as uid=10001(verdaccio)
+      # gid=65533(nogroup) -- no root step, no chown initContainer needed
+      # (unlike minio's hostPath case): ceph-block is a real CSI volume, so
+      # the kubelet's fsGroup chown on first mount just works.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 65533
+        fsGroup: 65533
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: verdaccio
+          # B4 convention: through the platform's Harbor dockerhub-proxy
+          # pull-through cache, not docker.io directly. verdaccio/verdaccio is
+          # NOT a Docker Official ("library/") image, so the proxy path keeps
+          # the "verdaccio" namespace segment (dockerhub-proxy/verdaccio/...),
+          # same shape as springais's nginxinc/nginx-unprivileged precedent.
+          # Digest verified by executing this exact pull against the live
+          # Harbor proxy (see PR body) -- it matches docker.io's own digest
+          # for this tag, same verification standard as every tenant
+          # Dockerfile's B4 comment.
+          image: harbor.capstone.uamishub.com/dockerhub-proxy/verdaccio/verdaccio:5@sha256:9d622d256378c6e7ae09f384774ee2f0f8ac67a66c066db55921a0b7218abc4c
+          imagePullPolicy: IfNotPresent
+          env:
+            # The official image IGNORES config.yaml's `listen:` under Docker
+            # (verified locally) -- this env var is what actually sets the
+            # port. 8080 is deliberate: it is already one of the ports the
+            # arc-runners egress netpol permits into 10.96.0.0/12
+            # (hardening/netpol-runners/runner-netpol.yaml), so builds can
+            # reach this Service with NO netpol change at all.
+            - name: VERDACCIO_PORT
+              value: "8080"
+          ports:
+            - name: http
+              containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          # Modest: Verdaccio is a single Node.js process serving static
+          # tarballs off disk once cached; the only CPU it spends is TLS to
+          # the uplink + gzip on the way to a client. Revisit via Goldilocks
+          # once real CI traffic has run through it a while.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 768Mi
+          # /-/ping is Verdaccio's own implementation of the standard npm
+          # registry ping route -- confirmed live (curl against a running
+          # verdaccio/verdaccio:5 container returns 200), not assumed from
+          # docs (the upstream Docker page doesn't document a health route at
+          # all).
+          startupProbe:
+            httpGet:
+              path: /-/ping
+              port: http
+            periodSeconds: 5
+            failureThreshold: 12   # 60s grace for first boot
+          readinessProbe:
+            httpGet:
+              path: /-/ping
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /-/ping
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: data
+              mountPath: /verdaccio/storage
+            - name: config
+              mountPath: /verdaccio/conf
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: npm-mirror-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          platform.capstone/component: platform
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        # ceph-block == the fleet's Rook Ceph RBD replica-3 class (487Gi free,
+        # HEALTH_OK at write time), same class as vault/monitoring/lab-db.
+        # Deliberately NOT hostPath/local-path (which would pin this to one
+        # node's root disk -- capstone-w1 is explicitly off-limits at 92%
+        # full): Ceph is cluster-wide, so this PVC is unaffected by which
+        # node the pod lands on.
+        #
+        # SIZING: 30Gi to start. A full npm registry mirrors to hundreds of
+        # GB over years of unrestricted use, but this fleet's real footprint
+        # is a handful of tenant frontends (Vite/React/Vue/Nuxt/Next/Svelte
+        # dependency trees) plus whatever a semester of student CI installs
+        # touches -- observed single-tenant installs in verification were
+        # ~90 packages / ~190MB cached. 30Gi is generous headroom for that
+        # scale without reserving Ceph capacity the platform doesn't need
+        # yet. ceph-block has allowVolumeExpansion: true
+        # (applicationsets/rook-ceph-cluster-app.yaml) confirmed, so growing
+        # this later is an online PVC edit, not a rebuild.
+        storageClassName: ceph-block
+        resources:
+          requests:
+            storage: 30Gi
+---
+# ClusterIP only. Same reachability model as harbor-core/dockerhub-proxy: this
+# is an internal build dependency, not a service with any human-facing UI need
+# today (Verdaccio does ship a web UI, reachable the same way Goldilocks/minio
+# console are -- kubectl -n npm-mirror port-forward svc/npm-mirror 8080:8080 --
+# if someone ever wants to browse it).
+apiVersion: v1
+kind: Service
+metadata:
+  name: npm-mirror
+  namespace: npm-mirror
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: npm-mirror
+spec:
+  selector:
+    app.kubernetes.io/name: npm-mirror
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

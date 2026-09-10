@@ -1,0 +1,18 @@
+# platform-services/npm-mirror — an in-cluster npm registry mirror (Verdaccio),
+# picked up by the platform-services directory generator
+# (applicationsets/platform-services-appset.yaml) as Application
+# `platform-svc-npm-mirror`. See README.md for design, storage, and
+# failure-mode notes.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - statefulset.yaml
+  - netpol.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false

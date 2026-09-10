@@ -1,0 +1,102 @@
+# NetworkPolicies for the npm-mirror namespace -- default-deny, then admit only
+# what this service actually needs.
+#
+# ⚠ DELIBERATELY CO-LOCATED HERE, NOT IN hardening/netpol-controlplane/: that
+# directory's default-deny rollouts for already-LIVE control-plane namespaces
+# (argocd/dex/harbor/vault/minio) are MANUAL-SYNC on purpose (see its own
+# kustomization.yaml header) -- a fresh default-deny landing on a namespace
+# with real live traffic needs a deliberately watched
+# `argocd app sync platform-netpol-controlplane`. npm-mirror is a BRAND NEW
+# namespace with no live traffic yet, so that risk doesn't apply -- same
+# reasoning platform-services/lab-db/netpol.yaml used for its own brand-new
+# `slides`-adjacent pods. Shipping default-deny here rides the normal
+# AUTOMATED platform-services-appset sync, same as every other file in this
+# directory, with no separate manual step for an operator to remember.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: zz-default-deny
+  namespace: npm-mirror
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# INGRESS: arc-runners (the only consumer today -- CI/Kaniko builds) on the
+# mirror's port, plus kubelet health probes from the node LAN (same shape as
+# dex-netpol.yaml's kubelet allow -- probes originate from the node IP, not a
+# pod/namespace, so a podSelector/namespaceSelector peer can't match them).
+#
+# Widening this to non-CI consumers (e.g. a developer's laptop, another
+# in-cluster tool) is a deliberate follow-up, not done here -- narrowest
+# allow-list that satisfies the stated ask (builds point at it).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-arc-runners-and-kubelet
+  namespace: npm-mirror
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: npm-mirror
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: arc-runners
+      ports:
+        - protocol: TCP
+          port: 8080
+    - from:
+        - ipBlock:
+            cidr: 10.237.168.0/22   # Talos node LAN segment (kubelet probe source)
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# EGRESS: DNS (to resolve registry.npmjs.org) + external HTTPS:443 for the
+# uplink fallthrough. Scoped the same way runner-netpol.yaml's own external-443
+# rule is (pod/svc/node-lan/tailnet excepted) for consistency with the fleet's
+# one external-egress convention, rather than a bespoke narrower rule that
+# would need its own review of the same CIDRs.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-dns-and-npmjs
+  namespace: npm-mirror
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: npm-mirror
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.244.0.0/16    # pods
+              - 10.96.0.0/12     # services
+              - 10.237.168.0/22  # node LAN
+              - 100.64.0.0/10    # tailnet
+      ports:
+        - protocol: TCP
+          port: 443
