@@ -1,0 +1,37 @@
+# See replication-mcr-dotnet-sdk.yaml for the general rationale. Source is
+# `gcr` (registry-gcr.yaml, same dir) instead of `mcr`. distroless/static-debian12
+# is backend/go's final-stage base (platform-services/backstage/templates/
+# _fragments/backend/go/skeleton/Dockerfile) — a floating `:nonroot` tag by
+# upstream convention (distroless images are not semver-tagged per patch), so
+# this is intentionally NOT digest-pinned, matching the fragment's existing
+# floating-tag choice (owner directive: don't impose digests where a floating
+# tag is the deliberate upstream/fragment convention).
+#
+# ⚠ ADOPTING a pre-existing live policy (id=4), hand-created + executed
+# successfully on 2026-09-10 (execution evidence: policy_id=4, succeed=1/1).
+apiVersion: registry.harbor.crossplane.io/v1alpha1
+kind: Replication
+metadata:
+  name: base-images-gcr-distroless-static
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    crossplane.io/external-name: "/replication/policies/4"
+spec:
+  forProvider:
+    name: base-images-gcr-distroless-static
+    description: "GCR distroless/static-debian12 -> base-images permanent mirror"
+    action: pull
+    registryIdRef:
+      name: gcr
+    destNamespace: base-images
+    destNamespaceReplace: 0
+    schedule: manual
+    filters:
+      - name: "distroless/static-debian12"
+        tag: "nonroot"
+    deletion: false
+    override: true
+    enabled: true
+  providerConfigRef:
+    name: default

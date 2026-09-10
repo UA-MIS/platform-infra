@@ -22,7 +22,7 @@
 # limits across every team's CI, verified working end-to-end (cache-hit proof
 # in artifacts/implementation/b4-harbor-proxy-cache.evidence.yaml). Same image,
 # same tag, different registry host -- purely a pull-path change.
-FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/node:22-alpine AS deps
+FROM harbor.capstone.uamishub.com/base-images/library/node:22-alpine AS deps
 WORKDIR /src
 COPY package.json ./
 # ⚠ RETRIED, and deliberately not left to npm's own fetch-retries (see ./.npmrc for
@@ -42,7 +42,7 @@ RUN n=1; until npm install --omit=dev; do \
     done
 
 # ---- runtime stage ----
-FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/node:22-alpine
+FROM harbor.capstone.uamishub.com/base-images/library/node:22-alpine
 WORKDIR /app
 ENV NODE_ENV=production
 COPY --from=deps /src/node_modules ./node_modules

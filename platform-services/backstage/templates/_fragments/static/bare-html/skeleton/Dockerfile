@@ -21,7 +21,7 @@
 # limits across every team's CI, verified working end-to-end (cache-hit proof
 # in artifacts/implementation/b4-harbor-proxy-cache.evidence.yaml). Same image,
 # same tag, different registry host -- purely a pull-path change.
-FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/nginx:1.29-alpine
+FROM harbor.capstone.uamishub.com/base-images/library/nginx:1.29-alpine
 
 # Our config: foreground nginx, pid/temp under /dev/shm, listen on the app port, static
 # multi-page serving + /healthz. nginx.conf lives at the skeleton root, OUTSIDE public/, so

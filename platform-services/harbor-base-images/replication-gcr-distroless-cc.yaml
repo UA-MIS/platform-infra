@@ -1,0 +1,33 @@
+# See replication-gcr-distroless-static.yaml for rationale. distroless/cc-debian12
+# is backend/rust-axum's final-stage base (same fragments tree). Floating
+# `:nonroot` tag preserved (not digest-pinned), matching upstream/fragment
+# convention.
+#
+# ⚠ ADOPTING a pre-existing live policy (id=6), hand-created + executed
+# successfully on 2026-09-10 (execution evidence: policy_id=6, succeed=1/1).
+apiVersion: registry.harbor.crossplane.io/v1alpha1
+kind: Replication
+metadata:
+  name: base-images-gcr-distroless-cc
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    crossplane.io/external-name: "/replication/policies/6"
+spec:
+  forProvider:
+    name: base-images-gcr-distroless-cc
+    description: "GCR distroless/cc-debian12 -> base-images permanent mirror"
+    action: pull
+    registryIdRef:
+      name: gcr
+    destNamespace: base-images
+    destNamespaceReplace: 0
+    schedule: manual
+    filters:
+      - name: "distroless/cc-debian12"
+        tag: "nonroot"
+    deletion: false
+    override: true
+    enabled: true
+  providerConfigRef:
+    name: default

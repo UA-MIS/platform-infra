@@ -1,0 +1,35 @@
+# base-images: the permanent local mirror (see project.yaml). Picked up by the
+# platform-services directory-generator ApplicationSet
+# (applicationsets/platform-services-appset.yaml) as `platform-svc-harbor-
+# base-images` — no new Application file, same pattern as harbor-dockerhub-proxy/
+# and harbor-mcr-proxy/.
+#
+# Two resource classes in this one directory:
+#   - Harbor-native (Crossplane provider-harbor CRDs, group harbor.crossplane.io):
+#     project.yaml, registry-gcr.yaml, replication-mcr-*.yaml,
+#     replication-gcr-*.yaml, robotaccount-mirror-push.yaml.
+#   - Plain Kubernetes (applied like any other manifest in this repo):
+#     platform-ca-configmap.yaml, dockerhub-mirror-configmap.yaml,
+#     dockerhub-mirror-cronjob.yaml — the Docker Hub population path (see that
+#     CronJob's header comment for why Docker Hub needs a different mechanism
+#     than MCR/GCR's Replication MRs).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - project.yaml
+  - registry-gcr.yaml
+  - replication-mcr-dotnet-sdk.yaml
+  - replication-mcr-dotnet-aspnet.yaml
+  - replication-gcr-distroless-static.yaml
+  - replication-gcr-distroless-cc.yaml
+  - replication-gcr-kaniko-executor.yaml
+  - robotaccount-mirror-push.yaml
+  - platform-ca-configmap.yaml
+  - dockerhub-mirror-configmap.yaml
+  - dockerhub-mirror-cronjob.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false

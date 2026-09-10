@@ -148,6 +148,57 @@ existing robot). Until either path runs, the Trivy-gate step 403s on the
 
 ---
 
+## Proxy caches vs. the permanent base-images mirror
+
+Two DIFFERENT mechanisms exist for base images, and they solve different
+problems — don't confuse them:
+
+| | `dockerhub-proxy` / `mcr-proxy` | `base-images` |
+| --- | --- | --- |
+| Kind | Harbor **proxy_cache** project | Regular project |
+| Populated | On-demand, first pull | Pre-populated (Replication for MCR/GCR; a `crane copy` CronJob for Docker Hub — see `platform-services/harbor-base-images/dockerhub-mirror-cronjob.yaml`) |
+| Retention | `nDaysSinceLastPull: 7` + nightly GC — **evicts** | None — **never evicts** |
+| Use for | Anything NOT in the curated build-path list (ad hoc pulls) | Every base image the build path (Dockerfile `FROM`, CI `container:`, Kaniko executor, scaffolder fragments) actually needs |
+
+The eviction policy on the proxy projects is what originally caused
+`npm error network read ETIMEDOUT` / `failed to get filesystem from image` —
+a team idle for >7 days had its cached base image GC'd, and the next build
+re-pulled cold from the internet. `base-images` exists specifically so build-
+path images are never subject to that.
+
+Docker Hub's `library/*` and third-party-org images CANNOT be reliably
+populated via Harbor's native Replication feature when anonymous: Harbor's
+replication engine lists the source repo's tags server-side first, and Docker
+Hub's Hub API 403s that listing past a shallow page depth for an anonymous
+caller (`pagination offset too large for anonymous requests`). This is
+independent of image popularity — it reproduced for both the huge `library`
+namespace and a small third-party org. `crane copy` (used by the CronJob)
+resolves one exact tag directly and never lists, so it's unaffected — and it
+pulls via `mirror.gcr.io` (Google's public anonymous Docker Hub cache) rather
+than `docker.io` directly, because a full population run also trips Docker
+Hub's separate anonymous PULL rate limit (IP-bucketed, so the whole cluster
+shares one budget). MCR and GCR use Harbor-native Replication MRs
+(`platform-services/harbor-base-images/replication-*.yaml`) because their
+generic `docker-registry` adapters use a single unpaginated catalog/tags call
+— no Docker Hub-style listing cap applies to them.
+
+Any pod/Job pulling FROM Docker Hub or pushing INTO `base-images` at any real
+volume (more than a couple of images) must route through the in-cluster path
+(`hostAliases` to Traefik's ClusterIP + the `platform-ca` trust bundle), not
+the public `harbor.capstone.uamishub.com` hostname — Cloudflare enforces a
+100MB per-request body cap that 413s on larger/multi-arch blobs. See
+`dockerhub-mirror-cronjob.yaml`'s header comment for the full verified
+mechanism and `platform-services/arc/hook-template.yaml`'s `hostAliases` for
+the original precedent (Kaniko build pods already do this).
+
+Disk: the registry PVC is 60Gi on ceph-block. Check current usage with
+`kubectl -n harbor exec deploy/harbor-registry -c registry -- du -sh /storage`
+(or via Harbor UI → Administration → Configuration). `base-images` holds ~30
+distinct base images across Docker Hub, MCR, and GCR — a few GB, not a
+capacity concern at this PVC size.
+
+---
+
 ## Day-2 checks
 
 ```bash

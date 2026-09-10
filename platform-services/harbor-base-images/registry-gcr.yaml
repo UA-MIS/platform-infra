@@ -1,0 +1,46 @@
+# Google Container Registry endpoint — a THIRD upstream this mirror needs
+# beyond the two the owner directive named (Docker Hub, MCR). Discovered by
+# enumerating every FROM/container-image reference in the build path per the
+# directive's own instruction to "verify and extend" the list:
+#   - gcr.io/kaniko-project/executor  — the Kaniko executor itself (digest-
+#     pinned, backstage-process-build-push.yaml / tenant-build.yaml / every
+#     tenant's build-and-push.yaml `uses: docker://...` step)
+#   - gcr.io/distroless/static-debian12:nonroot — backend/go fragment final stage
+#   - gcr.io/distroless/cc-debian12:nonroot     — backend/rust-axum fragment final stage
+#
+# type: docker-registry (generic v2 adapter), NOT the named "google-gcr" cloud
+# adapter — verified by execution. Harbor's "google-gcr" adapter refused to
+# create anonymously (`the registry is unhealthy` — its health-check assumes a
+# service-account JSON key, per `GET /api/v2.0/replication/adapterinfos`
+# credential_pattern for that adapter). gcr.io also implements a plain Docker
+# Registry v2 API, so the SAME generic adapter type this repo already uses for
+# harbor-mcr-proxy/registry.yaml (MCR is not Docker Hub either) works here too,
+# anonymously — confirmed live: registry id=3 created successfully as
+# type=docker-registry, and every GCR image below replicated through it.
+#
+# insecure: false, no credential — gcr.io/distroless/* and
+# gcr.io/kaniko-project/executor are public images; anonymous pulls work the
+# same way they do for MCR's dotnet/* images.
+#
+# ⚠ ADOPTING a pre-existing live object. `gcr` (registry_id=3) was hand-created
+# on 2026-09-10 via the raw Harbor API to populate and verify this mirror
+# end-to-end before landing this declarative form (same bootstrap sequence as
+# harbor-mcr-proxy/registry.yaml's `mcr` adoption). external-name below
+# (`/registries/3`) makes the first reconcile a GET, not a create-conflict.
+apiVersion: registry.harbor.crossplane.io/v1alpha1
+kind: Registry
+metadata:
+  name: gcr
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    crossplane.io/external-name: "/registries/3"
+spec:
+  forProvider:
+    name: gcr
+    description: "Google Container Registry pull source for the base-images permanent mirror (kaniko executor, distroless final-stage images)"
+    providerName: docker-registry
+    endpointUrl: https://gcr.io
+    insecure: false
+  providerConfigRef:
+    name: default

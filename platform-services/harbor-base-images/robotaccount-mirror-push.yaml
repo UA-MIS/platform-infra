@@ -1,0 +1,53 @@
+# Push-only robot for the Docker Hub side of the mirror (dockerhub-mirror-cronjob.yaml,
+# same dir). See that file's header for WHY Docker Hub uses a CronJob + crane
+# instead of a Harbor-native Replication MR (verified-by-execution: Harbor's
+# pull-based replication engine LISTS the source namespace/repo's tags before
+# filtering, and Docker Hub's Hub API 403s that listing for an anonymous
+# caller once the result set is large enough — "pagination offset too large
+# for anonymous requests; sign in to page further" — confirmed against BOTH
+# the "library" namespace (nginx) and a small third-party org
+# (nginxinc/nginx-unprivileged). `crane copy` never lists anything — it
+# resolves one exact tag reference directly, the same anonymous call path
+# `docker pull` and the existing proxy-cache already use successfully — so it
+# is unaffected).
+#
+# Scoped to project=base-images ONLY, action=push+pull+read+list on
+# `repository` — deliberately NO `delete` action anywhere in this permission
+# set. That is not just policy discipline: it makes "the mirror can delete
+# something" a capability this credential structurally does not have, on top
+# of the CronJob script never invoking a delete verb.
+apiVersion: robotaccount.harbor.crossplane.io/v1alpha1
+kind: RobotAccount
+metadata:
+  name: base-images-mirror-push
+  labels:
+    platform.capstone/component: platform
+spec:
+  forProvider:
+    name: mirror-push
+    description: "dockerhub-mirror-cronjob push robot (managed by Crossplane) — push-only to base-images, no delete"
+    level: project
+    duration: -1
+    permissions:
+      - kind: project
+        namespace: base-images
+        access:
+          - action: push
+            resource: repository
+          - action: pull
+            resource: repository
+          - action: read
+            resource: repository
+          - action: list
+            resource: repository
+  # Written directly into the `harbor` namespace (not crossplane-system -> Vault
+  # -> ESO): this is a PLATFORM credential consumed only by a Job in that same
+  # namespace, not a tenant secret that needs to cross the Vault boundary. Same
+  # narrow-scope reasoning as harbor-onboard-__TEAM__ (onboard-team-job.yaml,
+  # same parent dir's sibling) keeping harbor-admin in the `harbor` namespace
+  # only.
+  writeConnectionSecretToRef:
+    namespace: harbor
+    name: base-images-mirror-push
+  providerConfigRef:
+    name: default

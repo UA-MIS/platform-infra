@@ -22,7 +22,7 @@
 # limits across every team's CI, verified working end-to-end (cache-hit proof
 # in artifacts/implementation/b4-harbor-proxy-cache.evidence.yaml). Same image,
 # same tag, different registry host -- purely a pull-path change.
-FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/node:22-alpine AS build
+FROM harbor.capstone.uamishub.com/base-images/library/node:22-alpine AS build
 WORKDIR /src
 ENV NUXT_TELEMETRY_DISABLED=1
 # node:22-alpine ships npm 10.9.8, which has a real, deterministic Arborist crash
@@ -64,7 +64,7 @@ COPY . .
 RUN npm run build
 
 # ---- runtime stage (the self-contained Nitro server) ----
-FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/node:22-alpine
+FROM harbor.capstone.uamishub.com/base-images/library/node:22-alpine
 WORKDIR /app
 ENV NODE_ENV=production \
     NUXT_TELEMETRY_DISABLED=1 \

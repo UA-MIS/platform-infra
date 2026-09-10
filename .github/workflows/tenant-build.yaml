@@ -168,7 +168,7 @@ jobs:
     # node:24-trixie (NOT -slim): resolve-image.sh's git-describe needs git, and we
     # curl yq. -slim ships neither git nor curl.
     container:
-      image: node:24-trixie
+      image: harbor.capstone.uamishub.com/base-images/library/node:24-trixie   # was a raw unprefixed pull; repointed to the permanent mirror (base-images)
     # actions:read + pull-requests:write are for the BEST-EFFORT queue-status step
     # below (read this run's queue timing; post the sticky "you were in a queue" PR
     # comment). Both are capped by the CALLER's grant — a caller that hasn't been
@@ -360,7 +360,7 @@ jobs:
     needs: prepare
     runs-on: ${{ inputs.runner }}
     container:
-      image: node:24-trixie-slim
+      image: harbor.capstone.uamishub.com/base-images/library/node:24-trixie-slim   
     steps:
       - name: Checkout (working tree to scan)
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -405,7 +405,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.prepare.outputs.MATRIX) }}
     container:
-      image: node:24-trixie-slim
+      image: harbor.capstone.uamishub.com/base-images/library/node:24-trixie-slim   
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -469,6 +469,11 @@ jobs:
         # every `uses: .../tenant-build.yaml@v1` caller picks this up without a per-tenant
         # PR; tenants still on the older inline-copy template get the same fix landed
         # directly in their own workflow file instead.
+        #
+        # NOT YET repointed to base-images (harbor-base-images PR): this digest
+        # was pushed by `crane copy` but a post-push HEAD returned 404 -- root
+        # cause open (likely an untagged-artifact GC sweep). Kept raw until
+        # confirmed present.
         uses: docker://node@sha256:366fdef91728b1b7fa18c84fba63b6e79ed77b7e10cc206878e9705da4d7b169 # 24-trixie-slim
         with:
           entrypoint: /bin/sh
@@ -733,7 +738,7 @@ jobs:
     # working end-to-end (cache-hit proof in
     # artifacts/implementation/b4-harbor-proxy-cache.evidence.yaml).
     container:
-      image: harbor.capstone.uamishub.com/dockerhub-proxy/library/node:24-trixie
+      image: harbor.capstone.uamishub.com/base-images/library/node:24-trixie
     env:
       DOCKER_CONFIG_DIR: /kaniko/.docker
     # RE-DECLARES id-token: write (workflow default is contents:read only) — cosign
@@ -777,8 +782,10 @@ jobs:
       # the image only ever lands in the fenced <team>-pr-<n> preview namespace.
       - name: Build (and push) component '${{ matrix.name }}' with Kaniko
         # Digest-pinned (SEC, D-030): the Kaniko image holds the Harbor push cred.
-        # digest = gcr.io/kaniko-project/executor:v1.23.2-debug.
-        uses: docker://gcr.io/kaniko-project/executor@sha256:c3109d5926a997b100c4343944e06c6b30a6804b2f9abe0994d3de6ef92b028e # v1.23.2-debug
+        # digest = gcr.io/kaniko-project/executor:v1.23.2-debug. Repointed to the
+        # base-images permanent mirror (was pulled from GCR directly on every
+        # build) -- digest unchanged, byte-for-byte identical image.
+        uses: docker://harbor.capstone.uamishub.com/base-images/kaniko-project/executor@sha256:c3109d5926a997b100c4343944e06c6b30a6804b2f9abe0994d3de6ef92b028e # v1.23.2-debug
         with:
           entrypoint: /busybox/sh
           args: >-
@@ -937,6 +944,12 @@ jobs:
     # the risk of a subtle apt/network difference breaking dev deploys for every
     # tenant outweighs the speed win for what the task scoped as an optional item.
     # Left as a well-evidenced follow-up, not attempted blind against production CI.
+    #
+    # NOT YET repointed to base-images: this exact digest was pushed by `crane
+    # copy` (logged success) but a post-push HEAD against base-images returned
+    # 404 -- root cause open (possibly an untagged-artifact GC sweep; this
+    # digest has no tag pointing at it in base-images, only a raw digest push).
+    # Kept on the raw/unprefixed pull until that digest is confirmed present.
     container:
       image: node@sha256:05c60dce78787e477fd7c0d61d9efcd5b7ae3f21a8b18787c7ef3daf9c9a2ad3 # 24-trixie
     permissions:
@@ -1055,7 +1068,7 @@ jobs:
     # persist-credentials. -slim ships neither git nor curl. Same reasoning as
     # bump-dev.
     container:
-      image: node:24-trixie
+      image: harbor.capstone.uamishub.com/base-images/library/node:24-trixie   
     permissions:
       contents: write
     steps:
