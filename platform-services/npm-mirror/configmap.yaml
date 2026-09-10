@@ -1,0 +1,55 @@
+# Verdaccio config (verdaccio.org/docs/configuration). Kept intentionally minimal:
+# ONE upstream (npmjs), ONE catch-all package rule, no auth/publish story — this
+# mirror exists to accelerate + insulate `npm ci`/`npm install` reads for CI, not to
+# host any internally-published package. `publish`/`unpublish` are left at
+# `$authenticated`; since no users are ever registered (no htpasswd plugin
+# configured), that is equivalent to "nobody can publish" without needing a
+# separate deny rule.
+#
+# `storage: /verdaccio/storage` is the official image's default path (verdaccio.org/
+# docs/docker) and is where the StatefulSet mounts the ceph-block PVC (statefulset.yaml)
+# — every resolved tarball lands there and persists across pod restarts/reschedules.
+# Verdaccio has no built-in eviction of cached packages, which is exactly the
+# "permanent, not merely cached" storage behavior asked for: once a tarball is
+# fetched through the mirror it stays until someone explicitly removes it or the
+# PVC is deleted.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: npm-mirror-config
+  namespace: npm-mirror
+  labels:
+    platform.capstone/component: platform
+data:
+  config.yaml: |
+    storage: /verdaccio/storage
+
+    uplinks:
+      npmjs:
+        url: https://registry.npmjs.org/
+        # Keys verified against verdaccio.org/docs/uplinks (defaults in parens).
+        # Matches this mirror's own install-retry philosophy (mychef#12 et al.):
+        # a slow/stalled fetch from the real registry should be retried a few times
+        # before Verdaccio gives up and reports the package unresolvable, and it
+        # should stop treating npmjs as dead (fail_timeout) quickly enough to
+        # recover from a short blip rather than sulking for the 5m default.
+        maxage: 30m       # metadata freshness window (default 2m) -- fewer revalidation round-trips
+        timeout: 30s       # per-request timeout (default 30s, set explicitly)
+        max_fails: 4       # failures before marking npmjs down (default 2)
+        fail_timeout: 15s  # how long npmjs stays marked down after that (default 5m)
+
+    packages:
+      '**':
+        access: $all
+        publish: $authenticated
+        unpublish: $authenticated
+        proxy: npmjs
+
+    # Default is 10mb; some real-world tarballs (esbuild, puppeteer-adjacent
+    # postinstall payloads, prebuilt native binaries) exceed that.
+    max_body_size: 100mb
+
+    # Verdaccio logs to stdout by default in recent versions; pinned explicitly so
+    # a future image bump can't silently switch this to a file under a read-only
+    # rootfs and crash-loop the container.
+    logs: { type: stdout, format: pretty, level: http }

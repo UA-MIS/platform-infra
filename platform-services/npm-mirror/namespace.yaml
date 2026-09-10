@@ -1,0 +1,6 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: npm-mirror
+  labels:
+    platform.capstone/component: platform

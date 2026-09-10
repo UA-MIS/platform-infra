@@ -1,0 +1,85 @@
+# NetworkPolicies for the npm-mirror namespace — same default-deny + scoped-allow
+# posture as every other namespace in this repo (db-tier/netpol.yaml,
+# hardening/netpol-runners/runner-netpol.yaml). CIDRs from those files' headers:
+# pods 10.244.0.0/16, services 10.96.0.0/12, nodes 10.237.168.0/22.
+#
+# NO arc-runners netpol change needed for this to work: the pod listens on 8080
+# (statefulset.yaml env VERDACCIO_PORT), already inside arc-runners'
+# allow-egress-scoped allowed port set {443,80,8443,8080,8200} — see that file's
+# comment on the M1 Harbor/Traefik gotcha for why the POD port (not the Service
+# port) is what has to be an allowed number.
+
+# --- default-deny (ingress + egress) for every pod in npm-mirror ---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: zz-default-deny
+  namespace: npm-mirror
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# --- INGRESS: arc-runners (the only real client -- CI install steps) on 8080, and
+#     kubelet health probes. Nothing else is a legitimate caller of a build-time
+#     package mirror; no tenant workload should be pulling npm packages at runtime. ---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-arc-runners
+  namespace: npm-mirror
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: arc-runners
+      ports:
+        - protocol: TCP
+          port: 8080
+    - from:
+        - ipBlock:
+            cidr: 10.237.168.0/22   # kubelet readiness/liveness probes (node IP, not a pod/ns)
+---
+# --- EGRESS: DNS, and external HTTPS:443 to the real npm registry (npmjs's uplink
+#     -- Fastly-fronted, no stable IP range, hence the wide ipBlock, PORT-scoped to
+#     443 only -- same shape as arc-runners' own external-HTTPS rule). No
+#     intra-cluster egress needed: this pod talks to nobody else in the cluster. ---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-scoped
+  namespace: npm-mirror
+  labels:
+    platform.capstone/component: platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.244.0.0/16
+              - 10.96.0.0/12
+      ports:
+        - protocol: TCP
+          port: 443

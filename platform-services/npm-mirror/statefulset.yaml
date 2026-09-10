@@ -1,0 +1,160 @@
+# Verdaccio — in-cluster npm registry mirror/pull-through cache, the npm-package
+# equivalent of platform-services/harbor-dockerhub-proxy for container images.
+# Verdaccio picked over alternatives (Nexus/Artifactory/JFrog): it is a single
+# small Node.js process purpose-built for npm, needs no JVM/database sidecar, and
+# ships an official minimal Docker image -- proportionate to this platform's
+# actual need (a handful of tenant frontends' `npm ci`), not a general-purpose
+# multi-format artifact server.
+#
+# ONE replica, StatefulSet (not Deployment) so it keeps a stable identity/PVC
+# across reschedules — same "raw manifests for a small, well-understood
+# component" call as monitoring/tempo.yaml. Verdaccio's local-filesystem storage
+# backend is not designed for concurrent multi-writer access, so this is not
+# horizontally scaled; if it ever needs HA, that is a backend change (e.g. an S3
+# storage plugin), not just `replicas: 2`.
+#
+# STORAGE: ceph-block (replica-3 RBD, survives node loss), sized at 20Gi to start.
+# Owner directive: build dependencies are stored PERMANENTLY here, not merely
+# cached — Verdaccio has no built-in eviction (see configmap.yaml), so every
+# tarball ever resolved through this mirror stays. 20Gi is deliberately generous
+# for today's footprint (a handful of tenant frontends on the same
+# React/Vite/TypeScript-heavy dependency graph, heavily overlapping — realistically
+# low hundreds of MB, not GB) while leaving ~467Gi of the cluster's 487Gi Ceph
+# capacity for everything else Ceph backs. Not sized to the full capacity: this is
+# shared cluster storage, not a dedicated allocation. ceph-block has
+# allowVolumeExpansion: true (confirmed live), so this can be grown in place
+# exactly like tempo's PVC was (this file's `storage:` stays at the original
+# provisioning size per Kubernetes' immutable volumeClaimTemplates — see that
+# precedent's comment for why — a resize is a live `kubectl patch pvc` + restart,
+# not a git change).
+#
+# PLACEMENT: excludes capstone-w1 (its root filesystem is at 92%, unrelated disk
+# pressure this pod should not add to or be exposed to) via a required
+# nodeAffinity, not a preference — this data is meant to be permanent, so it
+# should not casually land on the node with the least headroom. This is
+# independent of Ceph's own OSD placement: RBD volumes are distributed across
+# OSDs by Ceph regardless of which node the consuming pod is scheduled on: the
+# exclusion is about THIS POD's node (and thus what shares that node's CPU/RAM/
+# root-disk), not about where the bytes physically live.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: npm-mirror
+  namespace: npm-mirror
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: npm-mirror
+spec:
+  replicas: 1
+  serviceName: npm-mirror
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: npm-mirror
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: npm-mirror
+        platform.capstone/component: platform
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: NotIn
+                    values: ["capstone-w1"]
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001    # verdaccio.org/docs/docker: the official image's own uid
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: verdaccio
+          # Digest-pinned (SEC), pulled through the platform's Docker Hub proxy-cache
+          # (dockerhub-proxy) — same path every other Docker Hub image in this repo
+          # uses, for the same reason (B4: dodge Docker Hub's anonymous rate limit).
+          # verdaccio/verdaccio is a community (non-`library/`) image, so the proxied
+          # path keeps its full org/repo, unlike node/nginx's `library/` prefix.
+          # Digest independently verified against registry-1.docker.io's v2 API
+          # (docker-content-digest header) for verdaccio/verdaccio:6, 2026-09-10.
+          image: harbor.capstone.uamishub.com/dockerhub-proxy/verdaccio/verdaccio@sha256:7b067a47ae51fb9dff3dcdce60ec0a2cbd7650c208cb4b9f6d37cb1b09b39d43 # 6
+          env:
+            # The `listen:` key in config.yaml is IGNORED by the official Docker
+            # image (verdaccio.org/docs/docker) — VERDACCIO_PORT is the only way to
+            # move it off the 4873 default. Set to 8080 so this Service needs NO
+            # arc-runners netpol change: 8080 is already in that namespace's
+            # allow-egress-scoped allowed port set (hardening/netpol-runners/
+            # runner-netpol.yaml) — the destination is matched against the POD port
+            # after Service translation (the M1 Harbor/Traefik gotcha, same file),
+            # so the pod must actually LISTEN on an allowed number, not just be
+            # exposed on one via the Service.
+            - name: VERDACCIO_PORT
+              value: "8080"
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet:
+              path: /-/ping
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /-/ping
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 15
+          volumeMounts:
+            - name: config
+              mountPath: /verdaccio/conf
+            - name: storage
+              mountPath: /verdaccio/storage
+            # readOnlyRootFilesystem + a Node process: give it a writable /tmp
+            # rather than discovering at runtime what else it wants to touch.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: npm-mirror-config
+        - name: tmp
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: storage
+        labels:
+          platform.capstone/component: platform
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: ceph-block
+        resources:
+          requests:
+            storage: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: npm-mirror
+  namespace: npm-mirror
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: npm-mirror
+spec:
+  selector:
+    app.kubernetes.io/name: npm-mirror
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
