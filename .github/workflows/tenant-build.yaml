@@ -456,15 +456,40 @@ jobs:
         # typecheck run only --if-present (a bare starter without them is not blocked); `npm test`
         # runs only when a test script exists (npm test hard-errors on a missing script otherwise).
         # A real lint / tsc / test failure BLOCKS.
+        #
+        # RETRY: install is wrapped in an EXPLICIT loop (4 attempts, n*15s backoff), not
+        # npm's own `fetch-retries`. Student CI runners have produced intermittent
+        # `ETIMEDOUT`/errno -110 failures ~10-15s into install; that is a socket-read
+        # timeout, and npm's internal retry does not cover it (confirmed independently in
+        # UA-MIS/ida-llm build-and-push.yaml checks-frontend: a `fetch-retries`/`.npmrc`-only
+        # fix there reached the step but still failed in ~20s flat). Retrying the whole
+        # command is blunt but cannot silently no-op the way a fetch-retries tweak did. A
+        # genuine lockfile-desync failure still fails deterministically on every attempt and
+        # surfaces the real error after the 4th. This is THE reusable copy (ADR-031 §8) —
+        # every `uses: .../tenant-build.yaml@v1` caller picks this up without a per-tenant
+        # PR; tenants still on the older inline-copy template get the same fix landed
+        # directly in their own workflow file instead.
         uses: docker://node@sha256:366fdef91728b1b7fa18c84fba63b6e79ed77b7e10cc206878e9705da4d7b169 # 24-trixie-slim
         with:
           entrypoint: /bin/sh
           args: >-
             -c 'set -eu;
             cd "$GITHUB_WORKSPACE/${{ matrix.context }}";
-            if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then echo "==> npm ci (lockfile present)";
-            npm ci || { echo "::error::package-lock.json is OUT OF SYNC with package.json, so npm ci stopped. That is what npm ci is for, and CI will not rewrite your lockfile for you. TO FIX — both steps, and the second is the one people miss: (1) run  npm install  locally, which updates package-lock.json; (2) COMMIT it —  git add package-lock.json && git commit -m \"sync lockfile\" && git push. If you run npm install but do not commit the lockfile, the next build fails with this same message."; exit 1; };
-            else echo "==> npm install (no lockfile — commit one to switch to fast reproducible npm ci)"; npm install; fi;
+            if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then echo "==> npm ci (lockfile present)"; LOCKED=1;
+            else echo "==> npm install (no lockfile — commit one to switch to fast reproducible npm ci)"; LOCKED=0; fi;
+            npm_install() { if [ "$LOCKED" = 1 ]; then npm ci; else npm install; fi; };
+            n=1;
+            until npm_install; do
+            if [ "$n" -ge 4 ]; then
+            if [ "$LOCKED" = 1 ]; then echo "::error::package-lock.json is OUT OF SYNC with package.json, so npm ci stopped after 4 attempts. That is what npm ci is for, and CI will not rewrite your lockfile for you. TO FIX — both steps, and the second is the one people miss: (1) run  npm install  locally, which updates package-lock.json; (2) COMMIT it —  git add package-lock.json && git commit -m \"sync lockfile\" && git push. If you run npm install but do not commit the lockfile, the next build fails with this same message.";
+            else echo "::error::npm install failed 4 times; this is not a blip."; fi;
+            exit 1;
+            fi;
+            wait=$((n * 15));
+            echo "::warning::install failed (attempt ${n}/4) -- retrying in ${wait}s";
+            n=$((n + 1));
+            sleep "$wait";
+            done;
             echo "==> lint (if present)"; npm run lint --if-present;
             echo "==> typecheck (if present)"; npm run typecheck --if-present;
             if npm run | grep -qE "^[[:space:]]+test"; then echo "==> npm test"; npm test;
