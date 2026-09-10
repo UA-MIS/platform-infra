@@ -30,7 +30,17 @@ WORKDIR /src
 # with the starter, so `npm install` resolves the manifests; commit the generated
 # package-lock.json and switch to `npm ci` for reproducible builds once you are set up.
 COPY package.json ./
-RUN npm install
+# Same-day network mitigation (2026-09-10 npm ci incident): the platform CI
+# egress path intermittently stalls mid-download (`npm error network read
+# ETIMEDOUT`, errno -110) faster than npm's own fetch-retries engages --
+# proven insufficient on this platform by UA-MIS/ida-llm (see that repo's
+# frontend/Dockerfile + .github/workflows/ci.yml for the original fix this
+# mirrors). Blunt outer retry instead.
+RUN n=1; until npm install; do \
+      if [ "$n" -ge 4 ]; then echo "npm install failed 4 times -- not a blip" >&2; exit 1; fi; \
+      echo "npm install failed (attempt $n/4) -- retrying in $((n * 15))s" >&2; \
+      sleep $((n * 15)); n=$((n + 1)); \
+    done
 COPY . .
 # `ng build` (npm run build) emits the browser bundle to dist/app/browser (angular.json).
 RUN npm run build

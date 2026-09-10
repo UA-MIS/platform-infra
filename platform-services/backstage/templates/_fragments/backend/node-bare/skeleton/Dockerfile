@@ -25,7 +25,17 @@
 FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/node:22-alpine AS deps
 WORKDIR /src
 COPY package.json ./
-RUN npm install --omit=dev
+# Same-day network mitigation (2026-09-10 npm ci incident): the platform CI
+# egress path intermittently stalls mid-download (`npm error network read
+# ETIMEDOUT`, errno -110) faster than npm's own fetch-retries engages --
+# proven insufficient on this platform by UA-MIS/ida-llm (see that repo's
+# frontend/Dockerfile + .github/workflows/ci.yml for the original fix this
+# mirrors). Blunt outer retry instead.
+RUN n=1; until npm install --omit=dev; do \
+      if [ "$n" -ge 4 ]; then echo "npm install failed 4 times -- not a blip" >&2; exit 1; fi; \
+      echo "npm install failed (attempt $n/4) -- retrying in $((n * 15))s" >&2; \
+      sleep $((n * 15)); n=$((n + 1)); \
+    done
 
 # ---- runtime stage ----
 FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/node:22-alpine

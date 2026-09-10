@@ -275,15 +275,29 @@ jobs:
         # silently REWRITES the lockfile and the gate goes green. The condition being tested
         # is "is a lockfile committed", which is a file test — so test the file, and let a
         # genuine `npm ci` failure fail.
+        #
+        # RETRY WRAPPER (2026-09-10 npm ci incident): the platform CI egress path
+        # intermittently stalls mid-download (`npm error network read ETIMEDOUT`,
+        # errno -110) faster than npm's own fetch-retries can engage — proven on
+        # this platform by UA-MIS/ida-llm (see its .github/workflows/ci.yml) before
+        # this fix was copied here. The loop is blunt on purpose: a genuine
+        # `npm ci` lockfile-desync failure still exhausts all 4 attempts and the
+        # final message still tells the developer how to fix it.
         uses: docker://node@sha256:366fdef91728b1b7fa18c84fba63b6e79ed77b7e10cc206878e9705da4d7b169 # 24-trixie-slim
         with:
           entrypoint: /bin/sh
           args: >-
             -c 'set -eu;
             cd "$GITHUB_WORKSPACE/${{ matrix.context }}";
-            if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then echo "==> npm ci (lockfile present)";
-            npm ci || { echo "::error::package-lock.json is OUT OF SYNC with package.json, so npm ci stopped. That is what npm ci is for, and CI will not rewrite your lockfile for you. TO FIX — both steps, and the second is the one people miss: (1) run  npm install  locally, which updates package-lock.json; (2) COMMIT it —  git add package-lock.json && git commit -m \"sync lockfile\" && git push. If you run npm install but do not commit the lockfile, the next build fails with this same message."; exit 1; };
-            else echo "==> npm install (no lockfile — commit one to switch to fast reproducible npm ci)"; npm install; fi;
+            npm_install() { if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then echo "==> npm ci (lockfile present)"; npm ci; else echo "==> npm install (no lockfile — commit one to switch to fast reproducible npm ci)"; npm install; fi; };
+            n=1;
+            until npm_install; do
+            if [ "$n" -ge 4 ]; then echo "::error::npm install failed 4 times. If every attempt showed ETIMEDOUT/network errors, this is the known flaky-egress issue, not your code — re-run the job. If npm ci said package-lock.json is OUT OF SYNC with package.json: run npm install locally, then git add package-lock.json && git commit -m \"sync lockfile\" && git push."; exit 1; fi;
+            wait=$((n * 15));
+            echo "::warning::npm install failed (attempt ${n}/4) — retrying in ${wait}s";
+            n=$((n + 1));
+            sleep "$wait";
+            done;
             echo "==> lint (if present)"; npm run lint --if-present;
             echo "==> typecheck (if present)"; npm run typecheck --if-present;
             if npm run | grep -qE "^[[:space:]]+test"; then echo "==> npm test"; npm test;

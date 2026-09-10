@@ -24,7 +24,17 @@ ENV NEXT_TELEMETRY_DISABLED=1
 COPY package.json package-lock.json* ./
 # Schema is copied here too so @prisma/client's postinstall can generate the client.
 COPY prisma ./prisma
-RUN npm ci || npm install
+# Same-day network mitigation (2026-09-10 npm ci incident): the platform CI
+# egress path intermittently stalls mid-download (`npm error network read
+# ETIMEDOUT`, errno -110) faster than npm's own fetch-retries engages --
+# proven insufficient on this platform by UA-MIS/ida-llm (see that repo's
+# frontend/Dockerfile + .github/workflows/ci.yml, the original of this fix).
+# Blunt outer retry instead.
+RUN n=1; until npm ci || npm install; do \
+      if [ "$n" -ge 4 ]; then echo "npm ci/install failed 4 times -- not a blip" >&2; exit 1; fi; \
+      echo "npm ci/install failed (attempt $n/4) -- retrying in $((n * 15))s" >&2; \
+      sleep $((n * 15)); n=$((n + 1)); \
+    done
 
 # ---- build: generate the Prisma client + compile Next in standalone mode ----
 FROM ${NODE_IMAGE} AS build
