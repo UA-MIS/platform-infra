@@ -1,0 +1,75 @@
+# Verdaccio's config.yaml, mounted at /verdaccio/conf/config.yaml (the official
+# image's expected path). Verified against a live container
+# (verdaccio/verdaccio:5, run locally) before writing this, not copied from a
+# blog post — see the PR body for the exact commands.
+#
+# READ-ONLY MIRROR, DELIBERATELY: `max_users: -1` disables new htpasswd
+# registrations, and every package rule below still requires `$authenticated`
+# to publish/unpublish. With registration disabled and no user seeded any other
+# way, nothing can ever authenticate, so publish/unpublish are unreachable in
+# practice. This is intentional: this instance exists to CACHE the public
+# registry for CI installs, not to host or accept anyone's packages — the
+# proxy fallthrough (`uplinks.npmjs`) is one-way (upstream -> here -> builds).
+# Blocking publish also closes the obvious dependency-confusion angle (nobody
+# can shadow a real package name with their own upload here).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: npm-mirror-config
+  namespace: npm-mirror
+  labels:
+    platform.capstone/component: platform
+    app.kubernetes.io/name: npm-mirror
+data:
+  config.yaml: |
+    storage: /verdaccio/storage/data
+    plugins: /verdaccio/plugins
+
+    web:
+      title: Capstone npm mirror
+
+    auth:
+      htpasswd:
+        file: /verdaccio/storage/htpasswd
+        max_users: -1   # registration disabled -- see the header note above
+
+    # DEGRADE, NOT BLOCK: `cache: true` (default) means a package already
+    # fetched once is served from local disk even if npmjs.org is briefly
+    # unreachable later. A package NEVER fetched before still needs the
+    # uplink -- if npmjs.org itself is down, that install fails the same way
+    # it would without this mirror at all (this is a cache, not a registry
+    # replacement). See the PR body's "if the mirror is down" section for the
+    # other half of this: what happens when THIS pod is unavailable.
+    uplinks:
+      npmjs:
+        url: https://registry.npmjs.org/
+        cache: true
+
+    packages:
+      '@*/*':
+        access: $all
+        publish: $authenticated
+        unpublish: $authenticated
+        proxy: npmjs
+      '**':
+        access: $all
+        publish: $authenticated
+        unpublish: $authenticated
+        proxy: npmjs
+
+    server:
+      keepAliveTimeout: 60
+
+    # `listen` is DOCUMENTED-IGNORED by the official Docker image (verified
+    # locally: the image logs that any listen host/port here is dropped under
+    # Docker). Kept only as in-repo documentation of intent; the REAL port is
+    # set via the VERDACCIO_PORT env var on the container (statefulset.yaml),
+    # which is also how this port ends up being one the arc-runners netpol
+    # already permits (10.96.0.0/12:8080) -- no netpol change needed.
+    listen: 0.0.0.0:8080
+
+    middlewares:
+      audit:
+        enabled: true
+
+    log: { type: stdout, format: pretty, level: http }

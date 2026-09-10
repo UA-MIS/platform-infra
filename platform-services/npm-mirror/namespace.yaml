@@ -1,0 +1,19 @@
+# npm-mirror namespace — an in-cluster npm registry mirror (Verdaccio) so tenant
+# builds stop depending on the public npm registry over the flaky CI egress path
+# (UA-MIS/mychef run 34420522887: `npm error network read ETIMEDOUT`, errno -110;
+# see the sibling PRs — mychef#13, next-up#28, curb-web#22, springais#12,
+# platform-infra#640 — for the per-repo/scaffolder retry-loop mitigation shipped
+# first). Same move this fleet already made for container images
+# (harbor-dockerhub-proxy, harbor-mcr-proxy): stop hitting the public origin on
+# every build, cache it once, in-cluster.
+#
+# Goldilocks recommend-only, same reasoning as minio/lab-db: a single-replica
+# stateful singleton should never sit in the Auto right-sizing policy (an
+# eviction mid-build would fail whatever CI job was mid-install).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: npm-mirror
+  labels:
+    platform.capstone/component: platform
+    goldilocks.fairwinds.com/enabled: "true"
