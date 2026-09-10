@@ -134,6 +134,40 @@ spec:
         # hardening/netpol-controlplane/vault-unsealer-netpol.yaml.
         - protocol: TCP
           port: 8200   # vault-unsealer (seal-status GET + unseal PUT)
+    # npm-mirror.npm-mirror.svc:8080 (2026-09-10 npm ci incident, Part 2
+    # permanent fix, #641) -- the in-cluster Verdaccio npm proxy-cache
+    # (platform-services/npm-mirror). npm-mirror's OWN ingress policy
+    # (platform-services/npm-mirror/netpol.yaml) already admits arc-runners
+    # by namespaceSelector -- that is necessary but NOT sufficient: this
+    # egress side also has to permit leaving arc-runners for that
+    # destination, and it does NOT already, for the same reason harbor-core/
+    # Traefik/vault-unsealer's rules above do not automatically extend to a
+    # brand-new destination on the SAME already-allowed port (8080 is
+    # already open below for harbor-core). Verified live (kubectl + hubble,
+    # 2026-09-10, after #641 merged and its pod came up): a pod in
+    # arc-runners still could NOT reach npm-mirror:8080 with #641's ingress
+    # rule alone -- Cilium's CIDR-to-identity derivation for the ipBlock
+    # rule below has already resolved 10.96.0.0/12 against long-lived
+    # backends and does not pick up a new one on the same CIDR promptly
+    # (the same class of gap this file's own SEC-019 caveat documents for
+    # the node-LAN/tailnet excepts). A SEPARATE, identity-based
+    # namespaceSelector egress rule -- not another port on that ipBlock --
+    # is what actually admits the traffic, verified immediately in the same
+    # live test.
+    #
+    # STATED EXPLICITLY, NOT A SILENT WIDENING: this is the only change this
+    # PR makes to this file. Like every other rule in this policy, it does
+    # not take effect on merge alone; this file is MANUAL-SYNC gated (see
+    # this policy's own Application, platform-netpol-runners) -- an
+    # operator must run `argocd app sync platform-netpol-runners` to apply
+    # it.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: npm-mirror
+      ports:
+        - protocol: TCP
+          port: 8080   # npm-mirror (Verdaccio npm proxy-cache, #641's chosen port)
     # External HTTPS:443 ONLY — GitHub (clone/Actions API/job token) + base-image
     # pulls. Port-scoped (no FQDN egress until Cilium).
     #
