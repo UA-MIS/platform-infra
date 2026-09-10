@@ -58,7 +58,21 @@ data:
         proxy: npmjs
 
     server:
-      keepAliveTimeout: 60
+      # 0 disables the HTTP keep-alive idle timeout entirely (matches
+      # Verdaccio'''s own default-config comment: this makes the server behave
+      # like Node <8, which had none). NOT left at 60s: live in-cluster
+      # verification (2026-09-10, same arc-runners boundary this mirror
+      # serves) hit a real bug here -- a 47MB cold-cache tarball
+      # (@next/swc-linux-x64-musl, from UA-MIS/ida-llm'''s actual lockfile)
+      # took 102s to fetch-and-stream even for an in-cluster, same-node
+      # client, and a keepAliveTimeout of 60 killed the connection out from
+      # under that still-in-flight request -- the client saw
+      # ECONNRESET/"aborted" on the NEXT request queued on the same
+      # keep-alive socket. Reproduced, then fixed with this value, then
+      # re-verified clean (npm ci completed with no ECONNRESET). A registry
+      # whose whole job is absorbing slow/flaky upstream transfers cannot
+      # itself impose a timeout shorter than the transfers it serves.
+      keepAliveTimeout: 0
 
     # `listen` is DOCUMENTED-IGNORED by the official Docker image (verified
     # locally: the image logs that any listen host/port here is dropped under
