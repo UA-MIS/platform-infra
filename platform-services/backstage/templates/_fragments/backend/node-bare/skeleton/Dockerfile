@@ -25,7 +25,21 @@
 FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/node:22-alpine AS deps
 WORKDIR /src
 COPY package.json ./
-RUN npm install --omit=dev
+# ⚠ RETRIED, and deliberately not left to npm's own fetch-retries (see ./.npmrc for
+# why that layer alone is not enough). This install runs inside the Kaniko image
+# build, so a retry wrapped only around the CI workflow's own `npm ci`/`npm install`
+# step (build-and-push.yaml's `checks` job) would not cover it -- a registry
+# timeout HERE fails the build itself. UA-MIS/mychef run 34420522887 (frontend
+# job, 2026-09-10) died with `npm error code ETIMEDOUT` / `errno -110` at exactly
+# this kind of RUN line. UA-MIS/ida-llm hit the identical failure and proved (PRs
+# #74 -> #75) that only retrying the command itself, at this layer, survives it --
+# this reuses that pattern verbatim, so every future tenant born from this
+# fragment inherits it.
+RUN n=1; until npm install --omit=dev; do \
+      if [ "$n" -ge 4 ]; then echo "npm install failed 4 times -- not a blip" >&2; exit 1; fi; \
+      echo "npm install failed (attempt $n/4) -- retrying in $((n * 15))s" >&2; \
+      sleep $((n * 15)); n=$((n + 1)); \
+    done
 
 # ---- runtime stage ----
 FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/node:22-alpine

@@ -24,7 +24,21 @@ ENV NEXT_TELEMETRY_DISABLED=1
 COPY package.json package-lock.json* ./
 # Schema is copied here too so @prisma/client's postinstall can generate the client.
 COPY prisma ./prisma
-RUN npm ci || npm install
+# ⚠ RETRIED, and deliberately not left to npm's own fetch-retries (see ./.npmrc for
+# why that layer alone is not enough). This install runs inside the Kaniko image
+# build, so a retry wrapped only around the CI workflow's own `npm ci` step
+# (build-and-push.yaml's `checks` job) would not cover it -- a registry timeout
+# HERE fails the build itself. UA-MIS/mychef run 34420522887 (frontend job,
+# 2026-09-10) died with `npm error code ETIMEDOUT` / `errno -110` at exactly this
+# kind of RUN line. UA-MIS/ida-llm hit the identical failure and proved (PRs
+# #74 -> #75) that only retrying the command itself, at this layer, survives it --
+# this reuses that pattern verbatim, so every future tenant born from this
+# fragment inherits it.
+RUN n=1; until sh -c 'npm ci || npm install'; do \
+      if [ "$n" -ge 4 ]; then echo "npm install failed 4 times -- not a blip" >&2; exit 1; fi; \
+      echo "npm install failed (attempt $n/4) -- retrying in $((n * 15))s" >&2; \
+      sleep $((n * 15)); n=$((n + 1)); \
+    done
 
 # ---- build: generate the Prisma client + compile Next in standalone mode ----
 FROM ${NODE_IMAGE} AS build
@@ -70,8 +84,14 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' \
 # Pin the CLI to the same MAJOR as @prisma/client in package.json (v6). Keep it v6.x — do
 # NOT bump to v7 without also adding a prisma.config.ts (see the WHY note above).
 ARG PRISMA_VERSION=6.2.1
+# Retried for the same reason as the deps stage above -- a bare install call here would
+# fail this build the same way UA-MIS/mychef run 34420522887 failed.
 RUN npm init -y >/dev/null && \
-    npm install --omit=dev --no-audit --no-fund "prisma@${PRISMA_VERSION}"
+    n=1; until npm install --omit=dev --no-audit --no-fund "prisma@${PRISMA_VERSION}"; do \
+      if [ "$n" -ge 4 ]; then echo "npm install prisma failed 4 times -- not a blip" >&2; exit 1; fi; \
+      echo "npm install prisma failed (attempt $n/4) -- retrying in $((n * 15))s" >&2; \
+      sleep $((n * 15)); n=$((n + 1)); \
+    done
 # schema.prisma + prisma/migrations from THIS component's source (build context = the app
 # dir). Migrations a team later creates with `prisma migrate dev` flow through on the next
 # build. An initial migration is shipped so the sample schema applies out of the box.
