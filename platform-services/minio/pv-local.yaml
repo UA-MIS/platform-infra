@@ -30,11 +30,23 @@
 # ── sizing ─────────────────────────────────────────────────────────────────────
 # `capacity.storage` is NOT a physical pre-allocation for a hostPath volume — it
 # is only the number Kubernetes uses for PVC-to-PV capacity matching. The REAL
-# ceiling is the free space on mac-debian-02's root filesystem; there is no
-# enforced quota. 200Gi is a starting point — operator should confirm actual free
-# disk on the box (`df -h /var/lib`) and adjust both this value and the PVC's
-# request (pvc.yaml) if the real disk is smaller/larger. Monitor real usage with
+# ceiling is the free space on the node's root filesystem; there is no quota
+# enforced at this layer — proven the hard way 2026-09-13 when the underlying
+# directory reached 381G with this field still reading 200Gi, filled
+# capstone-w1 to 95%, and evicted minio-0 repeatedly (DiskPressure). 200Gi is a
+# starting point — operator should confirm actual free disk on the box
+# (`df -h /var/lib`) and adjust both this value and the PVC's request
+# (pvc.yaml) if the real disk is smaller/larger. Monitor real usage with
 # `kubectl -n minio exec minio-0 -- df -h /data`.
+#
+# ── the ACTUAL enforcement lives one layer up, in MinIO itself ───────────────
+# Since 2026-09-13, `minio-provision-job.yaml` sets a hard MinIO bucket quota
+# on `velero` (240GiB) and `dr-backup` (70GiB) — see that file's "BUCKET
+# QUOTAS" header for the full reasoning and docs/operator/disk-headroom.md for
+# the sizing derivation. That is the field that actually stops a write once
+# the node approaches this PV's declared capacity; this `200Gi` stays
+# decorative for PVC binding purposes only. Keep the two in the same ballpark
+# when either changes.
 apiVersion: v1
 kind: PersistentVolume
 metadata:

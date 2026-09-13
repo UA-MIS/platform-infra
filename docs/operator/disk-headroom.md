@@ -176,9 +176,22 @@ night.
 
 ### 2. MinIO bucket quotas — the part that does not need a human
 
+**Status: IMPLEMENTED 2026-09-13** (`platform-services/minio/minio-provision-job.yaml`,
+"BUCKET QUOTAS"), after a second, worse incident (95% disk, `minio-0` evicted
+repeatedly, the BackupStorageLocation `Unavailable` and every kopia
+maintenance job erroring — a closed loop broken only by manually deleting the
+133G `monitoring` Kopia repo). The wording below is the original 09-03
+proposal; it is kept because the reasoning and the sizing math still hold —
+what changed is that the precondition in the last paragraph ("only AFTER
+retention has brought `velero` below the ceiling") is now actually met: the
+same PR that applies the quota also excludes `monitoring` from the schedules
+(`applicationsets/velero-app.yaml`), which is what brings `velero` back under
+240GiB (~203G steady-state) instead of the ~336G it had regrown to.
+
 `local-hostpath` does not enforce the PV's declared capacity, which is why a
-volume declared `200Gi` was holding 324.5 G. MinIO's own hard bucket quota does
-enforce, at the application layer, with no filesystem change and no reboot.
+volume declared `200Gi` was holding 324.5 G (and, five days later, 381G).
+MinIO's own hard bucket quota does enforce, at the application layer, with no
+filesystem change and no reboot.
 
 **Verified to actually bind** on 2026-09-03 (this is the whole point — an
 unenforced quota is worse than none):
@@ -192,16 +205,20 @@ $ mc ls m/quota-probe
                                                   # empty — nothing partial left
 ```
 
-Both real buckets are currently **unlimited** (`mc quota info` → `quota of 0 B`).
+Both real buckets were **unlimited** at the time this was written (`mc quota
+info` → `quota of 0 B`); as of 2026-09-13 both are set, declaratively, by
+`minio-provision-job.yaml`:
 
 ```bash
 mc quota set m/velero    --size 240GiB
 mc quota set m/dr-backup --size 70GiB
 ```
 
-**Set these only AFTER retention has brought `velero` below the ceiling** — a
-quota below current usage fails every write immediately. With 261 G currently in
-`velero`, applying a 240 GiB quota today would break tonight's backup.
+**These could only be set once retention (+ the `monitoring` exclusion, added
+in the same PR) brought `velero` below the ceiling** — a quota below current
+usage fails every write immediately. `velero` had regrown to ~336 G by
+2026-09-13 (see the top of this section); excluding `monitoring` from the
+schedules is what brings steady-state usage back under 240 GiB.
 
 The trade this makes, stated plainly: at the ceiling, **the backup fails loudly
 instead of the node failing silently**. A failed backup is a `VeleroBackupStale`
@@ -247,10 +264,18 @@ leaves a real margin; adjust both together if you move the retention dial.
   `backup.velero.io/backup-volumes` annotations) is the correct fix but must be
   done carefully: a missed annotation silently stops protecting a volume, which
   is exactly how the Vault gap above happened.
-- **Observability volumes are backed up but reconstructible.**
-  `thanos-compactor` (working dir) and `thanos-store-gateway` (index cache) are
-  100% rebuildable, and Prometheus TSDB is already shipped durably to Thanos.
-  They are a large share of the 108 G `monitoring` repo.
+- ~~**Observability volumes are backed up but reconstructible.**~~ **FIXED
+  2026-09-13**: the entire `monitoring` namespace is now excluded from both
+  Velero schedules (`applicationsets/velero-app.yaml`) rather than left
+  partially protected — its repo had grown from 108G here to 133G by
+  2026-09-13 and was the direct trigger of a second capstone-w1 DiskPressure
+  incident. `thanos-compactor`/`thanos-store-gateway` were 100% rebuildable as
+  noted below, and it turned out the rest of the namespace is too: Grafana
+  dashboards are sidecar-provisioned from ConfigMaps in this repo and
+  Grafana's backend database itself lives in CNPG/Postgres in `db-tier`
+  (still backed up), not in `monitoring`'s own PVC — see
+  `applicationsets/velero-app.yaml`'s 2026-09-13 comment for the full
+  per-PVC breakdown.
 - **The `deadmansswitch` receiver is broken.** Alertmanager logs
   `open /etc/alertmanager/secrets/alertmanager-webhook/deadmansswitch-url: no
   such file or directory` every minute — the `alertmanager-webhook` secret has

@@ -20,7 +20,7 @@ as Dex/cloudflared/vault-unsealer).
 | `sealedsecret-thanos-user.yaml` | A dedicated, non-root MinIO IAM user's creds, scoped later to only the `dr-backup` bucket — ⚠ coupled to `monitoring/thanos.yaml`'s `thanos-objstore-config`, see its own header |
 | `netpol.yaml` | CiliumNetworkPolicy: the provisioning Job's own intra-namespace access (auto-synced, additive-only) |
 | `statefulset.yaml` | The MinIO server (1 replica) + its ClusterIP Service (API :9000, console :9001) |
-| `minio-provision-job.yaml` | Idempotent bootstrap: creates the `velero` + `dr-backup` buckets + their scoped IAM users + least-privilege policies |
+| `minio-provision-job.yaml` | Idempotent bootstrap: creates the `velero` + `dr-backup` buckets, sets their hard capacity quotas (240GiB / 70GiB — the PV's own `200Gi` is not enforced, see its header), and creates their scoped IAM users + least-privilege policies |
 
 **Full architecture, day-2 checks, and the tested-restore drill:**
 [`docs/operator/dr-backup.md`](../../docs/operator/dr-backup.md).

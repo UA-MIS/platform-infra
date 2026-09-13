@@ -29,6 +29,41 @@
 # bucket). See sealedsecret-thanos-user.yaml's header for the important
 # secret_key COUPLING to thanos.yaml's `thanos-objstore-config` — they must be
 # rotated together, never independently.
+#
+# BUCKET QUOTAS (added 2026-09-13, capstone-w1 DiskPressure incident #2): the
+# `minio-dr-local-pv` capacity field (platform-services/minio/pv-local.yaml,
+# 200Gi) is a hostPath PV — Kubernetes uses it only to match a PVC's request,
+# it enforces NOTHING on the node's actual filesystem. That gap is exactly how
+# the underlying directory reached 381G on a 433G disk with the PV still
+# reporting 200Gi. A `local`-type PV, a dedicated LV, or a filesystem quota
+# would all require a one-off, out-of-band change ON THE NODE (mac fleet /
+# Debian workers) that this GitOps Job cannot perform and that isn't captured
+# by any file in this repo — rejected for that reason, not on merit.
+# `node_filesystem_avail_bytes`-based alerting was also considered and
+# REJECTED as redundant: `BuildPoolDiskFilling` (<20% free) and
+# `NodeRootFilesystemNearEviction` (<17% free, critical) already exist
+# (platform-services/monitoring/alerts.yaml) and already route to the real
+# `platform-oncall` receiver — and `BuildPoolDiskFilling` fired continuously
+# for 59.1 hours before the first incident without preventing it (see
+# docs/operator/disk-headroom.md, "The 2026-09-03 lesson is not 'we had no
+# alert'"). More detection does not fix an enforcement gap; a bucket quota
+# does — MinIO fails the *write* (`mc cp: Bucket quota exceeded`), immediately
+# and at the application layer, with zero dependency on anyone reading a page.
+# `mc quota set` is convergent (same size, re-applied, is a no-op-equivalent),
+# matching this Job's existing idempotency contract for `mc admin user add` /
+# `mc admin policy attach`.
+#
+# Sizing: `docs/operator/disk-headroom.md` §"Sizing the ceiling" derives ~325
+# GiB as the combined velero+dr-backup ceiling to keep capstone-w1 above its
+# own 20%-free warning line (433 GiB root fs, ~21 GiB non-DR baseline usage).
+# It proposed velero=240GiB / dr-backup=70GiB (310 GiB, ~15 GiB margin) but
+# noted that quota could not yet be applied: at the time, `velero` held ~336G
+# (monitoring 133G + harbor 81G + vault 44G + db-tier 34G + 4 tenant VMs 44G)
+# — ABOVE a 240GiB quota, which would fail that same night's backup. The
+# `monitoring` exclusion added in this same PR (applicationsets/velero-app.yaml)
+# removes that 133G going forward, bringing steady-state `velero` usage to
+# ~203G — safely under 240GiB — which is what finally makes applying this
+# quota safe today instead of merely planned.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -128,6 +163,18 @@ spec:
               echo "==> ensuring bucket 'dr-backup' exists (Thanos long-term metrics) ..."
               mc mb --ignore-existing local/dr-backup
 
+              # Hard quotas (see this file's header, "BUCKET QUOTAS", for the full
+              # rationale + sizing derivation). Convergent: re-setting the same size
+              # on every Job re-run is a no-op-equivalent, same contract as the
+              # `mc admin user add` / `mc admin policy attach` calls below. At the
+              # quota, writes fail loudly (`Bucket quota exceeded`) instead of the
+              # node filling silently.
+              echo "==> setting hard quota on 'velero' (240GiB) ..."
+              mc quota set local/velero --size 240GiB
+
+              echo "==> setting hard quota on 'dr-backup' (70GiB) ..."
+              mc quota set local/dr-backup --size 70GiB
+
               echo "==> writing least-privilege policy (velero-rw: only the velero bucket) ..."
               cat > /tmp/velero-rw-policy.json <<'EOF'
               {
@@ -175,6 +222,7 @@ spec:
               mc admin policy attach local thanos-rw --user="$THANOS_ACCESS_KEY"
 
               echo "==> done. buckets:"; mc ls local
+              echo "==> quotas:"; mc quota info local/velero; mc quota info local/dr-backup
       volumes:
         - name: tmp
           emptyDir: {}
