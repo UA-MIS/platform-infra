@@ -136,7 +136,9 @@ kubectl -n velero get schedule
 kubectl -n velero get backups                     # one per schedule firing
 kubectl -n velero describe backup <name>           # Phase: Completed, no errors
 kubectl -n minio get statefulset,pvc,pod
-kubectl -n minio exec minio-0 -- df -h /data       # real disk headroom (hostPath has no quota)
+kubectl -n minio exec minio-0 -- df -h /data       # real disk headroom (the hostPath PV itself has no quota;
+                                                    # enforcement is the MinIO bucket quota instead, see
+                                                    # docs/operator/disk-headroom.md #2 + `mc quota info local/velero`)
 
 # Confirm the repo password is OUR sealed value, not Velero's well-known default
 # (expect this to print nothing — a match means the backup store is unencrypted,

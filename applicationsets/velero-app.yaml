@@ -35,13 +35,16 @@
 # ── the actual schedule (all namespaces + PVs) ────────────────────────────────
 # `schedules.daily-full-backup` runs at 04:00 (after Vault's own 03:00 Raft
 # snapshot, docs/operator/vault-and-dr.md, to spread nightly I/O), 30-day TTL,
-# `includedNamespaces: ["*"]` — every namespace. `excludedNamespaces: [minio]`
-# is the one deliberate carve-out: without it, Velero would back up MinIO's own
+# `includedNamespaces: ["*"]` — every namespace, minus two deliberate carve-outs
+# in `excludedNamespaces`. `minio`: without it, Velero would back up MinIO's own
 # local data THROUGH MinIO's own S3 API into itself (the backup store backing up
 # its own backing store) — small but pointless recursive growth; excluding it
 # does not weaken DR coverage of anything else (MinIO's contents are ALREADY the
 # backups; the MinIO deployment's few Kubernetes objects — the StatefulSet,
 # Service, SealedSecrets — are cheap to recreate from this very git repo).
+# `monitoring`: added 2026-09-13 after a second capstone-w1 disk-pressure
+# incident — see the dated comment further down (next to the schedules
+# themselves) for the full reasoning.
 #
 # Chart: velero 12.1.0 (appVersion 1.18.1), pinned. Bump deliberately.
 # Root-app recurses applicationsets/, so this Application is registered.
@@ -198,6 +201,44 @@ spec:
         # NOTE this alone does not make the store safe: it must be paired with
         # the MinIO bucket quotas (docs/operator/disk-headroom.md), which make
         # overrun fail the BACKUP loudly instead of failing the NODE silently.
+        #
+        # ── 2026-09-13: exclude `monitoring` entirely (2nd capstone-w1 incident) ──
+        # The 09-03 retention cut above was not enough on its own: even at ~10
+        # kept restore points instead of 30, the `monitoring` Kopia repo alone
+        # regrew to 133 G (measured live 2026-09-13) and, combined with harbor
+        # (81 G), vault (44 G), db-tier (34 G) and four tenant VMs (44 G), drove
+        # capstone-w1 back to 95% disk, DiskPressure=True, and repeated `minio-0`
+        # evictions — which in turn took the BackupStorageLocation `Unavailable`
+        # and stalled every kopia maintenance job, so nothing could prune while
+        # the disk stayed full (a closed loop; broken this time by manually
+        # deleting the `monitoring` repo, 133G -> reclaimed, DiskPressure cleared).
+        #
+        # `monitoring`'s multiplier (see the table above: 6.0x at the 09-03
+        # measurement, i.e. 18.1 GiB of live PVC data costing 108 G of repo) is
+        # structural, not a fluke: its PVCs are Prometheus TSDB (20Gi), Loki
+        # (10Gi), Tempo (20Gi), Grafana (5Gi) and Alertmanager (2Gi) — all
+        # high-churn, self-describing telemetry that is already durably shipped
+        # elsewhere (Prometheus -> Thanos long-term storage, `monitoring/
+        # thanos.yaml`, retained per its own `raw 30d / 5m 180d / 1h 1y` policy in
+        # the SEPARATE `dr-backup` bucket) or fully reconstructible from git
+        # (Grafana dashboards/datasources are sidecar-provisioned from
+        # ConfigMaps in this repo, and Grafana's own backend moved off its local
+        # PVC onto CNPG/Postgres in `db-tier` — see `kube-prometheus-stack-
+        # app.yaml`'s "Backend database" comment: "every dashboard and
+        # datasource is PROVISIONED from ConfigMaps by the sidecar and
+        # re-materializes against the empty database" — `db-tier` is NOT
+        # excluded, so that Postgres data, including any hand-built dashboard,
+        # keeps its own backup coverage regardless of this exclusion). A
+        # week-old TSDB/Loki/Tempo restore has close to zero operational value
+        # against the disk cost of a near-full copy every single night. Alertmanager's
+        # silence state (2Gi) is the one piece that's ephemeral and unbacked-up
+        # after this change, which is an accepted, trivially-recreated loss (a
+        # fresh Alertmanager just reopens whatever was already firing).
+        #
+        # Net effect: `monitoring` drops out of the nightly footprint entirely
+        # (not just capped) — same shape as the existing `minio` carve-out
+        # above, extended to a second namespace whose own contents are backups
+        # (Thanos blocks) or code (dashboards) rather than primary state.
         schedules:
           # Mon-Sat. Sunday is deliberately left to the weekly schedule below so
           # the two never both run at 04:00 and double the nightly I/O.
@@ -211,6 +252,7 @@ spec:
                 - "*"
               excludedNamespaces:
                 - minio
+                - monitoring
               defaultVolumesToFsBackup: true
 
           # Sunday full, kept 30 days — preserves the existing 30-day DEPTH,
@@ -225,6 +267,7 @@ spec:
                 - "*"
               excludedNamespaces:
                 - minio
+                - monitoring
               defaultVolumesToFsBackup: true
   destination:
     server: https://kubernetes.default.svc
