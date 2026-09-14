@@ -23,19 +23,32 @@
 # tag reference directly (`GET /v2/<repo>/manifests/<tag>`), never lists
 # anything, so the pagination cap never applies.
 #
-# SOURCE IS mirror.gcr.io, NOT docker.io DIRECTLY — a second, independent
-# Docker Hub limitation found by execution: pulling ~20 images anonymously
-# from docker.io in one run tripped Docker Hub's separate anonymous PULL RATE
-# LIMIT ("TOOMANYREQUESTS: You have reached your unauthenticated pull rate
-# limit"), which is IP-bucketed — the whole cluster's egress shares one
-# budget, so this bites at cluster scale even though a single `docker pull`
-# never would. `mirror.gcr.io` is Google's public, anonymous, read-through
-# cache of Docker Hub (the same mirror Kubernetes' own docs recommend for
-# exactly this reason) — it is not subject to Docker Hub's rate limit because
-# the request never reaches Docker Hub for an already-cached tag. Confirmed
-# working end-to-end: `mirror.gcr.io/library/node:22-alpine` copied clean via
-# this exact path immediately after `docker.io/library/node:22-alpine` had
-# 429'd in the same session.
+# SOURCE IS mirror.gcr.io, NOT docker.io DIRECTLY (for Docker Hub entries) — a
+# second, independent Docker Hub limitation found by execution: pulling ~20
+# images anonymously from docker.io in one run tripped Docker Hub's separate
+# anonymous PULL RATE LIMIT ("TOOMANYREQUESTS: You have reached your
+# unauthenticated pull rate limit"), which is IP-bucketed — the whole
+# cluster's egress shares one budget, so this bites at cluster scale even
+# though a single `docker pull` never would. `mirror.gcr.io` is Google's
+# public, anonymous, read-through cache of Docker Hub (the same mirror
+# Kubernetes' own docs recommend for exactly this reason) — it is not subject
+# to Docker Hub's rate limit because the request never reaches Docker Hub for
+# an already-cached tag. Confirmed working end-to-end:
+# `mirror.gcr.io/library/node:22-alpine` copied clean via this exact path
+# immediately after `docker.io/library/node:22-alpine` had 429'd in the same
+# session.
+#
+# PER-ENTRY SOURCE REGISTRY (2026-09-14): `mirror.gcr.io` ONLY mirrors Docker
+# Hub — it MANIFEST_UNKNOWNs anything actually hosted on gcr.io or
+# mcr.microsoft.com. dockerhub-mirror-configmap.yaml's images.txt now carries
+# an optional second column naming the real source registry for non-Docker-Hub
+# entries (kaniko-project/executor from gcr.io; dotnet/sdk, dotnet/aspnet from
+# mcr.microsoft.com — digest-pinned, D-030), defaulting to `mirror.gcr.io` when
+# omitted so every pre-existing line is unchanged. See that ConfigMap's header
+# comment for the full format and why these 3 need to be here in addition to
+# their `schedule: manual` Replication MRs (replication-mcr-*.yaml,
+# replication-gcr-*.yaml, same dir): this job is the AUTOMATIC recovery path,
+# replication is the faster path for a deliberate version bump.
 #
 # WHY hostAliases + platform-ca (not the public hostname): confirmed by
 # execution — going out through the public Cloudflare-fronted hostname hit
@@ -66,6 +79,14 @@
 # on the project, and this manifest contains no delete/prune/GC step anywhere.
 # "Never evict" is therefore a structural property of the mechanism, not just
 # a policy choice.
+#
+# RETRY (2026-09-14, incident-driven): each `crane copy` gets up to 3 attempts
+# with a short backoff before it counts as a real failure. Verified by
+# execution during the 2026-09-13 recovery: the ~800MB dotnet/sdk image failed
+# once on a transient `stream ID …; CANCEL` from Microsoft's CDN, then
+# succeeded on an immediate retry — without a retry, a flaky upstream CDN
+# fails the whole nightly job (backoffLimit: 1 means the Job itself does not
+# retry) and someone ends up debugging a non-problem.
 #
 # SCHEDULE: nightly (02:00, ahead of the proxy projects' 02:30 GC — no
 # interaction, different projects, just avoiding a coincidental resource
@@ -134,14 +155,44 @@ spec:
                 - |
                   set -e
                   crane auth login harbor.capstone.uamishub.com -u "$ROBOT_USER" -p "$ROBOT_PW"
+
+                  # Up to 3 attempts per image with a short backoff — a flaky
+                  # upstream CDN (verified: Microsoft's, on the ~800MB
+                  # dotnet/sdk image) must not fail the whole nightly run.
+                  copy_with_retry() {
+                    src_ref="$1"
+                    dst_ref="$2"
+                    attempt=1
+                    max_attempts=3
+                    while [ "$attempt" -le "$max_attempts" ]; do
+                      if crane copy "$src_ref" "$dst_ref"; then
+                        return 0
+                      fi
+                      echo "=== attempt $attempt/$max_attempts failed for $dst_ref ==="
+                      attempt=$((attempt + 1))
+                      [ "$attempt" -le "$max_attempts" ] && sleep 5
+                    done
+                    return 1
+                  }
+
                   FAIL=0
-                  while IFS= read -r img; do
-                    [ -z "$img" ] && continue
-                    echo "=== COPYING $img ==="
-                    if crane copy "mirror.gcr.io/${img}" "harbor.capstone.uamishub.com/base-images/${img}"; then
+                  while IFS= read -r line; do
+                    case "$line" in
+                      ''|'#'*) continue ;;
+                    esac
+                    # Word-split on whitespace: field 1 = image-ref
+                    # (repo:tag or repo@sha256:digest), field 2 = optional
+                    # source registry (default mirror.gcr.io — back-compat
+                    # with every pre-existing entry). See
+                    # dockerhub-mirror-configmap.yaml's header for the format.
+                    set -- $line
+                    img="$1"
+                    src="${2:-mirror.gcr.io}"
+                    echo "=== COPYING ${src}/${img} ==="
+                    if copy_with_retry "${src}/${img}" "harbor.capstone.uamishub.com/base-images/${img}"; then
                       echo "=== OK $img ==="
                     else
-                      echo "=== FAILED $img ==="
+                      echo "=== FAILED $img (from $src, after $max_attempts attempts) ==="
                       FAIL=1
                     fi
                   done < /lists/images.txt

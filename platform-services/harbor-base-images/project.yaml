@@ -38,6 +38,29 @@
 # that file's comment for the general pattern). The external-name annotation
 # below (`/projects/17223`) makes the first reconcile a GET, adopting the
 # hand-made project instead of a 409 create-conflict.
+#
+# ⚠ deletionPolicy: Orphan IS LORE-BEARING — DO NOT "TIDY" IT AWAY.
+# Incident 2026-09-13 04:00:23Z: this MR (and mcr-proxy's) was recreated by
+# something that churned the underlying Kubernetes object, went Synced=False
+# a second later on a 403 from Harbor, and — because the DEFAULT
+# deletionPolicy is Delete — Crossplane had already issued a DELETE against
+# the real Harbor project as part of that recreate. Every tenant build in the
+# org failed for ~36h (base-images/mcr-proxy are the org-wide image mirror
+# every Dockerfile FROM and CI container: image resolves through). A 404
+# instead of 403 would have let Crossplane recreate the project cleanly; the
+# 403 turned recoverable drift into a permanent stall that needed a human to
+# recreate the project by hand. See docs/operator/base-images.md and the
+# gotchas-and-lessons.md Harbor entry for the full writeup.
+#
+# TRADE-OFF ACCEPTED: with Orphan, deleting THIS MR no longer deletes the
+# Harbor project — the registry content is orphaned (kept) and a future
+# reconcile re-adopts it. That is correct for a SHARED image mirror (nothing
+# about it should be destroyable by K8s object churn), but it means a
+# deliberate decommission of this project now needs a manual Harbor delete —
+# removing the MR alone will not clean it up. Do NOT copy this onto
+# tenant-scoped Project MRs (platform-services/crossplane/apis/composition.yaml)
+# — tenant teardown legitimately needs Crossplane to delete the tenant's own
+# Harbor project.
 apiVersion: project.harbor.crossplane.io/v1alpha1
 kind: Project
 metadata:
@@ -47,6 +70,7 @@ metadata:
   annotations:
     crossplane.io/external-name: "/projects/17223"
 spec:
+  deletionPolicy: Orphan   # shared platform mirror — never destroyable by MR churn; see header comment
   forProvider:
     name: base-images
     public: true
