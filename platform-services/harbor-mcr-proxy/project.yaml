@@ -28,6 +28,17 @@
 # `crossplane.io/external-name: /projects/17218`, read off the cluster) so the
 # first reconcile GETs id 17222 instead of trying to create a project named
 # "mcr-proxy" that already exists (which would 409).
+#
+# ⚠ deletionPolicy: Orphan IS LORE-BEARING — DO NOT "TIDY" IT AWAY. Same
+# incident and same reasoning as harbor-base-images/project.yaml (see that
+# file's header comment for the full writeup, and
+# docs/operator/base-images.md) — this MR was destroyed alongside base-images'
+# in the 2026-09-13 04:00:23Z incident by the same mechanism (deletionPolicy
+# defaulted to Delete, a recreate raced a delete, the recreate then 403'd and
+# permanently stalled). TRADE-OFF ACCEPTED: a deliberate decommission of this
+# project now needs a manual Harbor delete; the MR alone will not clean it up.
+# Do NOT copy this onto tenant-scoped Project MRs — tenant teardown
+# legitimately needs Crossplane to delete the tenant's own Harbor project.
 apiVersion: project.harbor.crossplane.io/v1alpha1
 kind: Project
 metadata:
@@ -37,6 +48,7 @@ metadata:
   annotations:
     crossplane.io/external-name: "/projects/17222"
 spec:
+  deletionPolicy: Orphan   # shared platform mirror — never destroyable by MR churn; see header comment
   forProvider:
     name: mcr-proxy
     public: true

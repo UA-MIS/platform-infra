@@ -197,6 +197,12 @@ Disk: the registry PVC is 60Gi on ceph-block. Check current usage with
 distinct base images across Docker Hub, MCR, and GCR — a few GB, not a
 capacity concern at this PVC size.
 
+> **Full runbook, image inventory, and the 2026-09-13 destroy-by-churn
+> incident:** [base-images](base-images.md). Short version: both `base-images`'
+> and `mcr-proxy`'s `Project` MRs now carry `spec.deletionPolicy: Orphan` — a
+> Kubernetes-side churn of the MR can no longer take the real Harbor project
+> (and every tenant build in the org) down with it.
+
 ---
 
 ## Day-2 checks

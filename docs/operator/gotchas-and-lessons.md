@@ -227,3 +227,24 @@ Crossplane onboarding — is the fix.
 CI tags images with a **12-char** short-sha (`cut -c1-12`), not the 7-char form git
 and GitHub display. An ApplicationSet image bump that copies the 7-char display sha
 gets `ImagePullBackOff`. Read the pushed tag from the build log.
+
+### Default `deletionPolicy: Delete` on a shared Crossplane MR + a 403 = permanent outage, not drift
+
+2026-09-13 04:00:23Z: the `base-images` and `mcr-proxy` `Project` MRs (Crossplane
+`project.harbor.crossplane.io`) were recreated by something, went
+`Synced=False` a second later, and — because `deletionPolicy` was left at its
+Crossplane default (`Delete`) — the recreate had already issued a `DELETE`
+against the real Harbor project. The recreate then failed with `observe failed:
+cannot run refresh: ... 403 FORBIDDEN`. A `404` there would have let Crossplane
+recreate the project and self-heal; the `403` made the drift **permanent** —
+every tenant build in the org failed for ~36h until a human recreated both
+projects by hand. Separately, the `RobotAccount` MR reported `Ready=True` the
+whole time even though its external-name pointed at a robot bound to the dead
+project id — **a Crossplane MR can report healthy over a resource that no
+longer exists**, so don't trust `Ready=True` alone for anything whose identity
+is a remote numeric ID. Fix: `spec.deletionPolicy: Orphan` on any Project MR
+that represents a **shared** resource (nothing team-scoped should be
+destroyable by K8s object churn) — see [base-images](base-images.md) for the
+full writeup and the trade-off it accepts (a deliberate decommission now needs
+a manual Harbor delete). Do not apply `Orphan` to tenant-scoped Project MRs —
+tenant teardown legitimately needs Crossplane to delete the tenant's project.

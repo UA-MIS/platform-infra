@@ -1,7 +1,39 @@
-# Curated Docker Hub image list for dockerhub-mirror-cronjob.yaml (same dir).
-# ONE exact `<repo>:<tag>` per line — deliberate curation, never a wildcard.
-# "How does a new version get in": add a line here (a normal, reviewable PR),
-# then either wait for the next scheduled run or trigger one immediately
+# Curated base-image list for dockerhub-mirror-cronjob.yaml (same dir).
+#
+# FORMAT (2026-09-14, incident-driven — see docs/operator/base-images.md):
+# one entry per line, whitespace-separated:
+#
+#   <image-ref>  [<source-registry>]
+#
+# - <image-ref> is `<repo>:<tag>` OR `<repo>@sha256:<digest>` (digest form
+#   preserves a SEC digest-pin exactly, same convention as every other
+#   digest-pinned reference in this repo — D-030).
+# - <source-registry> is OPTIONAL. Omitted = `mirror.gcr.io` (Google's public,
+#   anonymous, read-through Docker Hub cache — see the CronJob's header
+#   comment for why Docker Hub is never addressed directly). This is BACK-
+#   COMPATIBLE: every line that predates this column is still a bare
+#   `<image-ref>` and still resolves to `mirror.gcr.io`, unchanged behavior.
+# - Blank lines and lines starting with `#` are skipped by the copy loop
+#   (this header stays out-of-band above `data:`, but in-list comments are
+#   supported for grouping below).
+#
+# WHY A SOURCE COLUMN AT ALL: incident 2026-09-13 (base-images destroyed,
+# see docs/operator/base-images.md) surfaced 3 images the project held that
+# this job could never have fetched under the old bare-repo:tag format,
+# because `mirror.gcr.io` ONLY mirrors Docker Hub — it 404s/MANIFEST_UNKNOWNs
+# anything actually hosted on gcr.io or mcr.microsoft.com. Those 3 were
+# previously reachable ONLY via the Harbor-native Replication MRs
+# (replication-mcr-*.yaml, replication-gcr-*.yaml, same dir), which are
+# `schedule: manual` — they do NOT self-heal on a project recreate; a human
+# has to remember to POST an execution. Carrying them here too means the
+# nightly run (which IS automatic and idempotent — a re-copy of an unchanged
+# digest is a fast no-op) recovers them without anyone remembering a manual
+# step. This does not replace the Replication MRs (leave them — they're the
+# faster/native path for a deliberate version bump); it closes the
+# automatic-recovery gap they leave open.
+#
+# "How does a new version get in": add/edit a line here (a normal, reviewable
+# PR), then either wait for the next scheduled run or trigger one immediately
 # (`kubectl create job --from=cronjob/dockerhub-mirror-populate -n harbor
 # dockerhub-mirror-populate-manual-$(date +%s)`). Removing a line does NOT
 # delete anything already mirrored — the CronJob only ever adds/updates
@@ -13,7 +45,8 @@
 # Every entry here corresponds 1:1 to a FROM line, CI `container:` image, or
 # scaffolder fragment base image found in: next-up, mychef, curb-web, ida-llm,
 # springais, attributeextractor, and platform-services/backstage/templates/
-# _fragments/**. See the platform-infra PR description for the full mapping.
+# _fragments/**. See the platform-infra PR description for the full mapping,
+# and docs/operator/base-images.md for the authoritative current list.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -23,6 +56,7 @@ metadata:
     platform.capstone/component: platform
 data:
   images.txt: |
+    # --- Docker Hub (source defaults to mirror.gcr.io) ---
     library/python:3.12-slim
     library/python:3.11-slim
     library/python:3.12-slim-bookworm
@@ -50,3 +84,15 @@ data:
     library/eclipse-temurin:21-jre
     library/postgres:17-alpine
     library/python:3-slim
+
+    # --- GCR (explicit source; digest-pinned, D-030) ---
+    # kaniko executor: needed by EVERY build (Kaniko itself). Also covered by
+    # replication-gcr-kaniko-executor.yaml (manual-trigger); this entry is the
+    # automatic-recovery path.
+    kaniko-project/executor@sha256:c3109d5926a997b100c4343944e06c6b30a6804b2f9abe0994d3de6ef92b028e gcr.io
+
+    # --- MCR (explicit source; digest-pinned, D-030) ---
+    # Also covered by replication-mcr-dotnet-{sdk,aspnet}.yaml (manual-trigger);
+    # these entries are the automatic-recovery path.
+    dotnet/sdk@sha256:5ef85cc12cb25be6ec319a7392d1e9efd53c3bc8abb971c53d8058a473f09053 mcr.microsoft.com
+    dotnet/aspnet@sha256:9a464e9a7e8c6144631020975f703c89034fe386417cb740620df69c2c6cfe24 mcr.microsoft.com
