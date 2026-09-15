@@ -191,6 +191,30 @@ Do these **in order**, after the cluster heal + the Phase-3 domain cutover:
    **Exact mint + seal + apply commands and the full `new-capstone-vm` runthrough are in
    [`docs/operator/vm-path-harbor-provisioner.md`](../../docs/operator/vm-path-harbor-provisioner.md).**
 
+   **Provisioned ArgoCD webhook — seal `ARGOCD_WEBHOOK_SECRET`.** The
+   `capstone:ensure-argocd-webhook` scaffolder action (runs right after `publish:github` in
+   every tenant-onboarding template) creates the tenant repo's ArgoCD Git webhook so ArgoCD
+   syncs on push instead of the default ~3-minute poll. Unlike the Harbor robot above, there
+   is nothing new to mint — the value must be the EXACT SAME secret already sealed into
+   `argocd-secret`'s `webhook.github.secret` key (`platform-services/argocd-config/
+   sealedsecret-webhook.yaml`, ns `argocd` — see
+   [`docs/operator/argocd-gitops.md`](../../docs/operator/argocd-gitops.md) → "Git webhook —
+   instant sync"). Reseal `backstage-process-secrets` with:
+   - **`ARGOCD_WEBHOOK_SECRET`** — copy verbatim from `argocd-secret`'s
+     `webhook.github.secret`. Do NOT generate a new value — ArgoCD validates every
+     delivery's HMAC against its own copy, so a different value here is silently wrong (see
+     below).
+
+   Read by `applicationsets/backstage-process-app.yaml`'s `appConfig.capstone.argocd` block
+   (same "chart loads ONLY the overlay" seam as `capstone.harbor` above). Until sealed, the
+   scaffolder step fails closed with `capstone.argocd.webhookUrl and
+   capstone.argocd.webhookSecret are required`.
+
+   ⚠ **If `argocd-secret`'s `webhook.github.secret` is ever rotated/resealed, reseal THIS key
+   to match in the SAME change.** A mismatch is not loud: GitHub keeps delivering 200s, ArgoCD
+   keeps rejecting the signature, and every tenant's syncs silently revert to the ~3-minute
+   poll with no error anywhere — the two systems look healthy independently.
+
 4. **Build + push the custom image** (above) and bump the tag in the Application. Create
    the Harbor `harbor-pull` robot imagePullSecret in the `backstage` namespace (same
    robot pattern as team workloads — see `platform-services/harbor/README.md`).

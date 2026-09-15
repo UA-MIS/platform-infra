@@ -27,6 +27,9 @@
 #      (This repo CONTENT stays Backstage-templated — the hybrid, ADR-031 §9a.)
 #   3. publish:github — create UA-MIS/<repo>, push, set the default branch + the
 #      branch protection the platform expects (PRs only into main; no direct pushes).
+#   3b. capstone:ensure-argocd-webhook — wire the repo's ArgoCD Git webhook (instant sync
+#      on push instead of the default ~3-minute poll). Idempotent; same GitHub App auth
+#      as publish:github.
 #   4. catalog:register — register the new component's catalog-info.yaml so it shows
 #      up in The Process software catalog immediately.
 #   5. capstone:emit-tenant-claim — render the SINGLE CapstoneTenant XR (the zero-touch
@@ -387,6 +390,24 @@ spec:
         # by catalog ingestion + capstone:render-tenant. Repo creation runs as the App, not
         # a user OAuth token (which we removed from the RepoUrlPicker above). Mirrors the
         # publish:github:pull-request step (5b), which already uses the App token.
+
+    # 3b) Provision the ArgoCD Git webhook on the just-created repo, so ArgoCD refreshes
+    #    this tenant's Applications on push instead of waiting on the default ~3-minute
+    #    reconciliation poll. Runs right after `publish` — the SAME step that creates the
+    #    repo also wires its ArgoCD-facing config, so there is exactly one thing that ever
+    #    owns a tenant repo's GitHub-side settings (branch protection + collaborators in
+    #    `publish` above, the webhook here) — no separate reconciler, no second source of
+    #    truth. Idempotent (skips creation if the repo already has a hook targeting the
+    #    configured URL) and safe on a scaffold retry. Auth + the webhook HMAC secret both
+    #    come from backend config (integrations.github + capstone.argocd.webhookSecret) —
+    #    no token/secret input here, matching publish:github. See
+    #    plugins/scaffolder-backend-module-capstone/src/actions/ensureArgocdWebhook.ts for
+    #    why this lives here rather than in the Crossplane Composition or a standalone job.
+    - id: ensure-argocd-webhook
+      name: Wire ArgoCD Git webhook (instant sync)
+      action: capstone:ensure-argocd-webhook
+      input:
+        repoUrl: github.com?owner=UA-MIS&repo=${{ parameters.appName }}
 
     # 4) Register the new component so it appears in The Process catalog right away.
     - id: register

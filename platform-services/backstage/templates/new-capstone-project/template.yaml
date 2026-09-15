@@ -341,6 +341,19 @@ spec:
         # a user OAuth token (which we removed from the RepoUrlPicker above). Mirrors the
         # publish:github:pull-request step (5b), which already uses the App token.
 
+    # 3b) Provision the ArgoCD Git webhook on the just-created repo (instant sync on push
+    #    instead of the default ~3-minute poll). Same action/reasoning as the zero-touch
+    #    template's step of the same id — this is the FALLBACK safety-net template, so it
+    #    gets the same wiring: every tenant-onboarding path provisions the webhook, not
+    #    just the zero-touch one. Idempotent; auth + secret come from backend config, no
+    #    template input. See plugins/scaffolder-backend-module-capstone/src/actions/
+    #    ensureArgocdWebhook.ts.
+    - id: ensure-argocd-webhook
+      name: Wire ArgoCD Git webhook (instant sync)
+      action: capstone:ensure-argocd-webhook
+      input:
+        repoUrl: github.com?owner=UA-MIS&repo=${{ parameters.appName }}
+
     # 4) Register the new component so it appears in The Process catalog right away.
     - id: register
       name: Register in catalog

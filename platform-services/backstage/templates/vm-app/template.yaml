@@ -455,7 +455,18 @@ spec:
             access: admin
         # No `token:` — authenticates via integrations.github (the platform GitHub App).
 
-    # 3b) WAIT for GitHub to actually serve the just-pushed catalog-info.yaml before
+    # 3b) Provision the ArgoCD Git webhook on the just-created repo (instant sync on push
+    #    instead of the default ~3-minute poll). Same action as every other tenant-creating
+    #    template — VM tenants get instant sync too. Idempotent; auth + secret come from
+    #    backend config, no template input. See plugins/scaffolder-backend-module-capstone/
+    #    src/actions/ensureArgocdWebhook.ts.
+    - id: ensure-argocd-webhook
+      name: Wire ArgoCD Git webhook (instant sync)
+      action: capstone:ensure-argocd-webhook
+      input:
+        repoUrl: github.com?owner=UA-MIS&repo=${{ parameters.appName }}
+
+    # 3c) WAIT for GitHub to actually serve the just-pushed catalog-info.yaml before
     #     `register` below reads it (FIX-19/CATALOG-001 -- same root cause + fix as
     #     new-project/template.yaml; see waitForRepoContent.ts for the full writeup).
     #     catalog:register performs a SYNCHRONOUS first read of catalog-info.yaml the

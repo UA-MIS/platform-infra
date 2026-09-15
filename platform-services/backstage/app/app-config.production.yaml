@@ -236,6 +236,22 @@ capstone:
     username: ${HARBOR_PROVISIONER_USERNAME}
     secret: ${HARBOR_PROVISIONER_SECRET}
     oidcGroupPrefix: UA-MIS
+  # ── ArgoCD webhook provisioning (capstone:ensure-argocd-webhook) ─────────────────────
+  # Creates the tenant repo's ArgoCD Git webhook at scaffold time (new-capstone-project-
+  # zerotouch/template.yaml, right after publish:github) so ArgoCD refreshes that repo's
+  # Applications on push instead of waiting on the default ~3-minute reconciliation poll.
+  # Idempotent: lists the repo's existing webhooks first and skips creation if one already
+  # targets webhookUrl — safe to re-run. DEPLOY DEPENDENCY (devops): seal
+  # ARGOCD_WEBHOOK_SECRET into `backstage-process-secrets`, set to the EXACT SAME value as
+  # `argocd-secret`'s `webhook.github.secret` key (platform-services/argocd-config/
+  # sealedsecret-webhook.yaml, ns argocd) BEFORE this image deploys — the scaffolder step
+  # fails closed if it's unset. ⚠ If argocd-secret is ever rotated/resealed, reseal this key
+  # to match in the SAME change: a mismatch is NOT loud — GitHub still delivers 200s,
+  # ArgoCD still rejects the signature, and syncs silently revert to polling with no error
+  # anywhere (see the action's file header).
+  argocd:
+    webhookUrl: https://argocd.capstone.uamishub.com/api/webhook
+    webhookSecret: ${ARGOCD_WEBHOOK_SECRET}
   # ── Admin Tenant Teardown page (capstone-tenants) ─────────────────────────────────────
   # De-provision a finished tenant: the backend opens a PR against the onboarding ledger repo
   # (platform-infra) removing tenants/_claims/<team>-<app>.yaml; on merge, ArgoCD prunes the

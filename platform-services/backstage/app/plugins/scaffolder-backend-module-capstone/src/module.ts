@@ -5,6 +5,9 @@
  *
  *   - M3 (this PR): `capstone:seal-secret` (createSealSecretAction) — the secrets capability.
  *   - M4 (m4-dev):  `capstone:render-tenant` (createRenderTenantAction) — onboarding render.
+ *   - `capstone:ensure-argocd-webhook` (createEnsureArgocdWebhookAction) — provisions the
+ *     ArgoCD Git webhook on every new tenant repo at scaffold time (instant sync instead of
+ *     the ~3-minute poll). See the action's own file header for the full design rationale.
  *
  * To add an action: import its factory, give it its deps from the registerInit `deps` block
  * below (add the service ref to `deps` if it needs a new one), and pass it to `addActions`.
@@ -24,6 +27,7 @@ import { createCommitToMainAction } from './actions/commitToMain';
 import { createComposeProjectAction } from './actions/composeProject';
 import { createPreflightAction } from './actions/preflight';
 import { createWaitForRepoContentAction } from './actions/waitForRepoContent';
+import { createEnsureArgocdWebhookAction } from './actions/ensureArgocdWebhook';
 
 export const capstoneScaffolderModule = createBackendModule({
   pluginId: 'scaffolder',
@@ -97,6 +101,18 @@ export const capstoneScaffolderModule = createBackendModule({
           // runs; catalog:register itself is unchanged. Read-only. See the action's own
           // file header for the full root-cause writeup.
           createWaitForRepoContentAction({ config }),
+          // Provisioned ArgoCD webhook: the SAME thing that creates the tenant repo
+          // (publish:github, one step earlier in new-capstone-project-zerotouch/
+          // template.yaml) also wires its ArgoCD Git webhook, so every new tenant syncs
+          // on push instead of the default ~3-minute poll — no separate reconciler, no
+          // second source of truth for the repo's GitHub-side config. Idempotent (lists
+          // existing hooks first; skips creation if one already targets the configured
+          // URL). Auth: same integrations.github App as publish:github/commit-to-main.
+          // The HMAC secret comes from capstone.argocd.webhookSecret (backend config,
+          // backstage-process-secrets), never from template input. See the action's own
+          // file header for the ADR-035 §D2 rejection of putting this in the Crossplane
+          // Composition instead.
+          createEnsureArgocdWebhookAction({ config }),
         );
       },
     });

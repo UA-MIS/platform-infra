@@ -38,6 +38,32 @@ export interface Config {
        */
       oidcGroupPrefix?: string;
     };
+    /**
+     * ArgoCD webhook provisioning for the capstone:ensure-argocd-webhook scaffolder action
+     * (creates the tenant repo's ArgoCD Git webhook at scaffold time, so ArgoCD syncs on
+     * push instead of the default ~3-minute poll). `webhookSecret` MUST be the exact same
+     * value sealed into `argocd-secret`'s `webhook.github.secret` key (platform-services/
+     * argocd-config/sealedsecret-webhook.yaml) — ArgoCD validates every delivery's HMAC
+     * against that value, and a mismatch fails SILENTLY (GitHub still delivers 200s, ArgoCD
+     * still rejects the signature, syncs quietly revert to polling with no visible error).
+     * If argocd-secret is ever rotated/resealed, this value must be rotated to match in the
+     * SAME change.
+     */
+    argocd?: {
+      /**
+       * ArgoCD's webhook receiver URL.
+       * Default (this platform): https://argocd.capstone.uamishub.com/api/webhook.
+       * @visibility backend
+       */
+      webhookUrl?: string;
+      /**
+       * The shared HMAC secret ArgoCD's webhook receiver validates deliveries against.
+       * REQUIRED — the action fails closed rather than creating an unsigned/mis-signed
+       * webhook. Must match argocd-secret's `webhook.github.secret` exactly.
+       * @visibility secret
+       */
+      webhookSecret?: string;
+    };
     secrets?: {
       /**
        * Branch-name prefix for each set/delete PR (branch = <prefix><key>-<env>-<ts>).

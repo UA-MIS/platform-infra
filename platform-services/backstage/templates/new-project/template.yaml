@@ -745,6 +745,16 @@ spec:
           - team: labmx
             access: admin
 
+    # 3b) Provision the ArgoCD Git webhook on the just-created repo (instant sync on push
+    #    instead of the default ~3-minute poll). Same action as every other tenant-creating
+    #    template. Idempotent; auth + secret come from backend config, no template input.
+    #    See plugins/scaffolder-backend-module-capstone/src/actions/ensureArgocdWebhook.ts.
+    - id: ensure-argocd-webhook
+      name: Wire ArgoCD Git webhook (instant sync)
+      action: capstone:ensure-argocd-webhook
+      input:
+        repoUrl: github.com?owner=UA-MIS&repo=${{ parameters.appName }}
+
     # 4) WAIT for GitHub to actually serve the just-pushed catalog-info.yaml before the
     #    next step reads it (FIX-19/CATALOG-001). Root cause: `register` below is
     #    Backstage's built-in catalog:register action, which performs a SYNCHRONOUS

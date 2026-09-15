@@ -198,6 +198,16 @@ spec:
         # No `token:` — publish:github authenticates via integrations.github (the
         # platform GitHub App), the same App used by catalog ingestion + render-tenant.
 
+    # 3b) Provision the ArgoCD Git webhook on the just-created repo (instant sync on push
+    #    instead of the default ~3-minute poll). Idempotent; auth + secret come from
+    #    backend config, no template input. See plugins/scaffolder-backend-module-capstone/
+    #    src/actions/ensureArgocdWebhook.ts.
+    - id: ensure-argocd-webhook
+      name: Wire ArgoCD Git webhook (instant sync)
+      action: capstone:ensure-argocd-webhook
+      input:
+        repoUrl: github.com?owner=UA-MIS&repo=${{ parameters.appName }}
+
     # 4) Register the new component so it appears in The Process catalog right away.
     - id: register
       name: Register in catalog

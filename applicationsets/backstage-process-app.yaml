@@ -432,6 +432,22 @@ spec:
                 username: ${HARBOR_PROVISIONER_USERNAME}
                 secret: ${HARBOR_PROVISIONER_SECRET}
                 oidcGroupPrefix: UA-MIS
+              # ── ArgoCD webhook provisioning (capstone:ensure-argocd-webhook) ────────
+              # MIRROR of app-config.production.yaml's capstone.argocd block (same
+              # "chart loads ONLY this overlay" seam as auth/catalog/integrations/harbor
+              # above). Creates the tenant repo's ArgoCD Git webhook at scaffold time so
+              # ArgoCD syncs on push instead of the default ~3-minute poll. DEPLOY
+              # DEPENDENCY (devops): seal ARGOCD_WEBHOOK_SECRET into
+              # backstage-process-secrets, set to the EXACT SAME value as argocd-secret's
+              # `webhook.github.secret` key (platform-services/argocd-config/
+              # sealedsecret-webhook.yaml, ns argocd) — the scaffolder step fails closed
+              # if it's unset. ⚠ Rotating argocd-secret's webhook.github.secret WITHOUT
+              # rotating this key to match is a SILENT failure: GitHub keeps delivering
+              # 200s, ArgoCD keeps rejecting the signature, and syncs quietly revert to
+              # polling with no error anywhere (see the action's file header).
+              argocd:
+                webhookUrl: https://argocd.capstone.uamishub.com/api/webhook
+                webhookSecret: ${ARGOCD_WEBHOOK_SECRET}
         # ── ServiceAccount for the Vault WRITE path (#108) ───────────────────────
         # Dedicated SA the secrets-UX backend authenticates to Vault as (k8s-auth role
         # `backstage-writer` binds THIS SA — NOT `default`, which would grant write-any-
