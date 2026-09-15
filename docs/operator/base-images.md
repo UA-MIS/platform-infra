@@ -161,6 +161,74 @@ identified (no controller/job/actor confirmed) — `deletionPolicy: Orphan` make
 that mechanism harmless going forward for these two projects, but it was not
 diagnosed.
 
+**Round 2 (2026-09-14, same-day follow-up):** the first fix above landed with
+the `crossplane.io/external-name` pin still pointing at the two ORIGINAL,
+now-destroyed project ids (`/projects/17223`, `/projects/17222`). Recovery had
+recreated the projects with **new** ids (`17225`, `17226`), so both MRs sat
+`Synced=False` even after `Orphan` landed — Orphan stops the MR from
+*destroying* the project, it does not make a stale adoption pointer correct.
+A live-only patch of the annotation was tried and reverted within seconds by
+ArgoCD's `selfHeal` (correct behavior — the live object must match git, and
+git had the wrong id). Fixed by re-pinning both annotations to the current ids
+in this same PR — see "Why the project id must stay pinned in git" below for
+why the pin can't just be removed instead, and the runbook below for the
+now-mandatory re-pin-in-git step.
+
+---
+
+## Why the project id must stay pinned in git (verified, not assumed)
+
+It's tempting to read the round-2 failure above as "pinning a numeric id in
+git is fragile, drop it and let Crossplane manage it dynamically." That would
+make things worse, not better, for this specific resource — verified against
+the actual controller logic, not inferred from behavior:
+
+The Crossplane `provider-harbor` Project resource is Upjet-generated from
+[`goharbor/terraform-provider-harbor`](https://github.com/goharbor/terraform-provider-harbor)'s
+`resource_project.go`, and that source establishes three facts:
+
+1. **The resource's identity is the numeric `project_id`, full stop.** Read
+   populates `project_id` straight from the API response; Import is a bare
+   passthrough of whatever id string you hand it
+   (`schema.ImportStatePassthroughContext`). There is no name-based identity
+   for this resource type to fall back to — a pin, if adoption is needed at
+   all, has to be a numeric id.
+2. **Read/Observe only treats a plain `404` as "gone, safe to recreate."**
+   Every other error — including the `403` this project-scoped provisioner
+   credential gets when it GETs an id that no longer maps to any real project
+   (Harbor can't evaluate a namespace-scoped permission against a
+   nonexistent namespace, so it fails closed with Forbidden instead of Not
+   Found) — propagates as a hard error. This is *why* the 2026-09-13 incident
+   was a 36h outage instead of a same-night self-heal, and it is not
+   something this repo can patch around; it lives in the provider.
+3. **Create has no 409-conflict adoption fallback.** If a project with the
+   given name already exists — true right now for both `base-images` and
+   `mcr-proxy`, and true again after any future manual recreate — Create
+   simply returns the 409 to the caller. There is no lookup-and-adopt-by-name
+   logic. Dropping the external-name pin here would not make the MR
+   self-healing; it would swap a permanently-stuck `403` (Observe) for a
+   permanently-stuck `409` (Create) the very next time someone has to
+   hand-recreate the project. That's why this PR keeps the pin.
+
+This is also the answer to "why don't `harbor-dockerhub-proxy/` or the
+tenant Project MRs in `composition.yaml` need this": they never adopted a
+pre-existing hand-made object. Crossplane's own Create ran first for those,
+succeeded, and the provider wrote the resulting id into the live object's
+`crossplane.io/external-name` annotation itself — there was never anything to
+pin in git for them. `base-images`/`mcr-proxy` are pinned specifically
+*because* they started life as a hand-created object Crossplane needed to
+adopt rather than create — and every time that object is destroyed and
+manually recreated, the adoption has to be redone, in git, or ArgoCD's
+`selfHeal` will keep reasserting the stale (now-wrong) id.
+
+**If this class of incident recurs a third time,** the actual structural fix
+is upstream, not here: `goharbor/terraform-provider-harbor`'s Read function
+would need to treat a `403` from a namespace-scoped credential the same way
+it treats a `404` (both mean "this specific id is not something I can see
+right now," and only a system-admin credential can reliably tell the
+difference) — that's a provider-side change, out of scope for this repo, and
+not attempted here.
+
 ---
 
 ## Recovery runbook (if this ever happens again)
@@ -170,11 +238,18 @@ diagnosed.
    `deletionPolicy: Orphan` is in place (post-fix), the underlying Harbor project
    should **still exist** (Orphan means the MR's own churn never deleted it) —
    confirm via `GET /api/v2.0/projects/base-images` before assuming data loss.
-2. If the project genuinely does not exist (pre-fix state, or a real manual
-   deletion): recreate it via the Harbor API — `name`, `public: true`,
-   `vulnerability_scanning: false` — and either update the MR's
-   `crossplane.io/external-name` annotation to the new project ID, or delete and
-   let Crossplane create fresh (project is empty either way at this point).
+2. If the project genuinely does not exist: recreate it via the Harbor API —
+   `name`, `public: true`, `vulnerability_scanning: false` — note the new
+   `project_id` it returns, then **update
+   `platform-services/harbor-{base-images,mcr-proxy}/project.yaml`'s
+   `crossplane.io/external-name` annotation to that id, commit, and merge, in
+   the same change as the recreate.** This is the ONLY correct path:
+   - Do **not** patch the annotation live and leave it — ArgoCD's `selfHeal`
+     reverts it to whatever git says within seconds (confirmed 2026-09-14).
+   - Do **not** delete the MR and let Crossplane "create fresh" instead of
+     re-pinning — Create has no fallback for "a project with this name
+     already exists" (see "Why the project id must stay pinned in git"
+     above); it will just 409 and get stuck the same way the stale pin 403s.
 3. Check the `RobotAccount` MR (`base-images-mirror-push`) — do not trust
    `Ready=True` alone; confirm the robot it names actually exists in Harbor and
    is bound to the current project ID. If not, delete the stale MR (and any

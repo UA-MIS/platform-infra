@@ -248,3 +248,18 @@ destroyable by K8s object churn) — see [base-images](base-images.md) for the
 full writeup and the trade-off it accepts (a deliberate decommission now needs
 a manual Harbor delete). Do not apply `Orphan` to tenant-scoped Project MRs —
 tenant teardown legitimately needs Crossplane to delete the tenant's project.
+
+**Round 2, same incident:** `Orphan` alone wasn't enough — the git-pinned
+`crossplane.io/external-name` (used to *adopt* this hand-created project
+rather than re-create it) still pointed at the destroyed project's OLD id.
+Recovery recreated the project under a NEW id, so both MRs stayed
+`Synced=False` until the annotation was re-pinned **in git** — a live-only
+`kubectl patch` of the annotation was reverted by ArgoCD's `selfHeal` within
+seconds (correct behavior: live must match git). This resource type has no
+name-based external-name to fall back to (verified against
+`goharbor/terraform-provider-harbor`'s `resource_project.go`, which the
+Crossplane provider wraps) and its Create path has no 409-adopt-by-name
+fallback either, so re-pinning the id in git is the only way to recover — and
+it must happen **every time** this project is manually recreated, not just
+once. See [base-images](base-images.md)'s "Why the project id must stay
+pinned in git" section and its recovery runbook.
