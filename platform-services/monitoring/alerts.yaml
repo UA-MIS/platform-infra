@@ -169,10 +169,70 @@ spec:
               genuine snapshot staleness does.
 
     # ── (b) External Secrets Operator: store not Ready / sync error ────────────
+    #
+    # ── curb-web-secret incident (2026-09-12/15) — ExternalSecretSyncError FIXED,
+    #    NOT ADDED. This alert already existed (committed 2026-09-03) and its
+    #    expression genuinely matched curb-web-secret's Ready=False condition the
+    #    entire three days it sat broken — so "add detection" was the wrong frame.
+    #    It was already there. The question that mattered was why it never reached
+    #    a human, and the answer is a labeling bug, not a missing rule.
+    #
+    #    THE BUG: `namespace` LIES on this metric. ESO's own exporter (confirmed
+    #    against upstream's Grafana dashboard, which queries
+    #    `externalsecret_status_condition{...} by (namespace, name)`) labels each
+    #    series with the NAMESPACE OF THE EXTERNALSECRET IT DESCRIBES — i.e. it is
+    #    designed to carry `namespace="curb-staging"`. But on THIS cluster's scrape
+    #    config, the ESO controller pod itself lives in the `external-secrets`
+    #    namespace, and Prometheus auto-attaches its OWN `namespace` label from
+    #    the scrape target (`external-secrets`) to every series it scrapes from
+    #    that pod. That collides with the exporter's own `namespace` label, and
+    #    with `honor_labels: false` (the default, and what this PodMonitor uses)
+    #    Prometheus's target label wins — the exporter's original is renamed
+    #    `exported_namespace` instead of being dropped. The TenantDatabaseSecretMissing
+    #    rule below already discovered and worked around this for ITS join
+    #    (`exported_namespace` in its `by()`/annotations); these three rules
+    #    predate that discovery and were never revisited.
+    #
+    #    THE CONSEQUENCE, verified against this exact config (not assumed): every
+    #    ExternalSecretSyncError/SecretStoreNotReady alert, for EVERY tenant in the
+    #    fleet, carries the SAME `namespace` label value — the ESO controller's own
+    #    namespace, `external-secrets` — never the tenant's. Two failures stack:
+    #      1. The rendered alert text ("ExternalSecret {{ $labels.namespace }}/...")
+    #         shows `external-secrets`, not `curb-staging` — actively misleading,
+    #         not just blank, because `external-secrets` reads as a plausible real
+    #         value instead of an obvious gap.
+    #      2. WORSE: Alertmanager's route tree groups `by: ['namespace', 'alertname']`
+    #         (kube-prometheus-stack-app.yaml). Every tenant's ExternalSecretSyncError
+    #         collapses into ONE Alertmanager group (namespace=external-secrets,
+    #         alertname=ExternalSecretSyncError) — this is the SAME group-collapse
+    #         class already diagnosed for Crossplane MR alerts (see the `max_alerts:
+    #         25` / 128 KiB-ntfy-cap comment on the platform-oncall receiver), just
+    #         never connected to this rule. Bundle one big group and the per-tenant
+    #         signal — WHICH tenant, and whether curb's line even survives the
+    #         25-alert truncation — depends on how many other ExternalSecrets are
+    #         unhealthy fleet-wide at that moment. That is a plausible, evidenced
+    #         mechanism for "the alert fired the whole time and nobody could tell
+    #         curb was in it" — not proof of the exact 3-day timeline (this PR does
+    #         not have cluster/Alertmanager access to confirm what was actually
+    #         delivered), but a real bug independent of that question, worth fixing
+    #         regardless of which mechanism dropped curb specifically.
+    #
+    #    THE FIX: `label_replace` the real tenant namespace from `exported_namespace`
+    #    back onto the literal `namespace` label before it reaches Alertmanager —
+    #    label_replace OVERWRITES an existing destination label, so this corrects
+    #    both the misleading annotation text and the Alertmanager grouping key with
+    #    one change, no route-tree edit required. ClusterSecretStoreNotReady is left
+    #    alone: ClusterSecretStore is genuinely cluster-scoped, so its `namespace`
+    #    label already means the ESO controller (there is no tenant namespace to
+    #    recover).
     - name: external-secrets
       rules:
         - alert: ExternalSecretSyncError
-          expr: externalsecret_status_condition{condition="Ready", status="False"} == 1
+          expr: >-
+            label_replace(
+              externalsecret_status_condition{condition="Ready", status="False"} == 1,
+              "namespace", "$1", "exported_namespace", "(.+)"
+            )
           for: 10m
           labels:
             severity: warning
@@ -182,7 +242,13 @@ spec:
               ExternalSecret {{ $labels.namespace }}/{{ $labels.name }} has been
               Ready=False (SecretSyncError) for 10m. The backing k8s Secret is stale
               or missing. Check the ExternalSecret status and the SecretStore it
-              references.
+              references. Common cause on this platform: an explicit spec.data[]
+              entry whose Vault property isn't set in THIS environment — ESO's
+              data[] is atomic, so one missing key blocks the whole Secret,
+              silently discarding every OTHER key that resolved fine (this is what
+              happened to curb-web-secret in curb-staging/curb-prod, 2026-09-12).
+              `kubectl -n {{ $labels.namespace }} describe externalsecret {{ $labels.name }}`
+              names the exact missing key.
         - alert: ClusterSecretStoreNotReady
           expr: clustersecretstore_status_condition{condition="Ready", status="False"} == 1
           for: 10m
@@ -195,7 +261,11 @@ spec:
               ESO cannot reach/authenticate to Vault. ALL ExternalSecrets that use it
               are blocked. Check Vault reachability + the k8s-auth role.
         - alert: SecretStoreNotReady
-          expr: secretstore_status_condition{condition="Ready", status="False"} == 1
+          expr: >-
+            label_replace(
+              secretstore_status_condition{condition="Ready", status="False"} == 1,
+              "namespace", "$1", "exported_namespace", "(.+)"
+            )
           for: 10m
           labels:
             severity: warning
@@ -264,22 +334,34 @@ spec:
         #   count(kube_secret_info) right now                          = 187 (present)
         #   guard clause `and on() (count(kube_secret_info) > 0)`       = passes (1)
         #   simulated absence (count() of a namespace with 0 Secrets)   = 0 (blocks)
+        #
+        # curb-web-secret incident follow-up (this PR): `max by (exported_namespace,
+        # name)` drops every OTHER label, including `namespace` — so this alert had
+        # NO namespace label at all, and Alertmanager's `group_by: ['namespace',
+        # 'alertname']` collapsed every tenant's TenantDatabaseSecretMissing into one
+        # group (empty namespace), same class of bug as ExternalSecretSyncError above,
+        # independently discovered here. The outer label_replace restores a real
+        # `namespace` label from `exported_namespace` so grouping is per-tenant again;
+        # the annotation already used `exported_namespace` directly and is unchanged.
         - alert: TenantDatabaseSecretMissing
           expr: >-
-            (
-              max by (exported_namespace, name) (
-                externalsecret_status_condition{condition="Ready", status="True", name=~".+-db"} == 1
+            label_replace(
+              (
+                max by (exported_namespace, name) (
+                  externalsecret_status_condition{condition="Ready", status="True", name=~".+-db"} == 1
+                )
+                and on () (count(kube_secret_info) > 0)
               )
-              and on () (count(kube_secret_info) > 0)
-            )
-            unless on (exported_namespace, name) (
-              label_replace(
+              unless on (exported_namespace, name) (
                 label_replace(
-                  max by (namespace, secret) (kube_secret_info),
-                  "exported_namespace", "$1", "namespace", "(.+)"
-                ),
-                "name", "$1", "secret", "(.+)"
-              )
+                  label_replace(
+                    max by (namespace, secret) (kube_secret_info),
+                    "exported_namespace", "$1", "namespace", "(.+)"
+                  ),
+                  "name", "$1", "secret", "(.+)"
+                )
+              ),
+              "namespace", "$1", "exported_namespace", "(.+)"
             )
           for: 20m
           labels:
