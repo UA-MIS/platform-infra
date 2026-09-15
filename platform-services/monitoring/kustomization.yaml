@@ -160,6 +160,12 @@ resources:
   # dashboard above uses), live + errors-only Loki logs, pod health, and
   # shared-backend-DB health, all scoped by the $namespace picker.
   - dashboard-tenant-app-observability.yaml
+  # MIS 321 "Tap War" classroom live demo: 5 huge, projector-legible panels
+  # (total taps, live taps/sec by team, players connected, territory split,
+  # joins over time) sourced from the app team's tapwar_* metrics
+  # (mis321-demo-prod). One-off, not a namespace-templated tenant view, so it
+  # gets its own "MIS 321" folder, same reasoning as Crimson Copies above.
+  - dashboard-mis321-tapwar.yaml
 
 labels:
   - pairs:
