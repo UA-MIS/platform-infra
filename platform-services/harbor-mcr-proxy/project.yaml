@@ -20,14 +20,27 @@
 # platform-built; scanning it is not actionable here (same call as
 # dockerhub-proxy).
 #
-# ⚠ ADOPTING a pre-existing live object, not creating one. `mcr-proxy` already
-# exists (project_id=17222, registry_id=2 — created by hand on 2026-09-09,
-# `GET /api/v2.0/projects/17222` confirms both). The external-name annotation
-# below is pre-set to `/projects/17222` (format copied verbatim from
-# harbor-dockerhub-proxy/project.yaml's live MR:
-# `crossplane.io/external-name: /projects/17218`, read off the cluster) so the
-# first reconcile GETs id 17222 instead of trying to create a project named
-# "mcr-proxy" that already exists (which would 409).
+# ⚠ ADOPTING a pre-existing live object, not creating one. `mcr-proxy`
+# ORIGINALLY existed as project_id=17222, registry_id=2 (created by hand on
+# 2026-09-09, `GET /api/v2.0/projects/17222` confirmed both at the time).
+# project_id=17222 was DESTROYED in the 2026-09-13 04:00:23Z incident (see the
+# "deletionPolicy: Orphan" comment below) and RECREATED BY HAND on 2026-09-14
+# during incident recovery as project_id=17226 — the id below is pinned to
+# the CURRENT live project. registry_id=2 (registryIdRef: mcr) was unaffected
+# — only the two Project MRs (base-images, mcr-proxy) were destroyed, not the
+# Registry MRs. The external-name annotation makes the first reconcile a GET,
+# adopting the hand-made project instead of a 409 create-conflict.
+#
+# ⚠ THE PIN IS STRUCTURALLY REQUIRED, NOT A BOOTSTRAP-ONLY CONVENIENCE — and
+# it MUST be updated in git (this file) every time the live project is
+# manually recreated. That is now a documented recovery step (see
+# docs/operator/base-images.md's runbook — it covers mcr-proxy too, not just
+# base-images), not tribal knowledge. See
+# harbor-base-images/project.yaml's header comment for the full, verified
+# reasoning (goharbor/terraform-provider-harbor source citations) on why this
+# resource type has no name-based external-name, why a 403-on-GET never
+# self-heals, and why Create has no 409-adopt fallback — all identical here,
+# same resource type, same provisioner credential.
 #
 # ⚠ deletionPolicy: Orphan IS LORE-BEARING — DO NOT "TIDY" IT AWAY. Same
 # incident and same reasoning as harbor-base-images/project.yaml (see that
@@ -46,7 +59,7 @@ metadata:
   labels:
     platform.capstone/component: platform
   annotations:
-    crossplane.io/external-name: "/projects/17222"
+    crossplane.io/external-name: "/projects/17226"   # RE-PIN THIS after any manual project recreate — see comment above
 spec:
   deletionPolicy: Orphan   # shared platform mirror — never destroyable by MR churn; see header comment
   forProvider:

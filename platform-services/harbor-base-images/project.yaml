@@ -32,35 +32,69 @@
 # docs/operator/harbor.md before doing it.
 #
 # ⚠ ADOPTING a pre-existing live object, not creating one. `base-images` was
-# hand-created on 2026-09-10 via the raw Harbor API (project_id=17223) to
-# populate and verify the mirror end-to-end BEFORE landing this declarative
-# form (same bootstrap sequence as harbor-mcr-proxy/'s mcr-proxy adoption — see
-# that file's comment for the general pattern). The external-name annotation
-# below (`/projects/17223`) makes the first reconcile a GET, adopting the
+# ORIGINALLY hand-created on 2026-09-10 (project_id=17223) to populate and
+# verify the mirror end-to-end BEFORE landing this declarative form (same
+# bootstrap sequence as harbor-mcr-proxy/'s mcr-proxy adoption — see that
+# file's comment for the general pattern). project_id=17223 was DESTROYED in
+# the 2026-09-13 04:00:23Z incident (see the "deletionPolicy: Orphan" comment
+# below) and RECREATED BY HAND on 2026-09-14 during incident recovery as
+# project_id=17225 — the id below is pinned to the CURRENT live project, not
+# the original one. The external-name annotation makes the first reconcile a
+# GET, adopting the
 # hand-made project instead of a 409 create-conflict.
+#
+# ⚠ THE PIN IS STRUCTURALLY REQUIRED, NOT A BOOTSTRAP-ONLY CONVENIENCE — and
+# it MUST be updated in git (this file) every time the live project is
+# manually recreated. That is now a documented recovery step (see
+# docs/operator/base-images.md's runbook), not tribal knowledge. Verified
+# against the underlying Terraform provider this Crossplane provider wraps
+# (goharbor/terraform-provider-harbor, resource_project.go — Upjet generates
+# this provider from it):
+#   - The resource's identity IS the numeric project_id (Read populates
+#     project_id from the API response; Import is a passthrough of whatever
+#     id string you give it). There is no name-based external-name for this
+#     resource type — the pin cannot be dropped in favor of a name.
+#   - Read/Observe clears state (permitting a clean recreate) ONLY on a plain
+#     404. Any other error, including the 403 this project-scoped provisioner
+#     credential gets from a GET against an id that no longer exists (see the
+#     deletionPolicy comment below), propagates as a hard failure — it never
+#     self-heals into a fresh Create.
+#   - Create has NO 409-conflict adoption fallback: if a project with this
+#     name already exists (true right now, and true after any future manual
+#     recreate) and you drop the pin, Create 409s and there is no logic to
+#     look up and adopt the existing project by name. Dropping the pin
+#     entirely would trade one permanently-stuck state (403 on GET) for
+#     another (409 on Create) — it is not a fix, so this PR keeps the pin
+#     rather than removing it. This is also why `harbor-dockerhub-proxy/` and
+#     tenant Project MRs (composition.yaml) never need a pin: they were never
+#     adopting a pre-existing hand-made object, so Crossplane's own Create
+#     path ran first and it wrote the resulting id into the annotation
+#     itself — nothing to pin in git for those.
 #
 # ⚠ deletionPolicy: Orphan IS LORE-BEARING — DO NOT "TIDY" IT AWAY.
 # Incident 2026-09-13 04:00:23Z: this MR (and mcr-proxy's) was recreated by
 # something that churned the underlying Kubernetes object, went Synced=False
-# a second later on a 403 from Harbor, and — because the DEFAULT
-# deletionPolicy is Delete — Crossplane had already issued a DELETE against
-# the real Harbor project as part of that recreate. Every tenant build in the
-# org failed for ~36h (base-images/mcr-proxy are the org-wide image mirror
-# every Dockerfile FROM and CI container: image resolves through). A 404
-# instead of 403 would have let Crossplane recreate the project cleanly; the
-# 403 turned recoverable drift into a permanent stall that needed a human to
-# recreate the project by hand. See docs/operator/base-images.md and the
-# gotchas-and-lessons.md Harbor entry for the full writeup.
+# a second later on a 403 from Harbor (the "propagates as a hard failure"
+# case described above — the credential's GET is project-scoped, so it
+# cannot even resolve permission against an id that no longer maps to a real
+# project, and Harbor returns 403 rather than 404), and — because the
+# DEFAULT deletionPolicy is Delete — Crossplane had already issued a DELETE
+# against the real Harbor project as part of that recreate. Every tenant
+# build in the org failed for ~36h (base-images/mcr-proxy are the org-wide
+# image mirror every Dockerfile FROM and CI container: image resolves
+# through) until a human recreated the project by hand (see the ADOPTING
+# comment above for the resulting new id). See docs/operator/base-images.md
+# and the gotchas-and-lessons.md Harbor entry for the full writeup.
 #
 # TRADE-OFF ACCEPTED: with Orphan, deleting THIS MR no longer deletes the
 # Harbor project — the registry content is orphaned (kept) and a future
-# reconcile re-adopts it. That is correct for a SHARED image mirror (nothing
-# about it should be destroyable by K8s object churn), but it means a
-# deliberate decommission of this project now needs a manual Harbor delete —
-# removing the MR alone will not clean it up. Do NOT copy this onto
-# tenant-scoped Project MRs (platform-services/crossplane/apis/composition.yaml)
-# — tenant teardown legitimately needs Crossplane to delete the tenant's own
-# Harbor project.
+# reconcile re-adopts it (once the pin above is updated to match). That is
+# correct for a SHARED image mirror (nothing about it should be destroyable
+# by K8s object churn), but it means a deliberate decommission of this
+# project now needs a manual Harbor delete — removing the MR alone will not
+# clean it up. Do NOT copy this onto tenant-scoped Project MRs
+# (platform-services/crossplane/apis/composition.yaml) — tenant teardown
+# legitimately needs Crossplane to delete the tenant's own Harbor project.
 apiVersion: project.harbor.crossplane.io/v1alpha1
 kind: Project
 metadata:
@@ -68,7 +102,7 @@ metadata:
   labels:
     platform.capstone/component: platform
   annotations:
-    crossplane.io/external-name: "/projects/17223"
+    crossplane.io/external-name: "/projects/17225"   # RE-PIN THIS after any manual project recreate — see comment above
 spec:
   deletionPolicy: Orphan   # shared platform mirror — never destroyable by MR churn; see header comment
   forProvider:
