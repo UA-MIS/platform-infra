@@ -1,0 +1,511 @@
+# MIS 321 "Tap War" live-demo dashboard -- a ONE-OFF classroom moment, not an
+# ops dashboard. Context: ~40 students play a browser tap-war game on their
+# phones (two teams, Flexbox vs Float), projected in the room; immediately
+# after, the instructor throws THIS dashboard on the projector so they see the
+# traffic they personally just generated. It will be read from the back of a
+# room, once, for about two minutes -- so every design choice here optimizes
+# for legibility at projector distance and immediate emotional impact
+# ("that spike was YOU"), not for an operator squinting at a terminal.
+#
+# METRIC CONTRACT (agreed with the app team, matched exactly -- see
+# tapwar_taps_total et al. below):
+#   tapwar_taps_total    counter, label `team` (flexbox|float)
+#   tapwar_joins_total   counter (a join ~= a QR scan)
+#   tapwar_players       gauge, currently connected players
+#   tapwar_squares_owned gauge, label `team`
+#   tapwar_rounds_total  counter (not surfaced -- no panel asked for it)
+# Scrape interval: 15s (the app team's ServiceMonitor + /metrics; NOT shipped
+# in this repo/PR -- this dashboard only consumes what they expose).
+#
+# ⚠ UNVERIFIED AT AUTHORING TIME: every query below filters on
+# `namespace="mis321-demo-prod"`, following this repo's universal per-tenant
+# convention (see dashboard-tenant-app-observability.yaml and friends) --
+# Prometheus Operator's default target relabeling attaches the scraped
+# workload's k8s namespace as a `namespace` label on every series. This has
+# NOT been confirmed against a live scrape because the app team's
+# ServiceMonitor/metrics endpoint did not exist yet when this dashboard was
+# built. If the app's /metrics handler is served from a process that strips
+# or never carries that label, every panel here reads a clean "0" (see the
+# no-data section below) instead of real numbers -- check Prometheus's own
+# query browser (`{__name__=~"tapwar_.*"}`) once the app team's ServiceMonitor
+# is live, and drop the namespace filter if it doesn't match.
+#
+# RATE WINDOW: rate()/increase() below use a 1m window. Standard floor is
+# 4x the scrape interval (15s x 4 = 60s) -- short enough that a 40-phone tap
+# frenzy still visibly spikes the line, long enough to guarantee 4-5 real
+# samples in every window so a single missed/misaligned scrape doesn't blank
+# the panel. 30s (2x scrape interval) was considered and rejected: at exactly
+# 2 samples per window, scrape-alignment jitter can intermittently starve
+# rate() of the two points it needs, which reads on a projector as the line
+# randomly dropping to nothing mid-spike -- exactly the wrong failure mode for
+# a two-minute, one-shot demo.
+#
+# GRACEFUL NO-DATA: every query ends in `or vector(0)`. Before the game (ServiceMonitor
+# live, counters at zero) this shows real per-team zero series. Before the ServiceMonitor
+# exists at all (metric absent entirely) it collapses to a single unlabeled flat zero --
+# not a per-team split, but a clean "0", never Grafana's "No data" placeholder or a query
+# error. That degrade-to-single-zero case is the one thing that could not be verified
+# live (see the unverified-namespace-label note above) -- everything else in this
+# paragraph was reasoned from Prometheus's documented `or` binary-operator semantics.
+#
+# COLORS: Team Flexbox = blue (#0072B2), Team Float = orange (#E69F00) -- two
+# colors from the Okabe-Ito colorblind-safe qualitative palette, chosen instead
+# of red/green per the ask (colorblind students, and red/green reads as
+# good/bad rather than as two neutral teams). Joins-over-time uses a third
+# Okabe-Ito color (#CC79A7, purple) so it's visually distinct from both teams.
+#
+# Auto-provisioned by the Grafana sidecar via the `grafana_dashboard: "1"`
+# label, filed into its own "MIS 321" folder via the `grafana_folder`
+# annotation (same mechanism as dashboard-crimson-copies-app.yaml).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-mis321-tapwar
+  namespace: monitoring
+  labels:
+    platform.capstone/component: platform
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: "MIS 321"
+data:
+  mis321-tapwar.json: |
+    {
+      "uid": "mis321-tapwar-live",
+      "title": "MIS 321 -- Tap War Live",
+      "description": "Live traffic from the Tap War in-class game (mis321-demo-prod). Built for a projector, read once, for about two minutes -- five big panels, no pickers to fiddle with on stage.",
+      "tags": [
+        "mis321",
+        "tapwar",
+        "classroom-demo"
+      ],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "graphTooltip": 1,
+      "time": {
+        "from": "now-30m",
+        "to": "now"
+      },
+      "refresh": "10s",
+      "templating": {
+        "list": [
+          {
+            "name": "datasource",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": {},
+            "hide": 0,
+            "label": "Data source"
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "stat",
+          "title": "TOTAL TAPS",
+          "description": "Cumulative taps across both teams for this session (the raw counter value, not windowed to the dashboard's time range) -- the number that lands after 40 phones have been hammering for a few minutes.",
+          "gridPos": {
+            "h": 10,
+            "w": 6,
+            "x": 0,
+            "y": 0
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "decimals": 0,
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "orientation": "auto",
+            "textMode": "value",
+            "colorMode": "value",
+            "graphMode": "none",
+            "justifyMode": "center",
+            "text": {
+              "valueSize": 120
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(tapwar_taps_total{namespace=\"mis321-demo-prod\"}) or vector(0)",
+              "refId": "A",
+              "instant": true
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "type": "timeseries",
+          "title": "TAPS PER SECOND",
+          "description": "Live tap rate per team -- rate() over a 1m window (4x the 15s scrape interval: long enough for 4-5 real samples every window so a missed scrape doesn't blank the line, short enough that the in-room tap frenzy still visibly spikes instead of averaging flat). This is the single most convincing 'that was you' panel.",
+          "gridPos": {
+            "h": 10,
+            "w": 18,
+            "x": 6,
+            "y": 0
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "smooth",
+                "lineWidth": 4,
+                "fillOpacity": 25,
+                "showPoints": "never",
+                "spanNulls": true,
+                "gradientMode": "opacity",
+                "pointSize": 5,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "axisPlacement": "auto",
+                "axisLabel": ""
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "decimals": 1
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "flexbox"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#0072B2"
+                    }
+                  },
+                  {
+                    "id": "displayName",
+                    "value": "Team Flexbox"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "float"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#E69F00"
+                    }
+                  },
+                  {
+                    "id": "displayName",
+                    "value": "Team Float"
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": []
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (team) (rate(tapwar_taps_total{namespace=\"mis321-demo-prod\"}[1m])) or vector(0)",
+              "refId": "A",
+              "legendFormat": "{{team}}"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "PLAYERS CONNECTED",
+          "description": "Live connected-player count, with a trend line showing the join surge right after the QR code goes up on the projector.",
+          "gridPos": {
+            "h": 8,
+            "w": 6,
+            "x": 0,
+            "y": 10
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "decimals": 0,
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  },
+                  {
+                    "color": "blue",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "orientation": "auto",
+            "textMode": "value",
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "center",
+            "text": {
+              "valueSize": 70
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(tapwar_players{namespace=\"mis321-demo-prod\"}) or vector(0)",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "TERRITORY SPLIT",
+          "description": "Squares currently owned by each team. Colors match the Taps Per Second panel: blue = Flexbox, orange = Float.",
+          "gridPos": {
+            "h": 8,
+            "w": 9,
+            "x": 6,
+            "y": 10
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "decimals": 0,
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "flexbox"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#0072B2"
+                    }
+                  },
+                  {
+                    "id": "displayName",
+                    "value": "TEAM FLEXBOX"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "float"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#E69F00"
+                    }
+                  },
+                  {
+                    "id": "displayName",
+                    "value": "TEAM FLOAT"
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "orientation": "horizontal",
+            "textMode": "value_and_name",
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "center",
+            "text": {
+              "valueSize": 60
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (team) (tapwar_squares_owned{namespace=\"mis321-demo-prod\"}) or vector(0)",
+              "refId": "A",
+              "legendFormat": "{{team}}",
+              "instant": true
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "type": "timeseries",
+          "title": "JOINS OVER TIME",
+          "description": "The QR-scan curve -- joins per minute (increase() over the same 1m window as the taps panel, for the same reason). Expect a sharp climb the moment the QR code goes up, then a plateau once everyone's in.",
+          "gridPos": {
+            "h": 8,
+            "w": 9,
+            "x": 15,
+            "y": 10
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "smooth",
+                "lineWidth": 3,
+                "fillOpacity": 20,
+                "showPoints": "never",
+                "spanNulls": true,
+                "gradientMode": "opacity",
+                "pointSize": 5,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "axisPlacement": "auto",
+                "axisLabel": ""
+              },
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "#CC79A7"
+              },
+              "decimals": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "hidden",
+              "placement": "bottom",
+              "showLegend": false,
+              "calcs": []
+            },
+            "tooltip": {
+              "mode": "single",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(increase(tapwar_joins_total{namespace=\"mis321-demo-prod\"}[1m])) or vector(0)",
+              "refId": "A",
+              "legendFormat": "joins / min"
+            }
+          ]
+        }
+      ]
+    }
