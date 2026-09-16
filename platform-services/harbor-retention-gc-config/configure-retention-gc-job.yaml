@@ -33,9 +33,23 @@
 # subsequent run (PUT /retentions/{id}); GC schedule is the same create-once /
 # update-in-place shape (POST when GET returns an empty body, PUT thereafter). A
 # REGULAR ArgoCD resource (not a sync hook — see harbor-configure-oidc for why a
-# hook-only app never fires) with Force=true,Replace=true,ServerSideApply=false, so
-# a changed manifest re-runs it and an unchanged re-sync leaves the completed Job in
-# place.
+# hook-only app never fires).
+#
+# M660-4 — THIS IS NO LONGER A JOB, AND THE OLD ANNOTATION IS GONE ON PURPOSE.
+# It used to carry Force=true,Replace=true,ServerSideApply=false so that a changed
+# manifest re-ran it immediately. A CronJob must NOT carry that: Replace on a
+# CronJob would recreate the schedule object rather than re-run the work, and the
+# annotation is correctly absent. Do not add it back.
+#
+# THE COST, STATED PLAINLY: a change to this script no longer takes effect on
+# merge. It waits for the next 00:30Z. That is free on an ordinary day and
+# expensive on the day it is an urgent fix — e.g. correcting a rule that is
+# deleting the wrong tags. THE ESCAPE HATCH, which is the whole point of writing
+# this down:
+#   kubectl -n harbor create job --from=cronjob/harbor-configure-retention-gc \
+#     keeplist-manual-$(date +%s)
+# The script is idempotent (every write is a PUT), so running it by hand at any
+# time is safe and is the correct move whenever you cannot wait for 00:30Z.
 #
 # SAFETY (re-verified live 2026-08-27, read-only queries only — no mutating call was
 # made while checking this):
@@ -120,12 +134,29 @@ spec:
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
-  # A missed window (controller down at 00:30) must NOT silently skip the refresh
-  # and leave retention acting on a stale keep-list — run late instead.
+  # A missed window (controller down at 00:30) still gets run, LATE, as long as it
+  # is picked up within this many seconds of the scheduled time.
+  # Precisely: past the deadline the run is SKIPPED, not deferred — Kubernetes does
+  # not queue it for later, it abandons that occurrence and waits for the next
+  # schedule. So this is "a late start is still acceptable for up to an hour", not
+  # "a missed run is guaranteed to happen eventually". An outage longer than an
+  # hour at 00:30Z therefore means NO keep-list refresh before 02:00Z retention
+  # that night — which is exactly what HarborKeepListStale (alerts.yaml) exists to
+  # surface, and why that alert keeps its absent() arm.
   startingDeadlineSeconds: 3600
   jobTemplate:
     spec:
-      backoffLimit: 10
+      # M660-2: 10 -> 1. The failures this script produces are DETERMINISTIC —
+      # an M-4 rule-cap breach has identical input on every retry, so retrying it
+      # ten times just re-runs the entire reconcile (21 retention PUTs + GC + 23
+      # quota PUTs) ~6-7 times against a 900s deadline and then reports the Job's
+      # terminal status as `DeadlineExceeded`. That relabels the loud, specific
+      # failure M-4 was built to produce as a generic timeout — the opposite of
+      # the intent, and it buries the actual cause under six identical repeats.
+      # 1 retry still absorbs the genuinely transient case, which is real here:
+      # the first execution after #652 lost two pods to `curl: (52)` and an
+      # HTTP 500 while ArgoCD was restarting harbor-core underneath it.
+      backoffLimit: 1
       activeDeadlineSeconds: 900
       template:
         metadata:
@@ -201,7 +232,18 @@ spec:
                 # truncate, because a truncated policy silently unprotects a deployed
                 # image — see step 0a.
                 - name: RETENTION_MAX_RULES
+                  # 15 is Harbor's own documented per-policy rule limit (goharbor
+                  # rejects a retention policy with more rules than this), NOT a
+                  # number picked here. Raising it does not raise Harbor's limit —
+                  # it only converts a clean pre-flight failure into a rejected PUT.
                   value: "15"
+                # Maximum percentage the deployed-tag count may shrink in one run
+                # before the job refuses to apply (see the shrink guard in step 0a).
+                # 40% allows real churn — a team deleting a Deployment, an env torn
+                # down — while still catching a truncated enumeration, which
+                # typically loses far more than that.
+                - name: INUSE_SHRINK_TOLERANCE_PCT
+                  value: "40"
                 # --- Storage quotas (2026-09-16). See step 3 for why these are
                 #     deliberately overcommitted and must not be shrunk to sum under
                 #     the PVC size. Sizes are GiB, applied as bytes.
@@ -222,6 +264,21 @@ spec:
               command: ["/bin/sh", "-eu", "-c"]
               args:
                 - |
+                  # set -f (noglob) — MANDATORY, not hygiene. This script iterates
+                  # over Harbor TAG PATTERNS with `for PAT in $VAR`, and unquoted
+                  # word-splitting also performs PATHNAME expansion. A pattern of
+                  # `**` therefore expands against the container filesystem: caught
+                  # live, `for _pt in $_condpats` turned the pattern list into
+                  # "bin dev etc home lib proc root sys tmp usr var". Every tag would
+                  # then be compared against directory names, so real coverage is
+                  # missed and nonsense is reported as a match. `*.*.*` survives today
+                  # only because nothing in / happens to have two dots — i.e. this was
+                  # already latent for the global protect patterns, not just the new
+                  # audit. Pathname expansion is never wanted anywhere in this script;
+                  # `case` pattern matching is unaffected by -f, which is what the
+                  # matching actually relies on.
+                  set -f
+
                   CORE="$HARBOR_CORE"
                   AUTH="admin:$HARBOR_ADMIN_PASSWORD"
 
@@ -277,6 +334,31 @@ spec:
                   n_total=$(wc -l < /tmp/all_projects.txt | tr -d ' ')
                   echo "==> $n_total projects found; applying retention to:$RETENTION_PROJECTS"
                   [ -n "$RETENTION_PROJECTS" ] || { echo "FAIL: enumeration produced no projects"; exit 1; }
+
+                  # SINGLE SOURCE OF TRUTH for "which deployed tags in project $1 need
+                  # a rule of their own" — i.e. deployed, minus anything a global
+                  # RETENTION_PROTECT_TAGS pattern already covers.
+                  #
+                  # It is a function because this exact derivation is needed in THREE
+                  # places (the shrink guard, the rule builder, the read-back check)
+                  # and the previous版 had it written out inline twice and approximated
+                  # a third time in different units. That is what produced the guard
+                  # comparing 42 against 15: both numbers were "in use", but one counted
+                  # raw refs across all projects and the other counted deduped uncovered
+                  # tags in managed projects only. One definition, called three times,
+                  # cannot drift like that.
+                  uncovered_tags() {
+                    _utp="$1"
+                    grep "^${_utp}/" /tmp/inuse.txt 2>/dev/null | sed 's|^.*:||' | sort -u \
+                      | while IFS= read -r _ut; do
+                          [ -n "$_ut" ] || continue
+                          _utc=0
+                          for _utg in $RETENTION_PROTECT_TAGS; do
+                            case "$_ut" in $_utg) _utc=1; break ;; esac
+                          done
+                          [ "$_utc" = "1" ] || echo "$_ut"
+                        done
+                  }
 
                   # --- 0a) IN-USE TAG KEEP-LIST (2026-09-16) --------------------
                   # Recency does not imply "not in use", and the converse is worse: a
@@ -346,7 +428,9 @@ spec:
                         # token (watch cache expired mid-walk) also lands here rather
                         # than being swallowed as a partial list.
                         echo "FAIL: GET $_url returned HTTP $code — refusing to build a partial keep-list"
-                        cat /tmp/k8s.json; exit 1
+                        # head, not cat: this payload is ~3.6MB and dumping it whole
+                      # buries the actual error in the job log (and in Loki).
+                      head -c 2000 /tmp/k8s.json; echo; exit 1
                       fi
                     # NOTE the ': *' in these patterns. The API server pretty-prints by
                     # default, so the field arrives as `"image": "nginx"` WITH a space —
@@ -369,18 +453,131 @@ spec:
                     [ "$_skip_api" = "1" ] || echo "    $API -> $_api_n image refs ($_page page(s))"
                   done
 
-                  # Keep only this registry's images that carry a TAG. Digest-pinned
-                  # refs (…@sha256:…) are deliberately dropped: they are immune to tag
-                  # retention anyway, and there is no tag to protect.
+                  # Keep every ref that carries a TAG, INCLUDING refs that carry a
+                  # tag AND a digest.
+                  #
+                  # THIS WAS WRONG UNTIL 2026-09-16 AND THE COMMENT ASSERTED IT WAS
+                  # RIGHT. The filter was `grep -v '@sha256:'`, justified as "digest
+                  # refs are immune to tag retention, there is no tag to protect".
+                  # That holds for a pure `repo@sha256:…` ref. It is FALSE for
+                  # `repo:tag@sha256:…`, which has both — and dropping it loses the
+                  # tag that needs protecting. The failure chain is not subtle:
+                  # retention removes the unprotected tag -> the manifest is now
+                  # untagged -> GC at 02:30 with delete_untagged:true DESTROYS it ->
+                  # and the digest pull the workload actually uses now fails too. A
+                  # digest pin does not protect a manifest; a TAG keeps it reachable.
+                  #
+                  # Found by the reviewer on a live gap, not in review of this code:
+                  # npm-mirror/npm-mirror-0 runs
+                  # dockerhub-proxy/verdaccio/verdaccio:5@sha256:9d622d25… and was the
+                  # ONE ref in the whole cluster this filter discarded — so it never
+                  # entered the keep-list, and the 1b audit that should have flagged it
+                  # never saw it. One ref, and it was the npm mirror the whole fleet's
+                  # CI pulls through.
+                  #
+                  # So: strip the digest suffix, then require a tag on what remains.
+                  # A pure digest ref reduces to `project/repo` with no colon in the
+                  # final segment and is still correctly dropped — it genuinely has no
+                  # tag to retain.
                   REGISTRY_HOST="${REGISTRY_HOST:-harbor.capstone.uamishub.com}"
                   grep -F "${REGISTRY_HOST}/" /tmp/inuse_raw.txt 2>/dev/null \
-                    | grep -v '@sha256:' \
                     | sed "s|^.*${REGISTRY_HOST}/||" \
+                    | sed 's/@sha256:[0-9a-f]*$//' \
+                    | grep ':' \
                     | sort -u > /tmp/inuse.txt || true
                   n_inuse=$(wc -l < /tmp/inuse.txt | tr -d ' ')
                   echo "==> in-use: $n_inuse tagged image refs on $REGISTRY_HOST"
-                  # Zero is legitimate only on an empty cluster; on this one it means
-                  # the enumeration broke, and proceeding would strip every keep-rule.
+
+                  # GUARD: empty is the OBVIOUS failure; PARTIAL is the realistic one.
+                  # `-gt 0` alone only catches total enumeration collapse. Since M-3
+                  # added pagination the plausible failure changed shape: a truncated
+                  # or half-walked list is SHORT, not empty. That matters because these
+                  # policies are PUT WHOLESALE — a short keep-list does not merely fail
+                  # to add protection, it actively REMOVES the rules that were there
+                  # last night, for every tag that went missing. A run like that
+                  # reports success and quietly disarms the control.
+                  #
+                  # So the floor is relative to what we protected last time, persisted
+                  # in Harbor itself (no state of our own to keep): count the existing
+                  # always-rules that are NOT one of the global RETENTION_PROTECT_TAGS
+                  # patterns — i.e. the deployed-tag rules this job wrote on its last
+                  # run — and refuse to proceed if today's list would drop more than
+                  # INUSE_SHRINK_TOLERANCE_PCT below it.
+                  # A real shrink happens (a team deletes a Deployment), hence the
+                  # tolerance rather than an exact match; a collapse from 42 to 6 does
+                  # not, and that is what this stops.
+                  # NB: this runs BEFORE the retention loop, so /tmp/proj_*.json does
+                  # not exist yet — fetch it here. Reading the cache at this point is
+                  # how the first version of this guard silently counted 0 for every
+                  # project and never engaged at all; caught by the count printing 0
+                  # while 21 projects visibly had deployed-tag rules.
+                  # BOTH SIDES MUST BE IN THE SAME UNITS. The first version of this
+                  # guard compared n_inuse (42: raw project/repo:tag lines, all
+                  # projects, including tags already covered by *.*.*/latest, counting
+                  # mychef-backend:95b52f8 and mychef-frontend:95b52f8 separately)
+                  # against _prev (15: deployed-tag RULES in Harbor — deduped, managed
+                  # projects only, globals excluded). Floor came out at 9, so it only
+                  # fired below 9 of 42 — a 79% loss, while the knob and both comments
+                  # said 40%. A pagination failure losing half the fleet produced ~21
+                  # and sailed straight through the guard built to catch exactly that.
+                  # Now both sides are the rule count, from the same uncovered_tags().
+                  _now=0
+                  for P in $RETENTION_PROJECTS; do
+                    _now=$(( _now + $(uncovered_tags "$P" | wc -l | tr -d ' ') ))
+                  done
+
+                  _prev=0
+                  for P in $RETENTION_PROJECTS; do
+                    if [ ! -s "/tmp/proj_${P}.json" ]; then
+                      _fc=$(curl -sS -o "/tmp/proj_${P}.json" -w '%{http_code}' -u "$AUTH" "$CORE/api/v2.0/projects/$P")
+                      if [ "$_fc" = "404" ]; then rm -f "/tmp/proj_${P}.json"; continue; fi
+                      # FAIL CLOSED. `continue` here let a flaky Harbor silently LOWER
+                      # the floor, which is fail-open in a control whose entire job is
+                      # to refuse when it cannot be sure — the failure would make the
+                      # guard weaker exactly when the platform is least healthy.
+                      [ "$_fc" = "200" ] || { echo "FAIL: GET /projects/$P returned HTTP $_fc while measuring the previous keep-list; refusing to guess a floor"; exit 1; }
+                    fi
+                    _rid=$(grep -o '"retention_id":"[0-9]*"' "/tmp/proj_${P}.json" 2>/dev/null | head -1 | grep -o '[0-9]*' || true)
+                    [ -n "$_rid" ] || continue
+                    _pc=$(curl -sS -o /tmp/prev.json -w '%{http_code}' -u "$AUTH" "$CORE/api/v2.0/retentions/$_rid")
+                    [ "$_pc" = "200" ] || { echo "FAIL: GET /retentions/$_rid returned HTTP $_pc while measuring the previous keep-list; refusing to guess a floor"; exit 1; }
+                    # Same hardened parse as the 1b audit: split after "template"
+                    # (Harbor serialises it last), keep only `always` rules, and SLICE
+                    # to the tag_selectors span before grepping. Without the slice this
+                    # also picks up each rule's scope_selectors repository pattern —
+                    # harmless today only because every repo scope happens to be the
+                    # literal `**`, which the exclusion below drops. The first rule with
+                    # a narrower repo scope would inflate _prev and fail a legitimate
+                    # run. Two copies of one parse, hardened 300 lines apart, is how
+                    # that stays true by luck; they are the same now.
+                    _n=$(sed 's/"template":"[^"]*"/&\n/g' /tmp/prev.json \
+                         | grep '"template":"always"' \
+                         | sed 's/.*"tag_selectors"://; s/"template".*//' \
+                         | grep -o '"pattern":"[^"]*"' | sed 's/^"pattern":"//; s/"$//' | sort -u \
+                         | while IFS= read -r _pt; do
+                             _isglobal=0
+                             for _g in $RETENTION_PROTECT_TAGS '**'; do
+                               [ "$_pt" = "$_g" ] && _isglobal=1 && break
+                             done
+                             [ "$_isglobal" = "1" ] || echo x
+                           done | wc -l | tr -d ' ')
+                    _prev=$((_prev+_n))
+                  done
+                  echo "==> in-use: $_now deployed-tag rule(s) would be written now; $_prev persisted from the previous run"
+                  if [ "$_prev" -gt 0 ]; then
+                    _floor=$(( _prev * (100 - INUSE_SHRINK_TOLERANCE_PCT) / 100 ))
+                    if [ "$_now" -lt "$_floor" ]; then
+                      echo "FAIL: this run would write $_now deployed-tag rule(s), but $_prev are already"
+                      echo "      persisted (floor $_floor at ${INUSE_SHRINK_TOLERANCE_PCT}% tolerance)."
+                      echo "      Refusing to proceed: policies are PUT wholesale, so applying a short list"
+                      echo "      would DELETE protection that exists today. This is what a truncated or"
+                      echo "      partially-walked enumeration looks like — check the per-API page counts"
+                      echo "      above before assuming workloads really were removed."
+                      exit 1
+                    fi
+                  fi
+                  # Total collapse, kept as its own case: unambiguous, and it is the
+                  # only one that is wrong even on a genuinely empty cluster.
                   [ "$n_inuse" -gt 0 ] || { echo "FAIL: in-use enumeration returned nothing — refusing to apply retention with an empty keep-list"; exit 1; }
 
                   # Shared project_id resolver (F-1). Every occurrence, deduped; a
@@ -467,12 +664,7 @@ spec:
                     # rule slot on a redundant rule.
                     INUSE_RULES=""
                     n_inuse_p=0
-                    for TAG in $(grep "^${P}/" /tmp/inuse.txt 2>/dev/null | sed 's|^.*:||' | sort -u); do
-                      covered=0
-                      for PAT in $RETENTION_PROTECT_TAGS; do
-                        case "$TAG" in $PAT) covered=1; break ;; esac
-                      done
-                      [ "$covered" = "1" ] && continue
+                    for TAG in $(uncovered_tags "$P"); do
                       n_inuse_p=$((n_inuse_p+1))
                       INUSE_RULES="${INUSE_RULES},
                       {
@@ -589,12 +781,7 @@ spec:
                     # literal rule of their own. This mirror of the build-side `covered`
                     # test must stay in sync with it: checking for a literal rule on a
                     # pattern-covered tag fails a policy that is in fact correct.
-                    for TAG in $(grep "^${P}/" /tmp/inuse.txt 2>/dev/null | sed 's|^.*:||' | sort -u); do
-                      covered=0
-                      for PAT in $RETENTION_PROTECT_TAGS; do
-                        case "$TAG" in $PAT) covered=1; break ;; esac
-                      done
-                      [ "$covered" = "1" ] && continue
+                    for TAG in $(uncovered_tags "$P"); do
                       echo "$verify" | grep -qF "\"pattern\":\"${TAG}\"" \
                         || { echo "FAIL: policy $RID for '$P' is missing a retain rule for DEPLOYED tag '$TAG' after apply"; echo "$verify"; exit 1; }
                     done
@@ -638,12 +825,86 @@ spec:
                       echo "    NOTE: '$P' has no retention policy at all, so nothing prunes it — deployed tags are safe."
                       continue
                     fi
-                    _pol=$(curl -fsS -u "$AUTH" "$CORE/api/v2.0/retentions/$_rid")
+                    # M660-3: graceful, matching the project fetch ten lines above.
+                    # `curl -fsS` here had no code check and no `|| true`, so under
+                    # `sh -eu` a transient 500 on /retentions/{id} killed the whole
+                    # run BETWEEN retention and GC — skipping GC and every quota —
+                    # which is precisely what this step's own summary promises it
+                    # will not do. An audit must never be able to abort the
+                    # reconcile it is only observing.
+                    _pc=$(curl -sS -o /tmp/xpol.json -w '%{http_code}' -u "$AUTH" "$CORE/api/v2.0/retentions/$_rid")
+                    if [ "$_pc" != "200" ]; then
+                      echo "    WARN: GET /retentions/$_rid returned HTTP $_pc — cannot audit '$P', skipping."
+                      continue
+                    fi
+                    _pol=$(cat /tmp/xpol.json)
+                    # Match tags against the policy's patterns as GLOBS, not as
+                    # literals. A literal-only check reports UNPROTECTED for a tag
+                    # that a pattern rule genuinely covers (e.g. `1*`), which trains
+                    # the reader to ignore this audit — the failure mode of any
+                    # checker that cries wolf.
+                    #
+                    # HONEST LIMIT: this proves a RULE MATCHES, not that the tag is
+                    # safe. On an unmanaged policy the matching rule may be
+                    # conditional — dockerhub-proxy's is `nDaysSinceLastPull`, which
+                    # retains only what was pulled recently, so a match there means
+                    # "covered while still being pulled", not "kept". Treating
+                    # conditional coverage as a guarantee is out of scope for an
+                    # audit that deliberately does not own these policies.
+                    # Only patterns belonging to `always` rules count as protection.
+                    # The first version of this matched ANY pattern in the policy and
+                    # duly reported dockerhub-proxy's tags as "covered by **" — but
+                    # that `**` belongs to its nDaysSinceLastPull rule, which retains
+                    # only what is still being pulled. Crediting a conditional rule as
+                    # coverage is precisely the false assurance this audit exists to
+                    # prevent, and it made the checker report OK for the one project
+                    # it was written to watch.
+                    # Splitting this JSON correctly took three attempts; the two
+                    # wrong ones both produced a FALSE OK, which is the worst
+                    # possible failure for an audit, so the reasoning is recorded.
+                    #  1. Split on `},{` — wrong. tag_selectors and scope_selectors
+                    #     are themselves nested objects, so the split lands inside
+                    #     rules and patterns get attributed to the wrong template.
+                    #  2. Split after `"template":"..."` — necessary but not
+                    #     sufficient. Harbor serialises keys alphabetically so
+                    #     template is LAST in each rule (…scope_selectors,
+                    #     tag_selectors, template), which makes the split point right
+                    #     — but EVERY rule also carries a scope_selectors repository
+                    #     pattern of `**`, so grepping all patterns still yields `**`
+                    #     for every rule. That is what made dockerhub-proxy's tags
+                    #     report "retained unconditionally by always-rule '**'" when
+                    #     `**` actually belongs to its CONDITIONAL nDaysSinceLastPull.
+                    #  3. Split after template, then slice each rule to the span
+                    #     between "tag_selectors" and "template" before grepping.
+                    #     Verified against the live payloads for policy 22
+                    #     (dockerhub-proxy -> 17-alpine 7.4-alpine RELEASE… v0.0.31,
+                    #     no `**`) and policy 30 (mychef -> *.*.* latest 95b52f8
+                    #     584c796, no `**`).
+                    _rules=$(echo "$_pol" | sed 's/"template":"[^"]*"/&\n/g')
+                    _pats=$(echo "$_rules" | grep '"template":"always"' \
+                            | sed 's/.*"tag_selectors"://; s/"template".*//' \
+                            | grep -o '"pattern":"[^"]*"' | sed 's/^"pattern":"//; s/"$//' | sort -u)
+                    _condpats=$(echo "$_rules" | grep '"template":' | grep -v '"template":"always"' \
+                            | sed 's/.*"tag_selectors"://; s/"template".*//' \
+                            | grep -o '"pattern":"[^"]*"' | sed 's/^"pattern":"//; s/"$//' | sort -u)
                     for TAG in $_tags; do
-                      if echo "$_pol" | grep -qF "\"pattern\":\"${TAG}\""; then
-                        echo "    ok: '$P' tag '$TAG' has an explicit rule"
+                      _hit=""
+                      for _pt in $_pats; do
+                        case "$TAG" in $_pt) _hit="$_pt"; break ;; esac
+                      done
+                      if [ -n "$_hit" ]; then
+                        echo "    ok: '$P' tag '$TAG' retained unconditionally by always-rule '$_hit'"
                       else
-                        echo "    UNPROTECTED: '$P' tag '$TAG' is DEPLOYED but policy $_rid has no rule naming it"
+                        echo "    UNPROTECTED: '$P' tag '$TAG' is DEPLOYED but no always-rule in policy $_rid matches it"
+                        # Then say whether a CONDITIONAL rule covers it — genuinely
+                        # different from nothing at all, and the distinction is what
+                        # the reader needs to decide whether to act. Printed AFTER the
+                        # verdict so the verdict is never buried under its caveat.
+                        _cond=""
+                        for _pt in $_condpats; do
+                          case "$TAG" in $_pt) _cond="$_pt"; break ;; esac
+                        done
+                        [ -z "$_cond" ] || echo "      (note) it does match CONDITIONAL rule '$_cond' — retained only while that rule's terms hold, not guaranteed"
                         EXCLUDED_UNPROTECTED="${EXCLUDED_UNPROTECTED} ${P}:${TAG}"
                       fi
                     done

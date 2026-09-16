@@ -819,6 +819,96 @@ spec:
     # those fired for 59h and changed nothing because no ceiling was enforced.
     # An alert with no enforcement behind it is a notification that you are about
     # to have an outage, not a control that prevents one.
+    # --- Harbor in-use keep-list freshness (2026-09-16) ----------------------
+    # M660-1. The keep-list CronJob (harbor-configure-retention-gc, 00:30Z) is the
+    # control that stops Harbor retention deleting an image a Deployment is still
+    # running. It works by being FRESH: it recomputes the deployed-tag set 90
+    # minutes before retention fires at 02:00Z.
+    #
+    # Which means a silent failure of THIS job re-creates the original bug in its
+    # most dangerous form. Retention keeps running on schedule against a keep-list
+    # that is quietly ageing, and the measured half-life of that list is under a
+    # day (curb/curb-web-backend: 0.74 days). Nothing else notices — the Job's
+    # failure is not on the CI path, no tenant sees it, and the deletion it
+    # eventually permits surfaces as an ImagePullBackOff days later with no
+    # obvious link back. A freshness control with no freshness alarm is exactly
+    # the shape of the outage it was built to prevent.
+    #
+    # Same expression as VaultRaftSnapshotFailing above, deliberately: that shape
+    # is already proven on this cluster, and the `absent()` arm is the important
+    # half — it catches the CronJob being DELETED or never created, which a
+    # staleness comparison alone cannot see (no series, no comparison, no alert).
+    # Verified live before writing: kube_cronjob_status_last_successful_time IS
+    # exposed for namespace="harbor" by this kube-state-metrics build.
+    #
+    # NOTE ON THE FRESH-DEPLOY CASE: kube-state-metrics only publishes
+    # last_successful_time after a CronJob's first SUCCESSFUL run, so a newly created
+    # CronJob has no series. That used to make this alert fire on day one; the
+    # three-arm expression below fixes it properly rather than documenting it away.
+    #
+    # ⚠ AND KNOW WHAT THIS BUYS TODAY: Alertmanager has delivered NOTHING since
+    # 2026-08-26 (~50k failed sends; the dead-man's-switch is broken too). So this
+    # rule pages nobody right now. It is written anyway — delivery gets fixed, and
+    # a rule that exists is strictly better than one nobody wrote. Do not read its
+    # silence as health until Alertmanager delivery is confirmed working.
+    - name: harbor-keeplist
+      rules:
+        - alert: HarborKeepListStale
+          # THREE ARMS, EACH MEANING EXACTLY ONE THING. The first version used the
+          # single `absent(last_successful_time)` arm copied from
+          # VaultRaftSnapshotFailing, which conflates "deleted" with "never yet
+          # succeeded" and therefore fires on every fresh deploy. That was annotated
+          # as expected-and-self-clearing — but an alert whose documentation has to
+          # tell you to ignore its first firing is an alert people learn to ignore.
+          # Splitting it removes the day-one false fire instead of excusing it.
+          #   1. stale      — succeeded before, but not in 36h.
+          #   2. deleted    — kube_cronjob_info gone. This is the arm the single
+          #                   absent() was really there for, and it is now unambiguous.
+          #   3. never ran  — no success AND the CronJob has existed > 36h, so a
+          #                   genuinely new CronJob is silent until it has had real
+          #                   chances to run.
+          # Each arm verified individually against live Prometheus before merging:
+          # the composite returns EMPTY for the freshly-created CronJob (no false
+          # fire); absent(info) on a nonexistent name returns a series (arm 2 fires);
+          # and arm 3 with the age threshold lowered returns a series, which is what
+          # proves the `and on(namespace, cronjob)` label join against absent()
+          # actually matches rather than silently never firing.
+          expr: >-
+            (time() - kube_cronjob_status_last_successful_time{namespace="harbor", cronjob="harbor-configure-retention-gc"} > 129600)
+            or
+            absent(kube_cronjob_info{namespace="harbor", cronjob="harbor-configure-retention-gc"})
+            or
+            (
+              absent(kube_cronjob_status_last_successful_time{namespace="harbor", cronjob="harbor-configure-retention-gc"})
+              and on(namespace, cronjob)
+              (time() - kube_cronjob_created{namespace="harbor", cronjob="harbor-configure-retention-gc"} > 129600)
+            )
+          for: 15m
+          labels:
+            severity: critical
+            impact: student-facing
+          annotations:
+            summary: "Harbor in-use keep-list has not refreshed in over 36h"
+            description: >-
+              harbor-configure-retention-gc has not completed successfully in over
+              36 hours, or its metric has disappeared entirely (CronJob deleted or
+              never created). Harbor tag retention still runs at 02:00Z every night
+              and is now acting on a STALE keep-list. The list's measured half-life
+              is under a day, so within ~48h retention can delete an image a
+              Deployment is still running — silent until a pod reschedules, then
+              ImagePullBackOff with no way to re-pull.
+              TRIAGE: `kubectl -n harbor get cronjob,jobs | grep retention` and read
+              the last run's logs. A run that FAILED is the easy case. The dangerous
+              case is a run that SUCCEEDED with a partial keep-list, so check the
+              log for the enumerated count (`==> in-use: N tagged image refs`) and
+              compare against `kubectl get deploy,sts,ds,cronjob -A -o json | grep
+              -c '"image": *"harbor'`. If the CronJob is gone entirely, the cause is
+              almost certainly an ArgoCD prune — reconcile
+              platform-svc-harbor-retention-gc-config.
+              MITIGATION while fixing: run it by hand —
+              `kubectl -n harbor create job --from=cronjob/harbor-configure-retention-gc
+              keeplist-manual-$(date +%s)` — it is idempotent and safe to re-run.
+
     - name: harbor-storage
       rules:
         - alert: HarborRegistryStorageHigh
