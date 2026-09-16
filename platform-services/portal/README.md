@@ -129,17 +129,21 @@ exercised a real tenant host through it), and `websecure` additionally carries t
 2. Confirm SSL/TLS mode is **Full** (edge↔tunnel is the encrypted tunnel; origin is
    the ClusterIP over the tunnel).
 
-**Verify after `platform-traefik` re-syncs (ArgoCD) / the Traefik pods roll:**
+**Current state — these commands SHOW THE BUG, they do not confirm a fix.**
+Until the tunnel origin is repointed (above), 1 and 2 return `http://`. Treat a
+`https://` result as evidence the origin change landed:
 ```bash
 # 1) unauthenticated apex gate: the OIDC `state` must carry an https, port-less rd
 curl -sS -D- -o /dev/null https://capstone.uamishub.com/internal/ \
   | grep -io 'state=[^&]*' | sed 's/%3A/:/g;s/%2F/\//g'
-#    EXPECT: ...:https://capstone.uamishub.com/internal/   (was http://…, no :8080)
+#    TODAY:  ...:http://capstone.uamishub.com/internal/    <-- the bug
+#    AFTER FIX: ...:https://capstone.uamishub.com/internal/
 
 # 2) a db-console still redirects correctly (shared middleware, don't-break check)
 curl -sS -D- -o /dev/null https://db-admin.capstone.uamishub.com/ \
   | grep -io 'state=[^&]*' | sed 's/%3A/:/g;s/%2F/\//g'
-#    EXPECT: ...:https://db-admin.capstone.uamishub.com/
+#    TODAY:  ...:http://db-admin.capstone.uamishub.com/    <-- same bug, same cause
+#    AFTER FIX: ...:https://db-admin.capstone.uamishub.com/
 
 # 3) confirm Traefik took the trustedIPs arg
 kubectl -n kube-system get deploy traefik -o jsonpath='{.spec.template.spec.containers[0].args}' \
