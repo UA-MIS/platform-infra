@@ -178,6 +178,31 @@ spec:
             #     Verified against this exact production flag set: asset 202, nested
             #     asset 202, `/` 401, `/api/auth/login` 401, `.map` 401, traversal 401.
             - --reverse-proxy=true
+            #     --trusted-proxy-ip bounds WHO may supply those X-Forwarded-* headers.
+            #     Without it oauth2-proxy trusts every connecting IP (0.0.0.0/0, ::/0)
+            #     and says so at startup: "WARNING: --reverse-proxy is enabled but no
+            #     --trusted-proxy-ip CIDRs were configured." The flag is enforced, not
+            #     cosmetic — verified on v7.15.3 by sending the same spoofed
+            #     X-Forwarded-Uri from an out-of-range client: 202 with the header
+            #     honored, 401 once the CIDR excluded the sender.
+            #
+            #     ⚠ BE PRECISE ABOUT WHAT THIS BUYS. 10.244.0.0/16 is the whole cluster
+            #     pod CIDR, so it excludes node IPs, hostNetwork pods, and anything off
+            #     the pod network — but it does NOT exclude other PODS. A tenant
+            #     workload sits inside this range too. So this does not, on its own,
+            #     survive a NetworkPolicy regression: the namespace netpol (ingress from
+            #     kube-system only) remains the control that keeps tenant pods out, and
+            #     this CIDR is the coarser second layer under it. Two partial controls,
+            #     not one full one — do not read this flag as making the netpol optional.
+            #
+            #     It is NOT scoped tighter (e.g. to w1/w2's /24s) on purpose: Traefik has
+            #     only a PREFERRED podAntiAffinity and no nodeSelector, so it may be
+            #     scheduled onto any node, and the fleet is still growing. A too-narrow
+            #     CIDR would fail SAFE but SILENTLY — headers ignored, the skip-auth
+            #     regex stops matching, and student CSS breaks again with nothing in the
+            #     logs tying it to a Traefik reschedule. Same reason applies if Traefik
+            #     is ever moved to hostNetwork: revisit this value at that point.
+            - --trusted-proxy-ip=10.244.0.0/16
             - '--skip-auth-regex=^/assets/([A-Za-z0-9_~-]+/)*[A-Za-z0-9_~-]+(\.[A-Za-z0-9_~-]+)*\.(css|js|mjs|woff2?|ttf|otf|eot|svg|png|jpe?g|gif|ico|webp|avif)$'
             - --upstream=static://200
             - --http-address=0.0.0.0:4180
