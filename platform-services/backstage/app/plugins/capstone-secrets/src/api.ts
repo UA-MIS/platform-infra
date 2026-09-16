@@ -21,6 +21,22 @@ export interface SecretSummary {
   lastUpdated?: string;
 }
 
+/**
+ * An environment that HAS an overlay ExternalSecret, whether or not it declares any keys.
+ * Lets the UI say "staging is set up, it just has no secrets yet" instead of silently
+ * omitting the environment (the bug this shape was added to fix).
+ */
+export interface EnvironmentSummary {
+  env: string;
+  declaredKeyCount: number;
+  lastUpdated?: string;
+}
+
+export interface ListSecretsResult {
+  secrets: SecretSummary[];
+  environments: EnvironmentSummary[];
+}
+
 export interface SealSecretRequest {
   entityRef: string;
   key: string;
@@ -52,7 +68,7 @@ export interface CapstoneSecretsApi {
   /** Projects (Components) the signed-in user can manage secrets for (labmx admin = all). */
   listMyProjects(): Promise<ProjectSummary[]>;
   /** List existing secret key names + last-updated for a Component's repo. Never values. */
-  listSecrets(entityRef: string): Promise<SecretSummary[]>;
+  listSecrets(entityRef: string): Promise<ListSecretsResult>;
   /** Seal a secret and open the PR(s). The value is write-only; it is never returned. */
   sealSecret(request: SealSecretRequest): Promise<SealSecretResult>;
   /** Delete (un-seal) a secret key — opens a PR removing it. Not instant (PR-by-default). */
@@ -89,7 +105,7 @@ export class CapstoneSecretsClient implements CapstoneSecretsApi {
     return body.projects ?? [];
   }
 
-  async listSecrets(entityRef: string): Promise<SecretSummary[]> {
+  async listSecrets(entityRef: string): Promise<ListSecretsResult> {
     const base = await this.baseUrl();
     const res = await this.fetchApi.fetch(
       `${base}/list?entityRef=${encodeURIComponent(entityRef)}`,
@@ -99,8 +115,8 @@ export class CapstoneSecretsClient implements CapstoneSecretsApi {
         `Failed to list secrets (${res.status}): ${await res.text()}`,
       );
     }
-    const body = (await res.json()) as { secrets: SecretSummary[] };
-    return body.secrets ?? [];
+    const body = (await res.json()) as Partial<ListSecretsResult>;
+    return { secrets: body.secrets ?? [], environments: body.environments ?? [] };
   }
 
   async sealSecret(request: SealSecretRequest): Promise<SealSecretResult> {

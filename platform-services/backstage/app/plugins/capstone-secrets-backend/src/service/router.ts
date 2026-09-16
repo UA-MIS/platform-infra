@@ -2,7 +2,8 @@
  * The capstone-secrets backend route — what the frontend Secrets page posts to.
  *
  *   POST /seal    { entityRef, key, value, envs[] } -> { pullRequestUrls[] }
- *   GET  /list?entityRef=...                         -> { secrets: [{key, env, lastUpdated}] }
+ *   GET  /list?entityRef=...                         -> { secrets: [{key, env, lastUpdated}],
+ *                                                        environments: [{env, declaredKeyCount, lastUpdated}] }
  *   GET  /my-projects                                -> { projects: [{entityRef, title, owner}] }
  *   POST /delete  { entityRef, key }                 -> { pullRequestUrl }  (un-seal via PR)
  *
@@ -75,8 +76,9 @@ export async function createRouter(
     if (typeof entityRef !== 'string' || !entityRef) {
       throw new InputError('entityRef query parameter is required');
     }
-    const secrets = await listSecrets(core, { credentials, entityRef });
-    res.json({ secrets });
+    // { secrets, environments } — `environments` lets the UI distinguish "this env is
+    // configured but has no secrets yet" from "this env does not exist for this app".
+    res.json(await listSecrets(core, { credentials, entityRef }));
   });
 
   // GET /my-projects — the access-scoped project picker (Components the user owns; labmx=all).

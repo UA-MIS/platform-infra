@@ -111,9 +111,17 @@ describe('capstone-secrets router', () => {
 
   describe('GET /list', () => {
     it('forwards entityRef and returns the write-only summaries', async () => {
-      listSecrets.mockResolvedValue([
-        { key: 'DATABASE_URL', env: 'dev', lastUpdated: '2026-06-19T00:00:00Z' },
-      ]);
+      listSecrets.mockResolvedValue({
+        secrets: [
+          { key: 'DATABASE_URL', env: 'dev', lastUpdated: '2026-06-19T00:00:00Z' },
+        ],
+        // Envs that HAVE an overlay, including ones declaring nothing — the route passes
+        // this through so the UI can distinguish "configured but empty" from "absent".
+        environments: [
+          { env: 'dev', declaredKeyCount: 1, lastUpdated: '2026-06-19T00:00:00Z' },
+          { env: 'staging', declaredKeyCount: 0 },
+        ],
+      });
       const app = await buildApp();
       const res = await request(app)
         .get('/list')
@@ -127,6 +135,10 @@ describe('capstone-secrets router', () => {
             env: 'dev',
             lastUpdated: '2026-06-19T00:00:00Z',
           },
+        ],
+        environments: [
+          { env: 'dev', declaredKeyCount: 1, lastUpdated: '2026-06-19T00:00:00Z' },
+          { env: 'staging', declaredKeyCount: 0 },
         ],
       });
       expect(listSecrets).toHaveBeenCalledWith(

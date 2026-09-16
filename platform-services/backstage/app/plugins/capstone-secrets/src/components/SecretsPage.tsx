@@ -25,6 +25,7 @@ import {
 import { useApi } from '@backstage/core-plugin-api';
 import {
   capstoneSecretsApiRef,
+  EnvironmentSummary,
   ProjectSummary,
   SecretSummary,
 } from '../api';
@@ -111,6 +112,7 @@ function ProjectSecrets(props: {
   const api = useApi(capstoneSecretsApiRef);
 
   const [secrets, setSecrets] = useState<SecretSummary[]>([]);
+  const [environments, setEnvironments] = useState<EnvironmentSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | undefined>();
   const [editing, setEditing] = useState<SecretSummary | undefined>();
@@ -121,7 +123,9 @@ function ProjectSecrets(props: {
     setLoading(true);
     setError(undefined);
     try {
-      setSecrets(await api.listSecrets(project.entityRef));
+      const res = await api.listSecrets(project.entityRef);
+      setSecrets(res.secrets);
+      setEnvironments(res.environments);
     } catch (e) {
       setError(e as Error);
     } finally {
@@ -197,6 +201,7 @@ function ProjectSecrets(props: {
           )}
           <SecretsList
             secrets={secrets}
+            environments={environments}
             loading={loading}
             error={error}
             onEdit={s => setEditing(s)}

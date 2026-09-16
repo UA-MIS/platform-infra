@@ -11,10 +11,16 @@ import {
   EmptyState,
   WarningPanel,
 } from '@backstage/core-components';
-import { SecretSummary } from '../api';
+import { EnvironmentSummary, SecretSummary } from '../api';
 
 export function SecretsList(props: {
   secrets: SecretSummary[];
+  /**
+   * Environments that HAVE an overlay ExternalSecret, whether or not they declare keys. Used
+   * to tell "configured, no secrets yet" apart from "this app has no such environment" — the
+   * old listing collapsed both into an identical blank panel.
+   */
+  environments?: EnvironmentSummary[];
   loading: boolean;
   error?: Error;
   /** When provided, each row gets an "Edit" (re-seal) action. */
@@ -22,7 +28,7 @@ export function SecretsList(props: {
   /** When provided, each row gets a "Delete" (opens a PR) action. */
   onDelete?: (secret: SecretSummary) => void;
 }) {
-  const { secrets, loading, error, onEdit, onDelete } = props;
+  const { secrets, environments, loading, error, onEdit, onDelete } = props;
 
   if (loading) {
     return <Progress />;
@@ -33,11 +39,16 @@ export function SecretsList(props: {
     );
   }
   if (secrets.length === 0) {
+    const envs = (environments ?? []).map(e => e.env);
+    const description: string =
+      envs.length > 0
+        ? `No secrets are declared yet for ${envs.join(', ')}. Sealed secrets you create appear here by key name. Values are write-only — they are never shown.`
+        : 'Sealed secrets you create appear here by key name. Values are write-only — they are never shown.';
     return (
       <EmptyState
         missing="content"
         title="No secrets sealed yet"
-        description="Sealed secrets you create appear here by key name. Values are write-only — they are never shown."
+        description={description}
       />
     );
   }

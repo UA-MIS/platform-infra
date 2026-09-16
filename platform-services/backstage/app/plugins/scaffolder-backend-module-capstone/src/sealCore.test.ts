@@ -235,6 +235,74 @@ function serveTamperedEs(env: string, victimKey: string) {
   });
 }
 
+/**
+ * The SAFE overlay shape the templates ship after the 2026-09 ESO incident: `dataFrom: extract`
+ * (no per-property atomic failure) plus the inert `platform.capstone/declared-keys` annotation
+ * that carries the key NAMES for display. `annKeys: undefined` omits the annotation entirely.
+ */
+function dataFromEs(
+  env: string,
+  annKeys?: string[],
+  opts: { annotationsBlock?: boolean } = {},
+): string {
+  const lines = [
+    'apiVersion: external-secrets.io/v1',
+    'kind: ExternalSecret',
+    'metadata:',
+    '  name: my-app-secret',
+    `  namespace: team-alpha-${env}`,
+  ];
+  if (annKeys !== undefined || opts.annotationsBlock) {
+    lines.push('  annotations:');
+    if (annKeys !== undefined) {
+      lines.push(
+        `    platform.capstone/declared-keys: ${JSON.stringify(annKeys.join(','))}`,
+      );
+    }
+  }
+  lines.push(
+    '  labels:',
+    '    app.kubernetes.io/name: my-app',
+    'spec:',
+    '  refreshInterval: "1h"',
+    '  target:',
+    '    name: my-app-secret',
+    '    deletionPolicy: Delete',
+    '  dataFrom:',
+    '    - extract:',
+    `        key: tenants/team-alpha/${env}/app`,
+    '',
+  );
+  return lines.join('\n');
+}
+
+/** getContent serving an EXACT yaml body per env (for shapes serveEs cannot express). */
+function serveRawEs(perEnvYaml: Record<string, string>) {
+  octokitCalls.getContent.mockImplementation(async (opts: any) => {
+    for (const [env, body] of Object.entries(perEnvYaml)) {
+      if (opts.path === overlayEs(env)) {
+        return {
+          data: {
+            sha: `sha-${env}`,
+            content: Buffer.from(body, 'utf8').toString('base64'),
+          },
+        } as any;
+      }
+    }
+    const e = new Error('Not Found') as Error & { status: number };
+    e.status = 404;
+    throw e;
+  });
+}
+
+/** The declared-keys annotation value written to `path`, or undefined if there is none. */
+function annotationOf(yaml: string): string | undefined {
+  const m = yaml.match(
+    /^\s*platform\.capstone\/declared-keys:\s*(.*)$/m,
+  );
+  return m ? m[1].trim().replace(/^["']|["']$/g, '') : undefined;
+}
+
 beforeEach(() => {
   vaultDeleteCalls.length = 0;
   vaultSetCalls.length = 0;
@@ -381,28 +449,147 @@ describe('SEC-057: the Vault destination is checked against the derived team', (
 describe('listSecrets', () => {
   it('reports the secretKey NAMES per env from the overlay ES (names only, no Vault)', async () => {
     serveEs({ dev: ['DATABASE_URL'], prod: [] });
-    const out = await listSecrets(makeDeps([OWNER_GROUP]), {
+    const { secrets } = await listSecrets(makeDeps([OWNER_GROUP]), {
       credentials: CREDS,
       entityRef: TARGET_REF,
     });
     // dev: app-secret (shipped) + DATABASE_URL; prod: app-secret only.
-    expect(out.filter(s => s.env === 'dev').map(s => s.key).sort()).toEqual([
+    expect(secrets.filter(s => s.env === 'dev').map(s => s.key).sort()).toEqual([
       'DATABASE_URL',
       'app-secret',
     ]);
-    expect(out.filter(s => s.env === 'prod').map(s => s.key)).toEqual([
+    expect(secrets.filter(s => s.env === 'prod').map(s => s.key)).toEqual([
       'app-secret',
     ]);
     // last-updated populated from the commit date.
-    expect(out[0].lastUpdated).toBe('2026-06-24T00:00:00Z');
+    expect(secrets[0].lastUpdated).toBe('2026-06-24T00:00:00Z');
   });
 
-  it('returns [] when no overlay ES exists (non-tenant repo)', async () => {
-    const out = await listSecrets(makeDeps([OWNER_GROUP]), {
+  it('returns no secrets when no overlay ES exists (non-tenant repo)', async () => {
+    const { secrets, environments } = await listSecrets(makeDeps([OWNER_GROUP]), {
       credentials: CREDS,
       entityRef: TARGET_REF,
     });
-    expect(out).toEqual([]);
+    expect(secrets).toEqual([]);
+    // No overlay at all -> the env is not reported as configured.
+    expect(environments).toEqual([]);
+  });
+
+  // ── THE BUG (#secrets-tab invisible envs) ───────────────────────────────────────────────
+  // An overlay on the SAFE `dataFrom: extract` shape has no `secretKey:` lines at all, so the
+  // old scrape returned [] and the `continue` dropped the whole env from the response.
+  it('reports keys declared ONLY by the annotation (dataFrom overlay, no secretKey lines)', async () => {
+    serveRawEs({ prod: dataFromEs('prod', ['beta_emails', 'watch_mode_key']) });
+    const { secrets } = await listSecrets(makeDeps([OWNER_GROUP]), {
+      credentials: CREDS,
+      entityRef: TARGET_REF,
+    });
+    expect(secrets.filter(s => s.env === 'prod').map(s => s.key)).toEqual([
+      'beta_emails',
+      'watch_mode_key',
+    ]);
+  });
+
+  it('still reports a legacy explicit data[] overlay with no annotation (curb-web shape)', async () => {
+    serveEs({ prod: ['TICKETMASTER_API_KEY', 'MAPS_KEY'] });
+    const { secrets } = await listSecrets(makeDeps([OWNER_GROUP]), {
+      credentials: CREDS,
+      entityRef: TARGET_REF,
+    });
+    expect(secrets.filter(s => s.env === 'prod').map(s => s.key).sort()).toEqual([
+      'MAPS_KEY',
+      'TICKETMASTER_API_KEY',
+      'app-secret',
+    ]);
+  });
+
+  it('de-duplicates a key that is BOTH annotated and in data[], and sorts stably', async () => {
+    // shippedEs declares `app-secret` in data[]; annotate an overlapping + a new key.
+    const yaml = shippedEs('dev', ['ZEBRA']).replace(
+      '  name: my-app-secret',
+      '  name: my-app-secret\n  annotations:\n    platform.capstone/declared-keys: "ZEBRA,alpha,app-secret"',
+    );
+    serveRawEs({ dev: yaml });
+    const { secrets } = await listSecrets(makeDeps([OWNER_GROUP]), {
+      credentials: CREDS,
+      entityRef: TARGET_REF,
+    });
+    const keys = secrets.filter(s => s.env === 'dev').map(s => s.key);
+    expect(keys).toEqual(['ZEBRA', 'alpha', 'app-secret']); // deduped + stably sorted
+  });
+
+  it('reports an env that exists but declares NOTHING, instead of dropping it', async () => {
+    serveRawEs({ staging: dataFromEs('staging', []) });
+    const { secrets, environments } = await listSecrets(makeDeps([OWNER_GROUP]), {
+      credentials: CREDS,
+      entityRef: TARGET_REF,
+    });
+    expect(secrets).toEqual([]);
+    expect(environments).toEqual([
+      {
+        env: 'staging',
+        declaredKeyCount: 0,
+        lastUpdated: '2026-06-24T00:00:00Z',
+      },
+    ]);
+  });
+
+  it('tolerates a malformed / absent annotation and falls back to the data[] scrape', async () => {
+    const empties = [
+      dataFromEs('dev', undefined, { annotationsBlock: true }), // annotations: block, no key
+      dataFromEs('staging'), // no annotations block at all
+    ];
+    serveRawEs({ dev: empties[0], staging: empties[1] });
+    const { secrets, environments } = await listSecrets(makeDeps([OWNER_GROUP]), {
+      credentials: CREDS,
+      entityRef: TARGET_REF,
+    });
+    expect(secrets).toEqual([]);
+    expect(environments.map(e => e.env).sort()).toEqual(['dev', 'staging']);
+  });
+
+  it('ignores junk/empty entries in the annotation value rather than listing blank keys', async () => {
+    serveRawEs({ dev: dataFromEs('dev', []).replace(
+      'platform.capstone/declared-keys: ""',
+      'platform.capstone/declared-keys: " , ,A_KEY,,  "',
+    ) });
+    const { secrets } = await listSecrets(makeDeps([OWNER_GROUP]), {
+      credentials: CREDS,
+      entityRef: TARGET_REF,
+    });
+    expect(secrets.map(s => s.key)).toEqual(['A_KEY']);
+  });
+
+  // The annotation is read from the ExternalSecret's OWN metadata only. A tenant may also set
+  // spec.target.template.metadata.annotations (those land on the generated Secret) — reading
+  // those as declared keys would report keys the Secrets tab does not manage.
+  it('reads only the top-level metadata annotation, not spec.target.template annotations', async () => {
+    const yaml = dataFromEs('dev', ['REAL_KEY']).replace(
+      '    deletionPolicy: Delete',
+      [
+        '    deletionPolicy: Delete',
+        '    template:',
+        '      metadata:',
+        '        annotations:',
+        '          platform.capstone/declared-keys: "NOT_A_DECLARED_KEY"',
+      ].join('\n'),
+    );
+    serveRawEs({ dev: yaml });
+    const { secrets } = await listSecrets(makeDeps([OWNER_GROUP]), {
+      credentials: CREDS,
+      entityRef: TARGET_REF,
+    });
+    expect(secrets.map(s => s.key)).toEqual(['REAL_KEY']);
+  });
+
+  it('never contacts Vault while listing (names come from git only)', async () => {
+    serveRawEs({ prod: dataFromEs('prod', ['beta_emails']) });
+    await listSecrets(makeDeps([OWNER_GROUP]), {
+      credentials: CREDS,
+      entityRef: TARGET_REF,
+    });
+    expect(vaultSetCalls).toEqual([]);
+    expect(vaultDeleteCalls).toEqual([]);
   });
 });
 
@@ -786,5 +973,160 @@ describe('listMyProjects (realistic catalog filter evaluation)', () => {
     };
     const projects = await listMyProjects(deps, { credentials: bob });
     expect(projects.map(p => p.entityRef)).toEqual(['component:default/acme-web']);
+  });
+});
+
+// ── The declared-keys ANNOTATION contract (write + delete keep it accurate) ────────────────
+describe('declared-keys annotation: write path', () => {
+  it('records a new key in the annotation WITHOUT adding a fragile data[] entry (dataFrom overlay)', async () => {
+    serveRawEs({ prod: dataFromEs('prod', ['beta_emails']) });
+    await sealAndPublish(makeDeps([OWNER_GROUP]), {
+      credentials: CREDS,
+      entityRef: TARGET_REF,
+      key: 'watch_mode_key',
+      value: 'v',
+      envs: ['prod'],
+    });
+    const written = writtenFiles()[overlayEs('prod')];
+    expect(annotationOf(written)).toBe('beta_emails,watch_mode_key');
+    // The whole point: ESO keeps syncing via dataFrom/extract. No explicit data[] entry is
+    // introduced, so the all-or-nothing failure mode is not reintroduced.
+    expect(written).not.toMatch(/secretKey:/);
+    expect(written).toMatch(/dataFrom:/);
+  });
+
+  it('creates the annotations block when the overlay has none', async () => {
+    serveRawEs({ dev: dataFromEs('dev') }); // no annotations: block at all
+    await sealAndPublish(makeDeps([OWNER_GROUP]), {
+      credentials: CREDS,
+      entityRef: TARGET_REF,
+      key: 'FIRST_KEY',
+      value: 'v',
+      envs: ['dev'],
+    });
+    const written = writtenFiles()[overlayEs('dev')];
+    expect(annotationOf(written)).toBe('FIRST_KEY');
+    // must sit inside metadata:, above spec:
+    expect(written.indexOf('platform.capstone/declared-keys')).toBeLessThan(
+      written.indexOf('spec:'),
+    );
+  });
+
+  it('keeps the annotation list sorted and de-duplicated so diffs stay clean', async () => {
+    serveRawEs({ dev: dataFromEs('dev', ['b_key', 'd_key']) });
+    await sealAndPublish(makeDeps([OWNER_GROUP]), {
+      credentials: CREDS,
+      entityRef: TARGET_REF,
+      key: 'c_key',
+      value: 'v',
+      envs: ['dev'],
+    });
+    expect(annotationOf(writtenFiles()[overlayEs('dev')])).toBe(
+      'b_key,c_key,d_key',
+    );
+  });
+
+  it('re-sealing an already-declared key changes nothing in git (Vault-only rotation)', async () => {
+    serveRawEs({ dev: dataFromEs('dev', ['EXISTING']) });
+    const res = await sealAndPublish(makeDeps([OWNER_GROUP]), {
+      credentials: CREDS,
+      entityRef: TARGET_REF,
+      key: 'EXISTING',
+      value: 'rotated',
+      envs: ['dev'],
+    });
+    expect(vaultSetCalls).toEqual([
+      { path: 'tenants/team-alpha/dev/app', key: 'EXISTING' },
+    ]);
+    expect(octokitCalls.createOrUpdateFileContents).not.toHaveBeenCalled();
+    expect(res.pullRequestUrls).toEqual([]);
+  });
+
+  it('BACKWARD COMPAT: a legacy data[] overlay still gets its data[] entry, plus the annotation', async () => {
+    serveEs({ prod: [] }); // shippedEs: explicit data[], no dataFrom, no annotation
+    await sealAndPublish(makeDeps([OWNER_GROUP]), {
+      credentials: CREDS,
+      entityRef: TARGET_REF,
+      key: 'NEW_KEY',
+      value: 'v',
+      envs: ['prod'],
+    });
+    const written = writtenFiles()[overlayEs('prod')];
+    // ESO on this shape can ONLY see the key via data[] — it must still be written.
+    expect(written).toMatch(/- secretKey: "NEW_KEY"/);
+    expect(annotationOf(written)).toBe('NEW_KEY,app-secret');
+  });
+
+  it('refuses a key name that cannot round-trip through the annotation list', async () => {
+    serveRawEs({ dev: dataFromEs('dev', []) });
+    await expect(
+      sealAndPublish(makeDeps([OWNER_GROUP]), {
+        credentials: CREDS,
+        entityRef: TARGET_REF,
+        key: 'bad,key',
+        value: 'v',
+        envs: ['dev'],
+      }),
+    ).rejects.toThrow(/key name/i);
+    // fail CLOSED: nothing written to Vault either
+    expect(vaultSetCalls).toEqual([]);
+  });
+});
+
+describe('declared-keys annotation: delete path', () => {
+  it('deletes a key that is declared ONLY by the annotation (dataFrom overlay)', async () => {
+    serveRawEs({ prod: dataFromEs('prod', ['beta_emails', 'watch_mode_key']) });
+    await deleteSecret(makeDeps([OWNER_GROUP]), {
+      credentials: CREDS,
+      entityRef: TARGET_REF,
+      key: 'beta_emails',
+    });
+    // Vault value removed (that is what actually un-syncs it under dataFrom/extract)…
+    expect(vaultDeleteCalls).toEqual([
+      { path: 'tenants/team-alpha/prod/app', key: 'beta_emails' },
+    ]);
+    // …and the annotation no longer advertises a key nobody can use.
+    expect(annotationOf(writtenFiles()[overlayEs('prod')])).toBe(
+      'watch_mode_key',
+    );
+  });
+
+  it('removes the key from BOTH the annotation and data[] when it is in both', async () => {
+    const yaml = shippedEs('dev', ['DOOMED']).replace(
+      '  name: my-app-secret',
+      '  name: my-app-secret\n  annotations:\n    platform.capstone/declared-keys: "DOOMED,app-secret"',
+    );
+    serveRawEs({ dev: yaml });
+    await deleteSecret(makeDeps([OWNER_GROUP]), {
+      credentials: CREDS,
+      entityRef: TARGET_REF,
+      key: 'DOOMED',
+    });
+    const written = writtenFiles()[overlayEs('dev')];
+    expect(written).not.toMatch(/secretKey: DOOMED/);
+    expect(annotationOf(written)).toBe('app-secret');
+    expect(written).toMatch(/secretKey: app-secret/); // shipped entry preserved
+  });
+
+  it('leaves an empty annotation behind rather than a stale one when the last key goes', async () => {
+    serveRawEs({ dev: dataFromEs('dev', ['ONLY']) });
+    await deleteSecret(makeDeps([OWNER_GROUP]), {
+      credentials: CREDS,
+      entityRef: TARGET_REF,
+      key: 'ONLY',
+    });
+    expect(annotationOf(writtenFiles()[overlayEs('dev')])).toBe('');
+  });
+
+  it('still 404s for a key declared nowhere', async () => {
+    serveRawEs({ dev: dataFromEs('dev', ['SOMETHING_ELSE']) });
+    await expect(
+      deleteSecret(makeDeps([OWNER_GROUP]), {
+        credentials: CREDS,
+        entityRef: TARGET_REF,
+        key: 'GHOST',
+      }),
+    ).rejects.toThrow(NotFoundError);
+    expect(vaultDeleteCalls).toEqual([]);
   });
 });

@@ -85,6 +85,27 @@ export interface SecretSummary {
   lastUpdated?: string;
 }
 
+/**
+ * An environment that HAS an overlay ExternalSecret, whether or not it declares any keys.
+ *
+ * This exists so the UI can tell "this env is configured and simply has no secrets yet" apart
+ * from "this env does not exist for this app". The old list path collapsed those two cases:
+ * an env whose overlay declared nothing was `continue`d out of the response entirely and was
+ * indistinguishable from an app with no overlay at all — which is precisely how three live
+ * tenants' envs became invisible in the Secrets tab.
+ */
+export interface EnvironmentSummary {
+  env: string;
+  /** How many key names the overlay declares (0 = configured but empty). */
+  declaredKeyCount: number;
+  lastUpdated?: string;
+}
+
+export interface ListSecretsResult {
+  secrets: SecretSummary[];
+  environments: EnvironmentSummary[];
+}
+
 /** Request to list the projects (Components) the actor may manage secrets for. */
 export interface ListProjectsRequest {
   credentials: BackstageCredentials;
@@ -198,6 +219,273 @@ function parseEsDataKeys(yaml: string): string[] {
     }
   }
   return keys;
+}
+
+/**
+ * The annotation that carries a tenant env's secret key NAMES for DISPLAY, decoupled from the
+ * ESO wiring that actually syncs them.
+ *
+ * ── WHY THIS EXISTS ──────────────────────────────────────────────────────────────────────────
+ * listSecrets used to report key names by scraping `secretKey:` out of the committed overlay
+ * ExternalSecret. That silently tied "can the Secrets tab SHOW your keys" to "does the overlay
+ * use an explicit spec.data[] list" — and those two requirements are in direct opposition:
+ *
+ *   - explicit `data[]` is what the UI could read, but it is ATOMIC in ESO: one entry naming a
+ *     Vault property that is not set yet fails the WHOLE ExternalSecret and writes NO Secret,
+ *     discarding every key that would have resolved. That took down next-up staging/prod and
+ *     mychef dev, and curb-web staging/prod are in exactly this failed state today.
+ *   - `dataFrom: - extract:` has no such failure mode (it syncs what is present, omits what is
+ *     not) — but it has no `secretKey:` lines at all, so the scrape returned [] and the env
+ *     vanished from the UI entirely.
+ *
+ * Teams were therefore forced to choose between a UI that can see their keys and an
+ * ExternalSecret that cannot catastrophically fail. This annotation removes the choice: ESO
+ * keeps syncing via `dataFrom`, and the key names ride along as INERT metadata.
+ *
+ * ── WHY AN ANNOTATION AND NOT "just read the keys from Vault" ─────────────────────────────────
+ * The list path deliberately never contacts Vault and never handles a secret VALUE (it reports
+ * NAMES only, from git). Reading Vault to populate a UI list would put a read-capable Vault
+ * credential on a path that only needs names, and would make the tab a value-adjacent surface.
+ * That posture is preserved: this is a name, written to git, read from git.
+ *
+ * ── WHY IT IS SAFE (verified, not assumed) ────────────────────────────────────────────────────
+ * `metadata.annotations` on an ExternalSecret is inert to ESO: the CRD drives sync from `spec`
+ * only, and annotations on the ES are NOT propagated to the generated Secret (only
+ * `spec.target.template.metadata.annotations` are). Confirmed empirically against the live
+ * cluster (ESO v2.6.0): 77 of 111 ExternalSecrets already carry a non-ESO annotation
+ * (`argocd.argoproj.io/tracking-id`) and sync normally. The three that do not are failing on
+ * `SecretSyncedError` from the explicit-data[] problem above, not from their annotations.
+ */
+const DECLARED_KEYS_ANNOTATION = 'platform.capstone/declared-keys';
+
+/** Indent width of a line, ignoring blank lines. */
+function indentOf(line: string): number {
+  return line.match(/^(\s*)/)?.[1].length ?? 0;
+}
+
+/** True for a blank line or a whole-line YAML comment (never structurally significant here). */
+function isBlankOrComment(line: string): boolean {
+  const t = line.trim();
+  return t === '' || t.startsWith('#');
+}
+
+/**
+ * Locate the DOCUMENT-level `metadata:` block (indent 0) and, inside it, the `annotations:`
+ * mapping and the declared-keys entry.
+ *
+ * Scoping to the top-level block matters: an ExternalSecret may ALSO carry
+ * `spec.target.template.metadata.annotations`, which are the annotations stamped onto the
+ * GENERATED Secret. Those are a different thing with a different lifecycle — reading them as
+ * declared keys would report keys the Secrets tab does not manage, and writing there would
+ * change what lands on the workload's Secret. A naive document-wide regex would do exactly
+ * that, so we walk the block structure instead.
+ */
+function findMetadataRegion(lines: string[]): {
+  metaIdx: number;
+  metaEnd: number;
+  childIndent: number;
+  annIdx: number;
+  annEnd: number;
+  annChildIndent: number;
+  keysIdx: number;
+} | undefined {
+  const metaIdx = lines.findIndex(l => /^metadata:\s*$/.test(l));
+  if (metaIdx === -1) {
+    return undefined;
+  }
+  // The block runs until the next non-blank, non-comment line at indent 0.
+  let metaEnd = lines.length;
+  for (let i = metaIdx + 1; i < lines.length; i++) {
+    if (isBlankOrComment(lines[i])) {
+      continue;
+    }
+    if (indentOf(lines[i]) === 0) {
+      metaEnd = i;
+      break;
+    }
+  }
+  // The block's own child indent (from its first real child), defaulting to 2 spaces.
+  let childIndent = 2;
+  for (let i = metaIdx + 1; i < metaEnd; i++) {
+    if (!isBlankOrComment(lines[i])) {
+      childIndent = indentOf(lines[i]);
+      break;
+    }
+  }
+
+  let annIdx = -1;
+  for (let i = metaIdx + 1; i < metaEnd; i++) {
+    if (isBlankOrComment(lines[i])) {
+      continue;
+    }
+    if (indentOf(lines[i]) === childIndent && /^\s*annotations:\s*$/.test(lines[i])) {
+      annIdx = i;
+      break;
+    }
+  }
+  if (annIdx === -1) {
+    return {
+      metaIdx, metaEnd, childIndent,
+      annIdx: -1, annEnd: -1, annChildIndent: childIndent + 2, keysIdx: -1,
+    };
+  }
+
+  let annEnd = metaEnd;
+  for (let i = annIdx + 1; i < metaEnd; i++) {
+    if (isBlankOrComment(lines[i])) {
+      continue;
+    }
+    if (indentOf(lines[i]) <= childIndent) {
+      annEnd = i;
+      break;
+    }
+  }
+  let annChildIndent = childIndent + 2;
+  for (let i = annIdx + 1; i < annEnd; i++) {
+    if (!isBlankOrComment(lines[i])) {
+      annChildIndent = indentOf(lines[i]);
+      break;
+    }
+  }
+
+  let keysIdx = -1;
+  for (let i = annIdx + 1; i < annEnd; i++) {
+    if (isBlankOrComment(lines[i])) {
+      continue;
+    }
+    if (lines[i].trim().startsWith(`${DECLARED_KEYS_ANNOTATION}:`)) {
+      keysIdx = i;
+      break;
+    }
+  }
+  return { metaIdx, metaEnd, childIndent, annIdx, annEnd, annChildIndent, keysIdx };
+}
+
+/**
+ * The key names declared by the overlay's declared-keys annotation. Best-effort and
+ * TOLERANT: a missing annotation, an empty value, and junk/blank list entries all degrade to
+ * "declares nothing" rather than throwing — a hand-edited tenant file must never be able to
+ * break the Secrets tab's read path.
+ */
+function parseDeclaredKeysAnnotation(yaml: string): string[] {
+  const lines = yaml.split('\n');
+  const region = findMetadataRegion(lines);
+  if (!region || region.keysIdx === -1) {
+    return [];
+  }
+  const raw = lines[region.keysIdx].trim().slice(`${DECLARED_KEYS_ANNOTATION}:`.length);
+  const unquoted = raw.trim().replace(/^["']/, '').replace(/["']$/, '');
+  return unquoted
+    .split(',')
+    .map(k => k.trim())
+    .filter(k => k.length > 0);
+}
+
+/**
+ * Every key name an overlay declares: the UNION of the declared-keys annotation and the legacy
+ * explicit `data[]` entries, de-duplicated and stably sorted.
+ *
+ * The union is what makes this change BACKWARD COMPATIBLE. Tenants still on the explicit
+ * `data[]` shape (curb-web and anything scaffolded before the template fix) keep working with
+ * ZERO changes to their repositories — their keys are still scraped exactly as before. Tenants
+ * on the safe `dataFrom` shape get their names from the annotation. A tenant mid-migration,
+ * carrying both, sees each key once.
+ */
+function declaredKeys(yaml: string): string[] {
+  const union = new Set([...parseDeclaredKeysAnnotation(yaml), ...parseEsDataKeys(yaml)]);
+  return [...union].sort();
+}
+
+/** True when the overlay syncs via `dataFrom:` (the safe, non-atomic shape). */
+function hasDataFrom(yaml: string): boolean {
+  return yaml
+    .split('\n')
+    .some(l => !isBlankOrComment(l) && /^\s*dataFrom:\s*$/.test(l));
+}
+
+/**
+ * A key name must survive a round-trip through the comma-separated annotation list, and must be
+ * a legal Kubernetes Secret data key. Rejecting here (BEFORE any Vault write) keeps the failure
+ * loud and fail-closed rather than producing an annotation that silently parses back as two
+ * different keys — or a `data[]` entry Kubernetes would reject at apply time.
+ */
+function assertAnnotatableKeyName(key: string): void {
+  if (!/^[-._a-zA-Z0-9]+$/.test(key)) {
+    throw new InputError(
+      `Nothing was written and no secret was changed. ` +
+        `"${key}" is not a usable secret key name. A key may contain only letters, digits, ` +
+        `dashes, underscores and dots (the Kubernetes Secret data-key rules) — commas, spaces ` +
+        `and slashes are not allowed. Rename it and try again.`,
+    );
+  }
+}
+
+/**
+ * Write `keys` (sorted + de-duplicated) into the overlay's declared-keys annotation, creating
+ * the `annotations:` mapping under the top-level `metadata:` if the file has none yet.
+ * Line-oriented on purpose: these overlays carry ~60 lines of load-bearing incident commentary
+ * that a YAML round-trip would silently delete.
+ */
+function setDeclaredKeysAnnotation(yaml: string, keys: string[]): string {
+  const value = [...new Set(keys)].sort().join(',');
+  const lines = yaml.split('\n');
+  const region = findMetadataRegion(lines);
+  if (!region) {
+    throw new InputError(
+      `Nothing was written and no secret was changed. The ExternalSecret overlay has no ` +
+        `top-level "metadata:" block, so it is not a manifest the Secrets tab can safely edit. ` +
+        `Revert that file to the version the template generated and try again.`,
+    );
+  }
+  if (region.keysIdx !== -1) {
+    const indent = ' '.repeat(indentOf(lines[region.keysIdx]));
+    lines[region.keysIdx] = `${indent}${DECLARED_KEYS_ANNOTATION}: ${JSON.stringify(value)}`;
+    return lines.join('\n');
+  }
+  const entry = (indent: number) =>
+    `${' '.repeat(indent)}${DECLARED_KEYS_ANNOTATION}: ${JSON.stringify(value)}`;
+  if (region.annIdx !== -1) {
+    lines.splice(region.annIdx + 1, 0, entry(region.annChildIndent));
+    return lines.join('\n');
+  }
+  lines.splice(
+    region.metaIdx + 1,
+    0,
+    `${' '.repeat(region.childIndent)}annotations:`,
+    entry(region.childIndent + 2),
+  );
+  return lines.join('\n');
+}
+
+/**
+ * Add `key` to the declared-keys annotation (idempotent, keeps the list sorted + deduped).
+ *
+ * The new list is seeded from the UNION (annotation + existing `data[]`), not from the
+ * annotation alone. On a legacy explicit-`data[]` overlay this makes the annotation COMPLETE
+ * the first time a team touches the file, which is what later makes converting that overlay to
+ * the safe `dataFrom` shape a mechanical change: the names are already carried inertly, so
+ * dropping `data[]` cannot lose anything from the UI. Seeding from the annotation alone would
+ * leave a partial list that silently under-reports after such a conversion.
+ */
+function addDeclaredKey(yaml: string, key: string): string {
+  const current = declaredKeys(yaml);
+  if (current.includes(key)) {
+    return yaml;
+  }
+  return setDeclaredKeysAnnotation(yaml, [...current, key]);
+}
+
+/**
+ * Drop `key` from the declared-keys annotation. When the last key goes the annotation is kept
+ * with an EMPTY value rather than deleted: the contract stays visible in the file (so the next
+ * writer extends it instead of re-inventing it) and the diff stays a one-line value change.
+ */
+function removeDeclaredKey(yaml: string, key: string): string {
+  const current = parseDeclaredKeysAnnotation(yaml);
+  if (!current.includes(key)) {
+    return yaml;
+  }
+  return setDeclaredKeysAnnotation(yaml, current.filter(k => k !== key));
 }
 
 /**
@@ -729,6 +1017,10 @@ export async function sealAndPublish(
     )}] target=${entityRef}`,
   );
 
+  // Reject an unusable key name BEFORE anything is written anywhere (fail closed): a name that
+  // cannot round-trip through the comma-separated annotation would come back as two keys.
+  assertAnnotatableKeyName(key);
+
   const { target, teamSlug } = await authorizeAndResolveTarget(
     deps,
     credentials,
@@ -797,7 +1089,18 @@ export async function sealAndPublish(
       branch,
       esPath,
       baseContentByEnv[env],
-      content => upsertEsDataEntry(content, key, vaultKeyByEnv[env]),
+      content => {
+        // ALWAYS record the name in the annotation — that is what the Secrets tab displays,
+        // and it is inert to ESO.
+        const annotated = addDeclaredKey(content, key);
+        // Only add an explicit `data[]` entry on a LEGACY overlay that has no `dataFrom:`,
+        // where it is the sole way ESO can see the key. On the safe `dataFrom: extract` shape
+        // an explicit entry is redundant (extract already syncs whatever is present) and would
+        // re-arm the atomic all-or-nothing failure this whole change exists to avoid.
+        return hasDataFrom(annotated)
+          ? annotated
+          : upsertEsDataEntry(annotated, key, vaultKeyByEnv[env]);
+      },
       `chore(secrets): declare ${key} for ${env}`,
     );
     anyWrite = anyWrite || wrote;
@@ -840,7 +1143,7 @@ export async function sealAndPublish(
 export async function listSecrets(
   deps: CapstoneSecretsDeps,
   request: ListRequest,
-): Promise<SecretSummary[]> {
+): Promise<ListSecretsResult> {
   const { credentials, entityRef } = request;
   const cfg = readSecretsConfig(deps.config);
 
@@ -852,20 +1155,21 @@ export async function listSecrets(
   const { owner, repo } = repoForTarget(target);
   const octokit = await octokitForRepo(deps.config, owner, repo);
 
-  // Read the per-env overlay ExternalSecret the scaffolder ships. Each declares its KEY NAMES as
-  // the `secretKey:` of its data entries — we report those (NAMES only, never values; we never
-  // read Vault here). Each key's last-updated is that file's last commit date.
+  // Read the per-env overlay ExternalSecret the scaffolder ships and report the KEY NAMES it
+  // declares — the UNION of the declared-keys annotation and any legacy explicit `data[]`
+  // entries (see DECLARED_KEYS_ANNOTATION). NAMES only, never values, and we never read Vault
+  // here. Each key's last-updated is that file's last commit date.
   const summaries: SecretSummary[] = [];
+  const environments: EnvironmentSummary[] = [];
   for (const env of ['dev', 'staging', 'prod']) {
     const esPath = overlayEsPath(cfg, env);
     const text = await getFileContent(octokit, owner, repo, undefined, esPath);
-    if (!text) {
-      continue; // no overlay for this env -> nothing declared
+    if (text === undefined) {
+      continue; // no overlay for this env -> the env genuinely does not exist for this app
     }
-    const keys = parseEsDataKeys(text);
-    if (keys.length === 0) {
-      continue;
-    }
+    const keys = declaredKeys(text);
+    // NOTE: no early-out on an empty key list. An overlay that exists but declares nothing is
+    // reported as a configured env with zero keys, NOT dropped — dropping it is the bug.
     let lastUpdated: string | undefined;
     try {
       const { data: commits } = await octokit.repos.listCommits({
@@ -878,11 +1182,12 @@ export async function listSecrets(
     } catch {
       // best-effort; leave lastUpdated undefined
     }
+    environments.push({ env, declaredKeyCount: keys.length, lastUpdated });
     for (const key of keys) {
       summaries.push({ key, env, lastUpdated });
     }
   }
-  return summaries;
+  return { secrets: summaries, environments };
 }
 
 /**
@@ -1093,7 +1398,7 @@ export async function deleteSecret(
   for (const env of ['dev', 'staging', 'prod']) {
     const esPath = overlayEsPath(cfg, env);
     const existing = await getFileContent(octokit, owner, repo, baseBranch, esPath);
-    if (existing && parseEsDataKeys(existing).includes(key)) {
+    if (existing && declaredKeys(existing).includes(key)) {
       // Validate the declared destination HERE, in the read-only pass, so a tampered file in
       // ONE env cannot let an earlier env's Vault delete land before the refusal (SEC-057).
       // sealAndPublish already fails closed this way; delete now matches it.
@@ -1136,7 +1441,9 @@ export async function deleteSecret(
       branch,
       esPath,
       existing,
-      content => removeEsDataEntry(content, key),
+      // Drop the name from BOTH carriers: a stale annotation advertising a key whose Vault
+      // value is gone is its own bug (the tab would keep showing a key nobody can use).
+      content => removeEsDataEntry(removeDeclaredKey(content, key), key),
       `chore(secrets): remove ${key} for ${env}`,
     );
     anyWrite = anyWrite || wrote;
