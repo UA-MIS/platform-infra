@@ -53,33 +53,75 @@ this (Cloudflare dashboard-only setting, same class as the tunnel token). Until
 this is done, `capstone.uamishub.com` will not resolve/route publicly even
 though the in-cluster Ingress/TLS are correct.
 
-## ⚠ Post-auth redirect must land on `https://` (Traefik forwarded-headers)
+## ⚠ Post-auth redirect lands on `http://` (Traefik `{url}` uses the CONNECTION scheme)
 
-**Symptom (fixed):** clicking "Sign in" completed the OIDC round-trip but then
-landed the browser on `capstone.uamishub.com:8080/internal/` → Firefox *"SSL
-received a record that exceeded the maximum permissible length"*. Auth succeeded;
-only the final redirect target was wrong (scheme/port).
+**Status: NOT fixed by `forwardedHeaders.trustedIPs`.** An earlier revision of this
+section claimed that `ports.{web,websecure}.forwardedHeaders.trustedIPs` corrected the
+scheme. That claim is **wrong** and was disproved by direct experiment (2026-09-16,
+Traefik v3.7.1 / chart 40.2.0) — see "Proof" below. `trustedIPs` is still set, and is
+still correct for what it actually governs (which `X-Forwarded-*` values reach the
+*backends*), but it does **not** influence `{url}`.
 
-**Root cause:** public TLS terminates at the Cloudflare edge and cloudflared dials
-Traefik's `web` entrypoint over **plain HTTP**. By default Traefik does not trust a
-downstream's `X-Forwarded-*` headers, so it saw the request as `http` and
-reconstructed request-origin URLs (the `{url}` the `oauth2-proxy-errors` Middleware
-feeds into the post-login `rd`) as `http://…` on a non-default port. The browser
-was then bounced to an `http`/`:8080` apex URL; the Secure session cookie can't
-ride the plaintext leg (→ redirect loop = "sign-in hangs"), and `:8080` (Traefik's
-`traefik` API entrypoint port) is a plaintext Cloudflare port, so TLS to it throws
-the record-length error.
+**Symptom:** every SSO-gated host — the apex `/internal` gate, `db-admin`, every
+per-tenant DB console, and (since the non-prod-sso-gate PR) every tenant dev/staging
+app host — emits an OIDC `state` whose embedded return URL is `http://`:
 
-**Fix (git):** `applicationsets/traefik-app.yaml` now sets
-`ports.{web,websecure}.forwardedHeaders.trustedIPs: [10.244.0.0/16]` (the cluster
-pod CIDR = cloudflared's source range). Traefik now honors cloudflared's
-`X-Forwarded-Proto: https`, so `{url}` → `https://capstone.uamishub.com/internal/`
-(default 443 omitted). This fixes **every** tunnel-fronted auth redirect uniformly —
-the apex `/internal` gate and every `db-admin`/per-tenant DB console share this same
-`oauth2-proxy` + `oauth2-proxy-errors` Middleware.
-> Note: oauth2-proxy's own `--force-https`/`--reverse-proxy` do **not** fix this — the
-> `rd` origin is built by Traefik's `{url}` and passed to oauth2-proxy as an absolute
-> URL, so the correction has to happen at Traefik.
+```
+state=<nonce>:http%3A%2F%2Fmychef.staging.capstone.uamishub.com%2F
+```
+
+The `redirect_uri` is unaffected (it is the literal `--redirect-url` flag), so only the
+post-login return target is downgraded.
+
+**Root cause:** public TLS terminates at the Cloudflare edge; cloudflared dials
+`http://traefik.kube-system.svc.cluster.local:80` — the `web` entrypoint — over **plain
+HTTP**. Traefik builds the `{url}` that the `oauth2-proxy-errors` Middleware feeds into
+the post-login `rd` from the **actual connection scheme** (`req.TLS != nil`), and
+ignores `X-Forwarded-Proto` when doing so — *even from a trusted source IP*. Traefik
+hands oauth2-proxy an already-absolute `rd=http://…`, and oauth2-proxy echoes it
+verbatim into `state`.
+
+> Note: oauth2-proxy's own `--force-https` / `--reverse-proxy` do **not** fix this —
+> the `rd` origin is built by Traefik and arrives as an absolute URL, so oauth2-proxy
+> never derives the scheme itself and has nothing to correct. `--reverse-proxy` only
+> governs how oauth2-proxy infers its *own* request origin, which is not on this path.
+
+**Proof (all four runs from inside the cluster, client `10.244.2.122` — a pod IP
+squarely inside the trusted `10.244.0.0/16` range):**
+
+| # | Connection | Headers sent | Resulting `state` scheme |
+|---|------------|--------------|--------------------------|
+| A | `:80` plaintext (`web`) | none | `http://` |
+| B | `:80` plaintext (`web`) | `X-Forwarded-Proto: https` | `http://` |
+| C | `:443` **real TLS** (`websecure`) | none | **`https://`** |
+| D | `:80` plaintext (`web`) | `X-Forwarded-Proto` + `-Port` + `-Host` | `http://` |
+
+B and D are the decisive pair: a trusted client sending the correct forwarded headers
+changes nothing. C is the complement: only a genuine TLS connection yields `https://`.
+
+**Actual user impact today: LOW — the round trip completes.** Cloudflare's "Always Use
+HTTPS" is ON, so the browser's `http://` hop is 301'd to `https://` at the edge before
+it reaches the origin, the Secure cookie then rides the https leg, and the user lands
+signed in. The costs are (1) one extra redirect hop, and (2) the post-auth landing URL
+traverses one cleartext request to the CF edge — no HSTS header is set on these hosts,
+so the browser really does make that plaintext request.
+
+**The real risk is latency-to-breakage, not present breakage.** Correctness currently
+depends on a Cloudflare dashboard toggle that is not in git and is not monitored. If
+"Always Use HTTPS" is ever turned off, every SSO login on every gated host breaks
+at once — the Secure cookie cannot ride the plaintext leg and the sign-in loops
+forever. Treat that toggle as load-bearing platform config.
+
+**The actual fix (NOT git — requires human sign-off; fleet-wide):** repoint the
+Cloudflare Tunnel origin from `http://traefik.kube-system.svc.cluster.local:80` to
+`https://traefik.kube-system.svc.cluster.local:443` with `noTLSVerify: true`, so
+Traefik terminates TLS natively and the connection scheme becomes `https` with zero
+header dependency. The tunnel ingress config is **remotely managed** (cloudflared runs
+from `TUNNEL_TOKEN`), so this is a Cloudflare dashboard/API change and cannot be
+committed here. Routers already exist on `websecure` for every host (run C above
+exercised a real tenant host through it), and `websecure` additionally carries the
+900s `respondingTimeouts.readTimeout` that the Harbor blob-push path needs, which the
+`web` entrypoint does not. Rollback is a one-field revert of the same origin value.
 
 **Operator steps (Cloudflare dashboard — belt-and-suspenders, not git):**
 1. SSL/TLS → Edge Certificates → **Always Use HTTPS: ON** (so no plaintext client
