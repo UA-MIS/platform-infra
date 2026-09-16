@@ -1,0 +1,73 @@
+# RBAC for the in-use-tag keep-list (2026-09-16).
+#
+# WHY THIS EXISTS: tag retention ranked purely by push time will happily delete
+# an image that a Deployment is still running. That is not a hypothetical — it
+# was measured live on 2026-09-16, before any of this was in place:
+#
+#   mychef/mychef-backend:95b52f8    rank 65 of 65   <- mychef-PROD, 3 replicas
+#   mychef/mychef-frontend:95b52f8   rank 62 of 62   <- mychef-PROD, 3 replicas
+#   motion/attributeextractor-app:af69eb1  rank 14/14 <- motion-staging, 2 replicas
+#
+# Under `keep the last 10 pushed`, all three were outside the retained set. They
+# survived only because those projects' retention policies had never actually
+# executed (0 executions since creation). Policy 30 (mychef) was scheduled to run
+# for the FIRST time at 2026-09-17T02:00Z — i.e. the moment retention started
+# working as designed, it would have deleted the images mychef prod was running.
+# The failure is silent until a pod reschedules, then it is ImagePullBackOff with
+# no obvious cause and no way to re-pull.
+#
+# Recency is a poor proxy for "in use": a stable prod tag is old PRECISELY
+# because it is good. So the keep-list is derived from what is actually deployed,
+# and unioned (algorithm "or") with the recency rule.
+#
+# LEAST PRIVILEGE: read-only, and only the workload kinds that (re)create pods on
+# an ongoing basis. No secrets, no configmaps, no write verbs anywhere. This SA
+# can enumerate workload specs cluster-wide and nothing else.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: harbor-retention-inuse-reader
+  namespace: harbor
+  labels:
+    platform.capstone/component: platform
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: harbor-retention-inuse-reader
+  labels:
+    platform.capstone/component: platform
+rules:
+  # Deliberately NOT including bare `jobs`. A completed Job never pulls its image
+  # again, so pinning its tag forever would recreate exactly the "a dev build gets
+  # retained indefinitely" failure the retention header already warns about. This
+  # was not theoretical either: four ida-llm tags referenced only by long-finished
+  # model-sweep Jobs were already absent from Harbor at the time of writing, and
+  # adding them to the keep-list would have pinned four dead SHAs for good.
+  # CronJobs ARE included — they fire again and will pull again.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    verbs: ["get", "list"]
+  # Argo Rollouts is the progressive-delivery path on this cluster; a Rollout's
+  # pod template is as load-bearing as a Deployment's.
+  - apiGroups: ["argoproj.io"]
+    resources: ["rollouts"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: harbor-retention-inuse-reader
+  labels:
+    platform.capstone/component: platform
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: harbor-retention-inuse-reader
+subjects:
+  - kind: ServiceAccount
+    name: harbor-retention-inuse-reader
+    namespace: harbor
