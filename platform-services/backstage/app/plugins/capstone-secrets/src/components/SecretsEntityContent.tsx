@@ -11,7 +11,11 @@ import { Content } from '@backstage/core-components';
 import { useEntity } from '@backstage/plugin-catalog-react';
 import { useApi } from '@backstage/core-plugin-api';
 import { stringifyEntityRef } from '@backstage/catalog-model';
-import { capstoneSecretsApiRef, SecretSummary } from '../api';
+import {
+  capstoneSecretsApiRef,
+  EnvironmentSummary,
+  SecretSummary,
+} from '../api';
 import { SecretsForm } from './SecretsForm';
 import { SecretsList } from './SecretsList';
 
@@ -21,6 +25,7 @@ export function SecretsEntityContent() {
   const entityRef = stringifyEntityRef(entity);
 
   const [secrets, setSecrets] = useState<SecretSummary[]>([]);
+  const [environments, setEnvironments] = useState<EnvironmentSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | undefined>();
 
@@ -28,7 +33,9 @@ export function SecretsEntityContent() {
     setLoading(true);
     setError(undefined);
     try {
-      setSecrets(await api.listSecrets(entityRef));
+      const res = await api.listSecrets(entityRef);
+      setSecrets(res.secrets);
+      setEnvironments(res.environments);
     } catch (e) {
       setError(e as Error);
     } finally {
@@ -55,7 +62,12 @@ export function SecretsEntityContent() {
           />
         </Grid>
         <Grid item xs={12} md={6}>
-          <SecretsList secrets={secrets} loading={loading} error={error} />
+          <SecretsList
+            secrets={secrets}
+            environments={environments}
+            loading={loading}
+            error={error}
+          />
         </Grid>
       </Grid>
     </Content>

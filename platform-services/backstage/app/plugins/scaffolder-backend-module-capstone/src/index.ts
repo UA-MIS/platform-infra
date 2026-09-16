@@ -54,6 +54,8 @@ export type {
   SealRequest,
   ListRequest,
   SecretSummary,
+  EnvironmentSummary,
+  ListSecretsResult,
   ListProjectsRequest,
   ProjectSummary,
   DeleteRequest,

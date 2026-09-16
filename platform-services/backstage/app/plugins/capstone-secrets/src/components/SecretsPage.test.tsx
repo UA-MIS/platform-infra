@@ -14,9 +14,10 @@ function mockApi(overrides: Partial<CapstoneSecretsApi> = {}): CapstoneSecretsAp
       .mockResolvedValue([
         { entityRef: 'component:default/my-app', title: 'My App', owner: 'team-a' },
       ]),
-    listSecrets: jest
-      .fn()
-      .mockResolvedValue([{ key: 'DATABASE_URL', env: 'dev' }]),
+    listSecrets: jest.fn().mockResolvedValue({
+      secrets: [{ key: 'DATABASE_URL', env: 'dev' }],
+      environments: [{ env: 'dev', declaredKeyCount: 1 }],
+    }),
     sealSecret: jest
       .fn()
       .mockResolvedValue({ pullRequestUrls: ['https://github.com/x/y/pull/1'] }),
