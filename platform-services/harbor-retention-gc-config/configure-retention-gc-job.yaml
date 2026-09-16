@@ -335,6 +335,31 @@ spec:
                   echo "==> $n_total projects found; applying retention to:$RETENTION_PROJECTS"
                   [ -n "$RETENTION_PROJECTS" ] || { echo "FAIL: enumeration produced no projects"; exit 1; }
 
+                  # SINGLE SOURCE OF TRUTH for "which deployed tags in project $1 need
+                  # a rule of their own" — i.e. deployed, minus anything a global
+                  # RETENTION_PROTECT_TAGS pattern already covers.
+                  #
+                  # It is a function because this exact derivation is needed in THREE
+                  # places (the shrink guard, the rule builder, the read-back check)
+                  # and the previous版 had it written out inline twice and approximated
+                  # a third time in different units. That is what produced the guard
+                  # comparing 42 against 15: both numbers were "in use", but one counted
+                  # raw refs across all projects and the other counted deduped uncovered
+                  # tags in managed projects only. One definition, called three times,
+                  # cannot drift like that.
+                  uncovered_tags() {
+                    _utp="$1"
+                    grep "^${_utp}/" /tmp/inuse.txt 2>/dev/null | sed 's|^.*:||' | sort -u \
+                      | while IFS= read -r _ut; do
+                          [ -n "$_ut" ] || continue
+                          _utc=0
+                          for _utg in $RETENTION_PROTECT_TAGS; do
+                            case "$_ut" in $_utg) _utc=1; break ;; esac
+                          done
+                          [ "$_utc" = "1" ] || echo "$_ut"
+                        done
+                  }
+
                   # --- 0a) IN-USE TAG KEEP-LIST (2026-09-16) --------------------
                   # Recency does not imply "not in use", and the converse is worse: a
                   # stable prod tag is old precisely BECAUSE it is good. Measured live
@@ -486,17 +511,49 @@ spec:
                   # how the first version of this guard silently counted 0 for every
                   # project and never engaged at all; caught by the count printing 0
                   # while 21 projects visibly had deployed-tag rules.
+                  # BOTH SIDES MUST BE IN THE SAME UNITS. The first version of this
+                  # guard compared n_inuse (42: raw project/repo:tag lines, all
+                  # projects, including tags already covered by *.*.*/latest, counting
+                  # mychef-backend:95b52f8 and mychef-frontend:95b52f8 separately)
+                  # against _prev (15: deployed-tag RULES in Harbor — deduped, managed
+                  # projects only, globals excluded). Floor came out at 9, so it only
+                  # fired below 9 of 42 — a 79% loss, while the knob and both comments
+                  # said 40%. A pagination failure losing half the fleet produced ~21
+                  # and sailed straight through the guard built to catch exactly that.
+                  # Now both sides are the rule count, from the same uncovered_tags().
+                  _now=0
+                  for P in $RETENTION_PROJECTS; do
+                    _now=$(( _now + $(uncovered_tags "$P" | wc -l | tr -d ' ') ))
+                  done
+
                   _prev=0
                   for P in $RETENTION_PROJECTS; do
                     if [ ! -s "/tmp/proj_${P}.json" ]; then
                       _fc=$(curl -sS -o "/tmp/proj_${P}.json" -w '%{http_code}' -u "$AUTH" "$CORE/api/v2.0/projects/$P")
-                      [ "$_fc" = "200" ] || { rm -f "/tmp/proj_${P}.json"; continue; }
+                      if [ "$_fc" = "404" ]; then rm -f "/tmp/proj_${P}.json"; continue; fi
+                      # FAIL CLOSED. `continue` here let a flaky Harbor silently LOWER
+                      # the floor, which is fail-open in a control whose entire job is
+                      # to refuse when it cannot be sure — the failure would make the
+                      # guard weaker exactly when the platform is least healthy.
+                      [ "$_fc" = "200" ] || { echo "FAIL: GET /projects/$P returned HTTP $_fc while measuring the previous keep-list; refusing to guess a floor"; exit 1; }
                     fi
                     _rid=$(grep -o '"retention_id":"[0-9]*"' "/tmp/proj_${P}.json" 2>/dev/null | head -1 | grep -o '[0-9]*' || true)
                     [ -n "$_rid" ] || continue
                     _pc=$(curl -sS -o /tmp/prev.json -w '%{http_code}' -u "$AUTH" "$CORE/api/v2.0/retentions/$_rid")
-                    [ "$_pc" = "200" ] || continue
-                    _n=$(grep -o '"pattern":"[^"]*"' /tmp/prev.json | sed 's/^"pattern":"//; s/"$//' | sort -u \
+                    [ "$_pc" = "200" ] || { echo "FAIL: GET /retentions/$_rid returned HTTP $_pc while measuring the previous keep-list; refusing to guess a floor"; exit 1; }
+                    # Same hardened parse as the 1b audit: split after "template"
+                    # (Harbor serialises it last), keep only `always` rules, and SLICE
+                    # to the tag_selectors span before grepping. Without the slice this
+                    # also picks up each rule's scope_selectors repository pattern —
+                    # harmless today only because every repo scope happens to be the
+                    # literal `**`, which the exclusion below drops. The first rule with
+                    # a narrower repo scope would inflate _prev and fail a legitimate
+                    # run. Two copies of one parse, hardened 300 lines apart, is how
+                    # that stays true by luck; they are the same now.
+                    _n=$(sed 's/"template":"[^"]*"/&\n/g' /tmp/prev.json \
+                         | grep '"template":"always"' \
+                         | sed 's/.*"tag_selectors"://; s/"template".*//' \
+                         | grep -o '"pattern":"[^"]*"' | sed 's/^"pattern":"//; s/"$//' | sort -u \
                          | while IFS= read -r _pt; do
                              _isglobal=0
                              for _g in $RETENTION_PROTECT_TAGS '**'; do
@@ -506,12 +563,12 @@ spec:
                            done | wc -l | tr -d ' ')
                     _prev=$((_prev+_n))
                   done
-                  echo "==> in-use: $_prev deployed-tag rule(s) currently persisted from the previous run"
+                  echo "==> in-use: $_now deployed-tag rule(s) would be written now; $_prev persisted from the previous run"
                   if [ "$_prev" -gt 0 ]; then
                     _floor=$(( _prev * (100 - INUSE_SHRINK_TOLERANCE_PCT) / 100 ))
-                    if [ "$n_inuse" -lt "$_floor" ]; then
-                      echo "FAIL: in-use enumeration returned $n_inuse tagged refs, but $_prev deployed-tag"
-                      echo "      rules are already persisted (floor $_floor at ${INUSE_SHRINK_TOLERANCE_PCT}% tolerance)."
+                    if [ "$_now" -lt "$_floor" ]; then
+                      echo "FAIL: this run would write $_now deployed-tag rule(s), but $_prev are already"
+                      echo "      persisted (floor $_floor at ${INUSE_SHRINK_TOLERANCE_PCT}% tolerance)."
                       echo "      Refusing to proceed: policies are PUT wholesale, so applying a short list"
                       echo "      would DELETE protection that exists today. This is what a truncated or"
                       echo "      partially-walked enumeration looks like — check the per-API page counts"
@@ -607,12 +664,7 @@ spec:
                     # rule slot on a redundant rule.
                     INUSE_RULES=""
                     n_inuse_p=0
-                    for TAG in $(grep "^${P}/" /tmp/inuse.txt 2>/dev/null | sed 's|^.*:||' | sort -u); do
-                      covered=0
-                      for PAT in $RETENTION_PROTECT_TAGS; do
-                        case "$TAG" in $PAT) covered=1; break ;; esac
-                      done
-                      [ "$covered" = "1" ] && continue
+                    for TAG in $(uncovered_tags "$P"); do
                       n_inuse_p=$((n_inuse_p+1))
                       INUSE_RULES="${INUSE_RULES},
                       {
@@ -729,12 +781,7 @@ spec:
                     # literal rule of their own. This mirror of the build-side `covered`
                     # test must stay in sync with it: checking for a literal rule on a
                     # pattern-covered tag fails a policy that is in fact correct.
-                    for TAG in $(grep "^${P}/" /tmp/inuse.txt 2>/dev/null | sed 's|^.*:||' | sort -u); do
-                      covered=0
-                      for PAT in $RETENTION_PROTECT_TAGS; do
-                        case "$TAG" in $PAT) covered=1; break ;; esac
-                      done
-                      [ "$covered" = "1" ] && continue
+                    for TAG in $(uncovered_tags "$P"); do
                       echo "$verify" | grep -qF "\"pattern\":\"${TAG}\"" \
                         || { echo "FAIL: policy $RID for '$P' is missing a retain rule for DEPLOYED tag '$TAG' after apply"; echo "$verify"; exit 1; }
                     done

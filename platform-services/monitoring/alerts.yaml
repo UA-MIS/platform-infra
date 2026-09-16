@@ -841,11 +841,10 @@ spec:
     # Verified live before writing: kube_cronjob_status_last_successful_time IS
     # exposed for namespace="harbor" by this kube-state-metrics build.
     #
-    # ⚠ EXPECT THIS TO FIRE ONCE, ON FIRST DEPLOY, AND SELF-CLEAR. kube-state-metrics
-    # only publishes this series after a CronJob's first SUCCESSFUL run, so between
-    # the merge of #660 and the first 00:30Z execution there is no series and the
-    # absent() arm is true. That is the alert working, not a bug. If it is still
-    # firing after the first 00:30Z window has passed, it is real.
+    # NOTE ON THE FRESH-DEPLOY CASE: kube-state-metrics only publishes
+    # last_successful_time after a CronJob's first SUCCESSFUL run, so a newly created
+    # CronJob has no series. That used to make this alert fire on day one; the
+    # three-arm expression below fixes it properly rather than documenting it away.
     #
     # ⚠ AND KNOW WHAT THIS BUYS TODAY: Alertmanager has delivered NOTHING since
     # 2026-08-26 (~50k failed sends; the dead-man's-switch is broken too). So this
@@ -855,10 +854,35 @@ spec:
     - name: harbor-keeplist
       rules:
         - alert: HarborKeepListStale
+          # THREE ARMS, EACH MEANING EXACTLY ONE THING. The first version used the
+          # single `absent(last_successful_time)` arm copied from
+          # VaultRaftSnapshotFailing, which conflates "deleted" with "never yet
+          # succeeded" and therefore fires on every fresh deploy. That was annotated
+          # as expected-and-self-clearing — but an alert whose documentation has to
+          # tell you to ignore its first firing is an alert people learn to ignore.
+          # Splitting it removes the day-one false fire instead of excusing it.
+          #   1. stale      — succeeded before, but not in 36h.
+          #   2. deleted    — kube_cronjob_info gone. This is the arm the single
+          #                   absent() was really there for, and it is now unambiguous.
+          #   3. never ran  — no success AND the CronJob has existed > 36h, so a
+          #                   genuinely new CronJob is silent until it has had real
+          #                   chances to run.
+          # Each arm verified individually against live Prometheus before merging:
+          # the composite returns EMPTY for the freshly-created CronJob (no false
+          # fire); absent(info) on a nonexistent name returns a series (arm 2 fires);
+          # and arm 3 with the age threshold lowered returns a series, which is what
+          # proves the `and on(namespace, cronjob)` label join against absent()
+          # actually matches rather than silently never firing.
           expr: >-
             (time() - kube_cronjob_status_last_successful_time{namespace="harbor", cronjob="harbor-configure-retention-gc"} > 129600)
             or
-            absent(kube_cronjob_status_last_successful_time{namespace="harbor", cronjob="harbor-configure-retention-gc"})
+            absent(kube_cronjob_info{namespace="harbor", cronjob="harbor-configure-retention-gc"})
+            or
+            (
+              absent(kube_cronjob_status_last_successful_time{namespace="harbor", cronjob="harbor-configure-retention-gc"})
+              and on(namespace, cronjob)
+              (time() - kube_cronjob_created{namespace="harbor", cronjob="harbor-configure-retention-gc"} > 129600)
+            )
           for: 15m
           labels:
             severity: critical
