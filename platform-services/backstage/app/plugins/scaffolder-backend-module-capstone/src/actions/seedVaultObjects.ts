@@ -50,8 +50,22 @@ import { LoggerService, RootConfigService } from '@backstage/backend-plugin-api'
 import { VaultClient } from '../vaultClient';
 import { readVaultConfig } from '../sealCore';
 
-/** The environments a scaffolded tenant gets. Mirrors the overlays the templates ship. */
-const DEFAULT_ENVS = ['dev', 'staging', 'prod', 'preview'];
+/**
+ * The long-lived environments a scaffolded tenant gets.
+ *
+ * `preview` is deliberately ABSENT. Every template's preview overlay reads
+ * `tenants/<team>/pr-1/app` — a per-PR path, not `.../preview/app` — so seeding "preview"
+ * would create an object nothing ever reads while still missing the path that is actually
+ * used. Preview also keeps `deletionPolicy: Delete` precisely because it is ephemeral, so
+ * there is no alerting reason to seed it either.
+ */
+const DEFAULT_ENVS = ['dev', 'staging', 'prod'];
+
+/**
+ * Environment names are interpolated into the Vault path, exactly like `team`, so they get
+ * the same treatment rather than being trusted because they usually come from a template.
+ */
+const ENV_RE = /^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$/;
 
 /** Same slug rule the XRD enforces; also guarantees the Vault path cannot escape tenants/. */
 const TEAM_RE = /^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$/;
@@ -90,6 +104,15 @@ export function createSeedVaultObjectsAction(deps: SeedVaultObjectsActionDeps) {
         );
       }
       const targets = envs?.length ? envs : DEFAULT_ENVS;
+      const badEnv = targets.find(e => typeof e !== 'string' || !ENV_RE.test(e));
+      if (badEnv !== undefined) {
+        throw new InputError(
+          `Invalid environment name "${badEnv}". An environment is lowercase alphanumeric ` +
+            `with internal dashes (e.g. staging) — the same rule as the team slug, and for ` +
+            `the same reason: it is interpolated into the Vault path, so it is what keeps ` +
+            `that path inside tenants/<team>/.`,
+        );
+      }
 
       const vault = new VaultClient(readVaultConfig(deps.config));
       for (const env of targets) {
@@ -98,11 +121,18 @@ export function createSeedVaultObjectsAction(deps: SeedVaultObjectsActionDeps) {
           await vault.ensureObject(path);
         } catch (e) {
           // Best-effort: an unseeded object is the status quo, and the tenant still works.
+          // Name the EVENTUAL SYMPTOM, not just the error. Once the staging/prod overlays
+          // ship `deletionPolicy: Retain`, an unseeded object is not merely "less tidy": that
+          // environment sits at Ready=False and fires ExternalSecretSyncError forever. Whoever
+          // reads that alert weeks from now needs this line to be findable and to say so.
           deps.logger.warn(
             `capstone: could not seed the Vault app object at ${path} ` +
-              `(${(e as Error).message}). Onboarding continues; the object will be created on ` +
-              `the first secret write. The only consequence is that this environment is not yet ` +
-              `distinguishable from one whose secrets were lost.`,
+              `(${(e as Error).message}). Onboarding continues and the tenant is otherwise ` +
+              `fine — the object is created on the first secret write. BUT on an overlay using ` +
+              `deletionPolicy: Retain (staging/prod), an absent object means this environment ` +
+              `will report Ready=False and fire ExternalSecretSyncError continuously until a ` +
+              `secret is written or the object is seeded by hand. If you are reading this ` +
+              `while chasing such an alert: this is the cause, and it is not a lost secret.`,
           );
         }
       }

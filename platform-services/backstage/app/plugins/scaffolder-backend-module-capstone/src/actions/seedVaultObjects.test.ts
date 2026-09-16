@@ -58,7 +58,6 @@ describe('capstone:seed-vault-app-objects', () => {
       'tenants/team-alpha/dev/app',
       'tenants/team-alpha/staging/app',
       'tenants/team-alpha/prod/app',
-      'tenants/team-alpha/preview/app',
     ]);
   });
 
@@ -79,7 +78,7 @@ describe('capstone:seed-vault-app-objects', () => {
     await action.handler(ctx({ team: 'team-alpha' }));
     expect(setCalls).toEqual([]);
     expect(deleteCalls).toEqual([]);
-    expect(ensureCalls).toHaveLength(8);
+    expect(ensureCalls).toHaveLength(6);
   });
 
   it('rejects a team slug that could escape the tenants/ subtree', async () => {
@@ -97,6 +96,38 @@ describe('capstone:seed-vault-app-objects', () => {
       'tenants/team-alpha/dev/app',
       'tenants/team-alpha/prod/app',
     ]);
+  });
+
+  // B-2: every template's preview overlay points at tenants/<team>/pr-1/app, NOT
+  // .../preview/app — preview namespaces are per-PR. Seeding "preview" would create a
+  // permanently dead object and still miss the path actually used.
+  it('does NOT seed a preview env (the templates use a per-PR path, not preview/)', async () => {
+    const action = createSeedVaultObjectsAction({ config: mockConfig(), logger } as any);
+    await action.handler(ctx({ team: 'team-alpha' }));
+    expect(ensureCalls.some(p => p.includes('/preview/'))).toBe(false);
+  });
+
+  // A-3: `envs` is interpolated into the same Vault path that `team` is validated for.
+  it('rejects an env name that could escape the tenant path', async () => {
+    const action = createSeedVaultObjectsAction({ config: mockConfig(), logger } as any);
+    for (const bad of [['../../other'], ['a/b'], [''], ['has space']]) {
+      await expect(
+        action.handler(ctx({ team: 'team-alpha', envs: bad })),
+      ).rejects.toThrow(/environment/i);
+    }
+    expect(ensureCalls).toEqual([]);
+  });
+
+  // A-1: #658 makes Retain correct ONLY where seeding succeeded. A silent seed failure then
+  // has a consequence it does not have today, so the log has to name the eventual symptom.
+  it('names the eventual symptom when seeding fails, not just the error', async () => {
+    ensureImpl = async () => {
+      throw new Error('connect ECONNREFUSED');
+    };
+    const action = createSeedVaultObjectsAction({ config: mockConfig(), logger } as any);
+    await action.handler(ctx({ team: 'team-alpha' }));
+    const msg = logs.join(' ');
+    expect(msg).toMatch(/ExternalSecretSyncError|Ready=False|alert/i);
   });
 
   it('does not fail the scaffold when Vault is unreachable — seeding is best-effort', async () => {

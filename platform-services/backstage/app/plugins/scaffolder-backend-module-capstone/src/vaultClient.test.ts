@@ -210,7 +210,7 @@ describe('VaultClient ensureObject (seed an empty object, never overwrite)', () 
   // key does not exist" — the request is physically incapable of overwriting, so the blast
   // radius of a bug here is zero rather than a tenant's entire secret set.
   it('creates an EMPTY object with cas:0 so it cannot overwrite existing secrets', async () => {
-    queue({ status: 200 });
+    queue({ status: 200, json: { data: { version: 1 } } });
     const c = new VaultClient(CFG);
     await c.ensureObject('tenants/t/prod/app');
 
@@ -223,13 +223,20 @@ describe('VaultClient ensureObject (seed an empty object, never overwrite)', () 
   it('treats the cas conflict (object already exists) as success, not an error', async () => {
     // Vault answers 400 "check-and-set parameter did not match the current version" when the
     // object exists. That is the EXPECTED steady state on every re-run — it must be a no-op.
-    queue({ status: 400 });
+    queue({
+      status: 400,
+      json: { errors: ['check-and-set parameter did not match the current version'] },
+    });
     const c = new VaultClient(CFG);
     await expect(c.ensureObject('tenants/t/prod/app')).resolves.toBeUndefined();
   });
 
   it('is idempotent across repeated calls and never sends a non-empty data payload', async () => {
-    queue({ status: 200 }, { status: 400 }, { status: 400 });
+    const cas = {
+      status: 400,
+      json: { errors: ['check-and-set parameter did not match the current version'] },
+    };
+    queue({ status: 200, json: { data: { version: 1 } } }, cas, cas);
     const c = new VaultClient(CFG);
     await c.ensureObject('tenants/t/dev/app');
     await c.ensureObject('tenants/t/dev/app');
@@ -241,6 +248,34 @@ describe('VaultClient ensureObject (seed an empty object, never overwrite)', () 
       expect(JSON.parse(w.body!).data).toEqual({});
       expect(JSON.parse(w.body!).options).toEqual({ cas: 0 });
     }
+  });
+
+  // A-2: 400 is NOT synonymous with "already exists". Vault also 400s on a malformed request
+  // and on mount misconfiguration. Swallowing those as success turns a systematic seeding
+  // failure into silence — and because seeding is best-effort, nothing else would report it.
+  it('THROWS on a 400 that is not a check-and-set conflict (malformed/misconfigured)', async () => {
+    queue({
+      status: 400,
+      json: { errors: ['1 error occurred: * missing client token'] },
+    });
+    const c = new VaultClient(CFG);
+    await expect(c.ensureObject('tenants/t/prod/app')).rejects.toThrow(/400/);
+  });
+
+  it('THROWS on a 400 with no parseable error body rather than assuming success', async () => {
+    queue({ status: 400 });
+    const c = new VaultClient(CFG);
+    await expect(c.ensureObject('tenants/t/prod/app')).rejects.toThrow(/400/);
+  });
+
+  // The cas:0 guarantee is only real on a KV-v2 mount: KV-v1 SILENTLY IGNORES cas, which would
+  // turn this into an unconditional write. We cannot read sys/mounts (no capability), but a
+  // KV-v2 write always answers with data.version — a v1 mount does not. Absence of that marker
+  // means the guarantee did not hold, so fail loudly instead of continuing to trust it.
+  it('THROWS when the write succeeds without the KV-v2 version marker (cas not honoured)', async () => {
+    queue({ status: 200, json: { data: {} } });
+    const c = new VaultClient(CFG);
+    await expect(c.ensureObject('tenants/t/prod/app')).rejects.toThrow(/KV-v2/i);
   });
 
   it('throws (status + path, no body) on a real failure such as 403', async () => {

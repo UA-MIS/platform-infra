@@ -879,6 +879,30 @@ spec:
           accent: "#9e1b32"
         commitMessage: "board: provision sprint board for team ${{ parameters.team }} (Capstone ${{ parameters.season }} ${{ parameters.year }})"
 
+    # Seed the per-env `app` Vault objects, EMPTY.
+    #
+    #    THIS TEMPLATE NEEDS IT MOST. new-project composes its chart from
+    #    _fragments/_contract (capstone:compose-project), and the contract's staging/prod
+    #    overlays use `deletionPolicy: Retain`. Retain means an ABSENT Vault object reports
+    #    Ready=False and fires ExternalSecretSyncError — so without this step every tenant
+    #    onboarded through the PRIMARY path would alert on staging and prod permanently,
+    #    for the entirely normal state of "nobody has deployed there yet".
+    #
+    #    Vault KV-v2 creates an object on first write and nothing else creates this one (the
+    #    `database`/`harbor-pull` objects ARE provisioned by the Composition, which is why
+    #    those sync while `app` does not). An EMPTY object is healthy and produces no Secret
+    #    (verified, ESO v2.6.0), so seeding makes "never configured" quiet and leaves a
+    #    genuinely destroyed object as the only thing that alerts.
+    #
+    #    SAFE BY CONSTRUCTION: the write is cas:0 ("only if this key does not exist"), so it
+    #    cannot overwrite a team's secrets even on a re-run. BEST-EFFORT: a failure logs and
+    #    continues, naming the alert it will eventually cause.
+    - id: seed-vault
+      name: Seed empty per-environment secret objects in Vault
+      action: capstone:seed-vault-app-objects
+      input:
+        team: ${{ parameters.team }}
+
   output:
     links:
       - title: Repository
