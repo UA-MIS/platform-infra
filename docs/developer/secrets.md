@@ -66,6 +66,9 @@ kind: ExternalSecret
 metadata:
   name: <appName>-secret
   namespace: <team>-dev
+  annotations:
+    # key NAMES only, so the Secrets tab can list them. Never a value.
+    platform.capstone/declared-keys: "APP_SECRET"
 spec:
   refreshInterval: "1h"
   secretStoreRef:
@@ -74,13 +77,23 @@ spec:
   target:
     name: <appName>-secret          # the k8s Secret your Deployment consumes
     creationPolicy: Owner
-    deletionPolicy: Delete          # a missing Vault key is NOT an error (see below)
-  data:
-    - secretKey: app-secret
-      remoteRef:
-        key: tenants/<team>/dev/app # the Vault path
-        property: APP_SECRET        # the key under it
+    deletionPolicy: Delete
+  dataFrom:
+    - extract:
+        key: tenants/<team>/dev/app # the Vault path; ALL its properties are synced
 ```
+
+### Why `dataFrom: extract` and not a list of `data:` entries
+
+ESO processes explicit `data:` entries **atomically**. If any one entry names a Vault property
+that has not been written yet, ESO fails the **entire** ExternalSecret and writes **no Secret at
+all** — including the keys that would have resolved fine. Four tenants have been taken down this
+way. `extract` syncs whatever the Vault object actually holds and omits what it does not, so one
+unwritten key can never take the others with it.
+
+**If you hand-edit a `data:` entry onto one of these files, write its Vault value FIRST, in every
+environment that will declare it.** There is no per-key "optional" in the ExternalSecret schema.
+Better: use the Secrets tab, which writes Vault before it touches git.
 
 The Deployment envs that Secret into your app (e.g. `APP_SECRET`). The flow end-to-end:
 
@@ -91,10 +104,18 @@ Secrets UI ─► Vault (tenants/<team>/<env>/app) ─► ESO ─► k8s Secret 
 ## Zero-config: a brand-new app just works
 
 A freshly scaffolded app deploys **even with nothing in Vault**. The base marks `APP_SECRET`
-`optional: true` and the `ExternalSecret` uses `deletionPolicy: Delete`, so a missing value is
-not an error — the app simply starts and reports `secret loaded: false`. Add the value in the
+`optional: true`, and `dataFrom: extract` treats an absent property as "nothing to sync" rather
+than an error — the app simply starts and reports `secret loaded: false`. Add the value in the
 Secrets tab whenever you need it; the Secret appears on the next refresh. You are never forced
 to populate secrets before your first deploy.
+
+> **Know the sharp edge of `deletionPolicy: Delete`.** A missing *property* is harmless. If the
+> whole Vault **object** becomes unreadable, `Delete` makes ESO **remove your Secret** and report
+> `Ready=True` / `SecretDeleted` — it looks healthy. Because every secret-backed env var is
+> `optional: true`, your pods then restart and come up **Ready, serving 200s, with no secrets
+> loaded**, and ArgoCD stays green. Nothing turns red. If losing a secret silently would be worse
+> for your environment than failing loudly, set `deletionPolicy: Retain` on that overlay: the
+> Secret is kept and the ExternalSecret goes `Ready=False` where monitoring can see it.
 
 ## Per-environment secrets
 

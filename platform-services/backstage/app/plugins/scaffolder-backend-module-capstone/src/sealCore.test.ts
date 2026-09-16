@@ -75,6 +75,10 @@ jest.mock('@octokit/rest', () => ({
 }));
 
 // eslint-disable-next-line import/first
+import * as fs from 'fs';
+// eslint-disable-next-line import/first
+import { VaultClient } from './vaultClient';
+// eslint-disable-next-line import/first
 import {
   listSecrets,
   deleteSecret,
@@ -306,6 +310,7 @@ function annotationOf(yaml: string): string | undefined {
 beforeEach(() => {
   vaultDeleteCalls.length = 0;
   vaultSetCalls.length = 0;
+  (VaultClient as unknown as jest.Mock).mockClear();
   Object.values(octokitCalls).forEach(m => (m as jest.Mock).mockReset());
   octokitCalls.reposGet.mockImplementation(async () => ({
     data: { default_branch: 'main' },
@@ -582,12 +587,49 @@ describe('listSecrets', () => {
     expect(secrets.map(s => s.key)).toEqual(['REAL_KEY']);
   });
 
+  // ── BACKWARD-COMPAT REGRESSION ANCHOR ───────────────────────────────────────────────────
+  // Not a synthetic fixture: this is UA-MIS/curb-web's REAL prod overlay, vendored verbatim
+  // from origin/main 5e3f9af (see src/__fixtures__/). It is the explicit-data[] shape that
+  // live tenants still have in production, with its real quoting quirks (five keys quoted,
+  // two bare). Those repos must keep working with ZERO changes, so this asserts against the
+  // actual bytes rather than against a fixture written to match the implementation.
+  it('BACKWARD COMPAT: the REAL legacy curb-web prod overlay still lists all 7 keys', async () => {
+    const legacy = fs.readFileSync(
+      `${__dirname}/__fixtures__/legacy-curb-web-prod.externalsecret.yaml`,
+      'utf8',
+    );
+    expect(legacy).not.toMatch(/declared-keys/); // no annotation: pure pre-change shape
+    expect(legacy).not.toMatch(/dataFrom:/);
+    serveRawEs({ prod: legacy });
+    const { secrets, environments } = await listSecrets(makeDeps([OWNER_GROUP]), {
+      credentials: CREDS,
+      entityRef: TARGET_REF,
+    });
+    expect(secrets.map(s => s.key)).toEqual([
+      'APP_SECRET',
+      'PHOTO_PUBLIC_BASE_URL',
+      'R2_ACCESS_KEY_ID',
+      'R2_ACCOUNT_ID',
+      'R2_BUCKET',
+      'R2_SECRET_ACCESS_KEY',
+      'TICKETMASTER_API_KEY',
+    ]);
+    expect(environments).toEqual([
+      { env: 'prod', declaredKeyCount: 7, lastUpdated: '2026-06-24T00:00:00Z' },
+    ]);
+  });
+
   it('never contacts Vault while listing (names come from git only)', async () => {
     serveRawEs({ prod: dataFromEs('prod', ['beta_emails']) });
     await listSecrets(makeDeps([OWNER_GROUP]), {
       credentials: CREDS,
       entityRef: TARGET_REF,
     });
+    // Not merely "no write happened": the client is never CONSTRUCTED, so there is no
+    // Vault connection, no token use, and no read path to regress into. Asserting on the
+    // constructor (not just the recorded set/delete calls) is what makes this airtight —
+    // a future `vault.getKey(...)` in the list path would fail this test.
+    expect(VaultClient).not.toHaveBeenCalled();
     expect(vaultSetCalls).toEqual([]);
     expect(vaultDeleteCalls).toEqual([]);
   });

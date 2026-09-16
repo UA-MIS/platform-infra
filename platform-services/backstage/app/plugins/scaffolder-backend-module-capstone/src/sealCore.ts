@@ -248,13 +248,27 @@ function parseEsDataKeys(yaml: string): string[] {
  * credential on a path that only needs names, and would make the tab a value-adjacent surface.
  * That posture is preserved: this is a name, written to git, read from git.
  *
- * ── WHY IT IS SAFE (verified, not assumed) ────────────────────────────────────────────────────
- * `metadata.annotations` on an ExternalSecret is inert to ESO: the CRD drives sync from `spec`
- * only, and annotations on the ES are NOT propagated to the generated Secret (only
- * `spec.target.template.metadata.annotations` are). Confirmed empirically against the live
- * cluster (ESO v2.6.0): 77 of 111 ExternalSecrets already carry a non-ESO annotation
- * (`argocd.argoproj.io/tracking-id`) and sync normally. The three that do not are failing on
- * `SecretSyncedError` from the explicit-data[] problem above, not from their annotations.
+ * ── WHAT IS AND IS NOT TRUE ABOUT THIS ANNOTATION (verified against the live cluster) ────────
+ * ESO does not READ `metadata.annotations` as configuration. It reconciles from `spec` only, so
+ * nothing written here can change what syncs, in what order, or whether a sync fails. THAT is
+ * the property this design depends on, and it is what makes the annotation safe to maintain
+ * from the Secrets tab without touching the ESO wiring.
+ *
+ * It IS, however, COPIED ONTO THE GENERATED SECRET. With no `spec.target.template` set, ESO
+ * propagates the ExternalSecret's own annotations onto the Secret it creates. Verified on ESO
+ * v2.6.0: `db-tier/mariadb-root-credentials` and `db-tier/minio-root-credentials` set a custom
+ * `force-sync` annotation with NO template, and it is present on both generated Secrets.
+ *
+ * An earlier version of this comment asserted the opposite — that ES annotations are not
+ * propagated. That was FALSE, and the evidence offered for it ("77 of 111 ExternalSecrets carry
+ * a non-ESO annotation and sync normally") only ever showed that annotations do not BREAK sync,
+ * which is a different proposition from not propagating. Recorded here rather than quietly
+ * deleted, because shipping a confident, wrong comment about ESO semantics is the precise
+ * mechanism that produced the outage this whole change exists to clean up.
+ *
+ * Propagation is acceptable HERE, and only because of what this carries: key NAMES, which are
+ * already committed in plaintext a few lines away and are exactly what the UI exists to show.
+ * Never put a value, or anything else sensitive, in an annotation.
  */
 const DECLARED_KEYS_ANNOTATION = 'platform.capstone/declared-keys';
 
