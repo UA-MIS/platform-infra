@@ -38,12 +38,22 @@ metadata:
   labels:
     platform.capstone/component: platform
 rules:
-  # Deliberately NOT including bare `jobs`. A completed Job never pulls its image
-  # again, so pinning its tag forever would recreate exactly the "a dev build gets
-  # retained indefinitely" failure the retention header already warns about. This
-  # was not theoretical either: four ida-llm tags referenced only by long-finished
-  # model-sweep Jobs were already absent from Harbor at the time of writing, and
-  # adding them to the keep-list would have pinned four dead SHAs for good.
+  # Deliberately NOT including bare `jobs`. A Job that has run to completion and
+  # stays completed never pulls its image again, so pinning its tag forever would
+  # recreate exactly the "a dev build gets retained indefinitely" failure the
+  # retention header already warns about. Not theoretical: four ida-llm tags
+  # referenced only by long-finished model-sweep Jobs were already absent from
+  # Harbor at the time of writing, and adding them to the keep-list would have
+  # pinned four dead SHAs for good.
+  #
+  # NARROWER THAN IT FIRST READ: "a completed Job never pulls again" is true of
+  # the Job object as it sits, but NOT of every Job on a GitOps cluster. An
+  # ArgoCD-managed Job that is pruned and re-synced, one that TTL-expires and is
+  # recreated, or one carrying a hook-delete-policy WILL be recreated and WILL
+  # pull. There are zero such image-pulling Jobs on this cluster today, which is
+  # why the exclusion stands — but it rests on that fact, not on a law. If a
+  # recreated Job ever depends on a tag old enough to fall out of the last 10,
+  # this exclusion is what will have deleted it, so revisit here.
   # CronJobs ARE included — they fire again and will pull again.
   - apiGroups: ["apps"]
     resources: ["deployments", "statefulsets", "daemonsets"]
