@@ -5,7 +5,7 @@
  *   GET  /list?entityRef=...                         -> { secrets: [{key, env, lastUpdated}],
  *                                                        environments: [{env, declaredKeyCount, lastUpdated}] }
  *   GET  /my-projects                                -> { projects: [{entityRef, title, owner}] }
- *   POST /delete  { entityRef, key }                 -> { pullRequestUrl }  (un-seal via PR)
+ *   POST /delete  { entityRef, key, env }            -> { pullRequestUrl }  (un-seal, ONE env)
  *
  * SECURITY: every request resolves the AUTHENTICATED USER's credentials (httpAuth, allow:
  * ['user'] only — no service principal can drive this) and passes them into sealCore, which
@@ -92,14 +92,24 @@ export async function createRouter(
   // POST (not DELETE) so the {entityRef,key} body parses reliably across clients/proxies.
   router.post('/delete', async (req, res) => {
     const credentials = await httpAuth.credentials(req, { allow: ['user'] });
-    const { entityRef, key } = req.body ?? {};
+    const { entityRef, key, env } = req.body ?? {};
     if (typeof entityRef !== 'string' || !entityRef) {
       throw new InputError('entityRef is required');
+    }
+    // REQUIRED, and rejected rather than defaulted. Before the 2026-09-16 mychef incident
+    // this route took no env and sealCore deleted from EVERY environment that declared the
+    // key — one click on the tab's `dev` row destroyed that team's production secret. A
+    // missing env must be a 400, never "all of them".
+    if (typeof env !== 'string' || !VALID_ENVS.includes(env)) {
+      throw new InputError(
+        `env is required and must be one of ${VALID_ENVS.join(', ')} — a secret is ` +
+          `deleted from exactly one environment at a time`,
+      );
     }
     if (typeof key !== 'string' || !key.trim()) {
       throw new InputError('key is required');
     }
-    const result = await deleteSecret(core, { credentials, entityRef, key });
+    const result = await deleteSecret(core, { credentials, entityRef, key, env });
     res.json(result);
   });
 

@@ -58,6 +58,12 @@ export interface ProjectSummary {
 export interface DeleteSecretRequest {
   entityRef: string;
   key: string;
+  /**
+   * The ONE environment to delete from. Required: the list shows a Delete control per
+   * (key, env) row, so the action must match the row the user actually clicked. It did not
+   * until 2026-09-16, when deleting a `dev` row destroyed a team's `prod` secret.
+   */
+  env: string;
 }
 
 export interface DeleteSecretResult {

@@ -370,6 +370,7 @@ describe('SEC-057: the Vault destination is checked against the derived team', (
         credentials: CREDS,
         entityRef: TARGET_REF,
         key: 'app-secret',
+        env: 'prod',
       }),
     ).rejects.toThrow(NotAllowedError);
     expect(vaultDeleteCalls).toEqual([]);
@@ -642,6 +643,7 @@ describe('deleteSecret', () => {
       credentials: CREDS,
       entityRef: TARGET_REF,
       key: 'DATABASE_URL',
+      env: 'dev',
     });
 
     // Vault key removed at the env path.
@@ -667,6 +669,7 @@ describe('deleteSecret', () => {
         credentials: CREDS,
         entityRef: TARGET_REF,
         key: 'NONEXISTENT',
+        env: 'dev',
       }),
     ).rejects.toThrow(NotFoundError);
     expect(vaultDeleteCalls).toHaveLength(0);
@@ -680,6 +683,7 @@ describe('deleteSecret', () => {
         credentials: CREDS,
         entityRef: TARGET_REF,
         key: 'DATABASE_URL',
+        env: 'dev',
       }),
     ).rejects.toThrow(NotAllowedError);
     expect(vaultDeleteCalls).toHaveLength(0);
@@ -803,11 +807,13 @@ describe('deleteSecret rolling PR (D-118)', () => {
       credentials: CREDS,
       entityRef: TARGET_REF,
       key: 'DATABASE_URL',
+      env: 'dev',
     });
     const res2 = await deleteSecret(makeDeps([OWNER_GROUP]), {
       credentials: CREDS,
       entityRef: TARGET_REF,
       key: 'API_KEY',
+      env: 'dev',
     });
 
     expect(res1.pullRequestUrl).toBe(res2.pullRequestUrl);
@@ -827,6 +833,7 @@ describe('deleteSecret rolling PR (D-118)', () => {
       credentials: CREDS,
       entityRef: TARGET_REF,
       key: 'DATABASE_URL',
+      env: 'dev',
     });
     repo.mergePr(); // the PR merged — branch is now stale (no open PR references it)
 
@@ -834,6 +841,7 @@ describe('deleteSecret rolling PR (D-118)', () => {
       credentials: CREDS,
       entityRef: TARGET_REF,
       key: 'API_KEY',
+      env: 'dev',
     });
 
     expect(res2.pullRequestUrl).not.toBe(res1.pullRequestUrl);
@@ -854,6 +862,7 @@ describe('deleteSecret rolling PR (D-118)', () => {
       credentials: CREDS,
       entityRef: TARGET_REF,
       key: 'DATABASE_URL',
+      env: 'dev',
     });
     repo.closePrWithoutMerging(); // a human closed it without merging
 
@@ -861,6 +870,7 @@ describe('deleteSecret rolling PR (D-118)', () => {
       credentials: CREDS,
       entityRef: TARGET_REF,
       key: 'API_KEY',
+      env: 'dev',
     });
 
     expect(loggerCalls.join('\n')).toMatch(/CLOSED WITHOUT MERGING/);
@@ -878,11 +888,13 @@ describe('deleteSecret rolling PR (D-118)', () => {
         credentials: CREDS,
         entityRef: TARGET_REF,
         key: 'DATABASE_URL',
+        env: 'dev',
       }),
       deleteSecret(makeDeps([OWNER_GROUP]), {
         credentials: CREDS,
         entityRef: TARGET_REF,
         key: 'API_KEY',
+        env: 'dev',
       }),
     ]);
 
@@ -1115,6 +1127,79 @@ describe('declared-keys annotation: write path', () => {
   });
 });
 
+// ── THE mychef INCIDENT (2026-09-16) ─────────────────────────────────────────────────────
+// A user pressed Delete on ONE row of the Secrets tab. deleteSecret took {entityRef, key}
+// with NO env, so it removed the Vault value from dev, staging AND prod — three writes, one
+// second apart — destroying the team's only key in production three minutes after they set
+// it. The UI renders a Delete button per (key, env) row WITH an Environment column, so the
+// control presented as per-environment was wired to a fleet-wide action.
+describe('deleteSecret is scoped to ONE environment', () => {
+  it('deletes only the named env, leaving the other environments untouched', async () => {
+    serveEs({ dev: ['SHARED'], staging: ['SHARED'], prod: ['SHARED'] });
+    await deleteSecret(makeDeps([OWNER_GROUP]), {
+      credentials: CREDS,
+      entityRef: TARGET_REF,
+      key: 'SHARED',
+      env: 'dev',
+    });
+    // The whole point: prod and staging keep their value.
+    expect(vaultDeleteCalls).toEqual([
+      { path: 'tenants/team-alpha/dev/app', key: 'SHARED' },
+    ]);
+    expect(Object.keys(writtenFiles())).toEqual([overlayEs('dev')]);
+  });
+
+  it('FAILS CLOSED when no env is given — never falls back to deleting everywhere', async () => {
+    serveEs({ dev: ['SHARED'], staging: ['SHARED'], prod: ['SHARED'] });
+    await expect(
+      deleteSecret(makeDeps([OWNER_GROUP]), {
+        credentials: CREDS,
+        entityRef: TARGET_REF,
+        key: 'SHARED',
+      } as any),
+    ).rejects.toThrow(/environment/i);
+    expect(vaultDeleteCalls).toEqual([]);
+  });
+
+  it('rejects an unknown env rather than silently matching nothing', async () => {
+    serveEs({ dev: ['SHARED'] });
+    await expect(
+      deleteSecret(makeDeps([OWNER_GROUP]), {
+        credentials: CREDS,
+        entityRef: TARGET_REF,
+        key: 'SHARED',
+        env: 'production',
+      }),
+    ).rejects.toThrow(/environment/i);
+    expect(vaultDeleteCalls).toEqual([]);
+  });
+
+  it('404s when the key exists in another env but NOT the one named', async () => {
+    serveEs({ dev: ['ONLY_IN_DEV'], prod: [] });
+    await expect(
+      deleteSecret(makeDeps([OWNER_GROUP]), {
+        credentials: CREDS,
+        entityRef: TARGET_REF,
+        key: 'ONLY_IN_DEV',
+        env: 'prod',
+      }),
+    ).rejects.toThrow(NotFoundError);
+    expect(vaultDeleteCalls).toEqual([]);
+  });
+
+  it('names the environment in the not-found message', async () => {
+    serveEs({ dev: [] });
+    await expect(
+      deleteSecret(makeDeps([OWNER_GROUP]), {
+        credentials: CREDS,
+        entityRef: TARGET_REF,
+        key: 'GHOST',
+        env: 'dev',
+      }),
+    ).rejects.toThrow(/dev/);
+  });
+});
+
 describe('declared-keys annotation: delete path', () => {
   it('deletes a key that is declared ONLY by the annotation (dataFrom overlay)', async () => {
     serveRawEs({ prod: dataFromEs('prod', ['beta_emails', 'watch_mode_key']) });
@@ -1122,6 +1207,7 @@ describe('declared-keys annotation: delete path', () => {
       credentials: CREDS,
       entityRef: TARGET_REF,
       key: 'beta_emails',
+      env: 'prod',
     });
     // Vault value removed (that is what actually un-syncs it under dataFrom/extract)…
     expect(vaultDeleteCalls).toEqual([
@@ -1143,6 +1229,7 @@ describe('declared-keys annotation: delete path', () => {
       credentials: CREDS,
       entityRef: TARGET_REF,
       key: 'DOOMED',
+      env: 'dev',
     });
     const written = writtenFiles()[overlayEs('dev')];
     expect(written).not.toMatch(/secretKey: DOOMED/);
@@ -1156,6 +1243,7 @@ describe('declared-keys annotation: delete path', () => {
       credentials: CREDS,
       entityRef: TARGET_REF,
       key: 'ONLY',
+      env: 'dev',
     });
     expect(annotationOf(writtenFiles()[overlayEs('dev')])).toBe('');
   });
@@ -1167,6 +1255,7 @@ describe('declared-keys annotation: delete path', () => {
         credentials: CREDS,
         entityRef: TARGET_REF,
         key: 'GHOST',
+        env: 'dev',
       }),
     ).rejects.toThrow(NotFoundError);
     expect(vaultDeleteCalls).toEqual([]);

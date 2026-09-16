@@ -177,14 +177,18 @@ describe('capstone-secrets router', () => {
   });
 
   describe('POST /delete', () => {
-    it('forwards {entityRef,key}+creds to deleteSecret and returns the PR url', async () => {
+    it('forwards {entityRef,key,env}+creds to deleteSecret and returns the PR url', async () => {
       deleteSecret.mockResolvedValue({
         pullRequestUrl: 'https://github.com/x/y/pull/7',
       });
       const app = await buildApp();
       const res = await request(app)
         .post('/delete')
-        .send({ entityRef: 'component:default/my-app', key: 'DATABASE_URL' });
+        .send({
+          entityRef: 'component:default/my-app',
+          key: 'DATABASE_URL',
+          env: 'dev',
+        });
 
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ pullRequestUrl: 'https://github.com/x/y/pull/7' });
@@ -193,9 +197,35 @@ describe('capstone-secrets router', () => {
         expect.objectContaining({
           entityRef: 'component:default/my-app',
           key: 'DATABASE_URL',
+          env: 'dev',
           credentials: expect.anything(),
         }),
       );
+    });
+
+    // The mychef incident (2026-09-16): this route took no env and sealCore then deleted
+    // from EVERY environment declaring the key, so one click on the tab's `dev` row
+    // destroyed production. A missing or bogus env must 400, never mean "all of them".
+    it('400s when env is MISSING — never falls back to deleting every environment', async () => {
+      const app = await buildApp();
+      const res = await request(app)
+        .post('/delete')
+        .send({ entityRef: 'component:default/my-app', key: 'DATABASE_URL' });
+
+      expect(res.status).toBe(400);
+      expect(deleteSecret).not.toHaveBeenCalled();
+    });
+
+    it('400s on an env outside dev/staging/prod (no delete attempted)', async () => {
+      const app = await buildApp();
+      const res = await request(app).post('/delete').send({
+        entityRef: 'component:default/my-app',
+        key: 'DATABASE_URL',
+        env: 'production',
+      });
+
+      expect(res.status).toBe(400);
+      expect(deleteSecret).not.toHaveBeenCalled();
     });
 
     it('400s when key is missing (no delete attempted)', async () => {
