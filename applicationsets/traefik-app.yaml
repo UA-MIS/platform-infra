@@ -143,37 +143,47 @@ spec:
         #     the block is behavior-identical (in-cluster TLS preserved). Verified by
         #     rendering traefik/traefik 40.2.0.
         #
-        # --- forwardedHeaders.trustedIPs (APEX AUTH-REDIRECT FIX) — public TLS
-        #     terminates at the Cloudflare edge and cloudflared dials the `web`
-        #     entrypoint over PLAIN HTTP (cloudflared/deployment.yaml header). So the
-        #     connection Traefik sees is http, and by DEFAULT Traefik does NOT trust a
-        #     downstream's X-Forwarded-* headers (empty trustedIPs) — it treats the
-        #     request scheme as `http`. That makes Traefik reconstruct request-origin
-        #     URLs as `http://<host>` instead of the real public `https://<host>`.
-        #     The visible break: the apex sign-in gate (portal-services/portal +
-        #     db-console-auth `oauth2-proxy-errors` Middleware) builds the post-login
-        #     `rd` return-URL from Traefik's `{url}` (the reconstructed request URL).
-        #     With scheme=http the browser is bounced to an http apex URL whose Secure
-        #     session cookie can't ride the plaintext leg → an OIDC redirect LOOP
-        #     ("sign-in hangs"), and the origin's non-default port leaks into the URL
-        #     → the browser ends on `capstone.uamishub.com:8080` (the `traefik` API
-        #     entrypoint port) and Firefox throws "SSL received a record that exceeded
-        #     the maximum permissible length" (TLS spoken to a plaintext Cloudflare
-        #     port). Trusting cloudflared's source range makes Traefik honor
-        #     `X-Forwarded-Proto: https` (which cloudflared always sets), so `{url}`
-        #     becomes `https://<host>/...` with the default 443 port omitted — the
-        #     correct public origin. cloudflared reaches the Service from a POD IP, so
-        #     the trusted range is the cluster POD CIDR (10.244.0.0/16 on this Talos
-        #     cluster; nodes carve /24s from it — `kubectl get nodes -o
-        #     jsonpath=...spec.podCIDR`). Scoped to the pod CIDR (not `insecure: true`
-        #     / 0.0.0.0/0) so only in-cluster senders — i.e. cloudflared, the sole
-        #     ingress path — can set forwarded headers. Set on BOTH entrypoints for
-        #     parity (websecure is the in-cluster OIDC path). This fixes EVERY
-        #     tunnel-fronted auth redirect uniformly (the apex /internal gate AND every
-        #     db-console/db-admin console, which share this oauth2-proxy + errors
-        #     Middleware). Belt-and-suspenders operator step (Cloudflare dashboard, not
-        #     git): turn ON "Always Use HTTPS" so no plaintext client leg can exist —
-        #     see platform-services/portal/README.md.
+        # --- forwardedHeaders.trustedIPs — ⚠ READ THIS BEFORE RE-DEBUGGING SSO
+        #     SCHEME BUGS. This setting does NOT control the scheme in the OIDC
+        #     post-login return URL, despite what this comment claimed until
+        #     2026-09-16. It governs only which `X-Forwarded-*` values Traefik
+        #     PASSES THROUGH to backends (trusted source → preserve the incoming
+        #     headers; untrusted → overwrite them with Traefik's own view). That is
+        #     a real and useful behavior, and it is why the setting stays — but it
+        #     is NOT an auth fix. Keep it scoped to the pod CIDR (not
+        #     `insecure: true` / 0.0.0.0/0) so only in-cluster senders — i.e.
+        #     cloudflared, the sole ingress path — can set forwarded headers.
+        #     10.244.0.0/16 is this Talos cluster's pod CIDR; nodes carve /24s from
+        #     it (`kubectl get nodes -o jsonpath=...spec.podCIDR`). Set on BOTH
+        #     entrypoints for parity (websecure is the in-cluster OIDC path).
+        #
+        #     WHY THE AUTH-SCHEME CLAIM WAS WRONG: cloudflared dials the `web`
+        #     entrypoint over PLAIN HTTP, and Traefik builds the `{url}` that the
+        #     `oauth2-proxy-errors` Middleware feeds into the post-login `rd` from
+        #     the ACTUAL CONNECTION SCHEME (`req.TLS != nil`) — it ignores
+        #     `X-Forwarded-Proto` for that reconstruction even when the sender IS
+        #     trusted. Proven 2026-09-16 on Traefik v3.7.1 from a pod at
+        #     10.244.2.122 (inside the trusted range): plaintext :80 with an
+        #     explicit `X-Forwarded-Proto: https` still produced
+        #     `state=<nonce>:http://<host>/`, while a real TLS connection to :443
+        #     produced `https://<host>/`. So every SSO-gated host (apex /internal,
+        #     db-admin, every DB console, every tenant dev/staging app) emits an
+        #     http:// return URL. oauth2-proxy's `--force-https`/`--reverse-proxy`
+        #     cannot fix it either — it receives `rd` as an absolute URL and only
+        #     echoes it.
+        #
+        #     WHAT ACTUALLY FIXES IT (fleet-wide, human-gated, NOT git — the tunnel
+        #     ingress config is remotely managed via TUNNEL_TOKEN): repoint the
+        #     Cloudflare Tunnel origin from
+        #     `http://traefik.kube-system.svc.cluster.local:80` to
+        #     `https://traefik.kube-system.svc.cluster.local:443` +
+        #     `noTLSVerify: true`, so the connection scheme is genuinely https.
+        #     Routers already exist on websecure for every host.
+        #
+        #     LOAD-BEARING TODAY: the flow only works because Cloudflare "Always Use
+        #     HTTPS" is ON and 301s the http:// hop at the edge. That toggle is a
+        #     dashboard setting, not in git and not monitored — turning it off
+        #     breaks every SSO login at once. See platform-services/portal/README.md.
         ports:
           web:
             port: 8000

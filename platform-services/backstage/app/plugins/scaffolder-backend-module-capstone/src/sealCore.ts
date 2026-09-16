@@ -279,7 +279,18 @@ function parseEsDataKeys(yaml: string): string[] {
  * (`rewrite` renames keys, it cannot drop one). So an overlay cannot simply be converted to
  * `extract` on the assumption that everything in its Vault object is nameable — the object has
  * to be checked first. Vault KV-v2's `subkeys` endpoint lists property NAMES without values,
- * which is the right way to check.
+ * which is the right way to check (`GET /v1/<mount>/subkeys/<path>`): it answers "what is on
+ * this object" without putting a single value on the wire, unlike `vault kv get`.
+ *
+ * And note WHICH failure to fear. Faced with an unrepresentable key name, ESO either refuses to
+ * sync (loud, harmless) or SANITIZES the name — `conversionStrategy: Default` replaces invalid
+ * characters with `_`, which is documented for `find`; the field exists identically on `extract`
+ * and the docs do not say whether it applies there. The sanitizing branch is the DANGEROUS one:
+ * the sync succeeds and the property is copied into a Kubernetes Secret, readable by anything
+ * with secret read in that namespace. It is a quiet disclosure rather than an outage, and quiet
+ * is what makes it dangerous. So when a Vault object holds a property that should not be there,
+ * get it REMOVED — renaming it to something legal "fixes" the sync while leaving the data to be
+ * copied into a Secret on the next reconcile.
  */
 const DECLARED_KEYS_ANNOTATION = 'platform.capstone/declared-keys';
 

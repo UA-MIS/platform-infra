@@ -72,10 +72,45 @@ spec:
         # LOWER than the bound PVC's current size, which 20Gi now is). The retention +
         # GC setup below (platform-services/harbor-retention-gc-config) is the actual
         # fix for the leak; 60Gi is headroom, not a substitute for pruning.
+        #
+        # registry size: 60Gi -> 100Gi (2026-09-16). SECOND ENOSPC outage, and the
+        # sentence directly above this one was WRONG about it. Retention + GC were
+        # both configured, both running nightly, and both reporting Success (GC 1918
+        # at 02:30 on 2026-09-16 freed 658MB) — and the PVC still hit 100%, because
+        # what actually filled it was a class of data neither one can see:
+        #
+        #   22.7 GiB of ORPHANED MULTIPART UPLOADS under
+        #   /storage/docker/registry/v2/repositories/**/_uploads/
+        #
+        # `_uploads` are half-finished blob PUT sessions. They are not tags, so tag
+        # retention never selects them; they are not untagged manifests or referenced
+        # blobs, so GC's delete_untagged never walks them; and Harbor's own quota
+        # accounting does not count them either (live evidence: quota API summed to
+        # ~39.5G across all 23 projects while `df` on the PVC showed 59G used — the
+        # ~20G delta IS the orphan pile, invisible to Harbor at every layer).
+        # base-images/library/golang alone held 41 dead sessions / 20.8GB while
+        # showing ZERO tags.
+        #
+        # The producer is the nightly dockerhub-mirror-populate CronJob: `crane copy`
+        # of large base images (golang, rust, node, dotnet/sdk), which retries each
+        # image 3x, so one failing multi-hundred-MB copy strands up to 3 partial
+        # sessions. Jobs -29823960 and -29825400 both FAILED, and the orphan
+        # `startedat` timestamps cluster exactly on those runs.
+        #
+        # The ONLY mechanism that reclaims `_uploads` is registry upload_purging,
+        # configured below. It was already enabled at the chart default age=168h
+        # (7 days) — enabled, correct, and structurally useless here, because the
+        # leak rate (~4-7GB/day) fills the volume in ~4 days and nothing becomes
+        # purge-eligible for 7. The fix is the age, not the enable flag.
+        #
+        # 100Gi is again headroom, NOT the fix — upload_purging below is the fix, and
+        # the per-project quotas in platform-services/harbor-retention-gc-config are
+        # the enforcement ceiling. Projected steady state under all three: ~40-45G of
+        # ~98G usable (~45%), with no unbounded consumer remaining.
         persistence:
           enabled: true
           persistentVolumeClaim:
-            registry:   { storageClass: ceph-block, size: 60Gi }
+            registry:   { storageClass: ceph-block, size: 100Gi }
             jobservice:
               jobLog:   { storageClass: ceph-block, size: 1Gi }
             database:   { storageClass: ceph-block, size: 2Gi }
@@ -196,6 +231,35 @@ spec:
             limits: { cpu: 200m, memory: 256Mi }
         registry:
           replicas: 1
+          # --- upload_purging: THE fix for the 2026-09-16 ENOSPC outage. ---
+          # Reclaims abandoned multipart upload sessions under
+          # /storage/docker/registry/v2/repositories/**/_uploads/. This is the only
+          # mechanism in Harbor that touches them — tag retention and GC are both
+          # structurally blind to `_uploads` (see the persistence block above for the
+          # full evidence trail), which is why the previous incident's retention+GC
+          # fix did not prevent this one.
+          #
+          # age: 168h (chart default, 7 days) -> 24h.
+          #   168h could not work here: the mirror CronJob strands ~4-7GB/day of dead
+          #   sessions, which fills the volume in roughly 4 days, while nothing became
+          #   purge-eligible until day 7. The purge was enabled and still never got
+          #   the chance to fire against this pile.
+          #   24h is safe against killing a LEGITIMATE in-flight upload: the largest
+          #   real push path here is the mirror CronJob, itself capped at
+          #   activeDeadlineSeconds: 3600 (1h), and Kaniko tenant pushes complete in
+          #   minutes. Nothing on this platform legitimately holds an upload session
+          #   open for 24h, so the margin is ~24x the worst realistic case.
+          # interval: 24h -> 1h.
+          #   The interval timer restarts from process start, so with a 24h interval a
+          #   registry pod that restarts more often than daily may never purge at all.
+          #   Hourly makes the purge independent of restart cadence and bounds the
+          #   worst-case orphan lifetime to ~25h instead of ~48h.
+          # dryrun stays false — dryrun:true logs candidates and frees nothing.
+          upload_purging:
+            enabled: true
+            age: 24h
+            interval: 1h
+            dryrun: false
           registry:
             resources:
               requests: { cpu: 100m, memory: 128Mi }

@@ -137,13 +137,26 @@ spec:
               cpu: "1"
               memory: 1Gi
 
+        # Velero server memory. RAISED 512Mi -> 2Gi on 2026-09-16.
+        #
+        # ROOT CAUSE (proven): the server was OOMKilled (exit 137) mid-backup and,
+        # on restart, marked the in-flight backup Failed with
+        #   "found a backup with status InProgress during the server starting".
+        # Confirmed on velero-daily-full-backup-20260915040006: container
+        # terminated OOMKilled at 2026-09-15T06:22:47Z; the backup was marked
+        # Failed at 06:22:49Z. The 20260914 run died the same way.
+        #
+        # WHY IT OUTGREW 512Mi: each run now enumerates ~14k items (the cluster
+        # has grown to 40+ namespaces). Velero holds the item list in memory
+        # during resource collection, so peak RSS scales with item count, not
+        # with the amount of PV data moved.
         resources:
           requests:
             cpu: 250m
-            memory: 256Mi
+            memory: 512Mi
           limits:
             cpu: "1"
-            memory: 512Mi
+            memory: 2Gi
 
         # Scheduled backups: ALL namespaces + PVs. excludedNamespaces:[minio]
         # avoids the backup store backing up itself (see header) — every other

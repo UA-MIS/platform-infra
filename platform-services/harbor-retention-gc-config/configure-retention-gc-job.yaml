@@ -102,6 +102,9 @@ spec:
         platform.capstone/component: platform
     spec:
       restartPolicy: Never
+      # Reads workload specs cluster-wide to build the in-use tag keep-list.
+      # Read-only, workload kinds only — see rbac-inuse-reader.yaml.
+      serviceAccountName: harbor-retention-inuse-reader
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -159,6 +162,32 @@ spec:
             # and where that reasoning stops being true.
             - name: RETENTION_PROTECT_TAGS
               value: "*.*.* latest"
+            # Registry host used to filter workload image refs down to ours when
+            # building the in-use keep-list (step 0a).
+            - name: REGISTRY_HOST
+              value: "harbor.capstone.uamishub.com"
+            # Hard cap on rules per retention policy. The job FAILS rather than
+            # truncate, because a truncated policy silently unprotects a deployed
+            # image — see step 0a.
+            - name: RETENTION_MAX_RULES
+              value: "15"
+            # --- Storage quotas (2026-09-16). See step 3 for why these are
+            #     deliberately overcommitted and must not be shrunk to sum under
+            #     the PVC size. Sizes are GiB, applied as bytes.
+            - name: QUOTA_DEFAULT_GIB
+              value: "10"
+            # Space-separated project=GiB. Anything not listed gets the default.
+            #   base-images (20.24G live) — the shared upstream mirror every tenant
+            #     build pulls from; the single largest legitimate consumer, and the
+            #     one whose runaway `_uploads` caused this outage. 40GiB is ~2x its
+            #     real footprint, so a mirror refill cannot wedge CI again.
+            #   dockerhub-proxy / mcr-proxy — pull-through caches. Their content is
+            #     re-fetchable from upstream on demand, so a cap that occasionally
+            #     forces a re-pull costs latency, never data.
+            #   backstage (6.14G live) — the developer portal image + its Kaniko
+            #     layer cache; platform-critical, so headroom over the default.
+            - name: QUOTA_OVERRIDES
+              value: "base-images=40 dockerhub-proxy=20 mcr-proxy=20 backstage=15"
           command: ["/bin/sh", "-eu", "-c"]
           args:
             - |
@@ -217,6 +246,87 @@ spec:
               n_total=$(wc -l < /tmp/all_projects.txt | tr -d ' ')
               echo "==> $n_total projects found; applying retention to:$RETENTION_PROJECTS"
               [ -n "$RETENTION_PROJECTS" ] || { echo "FAIL: enumeration produced no projects"; exit 1; }
+
+              # --- 0a) IN-USE TAG KEEP-LIST (2026-09-16) --------------------
+              # Recency does not imply "not in use", and the converse is worse: a
+              # stable prod tag is old precisely BECAUSE it is good. Measured live
+              # before this existed — mychef/mychef-backend:95b52f8 ranked 65 of 65
+              # in its repo while mychef PROD ran it on 3 replicas. `keep last 10`
+              # would have deleted it the first time retention actually executed,
+              # and the breakage would have stayed invisible until a pod
+              # rescheduled into ImagePullBackOff.
+              #
+              # So: enumerate what is genuinely deployed and retain it explicitly.
+              # See rbac-inuse-reader.yaml for the SA and for why bare Jobs are
+              # excluded while CronJobs are not.
+              #
+              # This is a UNION with the recency rule (algorithm "or"), so like the
+              # other always-rules it can only ever retain MORE. It cannot cause a
+              # deletion that was not already going to happen.
+              KUBE="https://kubernetes.default.svc"
+              SA=/var/run/secrets/kubernetes.io/serviceaccount
+              KTOK=$(cat $SA/token)
+              echo "==> in-use: enumerating deployed images from workload specs ..."
+              : > /tmp/inuse_raw.txt
+              for API in \
+                "/apis/apps/v1/deployments" \
+                "/apis/apps/v1/statefulsets" \
+                "/apis/apps/v1/daemonsets" \
+                "/apis/batch/v1/cronjobs" \
+                "/apis/argoproj.io/v1alpha1/rollouts" ; do
+                code=$(curl -sS -o /tmp/k8s.json -w '%{http_code}' \
+                  --cacert $SA/ca.crt -H "Authorization: Bearer $KTOK" "${KUBE}${API}?limit=1000")
+                if [ "$code" = "404" ]; then
+                  # CRD not installed (e.g. no Argo Rollouts) — not an error.
+                  echo "    $API -> 404, kind not present, skipping"; continue
+                fi
+                if [ "$code" != "200" ]; then
+                  # A silent miss here means an in-use tag silently loses its
+                  # protection, which is the exact failure this step exists to
+                  # prevent. Fail loudly instead.
+                  echo "FAIL: GET $API returned HTTP $code — refusing to build a partial keep-list"
+                  cat /tmp/k8s.json; exit 1
+                fi
+                # NOTE the ': *' in these patterns. The API server pretty-prints by
+                # default, so the field arrives as `"image": "nginx"` WITH a space —
+                # a `"image":"` pattern silently matches zero and yields an empty
+                # keep-list. Caught live: the first run of this step enumerated 0
+                # refs from a 3.6MB payload containing 260 of them. The tolerant
+                # pattern matches both spellings, so it cannot regress if the
+                # server's formatting changes.
+                n=$(grep -o '"image": *"[^"]*"' /tmp/k8s.json | wc -l | tr -d ' ')
+                echo "    $API -> $n image refs"
+                grep -o '"image": *"[^"]*"' /tmp/k8s.json \
+                  | sed 's/^"image": *"//; s/"$//' >> /tmp/inuse_raw.txt
+              done
+
+              # Keep only this registry's images that carry a TAG. Digest-pinned
+              # refs (…@sha256:…) are deliberately dropped: they are immune to tag
+              # retention anyway, and there is no tag to protect.
+              REGISTRY_HOST="${REGISTRY_HOST:-harbor.capstone.uamishub.com}"
+              grep -F "${REGISTRY_HOST}/" /tmp/inuse_raw.txt 2>/dev/null \
+                | grep -v '@sha256:' \
+                | sed "s|^.*${REGISTRY_HOST}/||" \
+                | sort -u > /tmp/inuse.txt || true
+              n_inuse=$(wc -l < /tmp/inuse.txt | tr -d ' ')
+              echo "==> in-use: $n_inuse tagged image refs on $REGISTRY_HOST"
+              # Zero is legitimate only on an empty cluster; on this one it means
+              # the enumeration broke, and proceeding would strip every keep-rule.
+              [ "$n_inuse" -gt 0 ] || { echo "FAIL: in-use enumeration returned nothing — refusing to apply retention with an empty keep-list"; exit 1; }
+
+              # Shared project_id resolver (F-1). Every occurrence, deduped; a
+              # disagreement is a hard failure rather than a guess, because this id
+              # scopes both a deletion policy and a storage quota.
+              resolve_pid() {
+                _f="$1"; _p="$2"
+                _ids=$(grep -o '"project_id":[0-9]*' "$_f" 2>/dev/null | grep -o '[0-9]*$' | sort -u)
+                _n=$(printf '%s\n' "$_ids" | grep -c '[0-9]' || true)
+                if [ -z "$_ids" ] || [ "$_n" != "1" ]; then
+                  echo "FAIL: could not unambiguously resolve project_id for '$_p' (got: $(printf '%s' "$_ids" | tr '\n' ' '))" >&2
+                  return 1
+                fi
+                printf '%s' "$_ids"
+              }
 
               # --- 0b) build the protection rules once: one `always` retain rule per
               #         pattern in RETENTION_PROTECT_TAGS. Unioned with the
@@ -278,6 +388,50 @@ spec:
                 fi
                 RID=$(printf '%s' "$proj" | grep -o '"retention_id":"[0-9]*"' | head -1 | grep -o '[0-9]*' || true)
 
+                # Per-project in-use rules: one `always` retain rule per tag this
+                # project currently has DEPLOYED, on top of the global protection
+                # patterns. A tag already covered by a RETENTION_PROTECT_TAGS
+                # pattern is skipped, so a semver release does not burn a second
+                # rule slot on a redundant rule.
+                INUSE_RULES=""
+                n_inuse_p=0
+                for TAG in $(grep "^${P}/" /tmp/inuse.txt 2>/dev/null | sed 's|^.*:||' | sort -u); do
+                  covered=0
+                  for PAT in $RETENTION_PROTECT_TAGS; do
+                    case "$TAG" in $PAT) covered=1; break ;; esac
+                  done
+                  [ "$covered" = "1" ] && continue
+                  n_inuse_p=$((n_inuse_p+1))
+                  INUSE_RULES="${INUSE_RULES},
+                  {
+                    \"disabled\": false,
+                    \"action\": \"retain\",
+                    \"template\": \"always\",
+                    \"params\": {},
+                    \"tag_selectors\": [
+                      { \"kind\": \"doublestar\", \"decoration\": \"matches\", \"pattern\": \"${TAG}\" }
+                    ],
+                    \"scope_selectors\": {
+                      \"repository\": [
+                        { \"kind\": \"doublestar\", \"decoration\": \"repoMatches\", \"pattern\": \"**\" }
+                      ]
+                    }
+                  }"
+                done
+                n_rules_this=$((n_rules_expected+n_inuse_p))
+                # Harbor caps rules per policy. Silently truncating would drop an
+                # in-use tag's protection — the exact silent failure this guards
+                # against — so this is a hard stop with the real remedy named.
+                if [ "$n_rules_this" -gt "$RETENTION_MAX_RULES" ]; then
+                  echo "FAIL: project '$P' needs $n_rules_this rules (cap $RETENTION_MAX_RULES):"
+                  echo "      $n_inuse_p in-use tag(s) + $n_rules_expected base rule(s)."
+                  echo "      Refusing to truncate — that would silently unprotect a DEPLOYED image."
+                  echo "      Remedy: consolidate deployed tags in that project (or raise the cap"
+                  echo "      deliberately after checking Harbor's own per-policy rule limit)."
+                  exit 1
+                fi
+                echo "==> retention: '$P' has $n_inuse_p deployed tag(s) needing explicit protection ($n_rules_this rules total)"
+
                 cat > "/tmp/ret_${P}.json" <<EOF
               {
                 "algorithm": "or",
@@ -295,7 +449,7 @@ spec:
                         { "kind": "doublestar", "decoration": "repoMatches", "pattern": "**" }
                       ]
                     }
-                  }${PROTECT_RULES}
+                  }${PROTECT_RULES}${INUSE_RULES}
                 ],
                 "trigger": { "kind": "Schedule", "settings": { "cron": "0 0 2 * * *" }, "references": {} },
                 "scope": { "level": "project", "ref": ${PID} }
@@ -337,13 +491,31 @@ spec:
                   echo "$verify" | grep -qF "\"pattern\":\"${PAT}\"" \
                     || { echo "FAIL: policy $RID for '$P' missing protection rule for pattern '$PAT' after apply"; echo "$verify"; exit 1; }
                 done
+                n_always_expected=$((n_protect+n_inuse_p))
                 n_always=$(echo "$verify" | grep -o '"template":"always"' | wc -l | tr -d ' ')
-                [ "$n_always" = "$n_protect" ] \
-                  || { echo "FAIL: policy $RID for '$P' has $n_always always-rules, expected $n_protect"; echo "$verify"; exit 1; }
+                [ "$n_always" = "$n_always_expected" ] \
+                  || { echo "FAIL: policy $RID for '$P' has $n_always always-rules, expected $n_always_expected"; echo "$verify"; exit 1; }
+                # Every DEPLOYED tag must come back in the applied policy. This is
+                # the check that actually matters: a policy that applied cleanly but
+                # silently dropped an in-use rule is how prod images get deleted.
+                # Skip tags already covered by a RETENTION_PROTECT_TAGS pattern —
+                # they are protected by that pattern rule and deliberately get no
+                # literal rule of their own. This mirror of the build-side `covered`
+                # test must stay in sync with it: checking for a literal rule on a
+                # pattern-covered tag fails a policy that is in fact correct.
+                for TAG in $(grep "^${P}/" /tmp/inuse.txt 2>/dev/null | sed 's|^.*:||' | sort -u); do
+                  covered=0
+                  for PAT in $RETENTION_PROTECT_TAGS; do
+                    case "$TAG" in $PAT) covered=1; break ;; esac
+                  done
+                  [ "$covered" = "1" ] && continue
+                  echo "$verify" | grep -qF "\"pattern\":\"${TAG}\"" \
+                    || { echo "FAIL: policy $RID for '$P' is missing a retain rule for DEPLOYED tag '$TAG' after apply"; echo "$verify"; exit 1; }
+                done
                 n_got=$(echo "$verify" | grep -o '"template":"' | wc -l | tr -d ' ')
-                [ "$n_got" = "$n_rules_expected" ] \
-                  || { echo "FAIL: policy $RID for '$P' has $n_got rules, expected $n_rules_expected"; echo "$verify"; exit 1; }
-                echo "==> retention: OK for '$P' (policy id $RID, $n_got rules: keep last $RETENTION_KEEP_LAST_N pushed + always[$RETENTION_PROTECT_TAGS], all repos)."
+                [ "$n_got" = "$n_rules_this" ] \
+                  || { echo "FAIL: policy $RID for '$P' has $n_got rules, expected $n_rules_this"; echo "$verify"; exit 1; }
+                echo "==> retention: OK for '$P' (policy id $RID, $n_got rules: keep last $RETENTION_KEEP_LAST_N pushed + always[$RETENTION_PROTECT_TAGS] + $n_inuse_p deployed-tag rule(s), all repos)."
               done
 
               # --- 2) system-wide GC schedule, nightly, delete_untagged so retention
@@ -383,7 +555,115 @@ spec:
               echo "$verify" | grep -qF '"cron":"0 30 2 * * *"' || { echo "FAIL: gc cron mismatch after apply"; echo "$verify"; exit 1; }
               echo "==> gc: OK (Daily @ 02:30 UTC, delete_untagged=true)."
 
-              echo "==> harbor retention + gc configuration complete."
+              # --- 3) per-project STORAGE QUOTAS (2026-09-16). ---------------
+              # Enforcement, not observation. The 2026-09-16 ENOSPC outage happened
+              # with retention running, GC running nightly and reporting Success, and
+              # every project quota set to `unlimited` (verified live: all 23). The
+              # lesson this platform already paid for once — the MinIO/Velero DR
+              # deadlock on w1, where alerts fired for 59h and changed nothing because
+              # nothing enforced a ceiling — is that a ceiling is the control and the
+              # alert is only the backstop. So: quotas first, alert second.
+              #
+              # Quotas are applied to EVERY project, including the ones excluded from
+              # retention. That exclusion exists for a narrow reason (do not PUT over
+              # dockerhub-proxy's hand-set nDaysSinceLastPull policy) which has no
+              # bearing on a storage ceiling, so it is deliberately NOT reused here.
+              #
+              # HONEST LIMIT — THESE CAPS ARE INTENTIONALLY OVERCOMMITTED.
+              # The sum of all caps (~40 + 20 + 20 + 20 + 15 + the 10GiB default for
+              # the rest) exceeds the ~98GiB usable PVC. That is deliberate: sizing
+              # 23 projects to sum under 98GiB would mean ~4GiB each, which is below
+              # what an active tenant legitimately needs, and would break CI — the
+              # owner's #1 priority — to satisfy an arithmetic tidiness nobody asked
+              # for. What a quota buys here is BLAST-RADIUS containment for
+              # COMMITTED artifacts: no single project can run away on tags and
+              # blobs and take the registry down for every other tenant.
+              #
+              # READ THIS BEFORE CONCLUDING "we have quotas, so it cannot be a
+              # runaway project": a quota does NOT bound the class of data that
+              # caused the 2026-09-16 outage. Harbor's quota accounting does not
+              # count `_uploads` at all — measured during that incident, the quota
+              # API summed ~39.5G across all 23 projects while `df` on the PVC
+              # showed 59G used, and that ~20G delta WAS the orphaned-upload pile.
+              # base-images could reproduce that outage exactly while its quota
+              # still read 18.93G of 40G. Only registry.upload_purging
+              # (applicationsets/harbor-app.yaml) bounds that class.
+              #
+              # Aggregate safety therefore comes from the other two controls
+              # (upload_purging for orphaned uploads, retention for tags per repo),
+              # with the 75%/30m PVC utilisation alert as the backstop for slow
+              # collective drift across projects.
+              # Do not "fix" this by shrinking the caps to sum under capacity.
+              QUOTA_DEFAULT_GIB="${QUOTA_DEFAULT_GIB:-10}"
+              echo "==> quotas: default ${QUOTA_DEFAULT_GIB}GiB, overrides: $QUOTA_OVERRIDES"
+              while IFS= read -r P; do
+                [ -n "$P" ] || continue
+
+                GIB="$QUOTA_DEFAULT_GIB"
+                for OV in $QUOTA_OVERRIDES; do
+                  case "$OV" in
+                    "${P}="*) GIB="${OV#*=}" ;;
+                  esac
+                done
+                BYTES=$(( GIB * 1073741824 ))
+
+                # F-1: NOT `head -1`. Step 1 of this same script refuses that for
+                # this exact parse and explains why: Harbor serialises JSON keys
+                # alphabetically, so cve_allowlist's NESTED "project_id" sorts
+                # BEFORE the project's own. A project attached to the system CVE
+                # allowlist reports project_id 0 there, so `head -1` yields pid=0,
+                # the quota lookup finds nothing, and the `exit 1` below kills the
+                # loop mid-way under `set -eu` — leaving every project after it
+                # with NO quota at all, silently. Same unanimity check as step 1:
+                # take every occurrence, and refuse rather than guess if they
+                # disagree.
+                # `|| true` on THIS call only: projects excluded from retention
+                # (RETENTION_EXCLUDE_PROJECTS) have no cached payload, so an absent
+                # file must fall through to the fetch below, NOT abort the script
+                # under `set -eu`. Without it the job dies on the first excluded
+                # project and every project after it gets no quota — the exact
+                # silent-partial-application failure this fix exists to prevent.
+                # The post-fetch call below is strict, so a genuinely ambiguous
+                # payload still fails loudly.
+                pid=$(resolve_pid "/tmp/proj_${P}.json" "$P" 2>/dev/null || true)
+                if [ -z "$pid" ]; then
+                  # Retention skipped this project (excluded or 404) so no cached
+                  # payload exists; fetch it now rather than silently skipping —
+                  # a project with no quota is exactly the hole this step closes.
+                  pcode=$(curl -sS -o "/tmp/proj_${P}.json" -w '%{http_code}' -u "$AUTH" "$CORE/api/v2.0/projects/$P")
+                  if [ "$pcode" = "404" ]; then
+                    echo "==> quotas: skip: project '$P' gone (404), continuing."; continue
+                  fi
+                  [ "$pcode" = "200" ] || { echo "FAIL: GET /projects/$P returned HTTP $pcode"; exit 1; }
+                  pid=$(resolve_pid "/tmp/proj_${P}.json" "$P")
+                fi
+                [ -n "$pid" ] || { echo "FAIL: could not resolve project_id for '$P'"; exit 1; }
+
+                # The quota payload carries BOTH the quota's own "id" and a nested
+                # "ref":{"id":<project id>}. Strip the nested object first instead
+                # of trusting alphabetical key order to put "id" before "ref" —
+                # same class of bug as the project_id parse above, and picking the
+                # wrong one here would PUT a quota onto an unrelated object.
+                qid=$(curl -fsS -u "$AUTH" "$CORE/api/v2.0/quotas?reference=project&reference_id=${pid}" \
+                      | sed 's/"ref":{[^}]*}//g' \
+                      | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
+                [ -n "$qid" ] || { echo "FAIL: no quota object for project '$P' (id $pid)"; exit 1; }
+
+                code=$(curl -sS -u "$AUTH" -o /tmp/q.out -w '%{http_code}' \
+                  -X PUT "$CORE/api/v2.0/quotas/${qid}" -H 'Content-Type: application/json' \
+                  --data "{\"hard\":{\"storage\":${BYTES}}}")
+                [ "$code" = "200" ] || { echo "FAIL: PUT /quotas/$qid for '$P' returned HTTP $code"; cat /tmp/q.out; exit 1; }
+
+                # Read back — a quota that silently did not apply is the same as no
+                # quota, and that is the condition that caused this outage.
+                got=$(curl -fsS -u "$AUTH" "$CORE/api/v2.0/quotas/${qid}" \
+                      | grep -o '"hard":{[^}]*}' | grep -o '"storage":-\{0,1\}[0-9]*' | cut -d: -f2)
+                [ "$got" = "$BYTES" ] \
+                  || { echo "FAIL: quota read-back for '$P' is '$got', expected '$BYTES'"; exit 1; }
+                echo "==> quotas: OK '$P' (project $pid, quota $qid) = ${GIB}GiB"
+              done < /tmp/all_projects.txt
+
+              echo "==> harbor retention + gc + quota configuration complete."
       volumes:
         - name: tmp
           emptyDir: {}

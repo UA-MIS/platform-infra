@@ -88,9 +88,14 @@
 # fails the whole nightly job (backoffLimit: 1 means the Job itself does not
 # retry) and someone ends up debugging a non-problem.
 #
-# SCHEDULE: nightly (02:00, ahead of the proxy projects' 02:30 GC — no
-# interaction, different projects, just avoiding a coincidental resource
-# clash). A run that copies nothing new is a fast no-op (crane's manifest HEAD
+# SCHEDULE: nightly at 07:00Z. This header previously read "02:00, ahead of the
+# proxy projects' 02:30 GC — no interaction, different projects, just avoiding a
+# coincidental resource clash." That was WRONG in a way that mattered and is
+# corrected here: Harbor's GC is a SYSTEM-WIDE singleton that puts the whole
+# REGISTRY read-only while it runs, so "different projects" buys nothing — a
+# 02:00-03:00 mirror run had GC opening a read-only window straight through the
+# middle of its push phase. See the schedule: field below for the timing evidence
+# and for why 07:00Z (not 22:00Z) is the right destination. A run that copies nothing new is a fast no-op (crane's manifest HEAD
 # short-circuits unchanged digests). REFRESH/NEW-IMAGE FLOW: add a line to
 # dockerhub-mirror-configmap.yaml (same dir) in a normal PR; the next
 # scheduled run picks it up, or trigger immediately with
@@ -104,13 +109,73 @@ metadata:
   labels:
     platform.capstone/component: platform
 spec:
-  schedule: "0 2 * * *"
+  # 02:00Z -> 07:00Z (2026-09-16, ENOSPC follow-up). Two separate reasons.
+  #
+  # (1) COLLISION. Three jobs were stacked on the same hour:
+  #       02:00  this mirror run (up to 1h, so 02:00-03:00)
+  #       02:00  Harbor tag retention  (harbor-retention-gc-config)
+  #       02:30  Harbor garbage collection — which puts the registry READ-ONLY
+  #              while it runs, i.e. squarely inside this job's push window.
+  #     A push landing in the GC read-only window fails, burns one of the three
+  #     retries, and strands another partial multipart upload.
+  #
+  # (2) BLAST RADIUS. This CronJob has no spec.timeZone, so the cron is UTC and
+  #     local is UTC-5. This job saturates the registry and strands ~9GB per
+  #     killed run, so the hour it occupies should be the one where the FEWEST
+  #     tenant pushes can collide with it. Measured over 680 tag pushes:
+  #       02:00Z (21:00 local)  33 pushes   <- the old window
+  #       22:00Z (17:00 local)  55 pushes   <- 3rd BUSIEST hour; rejected
+  #       07:00Z (02:00 local)   4 pushes   <- quietest usable; chosen
+  #     An earlier revision of this change used 22:00Z, which reads like "late
+  #     evening" but is 17:00 local — the middle of the working afternoon. Do not
+  #     "fix" this back to an hour that looks quiet in UTC without re-checking
+  #     what it is locally.
+  #
+  # 07:00-08:00Z was checked clear against every other schedule on the cluster
+  # (vault 03:00, Velero 04:00, mr-prune Sun 04:00, curb-event-sync 06:11,
+  # Harbor retention 02:00, Harbor GC 02:30).
+  schedule: "0 7 * * *"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
   jobTemplate:
     spec:
       backoffLimit: 1
+      # DELIBERATELY LEFT AT 3600 — do not raise this. It was suspected of being
+      # broken during the 2026-09-16 ENOSPC incident because `kubectl get jobs`
+      # showed DURATION of 13h and 37h. It is not broken: `.status.conditions`
+      # shows Failed/DeadlineExceeded at exactly 3600s after startTime for all
+      # three failed runs. The long DURATION is a kubectl display artifact —
+      # `.status.completionTime` is only set on SUCCESS, so for a failed Job
+      # kubectl renders `now - startTime`, which grows forever.
+      #
+      # The deadline firing is nonetheless part of the leak: SIGKILL mid-`crane
+      # copy` strands the in-flight multipart uploads, ~9GB per killed run
+      # (measured from PVC utilisation: clean ~14-15pp steps at each kill window,
+      # flat in between). RAISING the deadline would make that WORSE, not better —
+      # a 4h window stranding ~4x the bytes — so the containment is
+      # registry.upload_purging (age 24h, applicationsets/harbor-app.yaml), not a
+      # longer rope here.
+      #
+      # A run that gets killed is not lost work: `crane copy` skips images already
+      # present, so each night resumes where the last left off and the list
+      # converges over a few runs. The 1h cap is what bounds the per-night damage.
+      # The skip behaviour is evidenced, not assumed — the 09-12 and 09-13 runs
+      # completed in 26s and 23s against this same 30-image list, which is only
+      # possible if already-present images are skipped outright.
+      #
+      # ⚠ CAVEAT — convergence holds only while the job still fails CLEANLY, and
+      # right now the evidence does not show it converging. Since the 09-14 list
+      # expansion there have been three consecutive DeadlineExceeded kills with no
+      # decrease in per-run damage (~14-15pp of the PVC each time). Capacity is the
+      # reason: library/rust:1-slim alone took 15m27s for ONE image, so a 3600s
+      # budget is realistically ~4 large images, against a 30-image list.
+      #
+      # So: if the run at 07:00Z is ALSO killed, stop treating this as transient.
+      # The list needs structural attention — a per-image deadline, or splitting
+      # the large pulls across runs — because until then registry.upload_purging
+      # is permanently load-bearing rather than a safety net, and it is the only
+      # control standing between this leak and a repeat ENOSPC.
       activeDeadlineSeconds: 3600
       template:
         metadata:

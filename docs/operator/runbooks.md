@@ -254,3 +254,95 @@ Verify: `kubectl -n vault-unsealer exec -it vault-unsealer-0 -- vault status`
 should show `Sealed  false`. The main Vault then auto-unseals on its own next
 restart (or immediately, if it was already waiting on the unsealer) — no
 further manual steps needed on the main Vault itself.
+
+---
+
+## (E) ESO + Vault: inspecting tenant secrets, and reading ESO's signals
+
+Reference material, not a procedure. These are the traps that cost real time
+during the 2026-09 Secrets-tab work; each one is a thing the obvious approach
+gets wrong.
+
+### E.1 — "What is actually on this Vault object?" — use `subkeys`, never `kv get`
+
+The question comes up constantly (before converting an overlay to
+`dataFrom: extract`, before believing a tenant's `data[]` list, when auditing a
+path). `vault kv get` answers it but puts **every value** on the wire and into
+your scrollback, for a question that only ever needed names.
+
+KV-v2 has a dedicated endpoint that returns the key structure and **no values**:
+
+```fish
+# names only — no secret material is transmitted
+kubectl exec -n vault vault-0 -- sh -c \
+  'VAULT_SKIP_VERIFY=1 vault read -format=json secret/subkeys/tenants/<team>/<env>/app'
+```
+
+A token with `read` on `secret/subkeys/tenants/*` is sufficient — it does not
+need, and should not have, `read` on `secret/data/*`. Prefer this for every
+"what's in this path" question, including in incident response.
+
+### E.2 — ESO's error events name the WRONG spec field
+
+An ExternalSecret using explicit `spec.data[]` reports provider errors as though
+it were using `dataFrom`:
+
+```
+MissingProviderSecret: secret does not exist at provider using spec.dataFrom[0]
+                       (key=tenants/mychef/prod/app)
+```
+
+That object has **no `dataFrom` at all** — `spec.data: [APP_SECRET]`, generation 1,
+verified directly. Debugging from the event alone sends you to a field that
+isn't there and invites the wrong conclusion about which shape is at fault.
+**Read `spec` on the object before trusting the event's field reference.**
+
+### E.3 — `deletionPolicy` decides whether failure is loud or silent, NOT the shape
+
+The intuitive model ("explicit `data[]` fails loudly, `extract` fails quietly")
+is wrong. The lever is `deletionPolicy`:
+
+| | missing **property** (object exists) | missing **object** |
+|---|---|---|
+| `data[]` | LOUD — `SecretSyncedError`, stale Secret retained | **silent** — `Ready=True`/`SecretDeleted` |
+| `extract` | silently omits just that key | **silent** — `Ready=True`/`SecretDeleted` |
+
+With `deletionPolicy: Delete` and a missing object, ESO **deletes the Secret**
+and reports `Ready=True`. Reloader restarts every replica into the empty state,
+`optional: true` env refs mean the pods come up Ready serving 200s with no
+credentials, and ArgoCD stays Synced/Healthy. Nothing turns red.
+
+`Retain` is the lever on **both** shapes: the last-known-good Secret is kept and
+the failure surfaces as `Ready=False`, which `ExternalSecretSyncError` pages on.
+Templates therefore ship `Retain` on staging/prod and `Delete` on dev/preview.
+
+### E.4 — "Never configured" and "secrets vanished" look identical
+
+`tenants/<team>/<env>/app` is **not** created by provisioning — KV-v2 creates an
+object on first write, so an environment where nobody has ever set a secret has
+no object at all. Under `deletionPolicy: Delete` that presents exactly like an
+environment whose secrets were destroyed: `Ready=True`, no Secret, ArgoCD green.
+
+When triaging a `SecretDeleted`, establish which case you are in **before**
+escalating — `subkeys` (E.1) answers it without reading values. Note that the
+`database` and `harbor-pull` ExternalSecrets in the same namespace ARE
+provisioned, so "those sync but `app` doesn't" is the signature of this case
+rather than evidence of a Vault problem.
+
+### E.5 — `dataFrom: extract` is unbounded; check names before converting
+
+`extract` syncs **every** property on the object, so every property name must be
+a legal Kubernetes Secret data key (`[-._a-zA-Z0-9]+`). Converting an overlay on
+the assumption that its Vault object holds only what `data[]` listed is unsafe:
+one tenant's object held four properties with no pointer anywhere, one of which
+had a **space** in its name.
+
+Given an unrepresentable name, ESO either refuses to sync (loud, harmless) or
+**sanitizes** it (`conversionStrategy: Default` replaces invalid characters with
+`_`; documented for `find`, field exists identically on `extract`, docs silent on
+whether it applies). **The sanitizing branch is the dangerous one** — the sync
+succeeds and the property lands in a Kubernetes Secret readable by anything with
+secret read in that namespace. A quiet disclosure, not an outage.
+
+So: when an object holds a property that should not be there, get it **removed**.
+Renaming it to something legal fixes the sync and leaves the data to be copied.
