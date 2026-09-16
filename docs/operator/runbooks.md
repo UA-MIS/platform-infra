@@ -282,6 +282,18 @@ A token with `read` on `secret/subkeys/tenants/*` is sufficient — it does not
 need, and should not have, `read` on `secret/data/*`. Prefer this for every
 "what's in this path" question, including in incident response.
 
+> **This does not work today — and that is a gap worth closing.** The per-tenant
+> ESO roles grant `secret/data/tenants/<team>/*` but **not**
+> `secret/subkeys/tenants/<team>/*`, so `subkeys` returns **403** with the
+> credentials that actually exist. The only way to answer "what keys are on this
+> object" right now is to read the object and discard the values — i.e. every
+> name lookup puts every value on the wire.
+>
+> **There is currently no names-only path.** Until the tenant policies add
+> `read` on `secret/subkeys/tenants/<team>/*`, treat any key-name lookup as a
+> full secret read and handle it accordingly (no shell history, no scrollback,
+> no pasting into a ticket).
+
 ### E.2 — ESO's error events name the WRONG spec field
 
 An ExternalSecret using explicit `spec.data[]` reports provider errors as though
@@ -323,6 +335,19 @@ object on first write, so an environment where nobody has ever set a secret has
 no object at all. Under `deletionPolicy: Delete` that presents exactly like an
 environment whose secrets were destroyed: `Ready=True`, no Secret, ArgoCD green.
 
+**Verified**, not inferred — read directly via the per-tenant ESO roles:
+
+```
+mychef/dev      EXISTS (1 key)      motion/dev      ABSENT (404)
+mychef/staging  ABSENT (404)        motion/staging  ABSENT (404)
+mychef/prod     ABSENT (404)        motion/prod     ABSENT (404)
+```
+
+The mychef split is the proof: dev works because someone set a secret there;
+staging and prod are absent because nobody ever did. (Note mychef's dev object
+holds exactly **one** key — so that tenant has never had its Spoonacular, Twilio
+or SMTP credentials in **any** environment, not just in prod.)
+
 When triaging a `SecretDeleted`, establish which case you are in **before**
 escalating — `subkeys` (E.1) answers it without reading values. Note that the
 `database` and `harbor-pull` ExternalSecrets in the same namespace ARE
@@ -346,3 +371,26 @@ secret read in that namespace. A quiet disclosure, not an outage.
 
 So: when an object holds a property that should not be there, get it **removed**.
 Renaming it to something legal fixes the sync and leaves the data to be copied.
+
+### E.6 — an EMPTY Vault object is healthy, and creates no Secret
+
+Verified directly (scratch path, `Retain`, `dataFrom: extract`):
+
+```
+condition: Ready=True   reason=SecretSynced
+           message="secret retained due to DeletionPolicy=Retain"
+secret:    NotFound
+```
+
+So `{}` is a legitimate "provisioned but not yet configured" state: the
+ExternalSecret is healthy, no Secret is produced, and nothing alerts. That is
+what makes seeding an empty object at onboarding the fix for E.4 — it separates
+"never configured" (object exists, empty, quiet) from "secrets vanished" (object
+absent, `Ready=False` under `Retain`, alerts).
+
+> **This one the template comment got right.** The `_contract` overlay's claim
+> that "an EMPTY Vault object is not an error — the ExternalSecret stays healthy
+> and simply creates no Secret" is **true**, and was re-verified above. Called
+> out explicitly because several of its neighbouring comments were *false* and
+> had to be corrected; do not let that spread into distrusting the whole file and
+> re-testing what is already settled. Check claims individually.
