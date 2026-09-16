@@ -52,21 +52,6 @@ interface VaultResponse {
 }
 
 /**
- * Does this Vault error body describe a check-and-set conflict — i.e. "the object already
- * exists", the EXPECTED outcome of a `cas: 0` write against a seeded path?
- *
- * Deliberately narrow. Vault answers 400 for several unrelated conditions (a malformed
- * request, a misconfigured mount), and every one of those is a real failure that must surface.
- */
-function isCheckAndSetConflict(body: unknown): boolean {
-  const errors = (body as { errors?: unknown } | undefined)?.errors;
-  return (
-    Array.isArray(errors) &&
-    errors.some(e => typeof e === 'string' && e.includes('check-and-set'))
-  );
-}
-
-/**
  * A tiny Vault KV-v2 client. One instance per request is fine (it logs in lazily and caches
  * the short-lived token for the lifetime of the instance only). All write/read methods throw
  * on an unexpected non-2xx Vault response with the status + path (NEVER the body) in the
@@ -226,91 +211,6 @@ export class VaultClient {
     }
     throw new Error(
       `Vault KV-v2 delete-key failed (HTTP ${res.status}) at ` +
-        `${this.cfg.mount}/data/${secretPath}.`,
-    );
-  }
-
-  /**
-   * Ensure the KV-v2 object at `secretPath` EXISTS, creating it EMPTY if it does not.
-   *
-   * ── WHY THIS EXISTS ──────────────────────────────────────────────────────────────────────
-   * Vault KV-v2 creates an object on first write, so `tenants/<team>/<env>/app` does not exist
-   * until someone sets their first secret. Under `deletionPolicy: Delete` that is reported as
-   * Ready=True/SecretDeleted with no Secret — byte-identical to an environment whose secrets
-   * were DESTROYED. Under `Retain` (staging/prod) it is reported as Ready=False and pages, so
-   * every freshly scaffolded tenant would alert on day one for doing nothing wrong.
-   *
-   * Seeding an empty object at onboarding separates the two: an empty object is healthy and
-   * produces no Secret (verified against ESO v2.6.0 — Ready=True/SecretSynced, secret NotFound),
-   * so "never configured" is quiet while "object destroyed" stays loud.
-   *
-   * ── WHY `cas: 0` AND NOT A PLAIN CREATE ──────────────────────────────────────────────────
-   * This runs against a path that may ALREADY hold a team's live secrets — a re-run of
-   * onboarding, a re-scaffold, a retry after a partial failure. A plain POST to
-   * `secret/data/<path>` REPLACES the object: every key the team has ever set would be gone,
-   * silently, with the ExternalSecret still reporting healthy afterwards.
-   *
-   * ── THE CONSEQUENCE THAT FALLS OUT OF THIS, AND IS NOT A BUG IN THIS METHOD ───────────────
-   * Because this never overwrites, onboarding a NEW team onto a slug a PREVIOUS team used
-   * leaves the previous team's secrets in place, and the new team inherits them. That is the
-   * correct behaviour here — the alternative is a seeding routine that can destroy live
-   * secrets — but it is worth knowing that teardown does NOT clean these paths: teardownCore
-   * makes no Vault calls, the Composition manages only the tenant POLICY and k8s auth role
-   * (no KV resource), and no platform credential holds `delete` on `secret/metadata/tenants/*`.
-   * So slug reuse is the real hazard, and the fix belongs in teardown, not here.
-   *
-   * `cas: 0` is Vault's check-and-set for "write only if this key does not exist". Vault
-   * refuses the write with a 400 when any version already exists, so this request is
-   * PHYSICALLY INCAPABLE of overwriting a secret no matter how it is called, how many times,
-   * or against which path. The blast radius of a bug here is zero rather than a tenant's
-   * entire secret set — which is the only acceptable risk profile for a write that runs
-   * automatically against every tenant path.
-   *
-   * The 400 is therefore the EXPECTED steady state on every run after the first, and is
-   * treated as success. Only `create` on `secret/data/tenants/*` is required (already held).
-   */
-  async ensureObject(secretPath: string): Promise<void> {
-    const token = await this.login();
-    const dataPath = `/v1/${this.cfg.mount}/data/${secretPath}`;
-    const res = await this.httpRequest(
-      'POST',
-      dataPath,
-      { 'x-vault-token': token, 'content-type': 'application/json' },
-      JSON.stringify({ data: {}, options: { cas: 0 } }),
-    );
-    if (res.status >= 200 && res.status < 300) {
-      // ── THE cas:0 GUARANTEE IS ONLY REAL ON A KV-v2 MOUNT ────────────────────────────────
-      // KV-v1 SILENTLY IGNORES `options.cas`. On a v1 mount this call would stop being a
-      // create-if-absent and become an unconditional write — the exact failure this method
-      // was designed to make impossible. We cannot read sys/mounts to check the version (the
-      // writer policy grants no such capability, and widening it for a self-check would be a
-      // poor trade), but we do not need to: a KV-v2 write ALWAYS answers with `data.version`,
-      // and a v1 write does not. Absence of that marker means the guarantee did not hold, so
-      // fail loudly rather than continue believing in it.
-      //
-      // This is the one place the safety property could quietly evaporate through a config
-      // change nobody associated with this code — which is precisely the class of failure
-      // this whole design was chosen to avoid, so it is asserted rather than assumed.
-      const version = (res.body as { data?: { version?: unknown } } | undefined)?.data?.version;
-      if (typeof version !== 'number') {
-        throw new Error(
-          `Vault did not answer with a KV-v2 version for ${this.cfg.mount}/data/${secretPath}. ` +
-            `That means the "${this.cfg.mount}" mount is not KV-v2 — and KV-v1 silently ignores ` +
-            `the check-and-set option this write relies on to be incapable of overwriting an ` +
-            `existing secret. Refusing to treat the write as safe. Fix the mount version.`,
-        );
-      }
-      return; // created it, on a mount that honours cas
-    }
-    // A 400 is NOT synonymous with "already exists". Vault also returns 400 for a malformed
-    // request and for mount misconfiguration. Treating every 400 as success would swallow a
-    // systematic failure — and because the caller seeds best-effort, nothing else would ever
-    // report it. Match the cas conflict specifically; everything else is a real error.
-    if (res.status === 400 && isCheckAndSetConflict(res.body)) {
-      return; // the object already exists. Nothing to do, and nothing was touched.
-    }
-    throw new Error(
-      `Vault KV-v2 ensure-object failed (HTTP ${res.status}) at ` +
         `${this.cfg.mount}/data/${secretPath}.`,
     );
   }

@@ -457,32 +457,6 @@ spec:
         sourcePath: ./claim/${{ steps['emit-claim'].output.claimPath }}
         commitMessage: "onboard tenant (zero-touch): ${{ parameters.team }}-${{ parameters.appName }} (Capstone ${{ parameters.season }} ${{ parameters.year }})"
 
-    # 7) Seed the per-env `app` Vault objects, EMPTY.
-    #
-    #    WHY: Vault KV-v2 creates an object on first write, so tenants/<team>/<env>/app does
-    #    not exist until someone sets their first secret — and nothing else creates it (the
-    #    `database`/`harbor-pull` objects ARE provisioned by the Composition, which is why
-    #    those sync while `app` does not). An absent object is NORMAL: most teams work only in
-    #    dev, so most staging/prod objects legitimately do not exist. The problem is that ESO
-    #    reports that ordinary state (Ready=True/SecretDeleted, no Secret, ArgoCD green)
-    #    identically to an object that was DESTROYED — the ambiguity is the defect, not the
-    #    absence. Under Retain it instead PAGES on that most-common state, forever, for every
-    #    environment nobody has deployed to, unless the object has been seeded first.
-    #
-    #    An EMPTY object is healthy and produces no Secret (verified, ESO v2.6.0:
-    #    Ready=True/SecretSynced, secret NotFound), so seeding makes "never configured" quiet
-    #    while a genuinely destroyed object stays loud. That is the whole point.
-    #
-    #    SAFE BY CONSTRUCTION: the write is cas:0 ("only if this key does not exist"), so it
-    #    is physically incapable of overwriting a team's secrets even on a re-run. It is also
-    #    BEST-EFFORT — a failure logs and continues, because an unseeded object is merely the
-    #    status quo and is not worth failing an onboarding over.
-    - id: seed-vault
-      name: Seed empty per-environment secret objects in Vault
-      action: capstone:seed-vault-app-objects
-      input:
-        team: ${{ parameters.team }}
-
   output:
     links:
       - title: Repository

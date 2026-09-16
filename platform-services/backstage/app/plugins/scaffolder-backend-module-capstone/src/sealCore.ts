@@ -190,17 +190,6 @@ function readSecretsConfig(config: Config): SecretsConfig {
   };
 }
 
-/**
- * The Vault connection settings, derived from the SAME single reader every other caller uses.
- * Exported so other actions (capstone:seed-vault-app-objects) construct a VaultClient from the
- * one source of truth rather than re-reading the config keys themselves — a second copy would
- * drift the moment an auth detail changes, and the audience/saTokenPath subtleties above are
- * exactly the kind that fail silently at 403.
- */
-export function readVaultConfig(config: Config): VaultClientConfig {
-  return readSecretsConfig(config).vault;
-}
-
 /** The Vault KV-v2 path that holds ALL of a tenant env's secret keys (one path per env). */
 function vaultPathFor(teamSlug: string, env: string): string {
   return `tenants/${teamSlug}/${env}/app`;
