@@ -8,18 +8,22 @@
  * that asymmetry is the signature of this bug, verified across the fleet: mychef/dev EXISTS
  * while mychef staging+prod and all three motion envs return 404).
  *
- * An absent object makes ESO report:
+ * AN ABSENT OBJECT IS NORMAL, AND THAT IS THE WHOLE PROBLEM. Most teams work only in dev, so
+ * most staging and prod objects legitimately do not exist — "no object" is the ordinary state
+ * of an environment nobody has deployed to, not a sign that anything went wrong. But ESO cannot
+ * tell that state apart from an object that was DESTROYED:
  *   - under deletionPolicy Delete  -> Ready=TRUE / SecretDeleted, no Secret, ArgoCD green.
- *     Byte-identical to an environment whose secrets were DESTROYED. That ambiguity is the
- *     real defect: "never configured" and "catastrophically lost" are the same signal.
+ *     Identical signals for the everyday case and the serious one, which is exactly what makes
+ *     the serious one invisible. THE AMBIGUITY is the defect — not the absence.
  *   - under deletionPolicy Retain  -> Ready=FALSE, which pages. Correct for a real loss, but
- *     every freshly scaffolded tenant would alert on day one for doing nothing wrong — two
- *     alerts per tenant (staging + prod), and a 60-tenant class means ~120 false pages.
+ *     without seeding it fires for every environment nobody has deployed to: two alerts per
+ *     tenant (staging + prod), permanently, on the most common state on the platform.
  *
- * Seeding an EMPTY object separates the two. An empty object is healthy and produces no
- * Secret — verified against ESO v2.6.0: Ready=True / SecretSynced, message "secret retained
- * due to DeletionPolicy=Retain", secret NotFound. So "never configured" is quiet and only a
- * genuinely destroyed object is loud.
+ * Seeding an EMPTY object separates the two, and is what makes Retain meaningful rather than
+ * noisy. An empty object is healthy and produces no Secret — verified against ESO v2.6.0:
+ * Ready=True / SecretSynced, message "secret retained due to DeletionPolicy=Retain", secret
+ * NotFound. Once every environment has an object, an ABSENT one means something really did
+ * happen to it, and THAT is the state worth paging on. Seed before switching to Retain.
  *
  * ── WHY THIS IS AN ACTION AND NOT A CROSSPLANE MANAGED RESOURCE ───────────────────────────
  * The architecturally "pure" option is a provider-vault SecretV2 in the Composition, since

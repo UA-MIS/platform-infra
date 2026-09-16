@@ -83,11 +83,11 @@ export const capstoneScaffolderModule = createBackendModule({
           createCommitToMainAction({ config }),
           // capstone:seed-vault-app-objects — create the team's per-env `app` Vault
           // objects EMPTY at onboarding. Vault KV-v2 creates an object on first write,
-          // so without this an environment nobody has configured yet is indistinguishable
-          // from one whose secrets were DESTROYED (both: no Secret, ExternalSecret green
-          // under deletionPolicy Delete) — and under Retain on staging/prod it PAGES on
-          // day one for every new tenant. An empty object is healthy and makes no Secret,
-          // so seeding makes "never configured" quiet and leaves real loss loud. The write
+          // so an environment nobody has deployed to has no object — the NORMAL state for
+          // most teams, who work only in dev. ESO cannot tell that apart from an object that
+          // was destroyed (both: no Secret, ExternalSecret green under Delete), and under
+          // Retain it PAGES on that most-common state forever. Seeding removes the ambiguity:
+          // once every env has an object, an absent one means something happened. The write
           // is cas:0, so it physically cannot overwrite a team's secrets; failures are
           // logged and do not fail the scaffold.
           createSeedVaultObjectsAction({ config, logger }),

@@ -462,11 +462,12 @@ spec:
     #    WHY: Vault KV-v2 creates an object on first write, so tenants/<team>/<env>/app does
     #    not exist until someone sets their first secret — and nothing else creates it (the
     #    `database`/`harbor-pull` objects ARE provisioned by the Composition, which is why
-    #    those sync while `app` does not). An ABSENT object makes ESO report Ready=True /
-    #    SecretDeleted with no Secret under deletionPolicy Delete: byte-identical to an
-    #    environment whose secrets were DESTROYED. Under Retain (staging/prod) it reports
-    #    Ready=False and PAGES, so without this step every newly scaffolded tenant would fire
-    #    two false ExternalSecretSyncError alerts on day one — ~120 for a 60-tenant class.
+    #    those sync while `app` does not). An absent object is NORMAL: most teams work only in
+    #    dev, so most staging/prod objects legitimately do not exist. The problem is that ESO
+    #    reports that ordinary state (Ready=True/SecretDeleted, no Secret, ArgoCD green)
+    #    identically to an object that was DESTROYED — the ambiguity is the defect, not the
+    #    absence. Under Retain it instead PAGES on that most-common state, forever, for every
+    #    environment nobody has deployed to, unless the object has been seeded first.
     #
     #    An EMPTY object is healthy and produces no Secret (verified, ESO v2.6.0:
     #    Ready=True/SecretSynced, secret NotFound), so seeding makes "never configured" quiet
