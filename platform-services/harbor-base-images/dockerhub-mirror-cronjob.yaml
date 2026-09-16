@@ -104,13 +104,42 @@ metadata:
   labels:
     platform.capstone/component: platform
 spec:
-  schedule: "0 2 * * *"
+  # 02:00 -> 22:00 (2026-09-16, ENOSPC follow-up). Three jobs were stacked on the
+  # same hour and they interfere:
+  #   02:00  this mirror run (up to 1h, so 02:00-03:00)
+  #   02:00  Harbor tag retention  (harbor-retention-gc-config)
+  #   02:30  Harbor garbage collection — which puts the registry READ-ONLY while
+  #          it runs, i.e. squarely inside this job's push window.
+  # A push that lands during the GC read-only window fails, burns one of the
+  # three retries, and leaves another partial multipart upload behind. Moving the
+  # mirror to 22:00 gives it a clean 22:00-23:00 window with nothing else
+  # touching the registry, and still lands well before retention/GC.
+  schedule: "0 22 * * *"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
   jobTemplate:
     spec:
       backoffLimit: 1
+      # DELIBERATELY LEFT AT 3600 — do not raise this. It was suspected of being
+      # broken during the 2026-09-16 ENOSPC incident because `kubectl get jobs`
+      # showed DURATION of 13h and 37h. It is not broken: `.status.conditions`
+      # shows Failed/DeadlineExceeded at exactly 3600s after startTime for all
+      # three failed runs. The long DURATION is a kubectl display artifact —
+      # `.status.completionTime` is only set on SUCCESS, so for a failed Job
+      # kubectl renders `now - startTime`, which grows forever.
+      #
+      # The deadline firing is nonetheless part of the leak: SIGKILL mid-`crane
+      # copy` strands the in-flight multipart uploads, ~9GB per killed run
+      # (measured from PVC utilisation: clean ~14-15pp steps at each kill window,
+      # flat in between). RAISING the deadline would make that WORSE, not better —
+      # a 4h window stranding ~4x the bytes — so the containment is
+      # registry.upload_purging (age 24h, applicationsets/harbor-app.yaml), not a
+      # longer rope here.
+      #
+      # A run that gets killed is not lost work: `crane copy` skips images already
+      # present, so each night resumes where the last left off and the list
+      # converges over a few runs. The 1h cap is what bounds the per-night damage.
       activeDeadlineSeconds: 3600
       template:
         metadata:
