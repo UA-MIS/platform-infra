@@ -885,13 +885,16 @@ spec:
             summary: "Harbor registry PVC trending to full within 4 days"
             description: >-
               Extrapolating the last 6h of free space, the harbor-registry PVC
-              runs out within 4 days. This is the RATE alert, and it is the one
-              that would actually have caught the 2026-09-16 outage early: the
-              orphan leak ran at ~4-7GB/day against a 60Gi volume, so utilisation
-              crossed from comfortable to ENOSPC in under a week — a static
-              threshold alone gives very little warning at that slope, which is
-              why this rule exists alongside the 75%/90% pair rather than instead
-              of them. A sudden change in slope usually means a runaway producer
-              (a failing mirror/replication job stranding partial uploads), not
-              organic tenant growth. Check the `_uploads` triage in
+              runs out within 4 days. This is the RATE alert. What it adds over
+              the static pair is SHAPE, not earliness — do not expect it to fire
+              first. At the ~5GB/day leak rate seen in the 2026-09-16 outage, a
+              4-day-to-empty projection on a 100Gi volume is only reached around
+              80% utilisation, i.e. AFTER HarborRegistryStorageHigh has already
+              fired at 75%. The 75%/30m rule is what actually covers slow
+              collective drift; this rule earns its place by distinguishing a
+              sudden change in SLOPE — a runaway producer, typically a failing
+              mirror/replication job stranding partial uploads — from ordinary
+              tenant growth sitting at the same utilisation. Both rules are kept
+              deliberately: one answers "how full", this one answers "how fast,
+              and did that just change". Check the `_uploads` triage in
               HarborRegistryStorageHigh first.

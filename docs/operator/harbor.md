@@ -191,11 +191,26 @@ the public `harbor.capstone.uamishub.com` hostname — Cloudflare enforces a
 mechanism and `platform-services/arc/hook-template.yaml`'s `hostAliases` for
 the original precedent (Kaniko build pods already do this).
 
-Disk: the registry PVC is 60Gi on ceph-block. Check current usage with
-`kubectl -n harbor exec deploy/harbor-registry -c registry -- du -sh /storage`
-(or via Harbor UI → Administration → Configuration). `base-images` holds ~30
-distinct base images across Docker Hub, MCR, and GCR — a few GB, not a
-capacity concern at this PVC size.
+Disk: the registry PVC is **100Gi** on ceph-block (20Gi → 60Gi → 100Gi across
+two ENOSPC outages, 2026-07-09 and 2026-09-16 — the expansions were headroom,
+not the fix either time). Check current usage with
+`kubectl -n harbor exec deploy/harbor-registry -c registry -- df -h /storage`
+(`df`, not `du` — `du` walks the whole tree and is slow on a full registry).
+
+`base-images` holds ~30 distinct base images across Docker Hub, MCR, and GCR.
+Its *committed* footprint is a few GB, but do not read that as "not a capacity
+concern": on 2026-09-16 this project filled the volume with **22.7 GiB of
+orphaned multipart uploads** under `_uploads/`, which are invisible to tag
+retention, to GC, and to Harbor's own quota accounting. If the PVC is filling,
+check `_uploads` FIRST:
+
+```
+kubectl -n harbor exec deploy/harbor-registry -c registry -- sh -c \
+  'find /storage/docker/registry/v2/repositories -type d -name _uploads -exec du -sm {} \;'
+```
+
+That class is bounded only by `registry.upload_purging` (age 24h, set in
+`applicationsets/harbor-app.yaml`), not by quotas and not by GC.
 
 > **Full runbook, image inventory, and the 2026-09-13 destroy-by-churn
 > incident:** [base-images](base-images.md). Short version: both `base-images`'
