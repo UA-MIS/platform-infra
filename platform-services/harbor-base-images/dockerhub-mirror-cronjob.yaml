@@ -218,7 +218,16 @@ spec:
                 - sh
                 - -c
                 - |
-                  set -e
+                  # set -f (noglob). This script does `set -- $line` — an UNQUOTED
+                  # expansion — so every field of every list entry is subject to
+                  # pathname expansion. Any entry containing a glob character would be
+                  # expanded against the container filesystem instead of being treated
+                  # as an image ref. No current entry triggers it, which is exactly how
+                  # the identical exposure survived unnoticed in the retention job one
+                  # directory over until it was hit for real (`**` expanding to
+                  # "bin dev etc home lib proc root sys tmp usr var", 2026-09-16).
+                  # Pathname expansion is never wanted anywhere in this script.
+                  set -ef
                   crane auth login harbor.capstone.uamishub.com -u "$ROBOT_USER" -p "$ROBOT_PW"
 
                   # Up to 3 attempts per image with a short backoff — a flaky
@@ -285,6 +294,14 @@ spec:
                       *@sha256:*)
                         _repo="${img%@*}"
                         _dg="${img#*@}"
+                        # `repo:tag@sha256:digest` is a VALID ref and is in use on this
+                        # platform right now (npm-mirror runs
+                        # dockerhub-proxy/verdaccio/verdaccio:5@sha256:9d622d25...).
+                        # Without this, _repo keeps its tag and the destination becomes
+                        # `library/foo:5:pinned-9d622d25...` — two tags, which crane
+                        # rejects. It fails closed rather than corrupting anything, but
+                        # it fails on an entry shape someone will eventually add here.
+                        case "$_repo" in *:*) _repo="${_repo%:*}" ;; esac
                         _short=$(echo "$_dg" | sed 's/^sha256://' | cut -c1-12)
                         dst="harbor.capstone.uamishub.com/base-images/${_repo}:pinned-${_short}"
                         ;;
@@ -300,7 +317,25 @@ spec:
                       # consumer broken, which is the failure being fixed.
                       case "$img" in
                         *@sha256:*)
-                          if crane manifest "harbor.capstone.uamishub.com/base-images/${img}" >/dev/null 2>&1; then
+                          # RETRY THIS TOO. Every other crane call in this file goes
+                          # through copy_with_retry because the MCR/GCR CDNs
+                          # intermittently reset (`stream ID ...; CANCEL` — observed 3
+                          # times in 5 on a single dotnet/sdk restore). A single-shot
+                          # assertion turns one transient reset into `PIN BROKEN` on a
+                          # copy that actually SUCCEEDED — a false alarm whose text
+                          # points at the real bug this change fixes, which is the
+                          # worst kind to emit.
+                          _pa=1
+                          _pok=0
+                          while [ "$_pa" -le "$max_attempts" ]; do
+                            if crane manifest "harbor.capstone.uamishub.com/base-images/${_repo}@${_dg}" >/dev/null 2>&1; then
+                              _pok=1; break
+                            fi
+                            echo "=== pin check attempt $_pa/$max_attempts failed for ${_repo}@${_dg} ==="
+                            _pa=$((_pa + 1))
+                            [ "$_pa" -le "$max_attempts" ] && sleep 5
+                          done
+                          if [ "$_pok" = "1" ]; then
                             echo "=== PIN OK ${_repo}@${_dg} resolves ==="
                           else
                             echo "=== PIN BROKEN: ${_repo}@${_dg} does not resolve after copy ==="
