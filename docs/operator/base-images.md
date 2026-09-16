@@ -266,7 +266,17 @@ not attempted here.
 
 ## Disk
 
-Registry PVC is 60Gi on `ceph-block`. `base-images` holds ~30 distinct images
-across Docker Hub, MCR, and GCR — a few GB, not a capacity concern at this size.
-Check current usage: `kubectl -n harbor exec deploy/harbor-registry -c registry --
-du -sh /storage`.
+Registry PVC is **100Gi** on `ceph-block` (grown 20 → 60 → 100Gi across two
+ENOSPC outages; each expansion was headroom, not the fix). `base-images` holds
+~30 distinct images across Docker Hub, MCR, and GCR — a few GB *committed*.
+
+That committed figure is not the capacity risk. On 2026-09-16 this project
+filled the registry with **22.7 GiB of orphaned multipart uploads**, stranded by
+the nightly mirror CronJob being SIGKILLed at its 1h deadline mid-`crane copy`
+(~9GB per killed run). `_uploads` are counted by neither retention, nor GC, nor
+Harbor's quota accounting — `base-images` can be at 18.93G of its 40G quota and
+still take the registry down.
+
+Check current usage: `kubectl -n harbor exec deploy/harbor-registry -c registry -- df -h /storage`,
+and if it is climbing, check `_uploads` before anything else (see
+`docs/operator/harbor.md` → Disk).

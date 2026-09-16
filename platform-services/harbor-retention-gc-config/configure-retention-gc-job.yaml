@@ -314,6 +314,20 @@ spec:
               # the enumeration broke, and proceeding would strip every keep-rule.
               [ "$n_inuse" -gt 0 ] || { echo "FAIL: in-use enumeration returned nothing — refusing to apply retention with an empty keep-list"; exit 1; }
 
+              # Shared project_id resolver (F-1). Every occurrence, deduped; a
+              # disagreement is a hard failure rather than a guess, because this id
+              # scopes both a deletion policy and a storage quota.
+              resolve_pid() {
+                _f="$1"; _p="$2"
+                _ids=$(grep -o '"project_id":[0-9]*' "$_f" 2>/dev/null | grep -o '[0-9]*$' | sort -u)
+                _n=$(printf '%s\n' "$_ids" | grep -c '[0-9]' || true)
+                if [ -z "$_ids" ] || [ "$_n" != "1" ]; then
+                  echo "FAIL: could not unambiguously resolve project_id for '$_p' (got: $(printf '%s' "$_ids" | tr '\n' ' '))" >&2
+                  return 1
+                fi
+                printf '%s' "$_ids"
+              }
+
               # --- 0b) build the protection rules once: one `always` retain rule per
               #         pattern in RETENTION_PROTECT_TAGS. Unioned with the
               #         keep-last-N rule below by "algorithm": "or", so a tag is kept
@@ -561,12 +575,24 @@ spec:
               # 23 projects to sum under 98GiB would mean ~4GiB each, which is below
               # what an active tenant legitimately needs, and would break CI — the
               # owner's #1 priority — to satisfy an arithmetic tidiness nobody asked
-              # for. What a quota buys here is BLAST-RADIUS containment: no single
-              # project can run away and take the registry down for every other
-              # tenant, which is exactly the failure mode being fixed. Aggregate
-              # safety comes from the other two controls (upload_purging removing the
-              # actual leak, retention bounding tags per repo), with the PVC
-              # utilisation alert as the backstop for slow collective drift.
+              # for. What a quota buys here is BLAST-RADIUS containment for
+              # COMMITTED artifacts: no single project can run away on tags and
+              # blobs and take the registry down for every other tenant.
+              #
+              # READ THIS BEFORE CONCLUDING "we have quotas, so it cannot be a
+              # runaway project": a quota does NOT bound the class of data that
+              # caused the 2026-09-16 outage. Harbor's quota accounting does not
+              # count `_uploads` at all — measured during that incident, the quota
+              # API summed ~39.5G across all 23 projects while `df` on the PVC
+              # showed 59G used, and that ~20G delta WAS the orphaned-upload pile.
+              # base-images could reproduce that outage exactly while its quota
+              # still read 18.93G of 40G. Only registry.upload_purging
+              # (applicationsets/harbor-app.yaml) bounds that class.
+              #
+              # Aggregate safety therefore comes from the other two controls
+              # (upload_purging for orphaned uploads, retention for tags per repo),
+              # with the 75%/30m PVC utilisation alert as the backstop for slow
+              # collective drift across projects.
               # Do not "fix" this by shrinking the caps to sum under capacity.
               QUOTA_DEFAULT_GIB="${QUOTA_DEFAULT_GIB:-10}"
               echo "==> quotas: default ${QUOTA_DEFAULT_GIB}GiB, overrides: $QUOTA_OVERRIDES"
@@ -581,7 +607,25 @@ spec:
                 done
                 BYTES=$(( GIB * 1073741824 ))
 
-                pid=$(grep -o '"project_id":[0-9]*' "/tmp/proj_${P}.json" 2>/dev/null | head -1 | cut -d: -f2)
+                # F-1: NOT `head -1`. Step 1 of this same script refuses that for
+                # this exact parse and explains why: Harbor serialises JSON keys
+                # alphabetically, so cve_allowlist's NESTED "project_id" sorts
+                # BEFORE the project's own. A project attached to the system CVE
+                # allowlist reports project_id 0 there, so `head -1` yields pid=0,
+                # the quota lookup finds nothing, and the `exit 1` below kills the
+                # loop mid-way under `set -eu` — leaving every project after it
+                # with NO quota at all, silently. Same unanimity check as step 1:
+                # take every occurrence, and refuse rather than guess if they
+                # disagree.
+                # `|| true` on THIS call only: projects excluded from retention
+                # (RETENTION_EXCLUDE_PROJECTS) have no cached payload, so an absent
+                # file must fall through to the fetch below, NOT abort the script
+                # under `set -eu`. Without it the job dies on the first excluded
+                # project and every project after it gets no quota — the exact
+                # silent-partial-application failure this fix exists to prevent.
+                # The post-fetch call below is strict, so a genuinely ambiguous
+                # payload still fails loudly.
+                pid=$(resolve_pid "/tmp/proj_${P}.json" "$P" 2>/dev/null || true)
                 if [ -z "$pid" ]; then
                   # Retention skipped this project (excluded or 404) so no cached
                   # payload exists; fetch it now rather than silently skipping —
@@ -591,11 +635,17 @@ spec:
                     echo "==> quotas: skip: project '$P' gone (404), continuing."; continue
                   fi
                   [ "$pcode" = "200" ] || { echo "FAIL: GET /projects/$P returned HTTP $pcode"; exit 1; }
-                  pid=$(grep -o '"project_id":[0-9]*' "/tmp/proj_${P}.json" | head -1 | cut -d: -f2)
+                  pid=$(resolve_pid "/tmp/proj_${P}.json" "$P")
                 fi
                 [ -n "$pid" ] || { echo "FAIL: could not resolve project_id for '$P'"; exit 1; }
 
+                # The quota payload carries BOTH the quota's own "id" and a nested
+                # "ref":{"id":<project id>}. Strip the nested object first instead
+                # of trusting alphabetical key order to put "id" before "ref" —
+                # same class of bug as the project_id parse above, and picking the
+                # wrong one here would PUT a quota onto an unrelated object.
                 qid=$(curl -fsS -u "$AUTH" "$CORE/api/v2.0/quotas?reference=project&reference_id=${pid}" \
+                      | sed 's/"ref":{[^}]*}//g' \
                       | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
                 [ -n "$qid" ] || { echo "FAIL: no quota object for project '$P' (id $pid)"; exit 1; }
 
