@@ -17,6 +17,7 @@ import {
 import { scaffolderActionsExtensionPoint } from '@backstage/plugin-scaffolder-node';
 import { catalogServiceRef } from '@backstage/plugin-catalog-node';
 import { createSealSecretAction } from './actions/sealSecret';
+import { createSeedVaultObjectsAction } from './actions/seedVaultObjects';
 import { createRenderTenantAction } from './actions/renderTenant';
 import { createHarborOnboardAction } from './actions/harborOnboard';
 import { createEmitTenantClaimAction } from './actions/emitTenantClaim';
@@ -80,6 +81,16 @@ export const capstoneScaffolderModule = createBackendModule({
           // publish:github (no token input). Inert until the zero-touch template's
           // commit step references it + the image is rebuilt.
           createCommitToMainAction({ config }),
+          // capstone:seed-vault-app-objects — create the team's per-env `app` Vault
+          // objects EMPTY at onboarding. Vault KV-v2 creates an object on first write,
+          // so without this an environment nobody has configured yet is indistinguishable
+          // from one whose secrets were DESTROYED (both: no Secret, ExternalSecret green
+          // under deletionPolicy Delete) — and under Retain on staging/prod it PAGES on
+          // day one for every new tenant. An empty object is healthy and makes no Secret,
+          // so seeding makes "never configured" quiet and leaves real loss loud. The write
+          // is cas:0, so it physically cannot overwrite a team's secrets; failures are
+          // logged and do not fail the scaffold.
+          createSeedVaultObjectsAction({ config, logger }),
           // ADR-034 — capstone:compose-project: the unified "New Project" wizard's
           // composition engine. Reads composable language fragments + the ONE shared
           // .devops/.github contract and assembles the project repo (replaces the

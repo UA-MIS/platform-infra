@@ -215,6 +215,57 @@ export class VaultClient {
     );
   }
 
+  /**
+   * Ensure the KV-v2 object at `secretPath` EXISTS, creating it EMPTY if it does not.
+   *
+   * ── WHY THIS EXISTS ──────────────────────────────────────────────────────────────────────
+   * Vault KV-v2 creates an object on first write, so `tenants/<team>/<env>/app` does not exist
+   * until someone sets their first secret. Under `deletionPolicy: Delete` that is reported as
+   * Ready=True/SecretDeleted with no Secret — byte-identical to an environment whose secrets
+   * were DESTROYED. Under `Retain` (staging/prod) it is reported as Ready=False and pages, so
+   * every freshly scaffolded tenant would alert on day one for doing nothing wrong.
+   *
+   * Seeding an empty object at onboarding separates the two: an empty object is healthy and
+   * produces no Secret (verified against ESO v2.6.0 — Ready=True/SecretSynced, secret NotFound),
+   * so "never configured" is quiet while "object destroyed" stays loud.
+   *
+   * ── WHY `cas: 0` AND NOT A PLAIN CREATE ──────────────────────────────────────────────────
+   * This runs against a path that may ALREADY hold a team's live secrets — a re-run of
+   * onboarding, a re-scaffold, a retry after a partial failure. A plain POST to
+   * `secret/data/<path>` REPLACES the object: every key the team has ever set would be gone,
+   * silently, with the ExternalSecret still reporting healthy afterwards.
+   *
+   * `cas: 0` is Vault's check-and-set for "write only if this key does not exist". Vault
+   * refuses the write with a 400 when any version already exists, so this request is
+   * PHYSICALLY INCAPABLE of overwriting a secret no matter how it is called, how many times,
+   * or against which path. The blast radius of a bug here is zero rather than a tenant's
+   * entire secret set — which is the only acceptable risk profile for a write that runs
+   * automatically against every tenant path.
+   *
+   * The 400 is therefore the EXPECTED steady state on every run after the first, and is
+   * treated as success. Only `create` on `secret/data/tenants/*` is required (already held).
+   */
+  async ensureObject(secretPath: string): Promise<void> {
+    const token = await this.login();
+    const dataPath = `/v1/${this.cfg.mount}/data/${secretPath}`;
+    const res = await this.httpRequest(
+      'POST',
+      dataPath,
+      { 'x-vault-token': token, 'content-type': 'application/json' },
+      JSON.stringify({ data: {}, options: { cas: 0 } }),
+    );
+    if (res.status >= 200 && res.status < 300) {
+      return; // created it
+    }
+    if (res.status === 400) {
+      return; // cas conflict => the object already exists. Nothing to do, nothing touched.
+    }
+    throw new Error(
+      `Vault KV-v2 ensure-object failed (HTTP ${res.status}) at ` +
+        `${this.cfg.mount}/data/${secretPath}.`,
+    );
+  }
+
   // NB: there is intentionally NO read-the-value method here. The writer policy
   // (backstage-writer) grants create/update/patch on secret/data/tenants/* but NOT
   // read — values are write-only and never read back. The Secrets tab's List sources key NAMES

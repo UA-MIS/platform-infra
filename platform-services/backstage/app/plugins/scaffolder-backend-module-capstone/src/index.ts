@@ -7,6 +7,10 @@
  */
 export { capstoneScaffolderModule, capstoneScaffolderModule as default } from './module';
 export { createSealSecretAction } from './actions/sealSecret';
+export {
+  createSeedVaultObjectsAction,
+  type SeedVaultObjectsActionDeps,
+} from './actions/seedVaultObjects';
 export type { SealSecretActionDeps } from './actions/sealSecret';
 export { createRenderTenantAction } from './actions/renderTenant';
 export type { RenderTenantActionDeps } from './actions/renderTenant';
@@ -43,6 +47,7 @@ export {
 // The SHARED seal core (also used by the capstone-secrets backend route, so the action and
 // the route enforce ONE authz + seal implementation — team-lead's Option A requirement).
 export {
+  readVaultConfig,
   sealAndPublish,
   listSecrets,
   listMyProjects,

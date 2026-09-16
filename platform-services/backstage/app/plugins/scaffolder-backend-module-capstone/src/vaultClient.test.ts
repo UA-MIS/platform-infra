@@ -203,6 +203,55 @@ describe('VaultClient deleteKey', () => {
   });
 });
 
+describe('VaultClient ensureObject (seed an empty object, never overwrite)', () => {
+  // WHY cas:0 AND NOT a plain create: this runs at onboarding against a path that may already
+  // hold a team's live secrets (re-run onboarding, re-scaffold, a retry). A plain POST would
+  // REPLACE the object and destroy every key in it. `cas: 0` is Vault's "write only if this
+  // key does not exist" — the request is physically incapable of overwriting, so the blast
+  // radius of a bug here is zero rather than a tenant's entire secret set.
+  it('creates an EMPTY object with cas:0 so it cannot overwrite existing secrets', async () => {
+    queue({ status: 200 });
+    const c = new VaultClient(CFG);
+    await c.ensureObject('tenants/t/prod/app');
+
+    const write = httpCalls[1];
+    expect(write.method).toBe('POST');
+    expect(write.path).toBe('/v1/secret/data/tenants/t/prod/app');
+    expect(JSON.parse(write.body!)).toEqual({ data: {}, options: { cas: 0 } });
+  });
+
+  it('treats the cas conflict (object already exists) as success, not an error', async () => {
+    // Vault answers 400 "check-and-set parameter did not match the current version" when the
+    // object exists. That is the EXPECTED steady state on every re-run — it must be a no-op.
+    queue({ status: 400 });
+    const c = new VaultClient(CFG);
+    await expect(c.ensureObject('tenants/t/prod/app')).resolves.toBeUndefined();
+  });
+
+  it('is idempotent across repeated calls and never sends a non-empty data payload', async () => {
+    queue({ status: 200 }, { status: 400 }, { status: 400 });
+    const c = new VaultClient(CFG);
+    await c.ensureObject('tenants/t/dev/app');
+    await c.ensureObject('tenants/t/dev/app');
+    await c.ensureObject('tenants/t/dev/app');
+    const writes = httpCalls.filter(h => h.path.startsWith('/v1/secret/data/'));
+    expect(writes).toHaveLength(3);
+    for (const w of writes) {
+      // The invariant that makes this safe to run anywhere, at any time.
+      expect(JSON.parse(w.body!).data).toEqual({});
+      expect(JSON.parse(w.body!).options).toEqual({ cas: 0 });
+    }
+  });
+
+  it('throws (status + path, no body) on a real failure such as 403', async () => {
+    queue({ status: 403 });
+    const c = new VaultClient(CFG);
+    await expect(c.ensureObject('tenants/t/prod/app')).rejects.toThrow(
+      /403.*tenants\/t\/prod\/app/,
+    );
+  });
+});
+
 describe('VaultClient has no data-read method (write-only, least privilege)', () => {
   it('does not expose a values read/list API', () => {
     const c = new VaultClient(CFG) as unknown as Record<string, unknown>;
