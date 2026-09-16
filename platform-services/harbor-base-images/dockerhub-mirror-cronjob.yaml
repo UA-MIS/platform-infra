@@ -253,8 +253,61 @@ spec:
                     set -- $line
                     img="$1"
                     src="${2:-mirror.gcr.io}"
-                    echo "=== COPYING ${src}/${img} ==="
-                    if copy_with_retry "${src}/${img}" "harbor.capstone.uamishub.com/base-images/${img}"; then
+
+                    # A DIGEST-PINNED ENTRY MUST STILL LAND WITH A TAG.
+                    # `crane copy src@sha256:X dst@sha256:X` stores the manifest in
+                    # Harbor UNTAGGED, and Harbor's nightly GC runs with
+                    # delete_untagged:true — so a digest-only mirror entry is deleted
+                    # the very next night, every night, forever.
+                    #
+                    # This was not theoretical. Verified from GC 1832's own log,
+                    # 2026-09-15T02:30:04Z:
+                    #   delete the untagged artifact: base-images/dotnet/sdk
+                    #     Digest:(sha256:5ef85cc12cb25be6...)
+                    #   delete the untagged artifact: base-images/dotnet/aspnet
+                    #     Digest:(sha256:9a464e9a7e8c6144...)
+                    # Those are exactly the two digests next-up's Dockerfile pins, and
+                    # their removal broke every next-up build with
+                    # `unable to complete operation after 0 attempts`. The same pair had
+                    # already been hand-restored on 09-14 (dotnet-mirror-fix,
+                    # dotnet-sdk-retry) and GC deleted them again the next night — a
+                    # loop, because the restore reproduced the untagged state.
+                    # kaniko-project/executor is pinned by digest in this same list and
+                    # survived ONLY because its replication MR happens to give it a tag
+                    # (v1.23.2-debug). That is luck, not design.
+                    #
+                    # So: derive a stable tag from the digest. The manifest content is
+                    # unchanged, therefore the DIGEST IS UNCHANGED, therefore every
+                    # existing `FROM ...@sha256:...` pin keeps resolving with no change
+                    # on the consumer side. The tag exists purely to keep the manifest
+                    # reachable, which is what stops GC reclaiming it.
+                    case "$img" in
+                      *@sha256:*)
+                        _repo="${img%@*}"
+                        _dg="${img#*@}"
+                        _short=$(echo "$_dg" | sed 's/^sha256://' | cut -c1-12)
+                        dst="harbor.capstone.uamishub.com/base-images/${_repo}:pinned-${_short}"
+                        ;;
+                      *)
+                        dst="harbor.capstone.uamishub.com/base-images/${img}"
+                        ;;
+                    esac
+
+                    echo "=== COPYING ${src}/${img} -> ${dst} ==="
+                    if copy_with_retry "${src}/${img}" "$dst"; then
+                      # For a digest entry, prove the pin still resolves. A copy that
+                      # "succeeded" but changed the digest would silently leave every
+                      # consumer broken, which is the failure being fixed.
+                      case "$img" in
+                        *@sha256:*)
+                          if crane manifest "harbor.capstone.uamishub.com/base-images/${img}" >/dev/null 2>&1; then
+                            echo "=== PIN OK ${_repo}@${_dg} resolves ==="
+                          else
+                            echo "=== PIN BROKEN: ${_repo}@${_dg} does not resolve after copy ==="
+                            FAIL=1
+                          fi
+                          ;;
+                      esac
                       echo "=== OK $img ==="
                     else
                       echo "=== FAILED $img (from $src, after $max_attempts attempts) ==="
