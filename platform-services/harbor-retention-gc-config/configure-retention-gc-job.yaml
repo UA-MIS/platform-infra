@@ -428,16 +428,37 @@ spec:
                     [ "$_skip_api" = "1" ] || echo "    $API -> $_api_n image refs ($_page page(s))"
                   done
 
-                  # Keep only this registry's images that carry a TAG.
-                  # Digest-pinned refs (…@sha256:…) are dropped because tag retention
-                  # cannot select them and there is no tag to protect — they are
-                  # immune, not unprotected. Note a ref can be BOTH (`repo:tag@sha256:…`);
-                  # those are dropped too, which is correct for the same reason, but it
-                  # does mean this count is "tags we must protect", not "images in use".
+                  # Keep every ref that carries a TAG, INCLUDING refs that carry a
+                  # tag AND a digest.
+                  #
+                  # THIS WAS WRONG UNTIL 2026-09-16 AND THE COMMENT ASSERTED IT WAS
+                  # RIGHT. The filter was `grep -v '@sha256:'`, justified as "digest
+                  # refs are immune to tag retention, there is no tag to protect".
+                  # That holds for a pure `repo@sha256:…` ref. It is FALSE for
+                  # `repo:tag@sha256:…`, which has both — and dropping it loses the
+                  # tag that needs protecting. The failure chain is not subtle:
+                  # retention removes the unprotected tag -> the manifest is now
+                  # untagged -> GC at 02:30 with delete_untagged:true DESTROYS it ->
+                  # and the digest pull the workload actually uses now fails too. A
+                  # digest pin does not protect a manifest; a TAG keeps it reachable.
+                  #
+                  # Found by the reviewer on a live gap, not in review of this code:
+                  # npm-mirror/npm-mirror-0 runs
+                  # dockerhub-proxy/verdaccio/verdaccio:5@sha256:9d622d25… and was the
+                  # ONE ref in the whole cluster this filter discarded — so it never
+                  # entered the keep-list, and the 1b audit that should have flagged it
+                  # never saw it. One ref, and it was the npm mirror the whole fleet's
+                  # CI pulls through.
+                  #
+                  # So: strip the digest suffix, then require a tag on what remains.
+                  # A pure digest ref reduces to `project/repo` with no colon in the
+                  # final segment and is still correctly dropped — it genuinely has no
+                  # tag to retain.
                   REGISTRY_HOST="${REGISTRY_HOST:-harbor.capstone.uamishub.com}"
                   grep -F "${REGISTRY_HOST}/" /tmp/inuse_raw.txt 2>/dev/null \
-                    | grep -v '@sha256:' \
                     | sed "s|^.*${REGISTRY_HOST}/||" \
+                    | sed 's/@sha256:[0-9a-f]*$//' \
+                    | grep ':' \
                     | sort -u > /tmp/inuse.txt || true
                   n_inuse=$(wc -l < /tmp/inuse.txt | tr -d ' ')
                   echo "==> in-use: $n_inuse tagged image refs on $REGISTRY_HOST"
@@ -827,15 +848,16 @@ spec:
                       if [ -n "$_hit" ]; then
                         echo "    ok: '$P' tag '$TAG' retained unconditionally by always-rule '$_hit'"
                       else
-                        # Say so if a CONDITIONAL rule covers it — that is genuinely
+                        echo "    UNPROTECTED: '$P' tag '$TAG' is DEPLOYED but no always-rule in policy $_rid matches it"
+                        # Then say whether a CONDITIONAL rule covers it — genuinely
                         # different from nothing at all, and the distinction is what
-                        # the reader needs to decide whether to act.
+                        # the reader needs to decide whether to act. Printed AFTER the
+                        # verdict so the verdict is never buried under its caveat.
                         _cond=""
                         for _pt in $_condpats; do
                           case "$TAG" in $_pt) _cond="$_pt"; break ;; esac
                         done
-                        [ -z "$_cond" ] || echo "    (note) '$P' tag '$TAG' matches CONDITIONAL rule '$_cond' — coverage depends on that rule's terms, not guaranteed)"
-                        echo "    UNPROTECTED: '$P' tag '$TAG' is DEPLOYED but no rule in policy $_rid matches it"
+                        [ -z "$_cond" ] || echo "      (note) it does match CONDITIONAL rule '$_cond' — retained only while that rule's terms hold, not guaranteed"
                         EXCLUDED_UNPROTECTED="${EXCLUDED_UNPROTECTED} ${P}:${TAG}"
                       fi
                     done
