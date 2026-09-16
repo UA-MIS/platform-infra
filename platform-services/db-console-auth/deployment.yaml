@@ -125,6 +125,85 @@ spec:
             - --cookie-samesite=lax
             # No real upstream — this proxy only ever answers its own /oauth2/*
             # endpoints (see header). Traefik forwardAuth treats any 2xx as "allow".
+            # --- STATIC-ASSET BYPASS (SEC: this is an auth bypass — read both flags
+            #     together, they are ONE change and neither works alone).
+            #
+            #     WHY: tenant app hosts are SSO-gated on ALL paths. A CSS/JS request
+            #     that misses Cloudflare's cache reaches the origin, hits this gate and
+            #     gets a 302 to the sign-in page — so the browser receives text/html
+            #     where it expected text/css and silently drops the stylesheet. It is
+            #     intermittent by construction: a cache HIT works, a MISS breaks. Two
+            #     mychef students hit this on two machines and two browsers.
+            #     Confirmed live: GET /assets/index-BideAULp.css -> 200 text/css
+            #     (cf-cache-status: HIT), but the SAME url with a cache-busting query
+            #     -> 302 text/html (cf-cache-status: BYPASS). The origin is gated; only
+            #     Cloudflare's cached copy was ever public.
+            #
+            #     ⚠ --reverse-proxy=true IS LOAD-BEARING FOR THE LINE BELOW. In a
+            #     Traefik forwardAuth topology Traefik calls THIS proxy at
+            #     `/oauth2/auth` and carries the real path in `X-Forwarded-Uri`. Without
+            #     --reverse-proxy, oauth2-proxy evaluates --skip-auth-regex against its
+            #     OWN path (`/oauth2/auth`), never reads X-Forwarded-Uri, and the regex
+            #     matches NOTHING — the bypass is silently inert while looking correct
+            #     in git. Measured on v7.15.3 with this exact flag set:
+            #         without --reverse-proxy: X-Forwarded-Uri=/assets/x.css -> 401
+            #         with    --reverse-proxy: X-Forwarded-Uri=/assets/x.css -> 202
+            #     Do not remove one of these two flags without removing the other.
+            #
+            #     --reverse-proxy is safe here on the two axes that could have bitten:
+            #     (1) it makes oauth2-proxy trust X-Forwarded-*, but this namespace's
+            #     NetworkPolicy admits ingress ONLY from kube-system (Traefik), so no
+            #     tenant workload can spoof those headers; (2) it does NOT hijack the
+            #     OIDC redirect_uri — with --redirect-url pinned above, the pin wins.
+            #     Verified: with the pin, redirect_uri stays db-auth.capstone... under
+            #     --reverse-proxy; WITHOUT the pin it would derive from
+            #     X-Forwarded-Host and Dex would reject every login. Never drop
+            #     --redirect-url while --reverse-proxy is set.
+            #
+            #     SCOPE — deliberately narrower than "^/assets/". This proxy is SHARED
+            #     by every tenant dev/staging host, every DB console, db-admin and the
+            #     portal's /internal, so anything matched here is bypassed for ALL of
+            #     them. The pattern is therefore anchored to a known static extension
+            #     rather than a path prefix:
+            #       - `.map` is EXCLUDED — source maps are gated today (verified: 302,
+            #         cf-cache-status DYNAMIC, Cloudflare does not cache them) and a
+            #         bare `^/assets/` prefix would have newly published original source.
+            #       - `.json` and any other non-listed extension stay gated for the
+            #         same reason.
+            #       - Path segments cannot contain `.`, so `..` cannot appear: this
+            #         cannot be walked out of /assets/ via path confusion. `/assets/
+            #         ../api/secret.css` -> 401 (an unanchored pattern returned 202).
+            #     oauth2-proxy strips the query before matching, so `?v=1` still
+            #     matches and a query cannot be used to smuggle a different path.
+            #     Verified against this exact production flag set: asset 202, nested
+            #     asset 202, `/` 401, `/api/auth/login` 401, `.map` 401, traversal 401.
+            - --reverse-proxy=true
+            #     --trusted-proxy-ip bounds WHO may supply those X-Forwarded-* headers.
+            #     Without it oauth2-proxy trusts every connecting IP (0.0.0.0/0, ::/0)
+            #     and says so at startup: "WARNING: --reverse-proxy is enabled but no
+            #     --trusted-proxy-ip CIDRs were configured." The flag is enforced, not
+            #     cosmetic — verified on v7.15.3 by sending the same spoofed
+            #     X-Forwarded-Uri from an out-of-range client: 202 with the header
+            #     honored, 401 once the CIDR excluded the sender.
+            #
+            #     ⚠ BE PRECISE ABOUT WHAT THIS BUYS. 10.244.0.0/16 is the whole cluster
+            #     pod CIDR, so it excludes node IPs, hostNetwork pods, and anything off
+            #     the pod network — but it does NOT exclude other PODS. A tenant
+            #     workload sits inside this range too. So this does not, on its own,
+            #     survive a NetworkPolicy regression: the namespace netpol (ingress from
+            #     kube-system only) remains the control that keeps tenant pods out, and
+            #     this CIDR is the coarser second layer under it. Two partial controls,
+            #     not one full one — do not read this flag as making the netpol optional.
+            #
+            #     It is NOT scoped tighter (e.g. to w1/w2's /24s) on purpose: Traefik has
+            #     only a PREFERRED podAntiAffinity and no nodeSelector, so it may be
+            #     scheduled onto any node, and the fleet is still growing. A too-narrow
+            #     CIDR would fail SAFE but SILENTLY — headers ignored, the skip-auth
+            #     regex stops matching, and student CSS breaks again with nothing in the
+            #     logs tying it to a Traefik reschedule. Same reason applies if Traefik
+            #     is ever moved to hostNetwork: revisit this value at that point.
+            - --trusted-proxy-ip=10.244.0.0/16
+            - '--skip-auth-regex=^/assets/([A-Za-z0-9_~-]+/)*[A-Za-z0-9_~-]+(\.[A-Za-z0-9_~-]+)*\.(css|js|mjs|woff2?|ttf|otf|eot|svg|png|jpe?g|gif|ico|webp|avif)$'
             - --upstream=static://200
             - --http-address=0.0.0.0:4180
             - --skip-provider-button=true
