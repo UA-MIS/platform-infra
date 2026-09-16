@@ -328,12 +328,22 @@ credentials, and ArgoCD stays Synced/Healthy. Nothing turns red.
 the failure surfaces as `Ready=False`, which `ExternalSecretSyncError` pages on.
 Templates therefore ship `Retain` on staging/prod and `Delete` on dev/preview.
 
-### E.4 — "Never configured" and "secrets vanished" look identical
+### E.4 — A missing Vault object is almost always NORMAL. The defect is the ambiguity
 
-`tenants/<team>/<env>/app` is **not** created by provisioning — KV-v2 creates an
-object on first write, so an environment where nobody has ever set a secret has
-no object at all. Under `deletionPolicy: Delete` that presents exactly like an
-environment whose secrets were destroyed: `Ready=True`, no Secret, ArgoCD green.
+**Start from the benign reading.** `tenants/<team>/<env>/app` is **not** created by
+provisioning — KV-v2 creates an object on first write — so "no object" is simply
+the state of an environment nobody has deployed to. **Most teams work only in
+dev**, so most staging and prod objects legitimately do not exist. A
+`SecretDeleted` on staging or prod is, by default, *nothing happened here yet*.
+
+The defect is that this common, benign state is **indistinguishable** from an
+object that was destroyed: under `deletionPolicy: Delete` both give `Ready=True`,
+no Secret, ArgoCD green. The everyday case and the serious case emit identical
+signals, which is exactly what makes the serious one invisible.
+
+> **Do not escalate a `SecretDeleted` as a secrets incident before asking whether
+> that environment has ever been used.** It has been mis-escalated that way once
+> already. Seeding (below) is what makes escalation meaningful.
 
 **Verified**, not inferred — read directly via the per-tenant ESO roles:
 
@@ -349,10 +359,14 @@ holds exactly **one** key — so that tenant has never had its Spoonacular, Twil
 or SMTP credentials in **any** environment, not just in prod.)
 
 When triaging a `SecretDeleted`, establish which case you are in **before**
-escalating — `subkeys` (E.1) answers it without reading values. Note that the
-`database` and `harbor-pull` ExternalSecrets in the same namespace ARE
-provisioned, so "those sync but `app` doesn't" is the signature of this case
-rather than evidence of a Vault problem.
+escalating. The `database` and `harbor-pull` ExternalSecrets in the same namespace
+ARE provisioned, so "those sync but `app` doesn't" is the signature of an
+unconfigured environment — **not** evidence of a Vault problem. Ask whether the
+team has ever deployed to that environment; for most teams the answer is no.
+
+Once every environment is seeded with an empty object (E.6), this flips: an
+**absent** object then does mean something happened to it, and that is the state
+worth paging on.
 
 ### E.5 — `dataFrom: extract` is unbounded; check names before converting
 
