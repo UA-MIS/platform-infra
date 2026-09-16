@@ -104,17 +104,32 @@ metadata:
   labels:
     platform.capstone/component: platform
 spec:
-  # 02:00 -> 22:00 (2026-09-16, ENOSPC follow-up). Three jobs were stacked on the
-  # same hour and they interfere:
-  #   02:00  this mirror run (up to 1h, so 02:00-03:00)
-  #   02:00  Harbor tag retention  (harbor-retention-gc-config)
-  #   02:30  Harbor garbage collection — which puts the registry READ-ONLY while
-  #          it runs, i.e. squarely inside this job's push window.
-  # A push that lands during the GC read-only window fails, burns one of the
-  # three retries, and leaves another partial multipart upload behind. Moving the
-  # mirror to 22:00 gives it a clean 22:00-23:00 window with nothing else
-  # touching the registry, and still lands well before retention/GC.
-  schedule: "0 22 * * *"
+  # 02:00Z -> 07:00Z (2026-09-16, ENOSPC follow-up). Two separate reasons.
+  #
+  # (1) COLLISION. Three jobs were stacked on the same hour:
+  #       02:00  this mirror run (up to 1h, so 02:00-03:00)
+  #       02:00  Harbor tag retention  (harbor-retention-gc-config)
+  #       02:30  Harbor garbage collection — which puts the registry READ-ONLY
+  #              while it runs, i.e. squarely inside this job's push window.
+  #     A push landing in the GC read-only window fails, burns one of the three
+  #     retries, and strands another partial multipart upload.
+  #
+  # (2) BLAST RADIUS. This CronJob has no spec.timeZone, so the cron is UTC and
+  #     local is UTC-5. This job saturates the registry and strands ~9GB per
+  #     killed run, so the hour it occupies should be the one where the FEWEST
+  #     tenant pushes can collide with it. Measured over 680 tag pushes:
+  #       02:00Z (21:00 local)  33 pushes   <- the old window
+  #       22:00Z (17:00 local)  55 pushes   <- 3rd BUSIEST hour; rejected
+  #       07:00Z (02:00 local)   4 pushes   <- quietest usable; chosen
+  #     An earlier revision of this change used 22:00Z, which reads like "late
+  #     evening" but is 17:00 local — the middle of the working afternoon. Do not
+  #     "fix" this back to an hour that looks quiet in UTC without re-checking
+  #     what it is locally.
+  #
+  # 07:00-08:00Z was checked clear against every other schedule on the cluster
+  # (vault 03:00, Velero 04:00, mr-prune Sun 04:00, curb-event-sync 06:11,
+  # Harbor retention 02:00, Harbor GC 02:30).
+  schedule: "0 7 * * *"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
@@ -140,6 +155,22 @@ spec:
       # A run that gets killed is not lost work: `crane copy` skips images already
       # present, so each night resumes where the last left off and the list
       # converges over a few runs. The 1h cap is what bounds the per-night damage.
+      # The skip behaviour is evidenced, not assumed — the 09-12 and 09-13 runs
+      # completed in 26s and 23s against this same 30-image list, which is only
+      # possible if already-present images are skipped outright.
+      #
+      # ⚠ CAVEAT — convergence holds only while the job still fails CLEANLY, and
+      # right now the evidence does not show it converging. Since the 09-14 list
+      # expansion there have been three consecutive DeadlineExceeded kills with no
+      # decrease in per-run damage (~14-15pp of the PVC each time). Capacity is the
+      # reason: library/rust:1-slim alone took 15m27s for ONE image, so a 3600s
+      # budget is realistically ~4 large images, against a 30-image list.
+      #
+      # So: if the run at 07:00Z is ALSO killed, stop treating this as transient.
+      # The list needs structural attention — a per-image deadline, or splitting
+      # the large pulls across runs — because until then registry.upload_purging
+      # is permanently load-bearing rather than a safety net, and it is the only
+      # control standing between this leak and a repeat ENOSPC.
       activeDeadlineSeconds: 3600
       template:
         metadata:
