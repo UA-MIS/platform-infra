@@ -88,9 +88,14 @@
 # fails the whole nightly job (backoffLimit: 1 means the Job itself does not
 # retry) and someone ends up debugging a non-problem.
 #
-# SCHEDULE: nightly (02:00, ahead of the proxy projects' 02:30 GC — no
-# interaction, different projects, just avoiding a coincidental resource
-# clash). A run that copies nothing new is a fast no-op (crane's manifest HEAD
+# SCHEDULE: nightly at 07:00Z. This header previously read "02:00, ahead of the
+# proxy projects' 02:30 GC — no interaction, different projects, just avoiding a
+# coincidental resource clash." That was WRONG in a way that mattered and is
+# corrected here: Harbor's GC is a SYSTEM-WIDE singleton that puts the whole
+# REGISTRY read-only while it runs, so "different projects" buys nothing — a
+# 02:00-03:00 mirror run had GC opening a read-only window straight through the
+# middle of its push phase. See the schedule: field below for the timing evidence
+# and for why 07:00Z (not 22:00Z) is the right destination. A run that copies nothing new is a fast no-op (crane's manifest HEAD
 # short-circuits unchanged digests). REFRESH/NEW-IMAGE FLOW: add a line to
 # dockerhub-mirror-configmap.yaml (same dir) in a normal PR; the next
 # scheduled run picks it up, or trigger immediately with
