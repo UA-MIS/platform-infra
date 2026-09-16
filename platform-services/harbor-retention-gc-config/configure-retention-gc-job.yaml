@@ -102,6 +102,9 @@ spec:
         platform.capstone/component: platform
     spec:
       restartPolicy: Never
+      # Reads workload specs cluster-wide to build the in-use tag keep-list.
+      # Read-only, workload kinds only — see rbac-inuse-reader.yaml.
+      serviceAccountName: harbor-retention-inuse-reader
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -159,6 +162,15 @@ spec:
             # and where that reasoning stops being true.
             - name: RETENTION_PROTECT_TAGS
               value: "*.*.* latest"
+            # Registry host used to filter workload image refs down to ours when
+            # building the in-use keep-list (step 0a).
+            - name: REGISTRY_HOST
+              value: "harbor.capstone.uamishub.com"
+            # Hard cap on rules per retention policy. The job FAILS rather than
+            # truncate, because a truncated policy silently unprotects a deployed
+            # image — see step 0a.
+            - name: RETENTION_MAX_RULES
+              value: "15"
             # --- Storage quotas (2026-09-16). See step 3 for why these are
             #     deliberately overcommitted and must not be shrunk to sum under
             #     the PVC size. Sizes are GiB, applied as bytes.
@@ -235,6 +247,73 @@ spec:
               echo "==> $n_total projects found; applying retention to:$RETENTION_PROJECTS"
               [ -n "$RETENTION_PROJECTS" ] || { echo "FAIL: enumeration produced no projects"; exit 1; }
 
+              # --- 0a) IN-USE TAG KEEP-LIST (2026-09-16) --------------------
+              # Recency does not imply "not in use", and the converse is worse: a
+              # stable prod tag is old precisely BECAUSE it is good. Measured live
+              # before this existed — mychef/mychef-backend:95b52f8 ranked 65 of 65
+              # in its repo while mychef PROD ran it on 3 replicas. `keep last 10`
+              # would have deleted it the first time retention actually executed,
+              # and the breakage would have stayed invisible until a pod
+              # rescheduled into ImagePullBackOff.
+              #
+              # So: enumerate what is genuinely deployed and retain it explicitly.
+              # See rbac-inuse-reader.yaml for the SA and for why bare Jobs are
+              # excluded while CronJobs are not.
+              #
+              # This is a UNION with the recency rule (algorithm "or"), so like the
+              # other always-rules it can only ever retain MORE. It cannot cause a
+              # deletion that was not already going to happen.
+              KUBE="https://kubernetes.default.svc"
+              SA=/var/run/secrets/kubernetes.io/serviceaccount
+              KTOK=$(cat $SA/token)
+              echo "==> in-use: enumerating deployed images from workload specs ..."
+              : > /tmp/inuse_raw.txt
+              for API in \
+                "/apis/apps/v1/deployments" \
+                "/apis/apps/v1/statefulsets" \
+                "/apis/apps/v1/daemonsets" \
+                "/apis/batch/v1/cronjobs" \
+                "/apis/argoproj.io/v1alpha1/rollouts" ; do
+                code=$(curl -sS -o /tmp/k8s.json -w '%{http_code}' \
+                  --cacert $SA/ca.crt -H "Authorization: Bearer $KTOK" "${KUBE}${API}?limit=1000")
+                if [ "$code" = "404" ]; then
+                  # CRD not installed (e.g. no Argo Rollouts) — not an error.
+                  echo "    $API -> 404, kind not present, skipping"; continue
+                fi
+                if [ "$code" != "200" ]; then
+                  # A silent miss here means an in-use tag silently loses its
+                  # protection, which is the exact failure this step exists to
+                  # prevent. Fail loudly instead.
+                  echo "FAIL: GET $API returned HTTP $code — refusing to build a partial keep-list"
+                  cat /tmp/k8s.json; exit 1
+                fi
+                # NOTE the ': *' in these patterns. The API server pretty-prints by
+                # default, so the field arrives as `"image": "nginx"` WITH a space —
+                # a `"image":"` pattern silently matches zero and yields an empty
+                # keep-list. Caught live: the first run of this step enumerated 0
+                # refs from a 3.6MB payload containing 260 of them. The tolerant
+                # pattern matches both spellings, so it cannot regress if the
+                # server's formatting changes.
+                n=$(grep -o '"image": *"[^"]*"' /tmp/k8s.json | wc -l | tr -d ' ')
+                echo "    $API -> $n image refs"
+                grep -o '"image": *"[^"]*"' /tmp/k8s.json \
+                  | sed 's/^"image": *"//; s/"$//' >> /tmp/inuse_raw.txt
+              done
+
+              # Keep only this registry's images that carry a TAG. Digest-pinned
+              # refs (…@sha256:…) are deliberately dropped: they are immune to tag
+              # retention anyway, and there is no tag to protect.
+              REGISTRY_HOST="${REGISTRY_HOST:-harbor.capstone.uamishub.com}"
+              grep -F "${REGISTRY_HOST}/" /tmp/inuse_raw.txt 2>/dev/null \
+                | grep -v '@sha256:' \
+                | sed "s|^.*${REGISTRY_HOST}/||" \
+                | sort -u > /tmp/inuse.txt || true
+              n_inuse=$(wc -l < /tmp/inuse.txt | tr -d ' ')
+              echo "==> in-use: $n_inuse tagged image refs on $REGISTRY_HOST"
+              # Zero is legitimate only on an empty cluster; on this one it means
+              # the enumeration broke, and proceeding would strip every keep-rule.
+              [ "$n_inuse" -gt 0 ] || { echo "FAIL: in-use enumeration returned nothing — refusing to apply retention with an empty keep-list"; exit 1; }
+
               # --- 0b) build the protection rules once: one `always` retain rule per
               #         pattern in RETENTION_PROTECT_TAGS. Unioned with the
               #         keep-last-N rule below by "algorithm": "or", so a tag is kept
@@ -295,6 +374,50 @@ spec:
                 fi
                 RID=$(printf '%s' "$proj" | grep -o '"retention_id":"[0-9]*"' | head -1 | grep -o '[0-9]*' || true)
 
+                # Per-project in-use rules: one `always` retain rule per tag this
+                # project currently has DEPLOYED, on top of the global protection
+                # patterns. A tag already covered by a RETENTION_PROTECT_TAGS
+                # pattern is skipped, so a semver release does not burn a second
+                # rule slot on a redundant rule.
+                INUSE_RULES=""
+                n_inuse_p=0
+                for TAG in $(grep "^${P}/" /tmp/inuse.txt 2>/dev/null | sed 's|^.*:||' | sort -u); do
+                  covered=0
+                  for PAT in $RETENTION_PROTECT_TAGS; do
+                    case "$TAG" in $PAT) covered=1; break ;; esac
+                  done
+                  [ "$covered" = "1" ] && continue
+                  n_inuse_p=$((n_inuse_p+1))
+                  INUSE_RULES="${INUSE_RULES},
+                  {
+                    \"disabled\": false,
+                    \"action\": \"retain\",
+                    \"template\": \"always\",
+                    \"params\": {},
+                    \"tag_selectors\": [
+                      { \"kind\": \"doublestar\", \"decoration\": \"matches\", \"pattern\": \"${TAG}\" }
+                    ],
+                    \"scope_selectors\": {
+                      \"repository\": [
+                        { \"kind\": \"doublestar\", \"decoration\": \"repoMatches\", \"pattern\": \"**\" }
+                      ]
+                    }
+                  }"
+                done
+                n_rules_this=$((n_rules_expected+n_inuse_p))
+                # Harbor caps rules per policy. Silently truncating would drop an
+                # in-use tag's protection — the exact silent failure this guards
+                # against — so this is a hard stop with the real remedy named.
+                if [ "$n_rules_this" -gt "$RETENTION_MAX_RULES" ]; then
+                  echo "FAIL: project '$P' needs $n_rules_this rules (cap $RETENTION_MAX_RULES):"
+                  echo "      $n_inuse_p in-use tag(s) + $n_rules_expected base rule(s)."
+                  echo "      Refusing to truncate — that would silently unprotect a DEPLOYED image."
+                  echo "      Remedy: consolidate deployed tags in that project (or raise the cap"
+                  echo "      deliberately after checking Harbor's own per-policy rule limit)."
+                  exit 1
+                fi
+                echo "==> retention: '$P' has $n_inuse_p deployed tag(s) needing explicit protection ($n_rules_this rules total)"
+
                 cat > "/tmp/ret_${P}.json" <<EOF
               {
                 "algorithm": "or",
@@ -312,7 +435,7 @@ spec:
                         { "kind": "doublestar", "decoration": "repoMatches", "pattern": "**" }
                       ]
                     }
-                  }${PROTECT_RULES}
+                  }${PROTECT_RULES}${INUSE_RULES}
                 ],
                 "trigger": { "kind": "Schedule", "settings": { "cron": "0 0 2 * * *" }, "references": {} },
                 "scope": { "level": "project", "ref": ${PID} }
@@ -354,13 +477,31 @@ spec:
                   echo "$verify" | grep -qF "\"pattern\":\"${PAT}\"" \
                     || { echo "FAIL: policy $RID for '$P' missing protection rule for pattern '$PAT' after apply"; echo "$verify"; exit 1; }
                 done
+                n_always_expected=$((n_protect+n_inuse_p))
                 n_always=$(echo "$verify" | grep -o '"template":"always"' | wc -l | tr -d ' ')
-                [ "$n_always" = "$n_protect" ] \
-                  || { echo "FAIL: policy $RID for '$P' has $n_always always-rules, expected $n_protect"; echo "$verify"; exit 1; }
+                [ "$n_always" = "$n_always_expected" ] \
+                  || { echo "FAIL: policy $RID for '$P' has $n_always always-rules, expected $n_always_expected"; echo "$verify"; exit 1; }
+                # Every DEPLOYED tag must come back in the applied policy. This is
+                # the check that actually matters: a policy that applied cleanly but
+                # silently dropped an in-use rule is how prod images get deleted.
+                # Skip tags already covered by a RETENTION_PROTECT_TAGS pattern —
+                # they are protected by that pattern rule and deliberately get no
+                # literal rule of their own. This mirror of the build-side `covered`
+                # test must stay in sync with it: checking for a literal rule on a
+                # pattern-covered tag fails a policy that is in fact correct.
+                for TAG in $(grep "^${P}/" /tmp/inuse.txt 2>/dev/null | sed 's|^.*:||' | sort -u); do
+                  covered=0
+                  for PAT in $RETENTION_PROTECT_TAGS; do
+                    case "$TAG" in $PAT) covered=1; break ;; esac
+                  done
+                  [ "$covered" = "1" ] && continue
+                  echo "$verify" | grep -qF "\"pattern\":\"${TAG}\"" \
+                    || { echo "FAIL: policy $RID for '$P' is missing a retain rule for DEPLOYED tag '$TAG' after apply"; echo "$verify"; exit 1; }
+                done
                 n_got=$(echo "$verify" | grep -o '"template":"' | wc -l | tr -d ' ')
-                [ "$n_got" = "$n_rules_expected" ] \
-                  || { echo "FAIL: policy $RID for '$P' has $n_got rules, expected $n_rules_expected"; echo "$verify"; exit 1; }
-                echo "==> retention: OK for '$P' (policy id $RID, $n_got rules: keep last $RETENTION_KEEP_LAST_N pushed + always[$RETENTION_PROTECT_TAGS], all repos)."
+                [ "$n_got" = "$n_rules_this" ] \
+                  || { echo "FAIL: policy $RID for '$P' has $n_got rules, expected $n_rules_this"; echo "$verify"; exit 1; }
+                echo "==> retention: OK for '$P' (policy id $RID, $n_got rules: keep last $RETENTION_KEEP_LAST_N pushed + always[$RETENTION_PROTECT_TAGS] + $n_inuse_p deployed-tag rule(s), all repos)."
               done
 
               # --- 2) system-wide GC schedule, nightly, delete_untagged so retention
