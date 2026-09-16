@@ -84,11 +84,32 @@ describe('SecretsPage', () => {
       expect(api.deleteSecret).toHaveBeenCalledWith({
         entityRef: 'component:default/my-app',
         key: 'DATABASE_URL',
+        // The row the user clicked — not every env declaring the key (mychef, 2026-09-16).
+        env: 'dev',
       }),
     );
     expect(
       await screen.findByText('https://github.com/x/y/pull/2'),
     ).toBeInTheDocument();
+    confirmSpy.mockRestore();
+  });
+
+  // The old dialog said "This opens a PR removing it; it's gone once merged" — false, and
+  // false in the direction that loses data: the Vault value is destroyed before the PR
+  // exists. A user closed that PR believing it would undo the delete. It did not.
+  it('the confirmation says the value is destroyed immediately, and names the environment', async () => {
+    const api = mockApi();
+    const confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(false);
+    await renderPage(api);
+    fireEvent.click(await screen.findByLabelText('manage secrets for My App'));
+    fireEvent.click(await screen.findByLabelText('delete DATABASE_URL'));
+
+    const msg = confirmSpy.mock.calls[0][0] as string;
+    expect(msg).toMatch(/IMMEDIATELY/);
+    expect(msg).toMatch(/cannot be recovered by closing/i);
+    expect(msg).toMatch(/dev/);
+    // and it must NOT repeat the old, false promise
+    expect(msg).not.toMatch(/gone once merged/i);
     confirmSpy.mockRestore();
   });
 

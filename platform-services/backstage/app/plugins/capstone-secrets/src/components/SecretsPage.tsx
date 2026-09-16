@@ -142,8 +142,17 @@ function ProjectSecrets(props: {
     setDeleteErr(undefined);
     // Honest: deletion opens a PR; confirm before opening it.
     // eslint-disable-next-line no-alert
+    // The previous wording was "This opens a PR removing it; it's gone once merged" — which
+    // is false in the direction that loses data. The Vault value is destroyed IMMEDIATELY,
+    // before the PR exists; the PR only removes the declaration from git. On 2026-09-16 a
+    // user closed that PR believing it would undo the delete. It did not: the value had been
+    // gone for three seconds by the time the PR was created. Say what actually happens.
     const confirmed = window.confirm(
-      `Delete secret "${secret.key}"? This opens a PR removing it; it's gone once merged.`,
+      `Delete "${secret.key}" from ${secret.env}?\n\n` +
+        `The value is removed from Vault IMMEDIATELY and cannot be recovered by closing ` +
+        `the pull request — the PR only removes the declaration from git.\n\n` +
+        `Only the ${secret.env} environment is affected. If this key is also set in other ` +
+        `environments, delete it there separately.`,
     );
     if (!confirmed) {
       return;
@@ -152,6 +161,8 @@ function ProjectSecrets(props: {
       const res = await api.deleteSecret({
         entityRef: project.entityRef,
         key: secret.key,
+        // The row the user clicked — NOT every environment that declares this key.
+        env: secret.env,
       });
       setDeleteMsg(res.pullRequestUrl);
       await refresh();

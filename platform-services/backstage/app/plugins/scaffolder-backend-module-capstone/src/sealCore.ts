@@ -125,6 +125,19 @@ export interface DeleteRequest {
   credentials: BackstageCredentials;
   entityRef: string;
   key: string;
+  /**
+   * The ONE environment to delete from. REQUIRED, and deliberately not optional.
+   *
+   * This field did not exist until the 2026-09-16 mychef incident: deleteSecret took only
+   * {entityRef, key} and removed the Vault value from EVERY environment that declared the
+   * key. The Secrets tab renders a Delete button per (key, env) row, complete with an
+   * Environment column — so a user pressing Delete on the `dev` row destroyed `prod`. It
+   * did, three minutes after that team first set the key there.
+   *
+   * Making it required rather than defaulting to "everywhere" is the point: a caller that
+   * forgets it gets a loud error instead of a fleet-wide delete.
+   */
+  env: string;
 }
 
 /**
@@ -200,6 +213,9 @@ function readSecretsConfig(config: Config): SecretsConfig {
 export function readVaultConfig(config: Config): VaultClientConfig {
   return readSecretsConfig(config).vault;
 }
+
+/** The environments the Secrets tab manages. One Vault object + one overlay per entry. */
+const SECRET_ENVS = ['dev', 'staging', 'prod'];
 
 /** The Vault KV-v2 path that holds ALL of a tenant env's secret keys (one path per env). */
 function vaultPathFor(teamSlug: string, env: string): string {
@@ -1414,11 +1430,22 @@ export async function deleteSecret(
   deps: CapstoneSecretsDeps,
   request: DeleteRequest,
 ): Promise<{ pullRequestUrl: string }> {
-  const { credentials, entityRef, key } = request;
+  const { credentials, entityRef, key, env: targetEnv } = request;
   const cfg = readSecretsConfig(deps.config);
 
+  // Fail closed BEFORE anything else. An absent or unrecognized environment must never
+  // degrade to "delete from all of them" — that behaviour is what destroyed a tenant's
+  // production secret. Validated here as well as at the route so no caller can skip it.
+  if (typeof targetEnv !== 'string' || !SECRET_ENVS.includes(targetEnv)) {
+    throw new InputError(
+      `Nothing was deleted. A delete must name exactly one environment ` +
+        `(${SECRET_ENVS.join(', ')}); got ${JSON.stringify(targetEnv)}. Secrets are ` +
+        `per-environment and are deleted one environment at a time.`,
+    );
+  }
+
   deps.logger.info(
-    `capstone delete-secret requested for key="${key}" target=${entityRef}`,
+    `capstone delete-secret requested for key="${key}" env=${targetEnv} target=${entityRef}`,
   );
 
   const { target, teamSlug } = await authorizeAndResolveTarget(
@@ -1439,10 +1466,12 @@ export async function deleteSecret(
   });
   const baseSha = baseRef.object.sha;
 
-  // 1) Find every env whose overlay ExternalSecret (on the BASE branch) declares this key — a
-  //    read-only check first, so a not-found delete never touches git (no branch created/reset).
+  // 1) Find the ONE environment's overlay (on the BASE branch) and confirm it declares this
+  //    key — a read-only check first, so a not-found delete never touches git (no branch
+  //    created/reset). Scoped to `env`: this loop used to run over every environment, which
+  //    is what made a single click destroy production (see DeleteRequest.env).
   const envEntries: Array<{ env: string; esPath: string; existing: string }> = [];
-  for (const env of ['dev', 'staging', 'prod']) {
+  for (const env of [targetEnv]) {
     const esPath = overlayEsPath(cfg, env);
     const existing = await getFileContent(octokit, owner, repo, baseBranch, esPath);
     if (existing && declaredKeys(existing).includes(key)) {
@@ -1455,7 +1484,9 @@ export async function deleteSecret(
   }
   if (envEntries.length === 0) {
     throw new NotFoundError(
-      `No secret "${key}" found for ${entityRef} (nothing to delete).`,
+      `No secret "${key}" found in the ${targetEnv} environment for ${entityRef} ` +
+        `(nothing to delete). Note that secrets are per-environment: a key set in one ` +
+        `environment does not exist in the others until it is set there too.`,
     );
   }
 
@@ -1502,7 +1533,7 @@ export async function deleteSecret(
   //    concurrent pending change already removed the same key first.
   if (!existingPrUrl && !anyWrite) {
     deps.logger.info(
-      `capstone delete-secret removed key="${key}" target=${entityRef} ` +
+      `capstone delete-secret removed key="${key}" env=${targetEnv} target=${entityRef} ` +
         `(Vault only — no pending git change, no PR opened)`,
     );
     return { pullRequestUrl: '' };
@@ -1517,7 +1548,7 @@ export async function deleteSecret(
     existingPrUrl,
   );
   deps.logger.info(
-    `capstone delete-secret staged key="${key}" on ${branch}: ${prUrl}`,
+    `capstone delete-secret staged key="${key}" env=${targetEnv} on ${branch}: ${prUrl}`,
   );
   return { pullRequestUrl: prUrl };
 }
