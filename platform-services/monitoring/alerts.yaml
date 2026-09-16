@@ -664,3 +664,99 @@ spec:
               API (what CI actually talks to) is unaffected. warning, not
               critical, for exactly that reason; see HarborCriticalPathUnavailable
               for the CI-blocking pair (registry/core).
+
+    # --- Harbor registry STORAGE (2026-09-16, ENOSPC outage) ------------------
+    # Harbor storage had NO alert of any kind before this. Note carefully: the
+    # metric was never missing — kubelet_volume_stats_* has been scraped for the
+    # harbor-registry PVC all along (verified live: it read 0.5995 immediately
+    # after the fix, matching `df` at 60%). Nobody was ever told. The gap was an
+    # alerting gap, not an instrumentation gap, which is why this is four lines of
+    # PromQL and not a new exporter.
+    #
+    # These alerts are the BACKSTOP, not the fix. The controls are:
+    #   1. registry.upload_purging age=24h (applicationsets/harbor-app.yaml) —
+    #      removes the orphaned-`_uploads` leak that actually caused the outage.
+    #   2. per-project quotas (harbor-retention-gc-config) — ceiling so one
+    #      project cannot take CI down for everyone.
+    #   3. tag retention + nightly GC — bounds tags/blobs per repo.
+    # Ordering matters and is deliberate: this cluster already learned, in the
+    # MinIO/Velero DR deadlock on w1, that alerts alone do not prevent an outage —
+    # those fired for 59h and changed nothing because no ceiling was enforced.
+    # An alert with no enforcement behind it is a notification that you are about
+    # to have an outage, not a control that prevents one.
+    - name: harbor-storage
+      rules:
+        - alert: HarborRegistryStorageHigh
+          expr: >-
+            kubelet_volume_stats_used_bytes{namespace="harbor", persistentvolumeclaim="harbor-registry"}
+            / kubelet_volume_stats_capacity_bytes{namespace="harbor", persistentvolumeclaim="harbor-registry"}
+            > 0.75
+          for: 30m
+          labels:
+            severity: warning
+            impact: student-facing
+          annotations:
+            summary: "Harbor registry PVC is {{ $value | humanizePercentage }} full — CI push path at risk"
+            description: >-
+              The harbor-registry PVC has been over 75% full for 30m (currently
+              {{ $value | humanizePercentage }}). At 100% every tenant image push
+              fails with ENOSPC/Err:28 and ALL CI is blocked — this is not a
+              single-tenant problem, the first team to push simply finds it first.
+              75%/30m is chosen to fire days before ENOSPC at the observed growth
+              rate, leaving room to act calmly rather than at 2am.
+              TRIAGE, in order:
+              (1) `kubectl -n harbor exec deploy/harbor-registry -c registry -- df -h /storage`
+              for ground truth.
+              (2) Check for the known leak class FIRST — orphaned multipart uploads:
+              `kubectl -n harbor exec deploy/harbor-registry -c registry -- sh -c
+              'find /storage/docker/registry/v2/repositories -type d -name _uploads -exec du -sm {} \;'`.
+              These are invisible to BOTH tag retention and GC, and to Harbor's own
+              quota accounting, so a "GC ran Success" message means nothing about
+              them. If this is large, upload_purging is not doing its job — check
+              `age` in the registry config, do not just expand the PVC again.
+              (3) Only then look at real image growth (Harbor UI → Projects →
+              storage) and per-project quotas.
+              Do NOT reflexively expand the PVC: it has already gone 20Gi -> 60Gi
+              -> 100Gi across two outages, and twice the expansion was mistaken for
+              the fix.
+        - alert: HarborRegistryStorageCritical
+          expr: >-
+            kubelet_volume_stats_used_bytes{namespace="harbor", persistentvolumeclaim="harbor-registry"}
+            / kubelet_volume_stats_capacity_bytes{namespace="harbor", persistentvolumeclaim="harbor-registry"}
+            > 0.90
+          for: 5m
+          labels:
+            severity: critical
+            impact: student-facing
+          annotations:
+            summary: "Harbor registry PVC {{ $value | humanizePercentage }} full — CI outage imminent"
+            description: >-
+              The harbor-registry PVC is over 90% full. Every tenant's image push
+              is minutes-to-hours from failing with ENOSPC. Treat as an active
+              incident. See HarborRegistryStorageHigh for the triage order; check
+              orphaned `_uploads` before anything destructive, and never reclaim
+              space by deleting tenant images as a first move.
+        - alert: HarborRegistryStorageFillingFast
+          expr: >-
+            predict_linear(
+              kubelet_volume_stats_available_bytes{namespace="harbor", persistentvolumeclaim="harbor-registry"}[6h],
+              4 * 24 * 3600
+            ) < 0
+          for: 1h
+          labels:
+            severity: warning
+            impact: student-facing
+          annotations:
+            summary: "Harbor registry PVC trending to full within 4 days"
+            description: >-
+              Extrapolating the last 6h of free space, the harbor-registry PVC
+              runs out within 4 days. This is the RATE alert, and it is the one
+              that would actually have caught the 2026-09-16 outage early: the
+              orphan leak ran at ~4-7GB/day against a 60Gi volume, so utilisation
+              crossed from comfortable to ENOSPC in under a week — a static
+              threshold alone gives very little warning at that slope, which is
+              why this rule exists alongside the 75%/90% pair rather than instead
+              of them. A sudden change in slope usually means a runaway producer
+              (a failing mirror/replication job stranding partial uploads), not
+              organic tenant growth. Check the `_uploads` triage in
+              HarborRegistryStorageHigh first.

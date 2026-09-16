@@ -159,6 +159,23 @@ spec:
             # and where that reasoning stops being true.
             - name: RETENTION_PROTECT_TAGS
               value: "*.*.* latest"
+            # --- Storage quotas (2026-09-16). See step 3 for why these are
+            #     deliberately overcommitted and must not be shrunk to sum under
+            #     the PVC size. Sizes are GiB, applied as bytes.
+            - name: QUOTA_DEFAULT_GIB
+              value: "10"
+            # Space-separated project=GiB. Anything not listed gets the default.
+            #   base-images (20.24G live) — the shared upstream mirror every tenant
+            #     build pulls from; the single largest legitimate consumer, and the
+            #     one whose runaway `_uploads` caused this outage. 40GiB is ~2x its
+            #     real footprint, so a mirror refill cannot wedge CI again.
+            #   dockerhub-proxy / mcr-proxy — pull-through caches. Their content is
+            #     re-fetchable from upstream on demand, so a cap that occasionally
+            #     forces a re-pull costs latency, never data.
+            #   backstage (6.14G live) — the developer portal image + its Kaniko
+            #     layer cache; platform-critical, so headroom over the default.
+            - name: QUOTA_OVERRIDES
+              value: "base-images=40 dockerhub-proxy=20 mcr-proxy=20 backstage=15"
           command: ["/bin/sh", "-eu", "-c"]
           args:
             - |
@@ -383,7 +400,79 @@ spec:
               echo "$verify" | grep -qF '"cron":"0 30 2 * * *"' || { echo "FAIL: gc cron mismatch after apply"; echo "$verify"; exit 1; }
               echo "==> gc: OK (Daily @ 02:30 UTC, delete_untagged=true)."
 
-              echo "==> harbor retention + gc configuration complete."
+              # --- 3) per-project STORAGE QUOTAS (2026-09-16). ---------------
+              # Enforcement, not observation. The 2026-09-16 ENOSPC outage happened
+              # with retention running, GC running nightly and reporting Success, and
+              # every project quota set to `unlimited` (verified live: all 23). The
+              # lesson this platform already paid for once — the MinIO/Velero DR
+              # deadlock on w1, where alerts fired for 59h and changed nothing because
+              # nothing enforced a ceiling — is that a ceiling is the control and the
+              # alert is only the backstop. So: quotas first, alert second.
+              #
+              # Quotas are applied to EVERY project, including the ones excluded from
+              # retention. That exclusion exists for a narrow reason (do not PUT over
+              # dockerhub-proxy's hand-set nDaysSinceLastPull policy) which has no
+              # bearing on a storage ceiling, so it is deliberately NOT reused here.
+              #
+              # HONEST LIMIT — THESE CAPS ARE INTENTIONALLY OVERCOMMITTED.
+              # The sum of all caps (~40 + 20 + 20 + 20 + 15 + the 10GiB default for
+              # the rest) exceeds the ~98GiB usable PVC. That is deliberate: sizing
+              # 23 projects to sum under 98GiB would mean ~4GiB each, which is below
+              # what an active tenant legitimately needs, and would break CI — the
+              # owner's #1 priority — to satisfy an arithmetic tidiness nobody asked
+              # for. What a quota buys here is BLAST-RADIUS containment: no single
+              # project can run away and take the registry down for every other
+              # tenant, which is exactly the failure mode being fixed. Aggregate
+              # safety comes from the other two controls (upload_purging removing the
+              # actual leak, retention bounding tags per repo), with the PVC
+              # utilisation alert as the backstop for slow collective drift.
+              # Do not "fix" this by shrinking the caps to sum under capacity.
+              QUOTA_DEFAULT_GIB="${QUOTA_DEFAULT_GIB:-10}"
+              echo "==> quotas: default ${QUOTA_DEFAULT_GIB}GiB, overrides: $QUOTA_OVERRIDES"
+              while IFS= read -r P; do
+                [ -n "$P" ] || continue
+
+                GIB="$QUOTA_DEFAULT_GIB"
+                for OV in $QUOTA_OVERRIDES; do
+                  case "$OV" in
+                    "${P}="*) GIB="${OV#*=}" ;;
+                  esac
+                done
+                BYTES=$(( GIB * 1073741824 ))
+
+                pid=$(grep -o '"project_id":[0-9]*' "/tmp/proj_${P}.json" 2>/dev/null | head -1 | cut -d: -f2)
+                if [ -z "$pid" ]; then
+                  # Retention skipped this project (excluded or 404) so no cached
+                  # payload exists; fetch it now rather than silently skipping —
+                  # a project with no quota is exactly the hole this step closes.
+                  pcode=$(curl -sS -o "/tmp/proj_${P}.json" -w '%{http_code}' -u "$AUTH" "$CORE/api/v2.0/projects/$P")
+                  if [ "$pcode" = "404" ]; then
+                    echo "==> quotas: skip: project '$P' gone (404), continuing."; continue
+                  fi
+                  [ "$pcode" = "200" ] || { echo "FAIL: GET /projects/$P returned HTTP $pcode"; exit 1; }
+                  pid=$(grep -o '"project_id":[0-9]*' "/tmp/proj_${P}.json" | head -1 | cut -d: -f2)
+                fi
+                [ -n "$pid" ] || { echo "FAIL: could not resolve project_id for '$P'"; exit 1; }
+
+                qid=$(curl -fsS -u "$AUTH" "$CORE/api/v2.0/quotas?reference=project&reference_id=${pid}" \
+                      | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
+                [ -n "$qid" ] || { echo "FAIL: no quota object for project '$P' (id $pid)"; exit 1; }
+
+                code=$(curl -sS -u "$AUTH" -o /tmp/q.out -w '%{http_code}' \
+                  -X PUT "$CORE/api/v2.0/quotas/${qid}" -H 'Content-Type: application/json' \
+                  --data "{\"hard\":{\"storage\":${BYTES}}}")
+                [ "$code" = "200" ] || { echo "FAIL: PUT /quotas/$qid for '$P' returned HTTP $code"; cat /tmp/q.out; exit 1; }
+
+                # Read back — a quota that silently did not apply is the same as no
+                # quota, and that is the condition that caused this outage.
+                got=$(curl -fsS -u "$AUTH" "$CORE/api/v2.0/quotas/${qid}" \
+                      | grep -o '"hard":{[^}]*}' | grep -o '"storage":-\{0,1\}[0-9]*' | cut -d: -f2)
+                [ "$got" = "$BYTES" ] \
+                  || { echo "FAIL: quota read-back for '$P' is '$got', expected '$BYTES'"; exit 1; }
+                echo "==> quotas: OK '$P' (project $pid, quota $qid) = ${GIB}GiB"
+              done < /tmp/all_projects.txt
+
+              echo "==> harbor retention + gc + quota configuration complete."
       volumes:
         - name: tmp
           emptyDir: {}
