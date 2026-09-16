@@ -269,6 +269,17 @@ function parseEsDataKeys(yaml: string): string[] {
  * Propagation is acceptable HERE, and only because of what this carries: key NAMES, which are
  * already committed in plaintext a few lines away and are exactly what the UI exists to show.
  * Never put a value, or anything else sensitive, in an annotation.
+ *
+ * ── AND NOTE WHAT VALIDATION-ON-WRITE CANNOT DO ──────────────────────────────────────────────
+ * assertAnnotatableKeyName() below rejects a key name that is not a legal Kubernetes Secret
+ * data key. It protects everything written from HERE onward — it does NOT retroactively clean
+ * what is already in Vault. A real example: one tenant's dev object holds a property whose name
+ * contains a SPACE, written long before this validation existed. `dataFrom: extract` is
+ * unbounded and would try to materialize it, and the ESO v1 schema has no exclusion mechanism
+ * (`rewrite` renames keys, it cannot drop one). So an overlay cannot simply be converted to
+ * `extract` on the assumption that everything in its Vault object is nameable — the object has
+ * to be checked first. Vault KV-v2's `subkeys` endpoint lists property NAMES without values,
+ * which is the right way to check.
  */
 const DECLARED_KEYS_ANNOTATION = 'platform.capstone/declared-keys';
 
