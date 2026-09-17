@@ -56,6 +56,35 @@ metadata:
     platform.capstone/component: platform
 data:
   images.txt: |
+    # ORDER IS LOAD-BEARING. This file is processed TOP TO BOTTOM by a job capped at
+    # activeDeadlineSeconds: 3600, and when there is real work to do that budget does
+    # not cover the whole list — library/rust:1-slim alone measured 15m27s. On
+    # 2026-09-14/15/16 the run was SIGKILLed at exactly 3600s having reached roughly
+    # entry 23, three nights running, and the tail never executed at all.
+    #
+    # That is why the DIGEST-PINNED entries are first. They were last (28-30), sitting
+    # directly behind a block of four entries that were themselves broken, so they
+    # were never reached — and they are the entries whose consumers pin by digest and
+    # break hardest when the artifact is missing (next-up's build outage, 2026-09-16).
+    # They are also the cheapest entries in the file: three small images that are a
+    # fast no-op once mirrored.
+    #
+    # Rule of thumb when adding entries: anything a tenant pins BY DIGEST goes at the
+    # top, because a missing digest-pinned image cannot be worked around by the
+    # consumer. Bulk tag-based images go below.
+
+    # --- Digest-pinned, FIRST (see note above) ---
+    # kaniko executor: needed by EVERY build (Kaniko itself). Also covered by
+    # replication-gcr-kaniko-executor.yaml (manual-trigger); this entry is the
+    # automatic-recovery path.
+    kaniko-project/executor@sha256:c3109d5926a997b100c4343944e06c6b30a6804b2f9abe0994d3de6ef92b028e gcr.io
+
+    # --- MCR (explicit source; digest-pinned, D-030) ---
+    # Also covered by replication-mcr-dotnet-{sdk,aspnet}.yaml (manual-trigger);
+    # these entries are the automatic-recovery path.
+    dotnet/sdk@sha256:5ef85cc12cb25be6ec319a7392d1e9efd53c3bc8abb971c53d8058a473f09053 mcr.microsoft.com
+    dotnet/aspnet@sha256:9a464e9a7e8c6144631020975f703c89034fe386417cb740620df69c2c6cfe24 mcr.microsoft.com
+
     # --- Docker Hub (source defaults to mirror.gcr.io) ---
     library/python:3.12-slim
     library/python:3.11-slim
@@ -86,13 +115,4 @@ data:
     library/python:3-slim
 
     # --- GCR (explicit source; digest-pinned, D-030) ---
-    # kaniko executor: needed by EVERY build (Kaniko itself). Also covered by
-    # replication-gcr-kaniko-executor.yaml (manual-trigger); this entry is the
-    # automatic-recovery path.
-    kaniko-project/executor@sha256:c3109d5926a997b100c4343944e06c6b30a6804b2f9abe0994d3de6ef92b028e gcr.io
 
-    # --- MCR (explicit source; digest-pinned, D-030) ---
-    # Also covered by replication-mcr-dotnet-{sdk,aspnet}.yaml (manual-trigger);
-    # these entries are the automatic-recovery path.
-    dotnet/sdk@sha256:5ef85cc12cb25be6ec319a7392d1e9efd53c3bc8abb971c53d8058a473f09053 mcr.microsoft.com
-    dotnet/aspnet@sha256:9a464e9a7e8c6144631020975f703c89034fe386417cb740620df69c2c6cfe24 mcr.microsoft.com
