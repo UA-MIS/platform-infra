@@ -197,6 +197,7 @@ data:
           - https://mychef-agile.capstone.uamishub.com/api/auth/callback
           - https://nextup-agile.capstone.uamishub.com/api/auth/callback
           - https://paper-papas-agile.capstone.uamishub.com/api/auth/callback
+          - https://runlocal-agile.capstone.uamishub.com/api/auth/callback
           - https://ss-evan-and-emily-agile.capstone.uamishub.com/api/auth/callback
           - https://team-404-agile.capstone.uamishub.com/api/auth/callback
           # ── END GENERATED team board redirect URIs ──
