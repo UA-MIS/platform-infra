@@ -1,0 +1,27 @@
+# Sprint board for team `runlocal` — added by hand, AHEAD of the team running
+# the project wizard. ONE board per TEAM; the filename is the team slug, which
+# is what makes that structural.
+#
+# The GitHub team `UA-MIS/runlocal` EXISTS (created 2026-09-18, parent team
+# `capstone-fall-2026`, verified against the API), so sign-in works on arrival —
+# unlike the lab-team boards, which deploy green and 403 every member until
+# their team is created.
+#
+# ⚠ `repos:` BELOW IS A DELIBERATE PLACEHOLDER — DO NOT "FIX" IT.
+# `UA-MIS/runlocal` does not exist, and that is the intent: the owner's
+# instruction is that this board tracks NO repo at the moment. The field cannot
+# be left blank (the chart's _helpers.tpl hard-fails on an empty `repos`), so a
+# non-existent repo is the way to say "none": it leaves the branch and PR
+# pickers inert and fails soft everywhere else — `repos` only scopes branch
+# creation and PR linking. When the team runs the project wizard it OVERWRITES
+# this file with their real repo, which is the one remaining step here.
+#
+# Rendered by applicationsets/agile-boards-appset.yaml into the shared
+# `agile-boards` namespace, from the ONE shared image. Host is derived:
+# runlocal-agile.capstone.uamishub.com
+#
+# De-provision = `git rm` this file.
+team: runlocal
+repos: UA-MIS/runlocal
+title: RunLocal Board
+accent: "#9e1b32"
