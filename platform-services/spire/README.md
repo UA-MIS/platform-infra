@@ -1,4 +1,49 @@
-# SPIFFE/SPIRE workload identity — exploratory baseline
+# SPIFFE/SPIRE workload identity — exploratory baseline (DECOMMISSIONED)
+
+> ## Decommissioned 2026-09-21 — owner decision
+>
+> This baseline never acquired a real consumer. Re-verified before removal:
+> across every pod in the cluster, the only workloads mounting the
+> SPIFFE/SPIRE Workload API socket (CSI ephemeral volume or hostPath) were
+> SPIRE's own `spire-server` StatefulSet, the `spire-agent`/`spiffe-csi-driver`
+> DaemonSets, and the one-shot `spire-demo-client` Job below (already
+> `Complete`, 75 days idle). The chart's own `recommendations.enabled: true`
+> default also installs a broad **fallback** `ClusterSPIFFEID`
+> (`spire-server-spire-default`, `namespaceSelector: NotIn [spire-server,
+> spire-system]`) that nominally *registers* every other pod in the cluster
+> (561 pods / 74 namespaces at removal time) — but registration alone mints
+> nothing: no external pod ever mounted the socket needed to redeem it, and
+> the server's own logs show only `Entry not found or not authorized` churn
+> from stale/rotated demo entries, never a successful issuance to anything
+> outside `spire-system`/`spire-server`. Net: an inert catch-all rule, not a
+> consumer.
+>
+> **What was removed** (PR decommissioning this): the two Helm-chart
+> Applications, `platform-spire`
+> (`applicationsets/spire-app.yaml`, deleted) and `platform-spire-crds`
+> (`applicationsets/spire-crds-app.yaml`, deleted) — server, controller-manager,
+> agent DaemonSet, spiffe-csi-driver DaemonSet, the `spire-server` SQLite
+> datastore PVC, the `spire-system`/`spire-server`/`spire-demo` namespaces, and
+> the CRDs (`ClusterSPIFFEID`, `ClusterFederatedTrustDomain`,
+> `ClusterStaticEntry`, `ControllerManagerConfig`).
+>
+> **What was kept**: this file and the rest of `platform-services/spire/` (the
+> namespace/demo manifests, now unreferenced — see the comment at the top of
+> `kustomization.yaml`), so a real mTLS/workload-identity need can restore this
+> in an afternoon instead of relearning it from scratch. The `platform`
+> AppProject's `sourceRepos` allowlist entry for
+> `https://spiffe.github.io/helm-charts-hardened/` (`bootstrap/platform-appproject.yaml`)
+> was deliberately left untouched — that file is bootstrap-only and needs a
+> manual `make bootstrap-reapply` to take effect either way, so editing it as
+> part of this GitOps PR would just add drift, not remove any.
+>
+> To re-enable: restore `applicationsets/spire-app.yaml` and
+> `applicationsets/spire-crds-app.yaml` from git history (the commit that
+> deleted them has the last-good content in its parent), then uncomment the
+> `resources:` list in `platform-services/spire/kustomization.yaml`. Everything
+> below this banner describes that original, working baseline.
+
+---
 
 SPIRE issues short-lived **X.509-SVIDs** (SPIFFE Verifiable Identity Documents) to
 Kubernetes workloads based on their **node** identity (k8s_psat attestation —
