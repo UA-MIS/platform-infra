@@ -132,6 +132,43 @@ shows green while its hook never ran (a sync hook only fires during a sync
 `ttlSecondsAfterFinished`. Always assert the real pods/behavior, not just the
 ArgoCD tile. `make verify-image-pull` checks the registry-mirror failure class.
 
+### Freezing a child app's auto-sync is not durable — freeze `root` first (board #31)
+
+During an incident, disabling `syncPolicy.automated` on one of the `platform-*`
+Applications (e.g. to hold a DB StatefulSet still mid-recovery) does **not**
+survive the next reconcile. The `root` app-of-apps (`path=applicationsets`,
+`selfHeal`) regenerates those `platform-*` Applications and **restores their
+`syncPolicy` wholesale** — auto-sync can silently re-enable itself between the
+freeze and the recovery, with no signal that it happened.
+
+This is the same class as "Synced/Healthy is not proof it works" above: a safety
+action (freezing sync) appears to succeed and silently doesn't. Observed live:
+auto-sync re-enabled itself between a freeze and a Galera SST recovery, and a
+pre-flight re-check caught it one command before ArgoCD would have reverted
+`forceClusterBootstrapInPod` **mid-SST** and restarted the thrash loop.
+
+**Always freeze `root` FIRST**, then the child app. Freezing only the child is not
+a freeze — it's a freeze until `root`'s next reconcile, which you do not control.
+Re-check both are still frozen immediately before the risky step, every time.
+
+---
+
+## Kubernetes / kubectl
+
+### `kubectl get backups` silently returns the wrong CRD (board #30)
+
+Three CRDs on this cluster claim the plural `backups`: `k8s.mariadb.com`,
+`postgresql.cnpg.io`, and `velero.io`. An unqualified `kubectl get backups`
+resolves to whichever is **alphabetically first**, not the one you meant — and if
+that one happens to have zero records, you get a confident, success-shaped
+`No resources found`, not an error.
+
+This convinced the platform it had no DR during a live incident: there were in
+fact 27 Velero backups, but `kubectl get backups` was silently resolving to a
+different CRD with none. **Always fully qualify:** `backups.velero.io`,
+`backups.postgresql.cnpg.io`, or `backups.k8s.mariadb.com`. Sweep any new
+doc/runbook/script for the unqualified plural before relying on it.
+
 ---
 
 ## KubeVirt VM tenants

@@ -7,24 +7,30 @@
 # per-team/per-component values come from .devops/promotion.yaml (registry/app) +
 # .devops/components.yaml (the components) + the git event.
 #
-# HOW IT WORKS (five jobs):
+# HOW IT WORKS (seven jobs):
 #   1. resolve     — run ONCE. resolve-image.sh maps the git event -> env + the ONE tag
 #                    all components share (D-030); resolve-components.sh reads
 #                    components.yaml and emits the per-component build MATRIX (one image
 #                    each, full ref = <registry>/<component.image>:<tag>).
+#   1.5 scan       — run ONCE, repo-wide. gitleaks secret scan, BLOCKING (board #64).
+#                    Ported from tenant-build.yaml so the wizard's self-contained
+#                    pipeline carries the same gate DSN-001 was fixed for.
 #   2. checks      — a MATRIX over the SAME components. Each leg auto-detects the
 #                    component's language (from its build-context manifest/lockfile) and
 #                    runs that language's LINT + UNIT TESTS in the right toolchain image
 #                    (a `uses: docker://` step, like the Kaniko build). This GATES the
-#                    build: build-and-push `needs: [resolve, checks]`, so a failing test
-#                    or lint (or a compile/typecheck error) NEVER reaches the registry —
-#                    and bump-dev, gated behind the build, never deploys it. ABSENCE of
-#                    tests is a notice (not a block); a real FAILURE blocks.
+#                    build: build-and-push `needs: [resolve, checks, scan]`, so a failing
+#                    test, lint, or secret-scan finding NEVER reaches the registry — and
+#                    bump-dev, gated behind the build, never deploys it. ABSENCE of tests
+#                    is a notice (not a block); a real FAILURE blocks.
 #   3. build-and-push — a MATRIX over the components. Each leg Kaniko-builds its
 #                    component (rootless, no docker daemon) from that component's
 #                    `context`/`dockerfile` and pushes to the team's OWN Harbor project
 #                    using the least-privilege PUSH robot (`harbor-push`, project-scoped
-#                    so it covers every component repo — no per-component robot).
+#                    so it covers every component repo — no per-component robot). On the
+#                    push path, each leg then runs the shared supply-chain-verify
+#                    composite action (board #148): gates on Harbor's Trivy CRITICAL
+#                    scan, cosign keyless-signs the digest, and uploads a syft SBOM.
 #   4. bump-dev    — run ONCE after all matrix legs. On push-to-main, rewrite the dev
 #                    overlay so EVERY component's images[].newTag = the built tag, commit,
 #                    push -> ArgoCD syncs all components into <team>-dev. (FIX-18/D-030:
@@ -200,6 +206,34 @@ jobs:
           set -euo pipefail
           MATRIX="$(sh .devops/ci/resolve-components.sh)"
           echo "matrix=${MATRIX}" | tee -a "$GITHUB_OUTPUT"
+
+  # ---- 1.5) scan: repo-wide secret scan, BLOCKING (board #64) -------------------
+  # Ported from tenant-build.yaml's `scan` job so the wizard's self-contained pipeline
+  # carries the same gate DSN-001 was fixed for. DSN-001 was a live database password
+  # committed into a repo that originated IN a tenant repo and got lifted into the
+  # skeleton — this fragment IS the tenant repo's own pipeline, so it is exactly the
+  # population that gate exists to protect and, until this job, did not have it.
+  # Runs ONCE per push/PR (not per-component — a leaked credential anywhere in the
+  # working tree is a leak for the whole repo, not just one component).
+  scan:
+    runs-on: ${{ vars.RUNNER_SCALE_SET || 'ua-mis-kaniko' }}
+    steps:
+      - name: Checkout (working tree to scan)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 1
+      - name: Secret scan (gitleaks — BLOCKING)
+        # Digest-pinned (SEC), same image as tenant-build.yaml's scan job. `dir` scans
+        # the checked-out files (not git history) — fast, and the working tree is what
+        # gets built. Exits non-zero on any finding, failing the gate before build.
+        uses: docker://zricethezav/gitleaks@sha256:0e99e8821643ea5b235718642b93bb32486af9c8162c8b8731f7cbdc951a7f46 # v8.21.2
+        with:
+          # Shell entrypoint so $GITHUB_WORKSPACE expands to the STEP-POD workspace
+          # mount (/__w/<repo>), not the JOB-container ${{ github.workspace }}, which
+          # does not exist inside this separate `docker://` step pod — same reason the
+          # Kaniko build step below uses $GITHUB_WORKSPACE.
+          entrypoint: /bin/sh
+          args: -c 'gitleaks dir "$GITHUB_WORKSPACE" --no-banner --redact --exit-code 1'
 
   # ---- 2) checks: per-component language-aware lint + test (GATES the build) ----
   # "Everything we ship runs its language's tests + lint before it can deploy." A MATRIX
@@ -533,15 +567,25 @@ jobs:
 
   # ---- 3) build-and-push: one Kaniko build per component (matrix) --------------
   build-and-push:
-    needs: [resolve, checks]
+    needs: [resolve, checks, scan]
     runs-on: ${{ vars.RUNNER_SCALE_SET || 'ua-mis-kaniko' }}
     strategy:
       # Don't cancel sibling components if one fails — surface every component's result.
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+    # FULL node image (NOT -slim): the post-push supply-chain-verify composite action
+    # (board #148) needs curl + tar + sha256sum to install cosign/syft, plus a real
+    # /etc/ssl/certs/ca-certificates.crt bundle — -slim ships none of these (same
+    # requirement documented in that action's header and in tenant-build.yaml).
     container:
-      image: harbor.capstone.uamishub.com/base-images/library/node:24-trixie-slim
+      image: harbor.capstone.uamishub.com/base-images/library/node:24-trixie
+    # RE-DECLARES id-token: write (workflow default at the top of this file is
+    # contents:read only) — cosign keyless signing needs the OIDC ID-token this
+    # grants (board #148).
+    permissions:
+      contents: read
+      id-token: write
     env:
       # Where the Harbor push cred lands inside the Kaniko step pod (Kaniko's default
       # DOCKER_CONFIG dir). The platform runner's container-hook injects secret
@@ -599,7 +643,7 @@ jobs:
                     --verbosity=info";
             if [ "${PUSH}" = "true" ]; then
               echo "==> building + pushing ${IMAGE}";
-              /kaniko/executor $COMMON;
+              /kaniko/executor $COMMON --image-name-with-digest-file=${GITHUB_WORKSPACE}/.image-digest;
             else
               echo "==> PR build-only validation for ${IMAGE} (no push)";
               /kaniko/executor $COMMON --no-push --tar-path=/tmp/image.tar;
@@ -614,6 +658,51 @@ jobs:
           DOCKERFILE: ${{ matrix.dockerfile }}
           PUSH: ${{ needs.resolve.outputs.PUSH }}
           DOCKER_CONFIG_DIR: ${{ env.DOCKER_CONFIG_DIR }}
+
+      # --- post-push supply chain: Trivy gate + cosign sign + syft SBOM (board #148) ---
+      # PUSH-only (nothing to verify for a --no-push PR validation build — no image
+      # landed in the registry). `--image-name-with-digest-file` above writes
+      # `<destination>@sha256:<digest>`; read it back with a real shell in THIS job's
+      # own pod (not the separate `docker://` Kaniko step pod).
+      - name: Capture built image digest + derive the Harbor project
+        if: ${{ needs.resolve.outputs.PUSH == 'true' }}
+        id: digest
+        env:
+          REGISTRY: ${{ needs.resolve.outputs.REGISTRY }}
+        run: |
+          set -eu
+          DIGEST_FILE="${GITHUB_WORKSPACE}/.image-digest"
+          [ -s "${DIGEST_FILE}" ] || {
+            echo "ERROR: kaniko did not write a digest file at ${DIGEST_FILE} (expected" \
+                 "--image-name-with-digest-file to run on the push path)." >&2
+            exit 1
+          }
+          IMAGE_REF="$(cat "${DIGEST_FILE}")"
+          echo "built image ref: ${IMAGE_REF}"
+          {
+            echo "IMAGE_REF=${IMAGE_REF}"
+            # REGISTRY is always <harbor-host>/<team-project> (one path segment) — strip
+            # the host to get the Harbor project.
+            echo "HARBOR_PROJECT=${REGISTRY#*/}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Supply-chain verify (Harbor Trivy gate + cosign sign + syft SBOM)
+        if: ${{ needs.resolve.outputs.PUSH == 'true' }}
+        # Pinned to a commit SHA, NOT @v1: verified 2026-09-21 that @v1 (tag cut
+        # 2026-07-13) is two commits behind main on THIS action's own accepted-cves.txt
+        # (#471/#473, perl-base + npm-vendored-tar allowlist entries). Pointing this
+        # fragment at @v1 would re-fail those already-triaged CRITICALs as blocking on
+        # every future scaffold — exactly the "stale allowlist -> every build fails at
+        # once" trap this action's own header warns about. action.yml's LOGIC is
+        # unchanged since v1 (verified: `git diff v1..HEAD -- action.yml` is empty);
+        # only the allowlist drifted. Re-pin forward when accepted-cves.txt next moves.
+        uses: UA-MIS/platform-infra/.github/actions/supply-chain-verify@50eeb90f2863eb8c75e7b76a191011e62901bee5
+        with:
+          image-ref: ${{ steps.digest.outputs.IMAGE_REF }}
+          harbor-project: ${{ steps.digest.outputs.HARBOR_PROJECT }}
+          harbor-repo: ${{ matrix.image }}
+          docker-config-dir: ${{ env.DOCKER_CONFIG_DIR }}
+          sbom-artifact-name: sbom-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
 
   # ---- 4) bump-dev: bump dev every push + FIRST-DEPLOY seed staging/prod -------
   # GitOps image-bump (D-030): after all component images are pushed, rewrite the dev
