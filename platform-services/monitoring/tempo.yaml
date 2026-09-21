@@ -148,6 +148,20 @@ spec:
         runAsUser: 10001
         runAsGroup: 10001
         fsGroup: 10001
+        # Added 2026-09-21, same incident as the startupProbe above: with no
+        # fsGroupChangePolicy set, kubelet defaults to "Always" -- a full
+        # recursive chown of every file under /var/tempo on EVERY pod
+        # (re)schedule, unconditionally, even when the volume's ownership is
+        # already correct. With ~69k block directories (4 files each) under
+        # /var/tempo/traces, this made ContainerCreating take 10+ minutes on a
+        # fresh mount (block-level mount confirmed fast via `mount` on the
+        # node; verified live -- root of the volume already showed group
+        # 10001 while the pod was still stuck in ContainerCreating, meaning
+        # the walk was recursing into `traces` long after the root matched).
+        # OnRootMismatch skips the recursive walk entirely once the volume's
+        # root already carries the right group -- a one-time cost instead of
+        # paid on every reschedule.
+        fsGroupChangePolicy: "OnRootMismatch"
         seccompProfile:
           type: RuntimeDefault
       containers:
