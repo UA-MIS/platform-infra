@@ -1,0 +1,47 @@
+# ClusterRoleBinding — the cluster-side half of identity-based access. The
+# tailnet ACL grant (pasted by hand into the tailnet policy file — see
+# docs/operator/tailscale-operator-access.md; ACL edits are NOT GitOps-managed
+# from this repo) maps tailnet `group:labmx` to the Kubernetes RBAC group name
+# `labmx-cluster-admins` via the operator's impersonation headers. This object is
+# what gives that GROUP NAME any actual permission.
+#
+# ── WHY A NAMED GROUP BOUND TO `cluster-admin`, AND NOT LITERALLY `system:masters`
+# Tailscale's own docs example impersonates straight into the literal
+# `system:masters` group name. That works (the API server's built-in
+# authorizer special-cases `system:masters` as an always-allow bypass, and
+# Impersonate-Group honors it same as a real member), but it means the
+# authorization boundary is an invisible string match against a magic
+# API-server constant with NO object in this repo to point at, review, or grep
+# for — anyone re-deriving "who is cluster-admin here" from git has nothing to
+# find. Binding an ordinary, distinctly-named group to the ordinary built-in
+# `cluster-admin` ClusterRole is functionally equivalent (full cluster-admin
+# permissions) but is a normal, auditable, git-diffable RBAC object like every
+# other ClusterRoleBinding in this repo (platform-services/dex/rbac.yaml,
+# platform-services/local-path-provisioner/rbac.yaml, ...) — revoking access is
+# `git rm`-shaped just like everything else here, not "remember a magic string
+# lives in the Tailscale admin console AND matches an API-server built-in."
+#
+# Revocation is two independent switches, either one closes the door:
+#   1. Remove the person from the `labmx` GitHub team (removes tailnet
+#      `group:labmx` membership, if the tailnet's group source is GitHub-synced)
+#      or from the tailnet ACL group directly.
+#   2. Delete/edit this ClusterRoleBinding (removes what the group can DO, even
+#      if group membership is somehow stale).
+# Client certs cannot be revoked this way (no CRL) — that gap is exactly why
+# this object exists. See docs/operator/tailscale-operator-access.md.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: labmx-cluster-admins
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    platform.capstone/component: platform
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: Group
+    name: labmx-cluster-admins

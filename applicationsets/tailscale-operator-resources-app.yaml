@@ -1,0 +1,50 @@
+# Tailscale operator cluster-side wiring — the OAuth ExternalSecret, the
+# ProxyGroup CR, and the labmx-cluster-admins ClusterRoleBinding (see
+# platform-services/tailscale-operator/ and
+# docs/operator/tailscale-operator-access.md). Git-source Application, sync-wave
+# 1 -> lands AFTER platform-tailscale-operator (wave 0, the Helm operator
+# install) creates the `tailscale` namespace AND the tailscale.com/v1alpha1
+# CRDs the ProxyGroup CR below needs, mirroring the established operator/
+# resources split in this repo (rook-ceph operator/cluster, cnpg operator/
+# cluster, kubevirt operator/cr).
+#
+# The tailscale-operator directory is EXCLUDED from the generic
+# platform-services-appset glob (applicationsets/platform-services-appset.yaml)
+# specifically so this Application — and its wave annotation — is the one and
+# only owner of that directory.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-tailscale-operator-resources
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"   # after platform-tailscale-operator (wave 0)
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/UA-MIS/platform-infra
+    targetRevision: HEAD
+    path: platform-services/tailscale-operator
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: tailscale   # ExternalSecret is namespaced; CRDs/ClusterRoleBinding are cluster-scoped (fallback only)
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false   # `tailscale` ns ships via the wave-0 operator app
+      - ServerSideApply=true    # CRDs are large — SSA avoids the 256KB last-applied-config limit
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }
+  # No ignoreDifferences needed: unlike the enumerated-`data:` ExternalSecrets
+  # elsewhere in this repo, externalsecret-oauth.yaml uses `dataFrom.extract`
+  # only, which is not subject to the `spec.data[].remoteRef` webhook-default
+  # drift that platform-services-appset.yaml works around (slidedeck/labmx, the
+  # other dataFrom.extract-only ExternalSecrets in this repo, don't need it
+  # either).
