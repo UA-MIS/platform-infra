@@ -65,6 +65,10 @@ metadata:
     # --- platform conventions (agile/ precedent) ---
     platform.capstone/component: platform
     goldilocks.fairwinds.com/enabled: "true"
+    # Resource-governance task (2026-09-21): LabMx is a production site but not a
+    # LIVE in-session class demo -> Initial (requests applied at next natural
+    # restart only, never an eviction — no risk to the site staying up).
+    goldilocks.fairwinds.com/vpa-update-mode: "Initial"
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/enforce-version: v1.31
     pod-security.kubernetes.io/warn: restricted

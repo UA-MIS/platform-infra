@@ -18,6 +18,10 @@ metadata:
   labels:
     platform.capstone/component: platform
     goldilocks.fairwinds.com/enabled: "true"
+    # Resource-governance task (2026-09-21): a static nginx landing page, not a
+    # student demo dependency -> Initial (requests applied at next natural restart
+    # only, never an eviction).
+    goldilocks.fairwinds.com/vpa-update-mode: "Initial"
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/warn: restricted
     pod-security.kubernetes.io/audit: restricted

@@ -17,3 +17,8 @@ metadata:
   labels:
     platform.capstone/component: platform
     goldilocks.fairwinds.com/enabled: "true"
+    # Resource-governance task (2026-09-21): build-cache singleton, not demo-facing
+    # -> Initial (requests applied at next natural restart only, never an eviction —
+    # unlike Auto, which would risk an eviction mid-build exactly like the header
+    # comment above warns against).
+    goldilocks.fairwinds.com/vpa-update-mode: "Initial"

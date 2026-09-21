@@ -657,9 +657,23 @@ spec:
                       platform.capstone/env: {{ $e.name | quote }}
                       pod-security.kubernetes.io/enforce: restricted
                       pod-security.kubernetes.io/enforce-version: v1.31
-                      # Goldilocks recommend-only (Off mode): tenant workloads get sizing
-                      # suggestions in the dashboard, never an eviction (mirrors _template).
+                      # Goldilocks recommend-only: tenant workloads get sizing suggestions,
+                      # never a live eviction (that's what `enabled` alone buys — mirrors
+                      # _template). Resource-governance task (2026-09-21): cluster was
+                      # requesting 39.1 cores / 84.3 GiB against VPA targets of 13.7 cores /
+                      # 72.7 GiB (~2.8x CPU over-request), owner decision was to apply
+                      # sizing to most non-essential workloads via `Initial` (sets requests
+                      # at pod start only — NEVER evicts a running pod, unlike `Auto`, which
+                      # stays platform-services/vpa-policies-only per that dir's README).
+                      # All 6 live CapstoneTenant teams (curb/ida-llm/motion/mychef/nextup/
+                      # springais) are equivalent generic student capstone projects with no
+                      # demo/production stakes callout, so this flips ALL their dev/staging/
+                      # prod namespaces uniformly — unlike the labs-hosting chart (live
+                      # Fall-2026 class exercises, deliberately left at the Off default) and
+                      # the out-of-repo mis321-demo tenant (the in-class "Tap War" live-demo
+                      # game — not a claim in this repo at all, so out of scope here anyway).
                       goldilocks.fairwinds.com/enabled: "true"
+                      goldilocks.fairwinds.com/vpa-update-mode: "Initial"
             ---
             apiVersion: kubernetes.crossplane.io/v1alpha1
             kind: Object

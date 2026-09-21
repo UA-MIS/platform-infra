@@ -16,7 +16,12 @@ metadata:
     # arc-system runs the ARC controller (stable Deployment) — recommend-only VPAs.
     # NOTE: arc-runners is intentionally NOT labelled — its runner pods are ephemeral
     # per-job (no stable workload for VPA to recommend against).
-    goldilocks.fairwinds.com/enabled: "true"   # Goldilocks recommend-only VPAs (Off mode; no eviction)
+    goldilocks.fairwinds.com/enabled: "true"   # Goldilocks recommend-only VPAs
+    # Resource-governance task (2026-09-21): the ARC controller Deployment is a
+    # stable, self-healing, non-demo-facing controller -> Initial (requests applied
+    # at next natural restart only, never an eviction). arc-runners is untouched
+    # (no goldilocks label there at all — ephemeral per-job pods, nothing to size).
+    goldilocks.fairwinds.com/vpa-update-mode: "Initial"
 ---
 apiVersion: v1
 kind: Namespace
