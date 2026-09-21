@@ -6,3 +6,4 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - namespace.yaml
+  - externalsecret-harbor-verify.yaml   # SEC-043: Harbor pull cred for verify-image-signature
