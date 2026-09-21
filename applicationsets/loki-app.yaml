@@ -70,14 +70,50 @@ spec:
             enabled: true
             storageClass: ceph-block        # replica-3 Ceph RBD (survives node loss)
             accessModes: ["ReadWriteOnce"]
-            size: 10Gi
+            # OUTAGE 2026-09-21: storage-loki-0 filled at 10Gi and stayed full for
+            # ~51 days (1300+ restarts, CrashLoopBackOff on
+            # `mkdir /var/loki/tsdb-shipper-active/scratch: no space left on device`).
+            # retention_period/compactor above were ALREADY correct (set 2026-07-07)
+            # but never had a chance to run: Loki crashes on the disk-full mkdir
+            # before the compactor module starts, so retention enforcement never
+            # fired — a chicken-and-egg an unlimited retention_period would NOT have
+            # fixed. Bumped 10Gi -> 30Gi (3x) for real headroom: the old size held
+            # an unknown but clearly >7d backlog (retention never got to trim it),
+            # plus the compactor needs scratch space of its own to catch up. Applied
+            # live first (`kubectl patch pvc storage-loki-0 ... 30Gi`, ceph-block
+            # allowVolumeExpansion:true, confirmed before patching; online expansion,
+            # no pod disruption needed beyond the crash-loop's own restarts), THEN
+            # this value bumped to match — unlike tempo.yaml's PVC (a raw
+            # StatefulSet, where volumeClaimTemplates is immutable post-creation so
+            # the git value deliberately stays stale), this is a Helm-chart-rendered
+            # StatefulSet: the old `loki` StatefulSet object was deleted with
+            # `--cascade=orphan` (keeps the pod/PVC, drops only the controller
+            # object) so ArgoCD's next sync recreates it fresh from this 30Gi value
+            # with NO immutable-field conflict against the live (already-resized)
+            # PVC. A future full-teardown rebuild now reproduces the right size
+            # directly. Follow-up: the existing KubePersistentVolumeFillingUp alert
+            # (kube-prometheus-stack default) covers this PVC going forward — it is
+            # what caught tempo's fill in August — now that Loki's own
+            # ServiceMonitor can actually scrape a running pod.
+            size: 30Gi
           # Resource-reclaim (VPA-driven, task follow-up): live VPA target for the
           # `loki` container is cpu 63m / mem ~309Mi (+15% headroom below). Memory
           # was UNDER-provisioned (actual usage already at the old 256Mi request);
           # cpu comes down (real, non-floor signal).
+          #
+          # OUTAGE 2026-09-21 follow-up: raising the PVC unblocked startup, but the
+          # first restart after 51 days down OOMKilled (exitCode 137) at the old
+          # 576Mi limit — every Alloy agent cluster-wide replayed its buffered
+          # backlog into Loki simultaneously, on top of the TSDB index catch-up
+          # across ~51 days of uncompacted daily tables. Limit raised 576Mi ->
+          # 1536Mi (request 368Mi -> 512Mi) to survive that one-time replay flood;
+          # nodes have ample headroom (all <75% mem at the time of this change).
+          # Once steady-state ingest resumes this is a candidate to right-size back
+          # down via the VPA target above — left at the incident-safe value here
+          # rather than re-tightened blind.
           resources:
-            requests: { cpu: 80m, memory: 368Mi }
-            limits: { memory: 576Mi }
+            requests: { cpu: 80m, memory: 512Mi }
+            limits: { memory: 1536Mi }
 
         # ── Zero out every distributed target + the optional sidecars/caches/store ──
         # so the chart renders ONLY the single-binary StatefulSet (no surprise pods).
