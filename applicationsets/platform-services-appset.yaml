@@ -86,6 +86,19 @@ spec:
           # picked up by this glob, ns + secrets only, same split as harbor/vault/eso).
           - path: platform-services/cnpg
             exclude: true
+          # EXCLUDE tailscale-operator/ (Tailscale K8s operator API-server-proxy,
+          # auth mode): this dir needs an EXPLICIT cross-Application sync-wave
+          # ("1" — after the Helm operator app's implicit wave 0 creates the
+          # `tailscale` namespace + CRDs, applicationsets/tailscale-operator-app.yaml)
+          # that the generic glob template cannot express (it sets no wave
+          # annotation on any generated Application). It is owned instead by the
+          # dedicated applicationsets/tailscale-operator-resources-app.yaml.
+          # Without this exclude the glob would ALSO generate
+          # `platform-svc-tailscale-operator` pointing at the same directory — the
+          # exact double-management failure (two Applications racing to own one
+          # set of live objects) every other exclude here documents.
+          - path: platform-services/tailscale-operator
+            exclude: true
           # EXCLUDE vpa-policies/ + crossplane-mr-prune/ (ArgoCD drift cleanup):
           # both dirs already have DEDICATED Applications
           # (applicationsets/vpa-platform-policies-app.yaml — sync-wave 1 after
