@@ -1,0 +1,65 @@
+# MinIO metrics scrape (2026-09-21 kopia-maintenance-deadlock incident,
+# companion to scrape-velero.yaml). Closes the gap that made "bucket quota
+# exhausted" invisible until Kopia maintenance started logging Errors: before
+# this file, MinIO published zero series to Prometheus (no ServiceMonitor
+# existed for it at all, verified live — `minio` matched nothing in
+# Prometheus's __name__ label values).
+#
+# ── WHICH METRICS PATH, AND WHY BEARER AUTH ───────────────────────────────────
+# MinIO exposes several Prometheus paths on its API port (9000); this scrapes
+# `/minio/v2/metrics/bucket` specifically because that is the one that carries
+# the per-bucket gauges the new alert rule needs:
+#   minio_bucket_usage_total_bytes{bucket="velero"}
+#   minio_bucket_quota_total_bytes{bucket="velero"}
+# (`/minio/v2/metrics/cluster` does NOT carry these — verified live by curling
+# both paths with the same token; cluster-level metrics cover node/drive
+# health, not per-bucket quota.)
+#
+# These endpoints require a signed bearer token by default
+# (`MINIO_PROMETHEUS_AUTH_TYPE=jwt`, the server's default — not overridden).
+# sealedsecret-minio-prometheus-token.yaml ships the token (generated via
+# `mc admin prometheus generate`, scoped to metrics reads only, does not expose
+# or rotate the root credential) — see that file's header for the full
+# rationale on why this is preferred over flipping the server to public/
+# unauthenticated metrics.
+#
+# ── NETWORK PATH ALREADY OPEN ──────────────────────────────────────────────
+# No NetworkPolicy change needed: `hardening/netpol-controlplane/
+# minio-netpol.yaml` already allows the `monitoring` namespace to reach
+# `minio:9000` (it's how Thanos's objstore client already talks to the
+# `dr-backup` bucket) — verified live before adding this file rather than
+# assumed.
+#
+# ⚠ REGISTERED in kustomization.yaml IN THIS SAME COMMIT, alongside
+# sealedsecret-minio-prometheus-token.yaml and alerts-minio-backup-store.yaml —
+# that `resources:` list is explicit, not globbed (see this file's header
+# convention elsewhere in this directory).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: minio
+  namespace: monitoring
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    platform.capstone/component: platform
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames: ["minio"]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: minio
+  endpoints:
+    - port: api
+      path: /minio/v2/metrics/bucket
+      scheme: http
+      interval: 60s
+      # `authorization`, not the deprecated `bearerTokenSecret` field (same
+      # Secret either way) — kubectl explain on this cluster's installed CRD
+      # confirms `authorization` is the current, non-deprecated field.
+      authorization:
+        credentials:
+          name: minio-prometheus-token
+          key: token

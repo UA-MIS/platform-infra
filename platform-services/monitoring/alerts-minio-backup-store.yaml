@@ -1,0 +1,203 @@
+# MinIO backup-store alerting (2026-09-21 kopia-maintenance-deadlock incident).
+#
+# THE GAP THIS CLOSES. On 2026-09-21 the `velero` MinIO bucket had been sitting
+# at its 240GiB hard quota for weeks. Kopia maintenance — the hourly per-namespace
+# job that PRUNES expired backup snapshot data — needs to write a small
+# `kopia.maintenance` metadata blob to complete a prune cycle; once the bucket
+# was AT quota, that write itself started failing
+# (`unable to complete PutBlob(kopia.maintenance) ... Bucket quota exceeded`),
+# so maintenance could never finish, so nothing was ever pruned, so usage never
+# dropped — a self-locking deadlock. Found live: 70 `*-kopia-maintain-job-*`
+# pods in `Error` across the `velero` namespace (one per repo), and 6 backups
+# stuck in phase `Deleting` for up to two weeks.
+#
+# Nothing paged on any of this. `alerts-velero.yaml` (board #158) covers
+# whether Velero's own BACKUP schedule is producing successes — it has no
+# visibility into whether the storage underneath it can still be written to,
+# or into Kopia maintenance at all. This file is that missing layer, and
+# follows the SAME absent()-arm discipline the CNPG file
+# (alerts-cnpg-backups.yaml) documents: a metric reading 0 or simply not
+# existing must never be silently read as "healthy".
+#
+# ── METRICS VERIFIED LIVE, NOT ASSUMED (2026-09-21, immediately post-fix) ────
+# `velero_repo_maintenance_failure_total{repository_name="molly-demo-dev-default-kopia"}`
+#   => 421 (weeks of hourly failed attempts, one series per repo)
+# `velero_repo_maintenance_success_total{repository_name="kube-system-default-kopia"}`
+#   => began incrementing again the moment the quota bump merged
+# `minio_bucket_usage_total_bytes{bucket="velero"}`   => 257924866978 (~240.2GiB)
+# `minio_bucket_quota_total_bytes{bucket="velero"}`   => 279172874240 (260GiB,
+#   the just-applied quota) — usage/quota == ~0.924, i.e. this cluster would
+#   ALREADY be inside the warning band below if these rules had existed before
+#   the incident. That is the point of the alert, not a flaw in its threshold.
+#
+# `minio_bucket_usage_total_bytes` / `minio_bucket_quota_total_bytes` come from
+# scrape-minio.yaml's ServiceMonitor (`/minio/v2/metrics/bucket`, bearer-token
+# authenticated) — see that file's header for why that path and not
+# `/minio/v2/metrics/cluster` (which does not carry per-bucket quota at all).
+#
+# ── WHY increase(), NOT A BARE last-failure EXISTENCE CHECK ──────────────────
+# `velero_repo_maintenance_failure_total` is a monotonic counter that never
+# resets on its own — a bare `> 0` would pin KopiaMaintenanceFailing permanently
+# firing on every repo that has EVER failed once, including the day this ships
+# (all 70 repos already carry nonzero counts from the incident itself). Exactly
+# the standing-false-critical shape the VaultRaftSnapshotFailing comment in
+# alerts.yaml (~line 109) and alerts-cnpg-backups.yaml both warn about.
+# `increase(...[3h])` only counts failures that happened recently: it reads 0
+# once 3h has passed with no new failure, which self-clears the moment
+# maintenance starts succeeding again (as it now is, post-fix) without anyone
+# editing this file.
+#
+# ⚠ REGISTERED in kustomization.yaml IN THIS SAME COMMIT, alongside
+# scrape-minio.yaml and sealedsecret-minio-prometheus-token.yaml — this app's
+# `resources:` list is explicit, not globbed; see the alerts-crossplane-
+# robot-race.yaml note elsewhere in this directory for the incident where a
+# file shipped but was never registered, and rendered nothing while the PR
+# merged clean.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: platform-minio-backup-store
+  namespace: monitoring
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    platform.capstone/component: platform
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: minio-backup-store
+      rules:
+        # ── (a) Kopia maintenance is failing to prune ─────────────────────────
+        # 3h window: `maintenanceFrequency` on every BackupRepository is 1h, so
+        # a healthy repo has zero failures over any 3h stretch; a genuinely
+        # deadlocked one (as all 70 were) fails on every attempt and stays
+        # comfortably inside this window. `for: 1h` debounces a single isolated
+        # blip (a transient S3 hiccup) from paging on its own — it must still be
+        # accumulating failures an hour after the rule first evaluates true.
+        - alert: KopiaMaintenanceFailing
+          expr: >-
+            increase(velero_repo_maintenance_failure_total[3h]) > 0
+          for: 1h
+          labels:
+            severity: critical
+          annotations:
+            summary: "Kopia repo maintenance failing for {{ $labels.repository_name }}"
+            description: >-
+              Repo maintenance (the hourly job that PRUNES expired backup
+              snapshot data) has failed at least once in the last 3h for
+              {{ $labels.repository_name }} and is still accumulating failures
+              an hour later. This is the exact precondition of the 2026-09-21
+              incident: maintenance can't complete -> nothing gets pruned ->
+              the bucket never shrinks -> eventually every write fails. Check
+              `kubectl get backuprepositories.velero.io -n velero
+              {{ $labels.repository_name }} -o jsonpath='{.status.recentMaintenance}'`
+              for the actual error, and `mc quota info local/velero` /
+              MinioBucketQuotaApproaching below for whether this is quota
+              exhaustion again versus a different storage-layer problem.
+
+        # ── (b) A full Velero backup failed (distinct from PartiallyFailed) ───
+        # alerts-velero.yaml's VeleroBackupStale already catches this within
+        # 36h (a Failed backup never advances last_successful_timestamp), but
+        # that is a staleness signal, not a failure signal — it says nothing
+        # for up to 36h. This fires within roughly an hour of the actual
+        # failed run, same recency-window shape as
+        # PostgresBackupFailed(alerts-cnpg-backups.yaml). 26h window (one
+        # nightly run + grace) so a single bad night self-clears the next day
+        # rather than pinning forever, matching VeleroBackupPartiallyFailing in
+        # alerts-velero.yaml.
+        - alert: VeleroBackupFailed
+          expr: >-
+            increase(velero_backup_failure_total{schedule!=""}[26h]) > 0
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "A Velero backup run of {{ $labels.schedule }} FAILED outright"
+            description: >-
+              A scheduled Velero backup of {{ $labels.schedule }} reported hard
+              phase Failed (not PartiallyFailed) within the last 26h — the run
+              produced no usable backup at all. Inspect with
+              `kubectl get backups.velero.io -n velero` (ALWAYS fully
+              qualified — board #30, three CRDs on this cluster share the
+              plural `backups`) then `velero backup logs <name>`. Common cause
+              on this cluster: the MinIO bucket quota (`minio_bucket_quota_
+              total_bytes`) — check MinioBucketQuotaApproaching /
+              MinioBucketQuotaCritical below before assuming a Velero-side bug.
+
+        # ── (c) The bucket is approaching its quota ───────────────────────────
+        # Two severities, same shape as BuildPoolDiskFilling/
+        # NodeRootFilesystemNearEviction (alerts.yaml) and this repo's general
+        # convention of a warning band with real runway before the critical
+        # band. 85%/95% chosen against the ~20GiB emergency-margin bump this
+        # same incident applied (see minio-provision-job.yaml, 260GiB) — at
+        # 95% of 260GiB there is still ~13GiB of headroom before the exact
+        # deadlock this file exists to prevent recurs.
+        #
+        # By bucket name, not a blanket rule: `dr-backup` (Thanos) and `velero`
+        # have independent quotas and independent consumers — collapsing them
+        # into one alert would hide which one is actually filling.
+        - alert: MinioBucketQuotaApproaching
+          expr: >-
+            minio_bucket_usage_total_bytes / minio_bucket_quota_total_bytes > 0.85
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "MinIO bucket {{ $labels.bucket }} is over 85% of its quota"
+            description: >-
+              {{ $labels.bucket }} is at {{ $value | humanizePercentage }} of its
+              hard quota (`minio_bucket_quota_total_bytes`). At 100% every write
+              to this bucket starts failing — for `velero`, that means every
+              backup AND every Kopia maintenance prune (the write that prune
+              itself needs can be blocked by the same quota it's trying to make
+              room under — see KopiaMaintenanceFailing above; this is exactly
+              how the 2026-09-21 incident happened). Check
+              `mc quota info local/{{ $labels.bucket }}` and
+              `mc du local/{{ $labels.bucket }}` for the live numbers, and
+              confirm Kopia maintenance is actually completing
+              (KopiaMaintenanceFailing) before assuming more retention cuts are
+              the fix — a stalled prune looks identical to genuine growth.
+
+        - alert: MinioBucketQuotaCritical
+          expr: >-
+            minio_bucket_usage_total_bytes / minio_bucket_quota_total_bytes > 0.95
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: "MinIO bucket {{ $labels.bucket }} is about to hit its quota"
+            description: >-
+              {{ $labels.bucket }} is at {{ $value | humanizePercentage }} of its
+              hard quota — writes are about to start failing loudly (`Bucket
+              quota exceeded`), including Kopia maintenance's own prune writes,
+              which is how this bucket gets stuck rather than self-recovering.
+              Act now: confirm maintenance is completing
+              (KopiaMaintenanceFailing), and if usage is genuinely new data
+              rather than a stalled prune, raise the quota
+              (platform-services/minio/minio-provision-job.yaml) by the
+              smallest amount that restores headroom — do not wait for this to
+              become the 2026-09-21 incident again.
+
+        # ── (d) We have gone blind to all of the above ────────────────────────
+        # Same "we have gone blind" shape as VeleroMetricsScrapeDown
+        # (alerts-velero.yaml): a ServiceMonitor selecting nothing produces no
+        # target, no error, and a clean-looking apply. While this fires, (c)
+        # above CANNOT fire — its series do not exist — so quota exhaustion is
+        # unmonitored regardless of whether it is happening.
+        - alert: MinioMetricsScrapeDown
+          expr: >-
+            up{job="minio", namespace="minio"} == 0
+            or absent(up{job="minio", namespace="minio"})
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Prometheus cannot scrape MinIO — bucket-quota alerting is blind"
+            description: >-
+              Either the minio target is failing (target present, up==0) or no
+              minio target is configured at all (absent — check
+              `kubectl get servicemonitor -n monitoring minio` and
+              `kubectl get endpoints -n minio minio`). A 403 here usually means
+              sealedsecret-minio-prometheus-token.yaml is stale against a
+              rotated MinIO root credential — see that file's header.
