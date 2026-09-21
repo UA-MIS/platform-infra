@@ -62,6 +62,19 @@ data:
     # 2026-09-14/15/16 the run was SIGKILLed at exactly 3600s having reached roughly
     # entry 23, three nights running, and the tail never executed at all.
     #
+    # ROOT CAUSE FIXED FOR TAG ENTRIES (2026-09-21) — this was the multi-arch tax,
+    # not a capacity problem to route around by reordering: a plain `crane copy` of
+    # a floating tag pulls EVERY platform upstream ships even though every node here
+    # is amd64. `library/rust:1-slim` with `--platform linux/amd64` (now applied to
+    # every tag entry below, see dockerhub-mirror-cronjob.yaml's copy_with_retry)
+    # measured 7.3s versus the 15m27s above — ~127x less data for the same result.
+    # Ordering still matters (a killed run should still reach the small/critical
+    # entries first) but the job should no longer need the whole 3600s just to get
+    # through the list once. Digest-pinned entries below are UNCHANGED and still
+    # exposed to this tax (verified 2026-09-21: all 3 pin an index digest, not a
+    # single-platform one) — narrowing them needs a separate consumer-pin inventory
+    # first (see copy_with_retry's header comment for why), not attempted here.
+    #
     # That is why the DIGEST-PINNED entries are first. They were last (28-30), sitting
     # directly behind a block of four entries that were themselves broken, so they
     # were never reached — and they are the entries whose consumers pin by digest and

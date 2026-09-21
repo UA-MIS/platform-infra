@@ -236,14 +236,55 @@ spec:
                   # Up to 3 attempts per image with a short backoff — a flaky
                   # upstream CDN (verified: Microsoft's, on the ~800MB
                   # dotnet/sdk image) must not fail the whole nightly run.
+                  #
+                  # $3 (optional) = a `crane copy --platform` value, e.g. "linux/amd64".
+                  # THE MULTI-ARCH TAX (2026-09-21, verified by execution): a plain
+                  # `crane copy` of a floating TAG copies the ENTIRE manifest list —
+                  # every platform upstream ships (5 for the distroless images below,
+                  # 10-16 for a typical Docker Hub official image) — even though every
+                  # node in this cluster is amd64 (`kubectl get nodes -o wide`,
+                  # confirmed). Measured: `library/rust:1-slim` unfiltered took 15m27s
+                  # (the figure already on record below); the SAME copy with
+                  # `--platform linux/amd64` took 7.3s, a ~127x reduction, because
+                  # 90-94% of the bytes a full copy transfers are for architectures
+                  # nothing here can ever run. That tax, repeated across a ~30+ entry
+                  # list inside one activeDeadlineSeconds: 3600 budget, is why this job
+                  # has been SIGKILLed mid-run three nights running (see the note below)
+                  # with the tail of the list never reached at all — not a fluke, a
+                  # structural consequence of paying the multi-arch tax on every tag
+                  # entry.
+                  #
+                  # SCOPED TO TAG ENTRIES ONLY — digest-pinned entries are NOT touched
+                  # here. A `@sha256:...`-pinned entry is called with NO platform arg
+                  # (see the call site below) and this function leaves it as a plain
+                  # `crane copy`, even though checking (2026-09-21, `crane manifest`)
+                  # shows all 3 current digest-pinned entries ALSO pin an
+                  # index/manifest-list digest, not a single-platform one, so they pay
+                  # this same tax today. They are deliberately left alone: the pin is
+                  # to the INDEX's own digest, and `crane copy --platform ...` would
+                  # push a single-platform manifest under a DIFFERENT digest at the
+                  # destination — breaking both this script's own pin-check below
+                  # (which asserts the ORIGINAL index digest still resolves post-copy)
+                  # and any consumer's `FROM ...@sha256:<index-digest>`. Narrowing these
+                  # safely needs a real inventory first (which consumers pin the index
+                  # vs. an already-platform-specific digest, and updating each pin to
+                  # match) — out of scope for this change, flagged here so it doesn't
+                  # read as solved.
                   copy_with_retry() {
                     src_ref="$1"
                     dst_ref="$2"
+                    platform_arg="${3:-}"
                     attempt=1
                     max_attempts=3
                     while [ "$attempt" -le "$max_attempts" ]; do
-                      if crane copy "$src_ref" "$dst_ref"; then
-                        return 0
+                      if [ -n "$platform_arg" ]; then
+                        if crane copy --platform "$platform_arg" "$src_ref" "$dst_ref"; then
+                          return 0
+                        fi
+                      else
+                        if crane copy "$src_ref" "$dst_ref"; then
+                          return 0
+                        fi
                       fi
                       echo "=== attempt $attempt/$max_attempts failed for $dst_ref ==="
                       attempt=$((attempt + 1))
@@ -293,6 +334,11 @@ spec:
                     # existing `FROM ...@sha256:...` pin keeps resolving with no change
                     # on the consumer side. The tag exists purely to keep the manifest
                     # reachable, which is what stops GC reclaiming it.
+                    # `plat`: the multi-arch-tax fix (see copy_with_retry's header
+                    # comment) applies ONLY to tag entries. A digest-pinned entry keeps
+                    # `plat=""` (plain, unfiltered `crane copy`) — deliberately, not an
+                    # oversight; see that same comment for why.
+                    plat=""
                     case "$img" in
                       *@sha256:*)
                         _repo="${img%@*}"
@@ -310,11 +356,12 @@ spec:
                         ;;
                       *)
                         dst="harbor.capstone.uamishub.com/base-images/${img}"
+                        plat="linux/amd64"
                         ;;
                     esac
 
-                    echo "=== COPYING ${src}/${img} -> ${dst} ==="
-                    if copy_with_retry "${src}/${img}" "$dst"; then
+                    echo "=== COPYING ${src}/${img} -> ${dst} ${plat:+(platform=$plat)} ==="
+                    if copy_with_retry "${src}/${img}" "$dst" "$plat"; then
                       # For a digest entry, prove the pin still resolves. A copy that
                       # "succeeded" but changed the digest would silently leave every
                       # consumer broken, which is the failure being fixed.
