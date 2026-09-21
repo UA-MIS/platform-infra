@@ -179,6 +179,30 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+          # startupProbe (added 2026-09-21, corrupt-block incident follow-up): the
+          # trace store had accumulated ~69k block directories under
+          # /var/tempo/traces/single-tenant (block_retention: 24h above should keep
+          # this far lower -- the crash-loop caused by the corrupt block, below,
+          # never let a compaction/retention cycle finish, so blocks piled up
+          # instead of expiring). Tempo's own tenant-block poller has to read every
+          # one of those on cold start, which took >80s in the recovery window here
+          # -- long enough that the plain readiness/liveness probes below (whose
+          # initialDelaySeconds assume a near-empty store) killed the container via
+          # "failed liveness probe" before /ready ever returned 200, an
+          # OOM-shaped-but-not-OOM restart loop layered on top of the actual
+          # corruption bug. startupProbe defers liveness/readiness enforcement for
+          # up to 5 minutes (30 x 10s) so one slow cold start doesn't get killed
+          # mid-poll; once it succeeds once, the tighter probes below resume
+          # normal operation. FOLLOW-UP (not done here, scope of this incident was
+          # "one corrupt block, minimum deletion"): 69k blocks in a 24h-retention
+          # store means the compactor/retention path likely needs its own look --
+          # flagged, not fixed blind.
+          startupProbe:
+            httpGet:
+              path: /ready
+              port: 3200
+            failureThreshold: 30
+            periodSeconds: 10
           readinessProbe:
             httpGet:
               path: /ready
