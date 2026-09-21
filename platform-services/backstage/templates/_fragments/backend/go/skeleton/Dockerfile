@@ -21,7 +21,8 @@
 # limits across every team's CI, verified working end-to-end (cache-hit proof
 # in artifacts/implementation/b4-harbor-proxy-cache.evidence.yaml). Same image,
 # same tag, different registry host -- purely a pull-path change.
-FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/golang:1.23 AS build   # NOT YET in base-images (mirror population pending) -- kept on dockerhub-proxy
+# NOT YET in base-images (mirror population pending) -- kept on dockerhub-proxy
+FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/golang:1.23 AS build
 WORKDIR /src
 # Resolve modules first (cached when only source changes).
 COPY go.mod go.sum ./

@@ -22,7 +22,8 @@
 # limits across every team's CI, verified working end-to-end (cache-hit proof
 # in artifacts/implementation/b4-harbor-proxy-cache.evidence.yaml). Same image,
 # same tag, different registry host -- purely a pull-path change.
-FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/rust:1-slim AS build   # NOT YET in base-images (mirror population pending)
+# NOT YET in base-images (mirror population pending)
+FROM harbor.capstone.uamishub.com/dockerhub-proxy/library/rust:1-slim AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
