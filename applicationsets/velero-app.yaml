@@ -1,12 +1,17 @@
-# Velero Application (dr-backup) — scheduled backup of ALL namespaces' Kubernetes
-# objects + PV data, into the platform's own MinIO object store
-# (platform-services/minio, deliberately node-local/non-Ceph — see that
-# namespace's header for why). Deploy method A (D-022/D-028): pinned Helm chart +
-# the chart repo added to the `platform` AppProject sourceRepos allowlist
-# (bootstrap/platform-appproject.yaml in this PR). ⚠ INSTALL-OWNED like every
-# other Helm-source add — reaches the live `platform` AppProject only via `make
-# bootstrap`/`make bootstrap-reapply` + VERIFY, else this app InvalidSpecErrors
-# "repo not permitted".
+# Velero Application (dr-backup) — scheduled backup, into the platform's own
+# MinIO object store (platform-services/minio, deliberately node-local/non-Ceph
+# — see that namespace's header for why). Deploy method A (D-022/D-028): pinned
+# Helm chart + the chart repo added to the `platform` AppProject sourceRepos
+# allowlist (bootstrap/platform-appproject.yaml in this PR). ⚠ INSTALL-OWNED
+# like every other Helm-source add — reaches the live `platform` AppProject
+# only via `make bootstrap`/`make bootstrap-reapply` + VERIFY, else this app
+# InvalidSpecErrors "repo not permitted".
+#
+# ⚠ SCOPE NARROWED 2026-09-21 — this no longer backs up "all namespaces". See
+# the dated section below ("2026-09-21: narrowed to the 3 VM root disks only")
+# for what changed and why; the header comments above/below it that still say
+# "all namespaces + PVs" are HISTORY, kept for the incident record, not the
+# current behavior.
 #
 # ── why file-system backup, not CSI/cloud snapshots ───────────────────────────
 # `snapshotsEnabled: false` (no VolumeSnapshotLocation) — this cluster has no
@@ -252,35 +257,91 @@ spec:
         # (not just capped) — same shape as the existing `minio` carve-out
         # above, extended to a second namespace whose own contents are backups
         # (Thanos blocks) or code (dashboards) rather than primary state.
+        #
+        # ── 2026-09-21: SCOPE NARROWED — the two `["*"]` schedules above are  ──
+        # ── GONE. Velero now protects ONLY the 3 KubeVirt VM root disks.      ──
+        #
+        # TRIGGER: the same day, the `velero` MinIO bucket hit its 240GiB quota
+        # and deadlocked — Kopia maintenance (which PRUNES expired snapshots)
+        # needs to write a small metadata blob to complete a prune, that write
+        # was itself quota-blocked, so nothing could ever be pruned. 70
+        # `*-kopia-maintain-job-*` pods sat in `Error`, one per namespace, for
+        # as long as two weeks. Fixed as an emergency measure in
+        # `platform-services/minio/minio-provision-job.yaml` (quota 240->260GiB,
+        # same PR day) — but that only buys headroom. It does not address why a
+        # teaching cluster's backup store kept re-hitting its ceiling every few
+        # weeks despite two prior retention cuts (2026-09-03, 2026-09-13, both
+        # in the history above): this Application was backing up everything,
+        # and "everything" on a 40+ namespace cluster keeps growing.
+        #
+        # THE OWNER'S CALL (stated plainly, not inferred): backups of student
+        # projects are NOT mission-critical; keeping old data is not the need;
+        # CI/storage must never again be blocked by retention. The only data
+        # this Application protects that is genuinely irreplaceable is the 3
+        # KubeVirt VM tenants' root disks — there is no other copy of a live VM
+        # guest filesystem anywhere. Everything else this used to protect has a
+        # better answer that already exists and was VERIFIED LIVE 2026-09-21,
+        # not assumed:
+        #
+        #   - Postgres (`db-tier`, capstone-pg + capstone-tenant-pg): CNPG's
+        #     own barman-cloud-plugin PITR, which this Velero backup was never
+        #     even a good copy OF (Velero's fs-backup of a live Postgres data
+        #     dir is not crash-consistent — no CHECKPOINT / pg_backup_start
+        #     coordination). Confirmed via
+        #     `kubectl get objectstores.barmancloud.cnpg.io -n db-tier -o
+        #     jsonpath='{.items[*].status.serverRecoveryWindow}'`:
+        #       capstone-pg-backup-store:        lastSuccessfulBackupTime
+        #         2026-09-21T03:00:10Z, firstRecoverabilityPoint 2026-08-22
+        #       capstone-tenant-pg-backup-store:  lastSuccessfulBackupTime
+        #         2026-09-21T03:30:18Z, firstRecoverabilityPoint 2026-07-13
+        #     Both clusters `Cluster in healthy state`, 3/3 ready.
+        #   - MariaDB (`db-tier`, capstone-mariadb-mariadb-cluster, Galera):
+        #     the operator's own nightly PhysicalBackup CronJob, same
+        #     crash-consistency argument. Confirmed via
+        #     `kubectl get physicalbackups.k8s.mariadb.com -n db-tier`:
+        #     `COMPLETE=True STATUS=Success`, last scheduled 2026-09-21
+        #     02:00:00 (143m before this check), job log shows the backup
+        #     pushed to S3 storage and old-backup cleanup running normally.
+        #   - Everything else (Harbor, Vault, Crossplane, ArgoCD state, tenant
+        #     app namespaces, `agile`/board data, etc.): reconstructible from
+        #     this git repo plus each service's own persistence mechanism
+        #     (Harbor images re-pull/re-build, Vault has its own raft
+        #     snapshot, ArgoCD state is git, tenant apps redeploy from their
+        #     own repos). None of it was ever verified restorable FROM Velero
+        #     either (board #26: no restore has ever been performed) — so this
+        #     narrowing trades an unverified, repeatedly-deadlocking safety net
+        #     for two verified, independently-operating ones plus the thing
+        #     that actually only lives here.
+        #
+        # RETENTION: 3 days, deliberately short (the owner's instruction, not a
+        # default) — these are VM tenants that only need protecting against
+        # node loss or an accidental VM deletion, not fine-grained
+        # point-in-time recovery; a 3-day-old restore point is adequate for
+        # that and keeps this Application's footprint permanently small so it
+        # can never again be the thing that fills the bucket.
+        #
+        # WHAT HAPPENS TO THE OLD DATA: the two `["*"]` schedules are deleted
+        # here, but Velero Schedule objects only stamp Backup CRs at creation
+        # time — deleting the Schedule does not touch Backups it already
+        # created. Every pre-existing non-VM backup keeps the ttl it was given
+        # (7d for dailies, 30d for weeklies) and will expire and get pruned on
+        # its own now that Kopia maintenance actually works again. No backup
+        # was force-deleted by this change. `velero` bucket usage will keep
+        # dropping over the following ~30 days as the last weekly-full expires
+        # — see minio-provision-job.yaml for the plan to bring the quota down
+        # once that has happened (NOT done in this PR: dropping the quota
+        # before the old data ages out would fail today's backups outright).
         schedules:
-          # Mon-Sat. Sunday is deliberately left to the weekly schedule below so
-          # the two never both run at 04:00 and double the nightly I/O.
-          daily-full-backup:
+          vm-disks-daily-backup:
             disabled: false
-            schedule: "0 4 * * 1-6"
+            schedule: "0 4 * * *"
             useOwnerReferencesInBackup: false
             template:
-              ttl: "168h0m0s"     # 7 days
+              ttl: "72h0m0s"     # 3 days — short by design, see note above
               includedNamespaces:
-                - "*"
-              excludedNamespaces:
-                - minio
-                - monitoring
-              defaultVolumesToFsBackup: true
-
-          # Sunday full, kept 30 days — preserves the existing 30-day DEPTH,
-          # at weekly rather than daily granularity beyond the first week.
-          weekly-full-backup:
-            disabled: false
-            schedule: "0 4 * * 0"
-            useOwnerReferencesInBackup: false
-            template:
-              ttl: "720h0m0s"     # 30 days
-              includedNamespaces:
-                - "*"
-              excludedNamespaces:
-                - minio
-                - monitoring
+                - paper-papas-vm-prod
+                - ss-evan-and-emily-vm-prod
+                - team-404-vm-prod
               defaultVolumesToFsBackup: true
   destination:
     server: https://kubernetes.default.svc

@@ -58,6 +58,15 @@ resources:
   # alerts are inert without it, so the two MUST stay registered together.
   - scrape-velero.yaml
   - alerts-velero.yaml
+  # MinIO backup store (2026-09-21 kopia-maintenance-deadlock incident):
+  # bucket-quota + Kopia-maintenance alerting, plus the Velero hard-failure
+  # rule that alerts-velero.yaml's staleness-based rules catch too slowly.
+  # scrape-minio.yaml + its bearer-token SealedSecret are the ServiceMonitor
+  # half; alerts-minio-backup-store.yaml is inert without them, so all three
+  # MUST stay registered together, same coupling as scrape-velero.yaml above.
+  - scrape-minio.yaml
+  - sealedsecret-minio-prometheus-token.yaml
+  - alerts-minio-backup-store.yaml
   # CloudNativePG (#152): backup-failure + WAL-archiving alerting. Read that
   # file's header before touching it — the obvious metric
   # (cnpg_collector_last_available_backup_timestamp) reads 0 on all six PG pods
