@@ -85,6 +85,28 @@ data:
     dotnet/sdk@sha256:5ef85cc12cb25be6ec319a7392d1e9efd53c3bc8abb971c53d8058a473f09053 mcr.microsoft.com
     dotnet/aspnet@sha256:9a464e9a7e8c6144631020975f703c89034fe386417cb740620df69c2c6cfe24 mcr.microsoft.com
 
+    # --- GCR (explicit source; floating tag, NOT digest-pinned) ---
+    # backend/go and backend/rust-axum's scaffold Dockerfiles FROM these for the
+    # runtime stage. Deliberately NOT digest-pinned (owner directive, see
+    # replication-gcr-distroless-{static,cc}.yaml's header: distroless images are
+    # not semver-tagged per patch upstream, so a floating :nonroot tag is the
+    # correct convention here, matching the fragments' own FROM lines) -- so,
+    # unlike the digest-pinned block above, these need no synthetic pinned-<short>
+    # tag rewrite: `crane copy` lands them tagged `:nonroot` directly, which is
+    # already enough to keep nightly GC (delete_untagged:true) from reclaiming
+    # them. Small images, placed early (same reasoning as the digest-pinned
+    # block): every fragment's boot-and-probe CI check depends on these existing.
+    #
+    # Also covered by replication-gcr-distroless-{static,cc}.yaml (manual-
+    # trigger, policy_id 4/6); this entry is the automatic-recovery path -- see
+    # docs/operator/base-images.md's "How it gets (re)populated" for why both
+    # exist. Added after both were found missing (never re-triggered since the
+    # 2026-09-13 base-images incident) failing wizard-green-check's
+    # boot-and-probe job -- see that doc's Incident section for the full history
+    # and the platform-infra PR that added this entry for the restoration log.
+    distroless/static-debian12:nonroot gcr.io
+    distroless/cc-debian12:nonroot gcr.io
+
     # --- Docker Hub (source defaults to mirror.gcr.io) ---
     library/python:3.12-slim
     library/python:3.11-slim
@@ -113,6 +135,4 @@ data:
     library/eclipse-temurin:21-jre
     library/postgres:17-alpine
     library/python:3-slim
-
-    # --- GCR (explicit source; digest-pinned, D-030) ---
 

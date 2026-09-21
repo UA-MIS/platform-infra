@@ -43,11 +43,14 @@
 # mcr.microsoft.com. dockerhub-mirror-configmap.yaml's images.txt now carries
 # an optional second column naming the real source registry for non-Docker-Hub
 # entries (kaniko-project/executor from gcr.io; dotnet/sdk, dotnet/aspnet from
-# mcr.microsoft.com — digest-pinned, D-030), defaulting to `mirror.gcr.io` when
-# omitted so every pre-existing line is unchanged. See that ConfigMap's header
-# comment for the full format and why these 3 need to be here in addition to
-# their `schedule: manual` Replication MRs (replication-mcr-*.yaml,
-# replication-gcr-*.yaml, same dir): this job is the AUTOMATIC recovery path,
+# mcr.microsoft.com — digest-pinned, D-030; distroless/static-debian12,
+# distroless/cc-debian12 from gcr.io — floating :nonroot tag, added after both
+# were found missing since the 2026-09-13 incident, see below), defaulting to
+# `mirror.gcr.io` when omitted so every pre-existing line is unchanged. See
+# that ConfigMap's header comment for the full format and why these 5 need to
+# be here in addition to their `schedule: manual` Replication MRs
+# (replication-mcr-*.yaml, replication-gcr-*.yaml, same dir): this job is the
+# AUTOMATIC recovery path,
 # replication is the faster path for a deliberate version bump.
 #
 # WHY hostAliases + platform-ca (not the public hostname): confirmed by

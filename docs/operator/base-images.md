@@ -45,7 +45,7 @@ Trivy finding here is not actionable locally — it would need to flow upstream.
 | `kaniko-project/executor:v1.23.2-debug` (`@sha256:c3109d5926a997b100c4343944e06c6b30a6804b2f9abe0994d3de6ef92b028e`) | **gcr.io** | digest (SEC, D-030) — the Kaniko executor itself, needed by **every** build | `replication-gcr-kaniko-executor.yaml` (manual-trigger) **and** `dockerhub-mirror-populate` CronJob (automatic — see below) |
 | `dotnet/sdk` (`@sha256:5ef85cc12cb25be6ec319a7392d1e9efd53c3bc8abb971c53d8058a473f09053`) | **mcr.microsoft.com** | digest (SEC, D-030) | `replication-mcr-dotnet-sdk.yaml` (manual-trigger) **and** `dockerhub-mirror-populate` CronJob (automatic) |
 | `dotnet/aspnet` (`@sha256:9a464e9a7e8c6144631020975f703c89034fe386417cb740620df69c2c6cfe24`) | **mcr.microsoft.com** | digest (SEC, D-030) | `replication-mcr-dotnet-aspnet.yaml` (manual-trigger) **and** `dockerhub-mirror-populate` CronJob (automatic) |
-| `gcr.io/distroless/static-debian12:nonroot`, `gcr.io/distroless/cc-debian12:nonroot` | **gcr.io** | tag | `replication-gcr-distroless-{static,cc}.yaml` (manual-trigger) |
+| `gcr.io/distroless/static-debian12:nonroot`, `gcr.io/distroless/cc-debian12:nonroot` | **gcr.io** | tag | `replication-gcr-distroless-{static,cc}.yaml` (manual-trigger) **and** `dockerhub-mirror-populate` CronJob (automatic — added after both were found missing since the 2026-09-13 incident; see "Incident" below) |
 
 The full, current source-of-truth list lives in
 `platform-services/harbor-base-images/dockerhub-mirror-configmap.yaml` (Docker
@@ -64,9 +64,36 @@ same PR that changes either.
    reviewed path for bumping a pinned version: one PR changes the filter, one
    execution runs it, done. It does **not** run on its own on any schedule.
 
+   **⚠ GCR-sourced policies are currently BROKEN at the listing stage
+   (confirmed by execution, 2026-09-21):** re-POSTing `.../replication/executions`
+   for `replication-gcr-distroless-{static,cc}.yaml` (policy_id 4/6) and
+   `replication-gcr-kaniko-executor.yaml` (policy_id 7) all fail immediately
+   with `failed to fetch artifacts: 403 DENIED` and zero tasks created — i.e.
+   the failure is in Harbor's registry-wide `GET /v2/_catalog` listing call
+   (used to enumerate repos before the name filter is applied), not in
+   fetching the filtered image itself. Verified directly: `GET
+   https://gcr.io/v2/_catalog` anonymously now 401s
+   (`www-authenticate: Bearer realm="https://gcr.io/v2/token"`), while `GET
+   /v2/<repo>/tags/list` and `GET /v2/<repo>/manifests/<tag>` for the SAME
+   repo still work anonymously — Google now gates the global catalog listing
+   but not a direct, known repo/tag lookup. This is the GCR analogue of the
+   already-documented Docker Hub pagination limit
+   (`dockerhub-mirror-cronjob.yaml`'s header) and has the same practical
+   consequence: for a `gcr.io` source, the CronJob's `crane copy` (which
+   resolves one exact tag/digest directly and never lists) is not just the
+   automatic-recovery *backup* for `kaniko-project/executor`,
+   `distroless/static-debian12`, and `distroless/cc-debian12` — **it is
+   currently the only working repopulation path for any of them.** Do not
+   spend time re-POSTing these 3 policies until Harbor's `gcr` Registry
+   endpoint (`registry-gcr.yaml`) is given real GCR credentials (out of scope
+   here — anonymous pull is deliberate, see "It is PUBLIC" above, and this
+   endpoint has never carried credentials). MCR-sourced policies (3, 5) were
+   not observed to have this problem.
+
 2. **`dockerhub-mirror-populate` CronJob** (`0 2 * * *`, `crane copy`) for Docker
-   Hub sources, **plus** (as of 2026-09-14) the same 3 GCR/MCR images the
-   Replication MRs above also cover. Harbor's native replication engine cannot
+   Hub sources, **plus** (as of 2026-09-14, extended 2026-09-21 to cover the two
+   distroless images) the same 5 GCR/MCR images the Replication MRs above also
+   cover. Harbor's native replication engine cannot
    populate Docker Hub anonymously past a shallow page depth (`pagination offset
    too large for anonymous requests` — Docker Hub's Hub API, not a Harbor bug;
    see the CronJob's header comment for the full verified mechanism), so this
@@ -76,14 +103,18 @@ same PR that changes either.
    naming the real source registry per entry (`gcr.io`, `mcr.microsoft.com`),
    defaulting to `mirror.gcr.io` when omitted.
 
-   **Why the CronJob duplicates 3 of the Replication MRs' images:** the
+   **Why the CronJob duplicates 5 of the Replication MRs' images:** the
    Replication MRs are `schedule: manual` — they do not self-heal after a
    project recreate. The CronJob runs nightly and is idempotent (a re-copy of an
-   unchanged digest is a fast no-op via `crane`'s manifest HEAD check), so
-   putting kaniko-executor/dotnet-sdk/dotnet-aspnet in *both* places means the
-   project recovers automatically overnight even if nobody remembers to
-   re-trigger the manual replications. This is intentional redundancy, not
-   drift — see "Incident" below for why it exists.
+   unchanged digest/tag is a fast no-op via `crane`'s manifest HEAD check), so
+   putting kaniko-executor/dotnet-sdk/dotnet-aspnet/distroless-static/
+   distroless-cc in *both* places means the project recovers automatically
+   overnight even if nobody remembers to re-trigger the manual replications.
+   This is intentional redundancy, not drift — see "Incident" below for why it
+   exists (the distroless pair was exactly this gap: mirrored once on
+   2026-09-10, never re-triggered after the 2026-09-13 project-recreate
+   incident, silently missing for 8 days until wizard-green-check's
+   boot-and-probe job caught it on 2026-09-21).
 
    Add a new image: edit `dockerhub-mirror-configmap.yaml` in a normal, reviewed
    PR. Trigger immediately instead of waiting for 02:00:
@@ -256,9 +287,12 @@ not attempted here.
    orphan robot squatting the same name in Harbor) so Crossplane mints a fresh
    one and rewrites the connection secret.
 4. Re-run population: trigger `dockerhub-mirror-populate` immediately (see
-   command above) for the Docker Hub + GCR/MCR-via-CronJob images, and manually
-   `POST .../replication/executions` for each `replication-*.yaml` policy for
-   the remaining GCR images (`distroless/static`, `distroless/cc`).
+   command above) — as of 2026-09-21 this covers all 5 GCR/MCR images too
+   (`distroless/static`, `distroless/cc` included), so this one trigger is
+   sufficient. `POST .../replication/executions` for the individual
+   `replication-*.yaml` policies remains the faster, reviewed path for a
+   deliberate version bump (see "How it gets (re)populated" above), but is no
+   longer the only way to recover any of these 5 after a project recreate.
 5. Confirm with a pull: `kubectl run verify --rm -it --image=harbor.capstone.uamishub.com/base-images/library/python:3.12-slim --restart=Never -- true`
    (public project, no pull secret needed).
 
