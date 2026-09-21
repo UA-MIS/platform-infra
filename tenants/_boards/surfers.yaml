@@ -1,0 +1,17 @@
+# Sprint board for team `surfers` (app: surfer, capstone.uamishub.com).
+# ONE board per TEAM; the filename is the team slug, which is what makes that
+# structural (D-186). See tenants/_boards/README.md.
+#
+# Rendered by applicationsets/agile-boards-appset.yaml into the shared
+# `agile-boards` namespace, from the ONE shared image. Host is derived:
+# surfers-agile.capstone.uamishub.com
+#
+# `repos` names the app repo ahead of its creation — UA-MIS/surfer is
+# provisioned separately via The Process wizard; this board does not depend on
+# that repo existing to render.
+#
+# De-provision = `git rm` this file.
+team: surfers
+repos: UA-MIS/surfer
+title: surfers Board
+accent: "#9e1b32"
