@@ -98,6 +98,25 @@ data:
     dotnet/sdk@sha256:5ef85cc12cb25be6ec319a7392d1e9efd53c3bc8abb971c53d8058a473f09053 mcr.microsoft.com
     dotnet/aspnet@sha256:9a464e9a7e8c6144631020975f703c89034fe386417cb740620df69c2c6cfe24 mcr.microsoft.com
 
+    # --- MCR (explicit source; floating tag) ---
+    # dotnet/sdk:8.0 and dotnet/aspnet:8.0 -- backend/dotnet-aspnet's scaffold
+    # Dockerfile FROMs these bare :8.0 tags directly
+    # (base-images/dotnet/{sdk,aspnet}:8.0), and the digest entries above do
+    # NOT satisfy that FROM line: a digest pin is not itself a retention
+    # anchor (Harbor's GC still treats an otherwise-unreferenced digest as
+    # reclaimable -- PR #667 covers that by also landing digest entries under
+    # a synthetic `:pinned-<short-digest>` tag, not `:8.0`), and separately
+    # `crane copy repo@sha256:X repo@sha256:X` never creates a `:8.0`
+    # reference at all -- nothing in this file has ever produced one. This is
+    # why wizard-green-check's boot-and-probe caught it: the dotnet-aspnet
+    # fragment's build failed to resolve `base-images/dotnet/sdk:8.0` because
+    # that tag genuinely did not exist in Harbor. KEEP the digest entries
+    # above untouched -- they remain the GC-proof recovery path for
+    # digest-pinning consumers (e.g. next-up's own Dockerfile); this pair is
+    # additive, for the floating-tag consumer, not a replacement.
+    dotnet/sdk:8.0 mcr.microsoft.com
+    dotnet/aspnet:8.0 mcr.microsoft.com
+
     # --- GCR (explicit source; floating tag, NOT digest-pinned) ---
     # backend/go and backend/rust-axum's scaffold Dockerfiles FROM these for the
     # runtime stage. Deliberately NOT digest-pinned (owner directive, see
