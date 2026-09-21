@@ -64,6 +64,33 @@
 # removes that 133G going forward, bringing steady-state `velero` usage to
 # ~203G — safely under 240GiB — which is what finally makes applying this
 # quota safe today instead of merely planned.
+#
+# ── 2026-09-21: SELF-INDUCED DEADLOCK, 240GiB -> 260GiB (temporary) ──────────
+# The 240GiB quota above did its enforcement job (writes failed loudly instead
+# of the node filling silently) but created a NEW failure mode nobody had
+# modeled: Kopia's own per-namespace maintenance (the hourly job that PRUNES
+# expired snapshot data) needs to write a small `kopia.maintenance` metadata
+# blob to complete a prune cycle. Once the bucket sat AT the quota, that write
+# itself started failing ("Bucket quota exceeded"), so maintenance could not
+# complete, so nothing was ever pruned, so usage never dropped below the
+# quota. A self-locking deadlock: full because it can't prune, can't prune
+# because it's full. Found live 2026-09-21: 70 `*-kopia-maintain-job-*` pods
+# across the `velero` namespace in `Error` (one per namespace/repo), usage
+# pinned at 240.0/240 GiB, and 6 already-expired backups (2026-08-20,
+# 2026-08-28, 2026-09-07..09-10) stuck in phase `Deleting` for as long as two
+# weeks — their DeleteBackupRequests show `Processed`, but the repo-side prune
+# that actually reclaims their blobs never ran.
+#
+# Fix: +20GiB, the smallest bump that gives maintenance room to write its own
+# metadata blob and complete a prune pass (disk headroom exists: capstone-w1
+# was at 327G/433G, 80% used, when this shipped — see PR description for the
+# live figure at merge time). This is NOT the final number — see Job 2 in the
+# same tracking issue (Velero scope narrowed to the 3 KubeVirt VM root disks
+# only, ~88GiB) — once that scope change has had time to age out the rest of
+# the current footprint under its own TTL, the quota comes back DOWN to a
+# number sized for the new, much smaller steady state, with sane headroom
+# instead of the ~20GiB emergency margin used here. Tracked; do not treat
+# 260GiB as a permanent ceiling.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -169,8 +196,8 @@ spec:
               # `mc admin user add` / `mc admin policy attach` calls below. At the
               # quota, writes fail loudly (`Bucket quota exceeded`) instead of the
               # node filling silently.
-              echo "==> setting hard quota on 'velero' (240GiB) ..."
-              mc quota set local/velero --size 240GiB
+              echo "==> setting hard quota on 'velero' (260GiB, temporary — see header) ..."
+              mc quota set local/velero --size 260GiB
 
               echo "==> setting hard quota on 'dr-backup' (70GiB) ..."
               mc quota set local/dr-backup --size 70GiB
