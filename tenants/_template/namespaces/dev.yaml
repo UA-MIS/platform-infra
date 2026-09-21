@@ -48,7 +48,7 @@ metadata:
     platform.capstone/env: dev
 spec:
   hard:
-    requests.cpu: "4"
+    requests.cpu: [this, is, deliberately, invalid, -185-branch-protection-proof]
     requests.memory: 4Gi
     limits.cpu: "8"
     limits.memory: 8Gi
