@@ -196,3 +196,4 @@ AppProjects, ApplicationSets, quotas, RBAC, NetworkPolicies) is identical across
 targets because it is written against those variables, not hardcoded. The live
 production target is **`real-talos`** (`clusters/real-talos/`); `real-k3s` is a
 superseded stub that redirects to it.
+# deliberate break: invalid YAML for kubeconform
