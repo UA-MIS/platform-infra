@@ -42,6 +42,46 @@
 > deleted them has the last-good content in its parent), then uncomment the
 > `resources:` list in `platform-services/spire/kustomization.yaml`. Everything
 > below this banner describes that original, working baseline.
+>
+> ### Trap for the next decommission: an emptied kustomization does not prune
+>
+> The first attempt here (commenting out `kustomization.yaml`'s `resources:`
+> list so the directory-generated `platform-svc-spire` Application would
+> render zero objects and let ArgoCD's `prune: true`/`selfHeal: true` clean up)
+> **did not work** — it merged, ArgoCD refreshed, and the namespaces just sat
+> there `Active` with the Application stuck `OutOfSync/Healthy` forever.
+> Reason: ArgoCD's `syncPolicy.automated.allowEmpty` defaults to `false`, and
+> that guard refuses to run a sync that would delete **every** resource an
+> Application manages, logging `Skipping sync attempt … auto-sync will wipe
+> out all resources` — it cannot tell "this dir is intentionally empty now"
+> from "this dir's render is broken and about to wipe out a live service" and
+> conservatively assumes the latter. This is the identical wedge fixed for
+> tenant teardown in `applicationsets/crossplane-claims-app.yaml` (#355,
+> 2026-07-12) — **the same class of bug bit twice, a project apart**, because
+> the fix lives on individual Applications and nobody generalized the lesson.
+>
+> **The actual fix used here** (see `applicationsets/platform-services-appset.yaml`,
+> the `platform-services/spire` exclude entry): stop generating the
+> Application entirely rather than trying to sync it down to empty. Removing a
+> generated Application this way does **not** cascade-delete its resources
+> (`syncPolicy.preserveResourcesOnDeletion: true` on that ApplicationSet, the
+> same trade-off already accepted for every other exclude in that file) — so
+> it only gets you a clean Application record; the live objects it leaves
+> behind (here: 3 namespaces, 3 CRDs whose owning Helm-chart Application had
+> already vanished the same way) still need one manual, `kubectl delete`
+> cleanup pass. That pass is safe to run **as soon as git's desired state is
+> already zero for those resources** (as it was here, from this decommission's
+> own first PR) — there is nothing left for ArgoCD to self-heal back, since
+> self-heal reverts drift *away* from the declared desired state, and deleting
+> an already-undesired resource moves *toward* it, not away.
+>
+> **For whoever decommissions the next platform service**: don't stop at
+> emptying a kustomization and trusting `prune: true` — either (a) exclude the
+> directory from its generator (cheap, safe, but leaves an orphan cleanup
+> step), or (b) set `allowEmpty: true` scoped to that one Application only
+> (never on a shared ApplicationSet template — that would let any future
+> broken/empty render silently wipe a live service). Either way, verify the
+> live resources are actually gone, not just that the Application object is.
 
 ---
 

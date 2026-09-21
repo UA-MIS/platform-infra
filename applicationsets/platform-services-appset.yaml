@@ -18,6 +18,28 @@ spec:
         revision: HEAD
         directories:
           - path: platform-services/*
+          # EXCLUDE spire/ (decommissioned 2026-09-21, owner decision — see
+          # platform-services/spire/README.md "Decommissioned" banner): the dir
+          # is kept as documentation with its `resources:` list commented out,
+          # so it already renders zero objects. That alone is NOT enough to
+          # remove `platform-svc-spire` — ArgoCD's `allowEmpty: false` default
+          # refuses to SYNC a source down to zero resources (same wedge class
+          # as applicationsets/crossplane-claims-app.yaml #355: "auto-sync will
+          # wipe out all resources"), so the Application sat OutOfSync/Healthy
+          # with its stale namespaces never pruned (hit live 2026-09-21). This
+          # exclude is the actual fix: it removes the
+          # `platform-svc-spire` Application object itself. Per this
+          # ApplicationSet's own `syncPolicy.preserveResourcesOnDeletion: true`
+          # below, that removal does NOT cascade-delete — same
+          # orphan-for-manual-cleanup trade-off as every other exclude in this
+          # file. In this case the orphans (3 namespaces + 3 CRDs from the
+          # already-removed platform-spire-crds app) were already hand-verified
+          # gone (self-heal-safe: git's desired state was already zero, so a
+          # direct kubectl delete converges toward git, it doesn't fight it)
+          # before this exclude was added — this line is cleanup of the
+          # Application record, not of live resources.
+          - path: platform-services/spire
+            exclude: true
           # EXCLUDE harbor-onboarding/: it is a per-team Job TEMPLATE (contains a
           # literal `__TEAM__` placeholder substituted by `make harbor-onboard
           # NAME=<name>`), NOT a GitOps-synced service. Without this exclude the
