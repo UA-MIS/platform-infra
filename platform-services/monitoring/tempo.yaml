@@ -204,18 +204,32 @@ spec:
           # initialDelaySeconds assume a near-empty store) killed the container via
           # "failed liveness probe" before /ready ever returned 200, an
           # OOM-shaped-but-not-OOM restart loop layered on top of the actual
-          # corruption bug. startupProbe defers liveness/readiness enforcement for
-          # up to 5 minutes (30 x 10s) so one slow cold start doesn't get killed
-          # mid-poll; once it succeeds once, the tighter probes below resume
-          # normal operation. FOLLOW-UP (not done here, scope of this incident was
-          # "one corrupt block, minimum deletion"): 69k blocks in a 24h-retention
-          # store means the compactor/retention path likely needs its own look --
-          # flagged, not fixed blind.
+          # corruption bug. startupProbe defers liveness/readiness enforcement so
+          # one slow cold start doesn't get killed mid-poll; once it succeeds
+          # once, the tighter probes below resume normal operation.
+          #
+          # failureThreshold raised 30 -> 60 (5min -> 10min budget) after live
+          # observation: on TWO separate cold starts (post fsGroupChangePolicy fix,
+          # so mount time was not the factor) Tempo logged
+          # `lifecycler.go:556 msg="auto-joining cluster after timeout" ring=ingester`
+          # and then sat there for 3-4+ minutes before the ingester ring module
+          # actually transitioned to Running -- this is the ring lifecycler's own
+          # safety wait (avoiding a split-brain token assignment against its own
+          # prior instance before that entry's heartbeat expires), not something
+          # this chart's config controls directly, and not caused by the block
+          # count. The first cold start after this PR's own predecessor (30 x 10s)
+          # got killed by the startupProbe RIGHT as it was finishing ("Application
+          # is stopping" logged the instant /ready would have gone 200) -- 5min
+          # was cutting it too close to this ring-join wait, not the block-poll
+          # this probe was originally sized for. FOLLOW-UP (not done here, scope
+          # of this incident was "one corrupt block, minimum deletion"): 69k
+          # blocks in a 24h-retention store means the compactor/retention path
+          # likely needs its own look -- flagged, not fixed blind.
           startupProbe:
             httpGet:
               path: /ready
               port: 3200
-            failureThreshold: 30
+            failureThreshold: 60
             periodSeconds: 10
           readinessProbe:
             httpGet:
