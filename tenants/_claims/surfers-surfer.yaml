@@ -1,0 +1,149 @@
+# PROVISIONED BY HAND, deliberately — same posture as springais-springais.yaml and
+# ida-llm-ida-llm.yaml, and for the identical reason on the frontend side, plus a
+# second reason of its own on the layout side:
+#
+#   1. `dbExtensions` (pgvector): the Backstage zero-touch wizard has no UI path to
+#      it (D-185: "ask us and we set it up by hand" — see springais-springais.yaml
+#      for the full untrusted-extension-wall rationale, unchanged here).
+#   2. LAYOUT: the wizard's `frontend-backend` layout has no Next.js option in the
+#      `frontend` slot — only react/angular/solid/vue (static-build SPAs behind
+#      nginx). `fullstack/nextjs` runs Next.js as a live Node server, but it only
+#      fills `single` (UI + its OWN /api routes in one process); there was no wizard
+#      path to "Next.js server on / + a SEPARATE FastAPI backend on /api". This claim
+#      is paired with a NEW fragment (frontend/nextjs, added in the same PR as this
+#      claim) that fills that gap — see the fragment's own fragment.yaml for the full
+#      rationale, and the gap-list note at the bottom of this file for what would
+#      need to change for a team to reach this shape through the wizard directly.
+#
+# Because this bypasses the wizard, it ALSO bypasses the wizard's zero-touch commit
+# path (README.md: "commits ... DIRECTLY to main ... via the platform GitHub App").
+# This claim goes through a normal PR + human merge instead, same as every other
+# hand-provisioned claim in this directory.
+#
+# Repo: composed with the platform's own compose_lib.render_tree() /
+# _fragments/_tools/dry-render.py (the same engine capstone:compose-project uses),
+# NOT hand-authored — see UA-MIS/surfer's own history for the exact compose
+# invocation. The backend was then patched, by hand, from the stock
+# backend/fastapi fragment's sync SQLAlchemy (psycopg) to ASYNC SQLAlchemy
+# (asyncpg) — the task scope asked for async explicitly, and this tenant's whole
+# point (embeddings / similarity search) is the kind of I/O-bound workload where it
+# actually matters. That patch is also NOT yet a fragment toggle — see the gap list.
+#
+# De-provision: prefer The Process admin "Tenant Teardown" page (it opens the
+# git-rm PR AND strips the capstone-tenant GitHub topic from the app repo). `git rm`
+# THIS FILE ALONE also fully reclaims the cluster/Harbor/Vault resources (Crossplane
+# cascade) but leaves the app repo's capstone-tenant topic in place. See
+# tenants/_claims/README.md "De-provision".
+apiVersion: platform.capstone.uamishub.com/v1alpha1
+kind: CapstoneTenant
+metadata:
+  name: surfers-surfer
+  labels:
+    platform.capstone/team: "surfers"
+    platform.capstone/semester: "2026-fall"
+    platform.capstone/component: tenant
+spec:
+  team: "surfers"
+  appName: "surfer"
+  semester: "2026-fall"
+
+  # `surfers` — the REAL, existing GitHub team (5 active members, parent
+  # capstone-fall-2026; verified live 2026-09-22: `gh api orgs/UA-MIS/teams/surfers`).
+  # Unlike springais-springais.yaml, `team` and `githubTeam` do NOT need to diverge
+  # here: `surfers` already exists and is exactly the right group, so both the
+  # AppProject developer-role binding (`UA-MIS:{{ team }}`) and this field name the
+  # same, correct team. App is singular (`surfer`), team is plural (`surfers`) —
+  # intentional, per the owner's brief; do not "fix" this into agreement.
+  githubTeam: "surfers"
+
+  # Single wizard-style port for the whole app — both components (frontend, backend)
+  # listen on this same value in their own pods (platform convention; see
+  # composePlan.mjs portFor() — one `port` input applies to every component, matching
+  # curb/mychef/springais, which are all 8080 too).
+  port: 8080
+
+  # OFF, matching every other claim in this directory (curb/mychef/springais/ida-llm)
+  # — previews do not work on this platform today (docs/operator/tenant-preview-gaps.md).
+  previewEnabled: false
+
+  domain: "capstone.uamishub.com"
+
+  # PostgreSQL — SQLAlchemy async + asyncpg on the backend, and the platform's own
+  # pgvector image (CNPG-managed PG17) is what makes the extension available at all.
+  database: "postgres"
+
+  # pgvector — same mechanism and same reason as springais-springais.yaml: `vector`
+  # is `trusted=f`, so this tenant's NOSUPERUSER login role cannot `CREATE EXTENSION`
+  # it itself; the platform installs it superuser-side, once per env, before any app
+  # code runs. Verified locally (not just asserted) before writing this claim:
+  # harbor.capstone.uamishub.com/dockerhub-proxy/pgvector/pgvector:pg17 pulled clean
+  # through the platform's own Harbor proxy-cache, `CREATE EXTENSION vector` succeeded
+  # (pg_extension shows vector 0.8.6), and the composed async backend (asyncpg,
+  # create_all via AsyncEngine.run_sync) connected, created its schema, and served a
+  # full CRUD round-trip against that same database — 2026-09-22, evidence in the
+  # devops task report, not re-asserted here.
+  dbExtensions:
+    - vector
+
+  # Platform defaults, pinned explicitly rather than inherited (same posture as
+  # springais — a silent default drift is exactly the failure class #535 already ate
+  # once). Two components (frontend, backend), each well inside the chart's
+  # 500m/256Mi per-container request/limit — see the devops task report for the
+  # measured local build/runtime footprint; nothing here approaches the 8-CPU/8Gi
+  # namespace ceiling or the 1-CPU/1Gi per-container LimitRange max.
+  maxRunners: 5
+  cpuLimit: 8
+
+# ============================================================================
+# GAP LIST — what would let a team reach THIS shape through the wizard directly,
+# instead of a hand-built tenant + hand-patched backend (owner asked for this
+# explicitly; kept in the claim, not a throwaway PR comment, so it survives whoever
+# next touches the wizard).
+#
+# 1. FRAGMENT (mostly closed by this PR): frontend/nextjs now exists and fills the
+#    `frontend` slot with a real Node-server Next.js app (not a static build behind
+#    nginx, unlike every other `frontend` fragment). What's still missing is wizard
+#    UI, not compose-engine capability — `dry-render.py --frontend frontend/nextjs
+#    --backend backend/fastapi --database host-postgres` already composes and
+#    kustomize-validates cleanly (proven, this task). The unified "New Project"
+#    template's frontend-choice step would need frontend/nextjs added to its options
+#    list alongside react/angular/solid/vue — a template-data change, not an engine
+#    change.
+#
+# 2. DATABASE CHOICE PER-FRAGMENT (real gap): VALID_DBCHOICES already includes
+#    host-postgres, but composePlan.mjs's own comment on it says the wizard offers
+#    host-postgres in exactly ONE place today (the blank/bring-your-own branch) and
+#    "every other needsDB fragment is hardcoded MySQL-only" in the wizard's UI (the
+#    planner is a proven superset of what the wizard exposes). backend/fastapi
+#    ALREADY supports Postgres in its own db.py (FIX-16/D-092) — the wizard step
+#    just never asks the question for it. Wiring the wizard's DB-choice step to offer
+#    host-postgres for every needsDB fragment (not just blank) is the actual unlock;
+#    springais and this claim both had to go around it by hand.
+#
+# 3. dbExtensions HAS NO WIZARD UI (same gap springais already logged): it is a real,
+#    tested XRD/Composition field with zero exposure in the "New Project" flow. A
+#    team that needs pgvector has no way to ask for it except a hand-authored claim
+#    like this one. A simple wizard step — "extra Postgres extensions" as a
+#    multi-select, gated on database == postgres — would close this without any
+#    engine change; the field already does the right thing once it's set.
+#
+# 4. ASYNC SQLALCHEMY IS A HAND PATCH, NOT A FRAGMENT CHOICE (real gap, new from this
+#    task): backend/fastapi ships sync SQLAlchemy (create_engine/Session) only. This
+#    claim's backend was hand-converted to async (create_async_engine/AsyncSession/
+#    asyncpg) because the task scope asked for it and the workload (vector search)
+#    benefits from it. The honest fix is an `async: true` fragment.yaml toggle (sync
+#    stays the wizard default) that swaps the driver + engine constructor + `get_db`
+#    generator at compose time — NOT a second fragment id, since the route/model/
+#    schema code is otherwise identical. Filed here rather than silently landing an
+#    unreviewed platform-wide default change.
+#
+# 5. NO /api/health PARITY ACROSS BACKEND FRAGMENTS (small, found while wiring the
+#    frontend): backend/express ships BOTH /healthz (pod-probe, bare) and /api/health
+#    (Ingress-reachable, for a paired frontend to call) — backend/fastapi ships only
+#    /healthz. Composed as the backend half of a frontend+backend app, external
+#    clients hitting <app>/api/healthz 404 (the Ingress forwards the path unchanged;
+#    there is no rewrite — see _contract/.devops/chart/base/ingress.yaml). This
+#    claim's backend adds /api/health by hand (see main.py) to match express's
+#    contract; backend/fastapi's fragment.yaml should ship the same route so any
+#    fastapi-backed frontend+backend tenant gets it for free.
+# ============================================================================

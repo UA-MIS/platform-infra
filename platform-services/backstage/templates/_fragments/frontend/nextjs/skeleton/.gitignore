@@ -1,0 +1,28 @@
+# Dependencies
+node_modules
+/.pnp
+.pnp.*
+
+# Next.js build output
+.next/
+out/
+build
+
+# Test / coverage
+coverage
+
+# Secrets / local env — NEVER commit these
+.env
+.env.*
+!.env.example
+*.local
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor / OS cruft
+.DS_Store
+.idea/
+.vscode/
+*.pem

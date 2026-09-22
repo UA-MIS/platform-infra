@@ -217,6 +217,17 @@ jobs:
   # working tree is a leak for the whole repo, not just one component).
   scan:
     runs-on: ${{ vars.RUNNER_SCALE_SET || 'ua-mis-kaniko' }}
+    # REQUIRED on this fleet's containerMode:kubernetes ARC scale sets, even though
+    # this job's own step runs as its own `uses: docker://` step-pod and never touches
+    # this image. Every OTHER job here (resolve/checks/build-and-push/bump-*) declares
+    # one; `scan` was added without it and failed hard on both the shared `ua-mis-kaniko`
+    # fallback pool and (unverified beyond this fix) any per-team scale set alike:
+    # "Jobs without a job container are forbidden on this runner, please add a
+    # 'container:' to your job" (confirmed live, UA-MIS/surfer runs 35783031125 and
+    # 35783446744, 2026-09-22 — the FIRST tenant to exercise this job since it was
+    # added). Same minimal image as `resolve` below; nothing runs in it directly.
+    container:
+      image: harbor.capstone.uamishub.com/base-images/library/node:24-trixie-slim
     steps:
       - name: Checkout (working tree to scan)
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
