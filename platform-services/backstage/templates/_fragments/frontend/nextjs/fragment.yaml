@@ -1,0 +1,48 @@
+# fragment.yaml — see _fragments/frontend/react/fragment.yaml for the FRONTEND CONTRACT
+# and ADR-034 for the architecture.
+#
+# NEW FRAGMENT (added for UA-MIS/surfer, 2026-09-22). Every other `frontend` slot
+# fragment (react/angular/solid/vue) is a Vite/CLI SPA that BUILDS TO STATIC FILES and
+# is served by hardened nginx — see frontend/react/fragment.yaml `buildType: container`
+# with an nginx Dockerfile. Next.js in App Router mode is not that shape: it needs a
+# live Node server (SSR/RSC, `next start` / the standalone server), not a static bundle
+# behind nginx. `fullstack/nextjs` already runs that Node-server pattern, but it only
+# fills `single` (one process serving UI + its OWN /api routes) — there was no way to
+# put "Next.js as a server" on ONE side of a frontend+backend split. This fragment is
+# THAT missing piece: the fullstack/nextjs Dockerfile/runtime pattern (proven: same
+# base image, same multi-stage build, same non-root/read-only-rootfs runtime, same
+# HOSTNAME=0.0.0.0 binding — see that Dockerfile's runtime stage for why 0.0.0.0 and
+# not 127.0.0.1/localhost: the platform Service reaches the pod by pod IP, not
+# loopback, so a server bound only to 127.0.0.1 would be unreachable through the
+# Service even though it "works" under `docker run -p`), stripped of Prisma/DB/migrate
+# (a `frontend` component never reads DATABASE_URL, per the slot contract) and pointed
+# at a separate backend fragment over the SAME relative-/api convention every other
+# frontend fragment uses (see frontend/react/fragment.yaml's wiring note).
+apiVersion: platform.capstone/fragment.v1
+id: nextjs-frontend
+displayName: Next.js (App Router, Server) frontend
+category: frontend
+language: typescript
+framework: nextjs
+# `frontend` ONLY — this is deliberately narrower than fullstack/nextjs's `single`.
+# A Next.js server with no API routes of its own filling `single` would be a UI with
+# nothing behind it; pair this with a `backend` fragment instead. (See the platform
+# gap-list note in tenants/_claims/surfer-surfer.yaml for the wizard-facing follow-up:
+# today a team can only reach this fragment by hand-editing the compose plan, same as
+# springais reached `dbExtensions` — there is no wizard UI path to `layout:
+# frontend-backend` + `frontend: nextjs-frontend` yet.)
+slots:
+  - frontend
+defaultPort: 3000
+ingressPath: /
+needsDB: false             # frontends never read DATABASE_URL — mirrors frontend/react
+buildType: container
+dockerfile: Dockerfile
+healthPath: /healthz
+notes: >-
+  Next.js 15 App Router (React 19, TypeScript, Tailwind) built with `output:
+  'standalone'` and served by its own Node server (NOT nginx — RSC/SSR needs a live
+  process). Talks to its paired backend via relative /api calls, same convention as
+  frontend/react. No database access, no Prisma, no deploy-time migration — those
+  belong to the backend component. Harvested from fullstack/nextjs's proven
+  build/runtime stages (Kaniko-rootless, non-root, read-only-rootfs, HOSTNAME=0.0.0.0).
