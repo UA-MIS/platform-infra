@@ -615,6 +615,32 @@ jobs:
           echo "push build for ${{ needs.resolve.outputs.REGISTRY }}/${{ matrix.image }}:${{ needs.resolve.outputs.TAG }}" \
                "— Harbor cred expected at ${DOCKER_CONFIG_DIR}/config.json in the Kaniko step pod"
       # --- Kaniko build as a container-action STEP (its own pod; shared _work) ---
+      # KANIKO MEMORY (OOM fix, board — motion/attributeextractor run 35755516567):
+      # this fragment's COMMON args had ONLY --reproducible, no snapshot-mode tuning.
+      # For a heavy (ML/large-dependency) image, Kaniko's default snapshotter
+      # content-hashes the ENTIRE filesystem after each layer and holds it in memory;
+      # the step pod (arc-runners LimitRange default, since per-tenant hook-template
+      # ConfigMaps set no resources on `$job` — platform-services/arc/limitrange.yaml)
+      # gets killed with no Kaniko-logged error ("Taking snapshot of full
+      # filesystem..." -> container-hook "job has failed" -> classic OOM-kill
+      # signature). This EXACT class was already hit and fixed twice elsewhere in
+      # this repo — tenant-build.yaml (--snapshot-mode=redo --use-new-run, for
+      # snapshot SPEED) and backstage-process-build-push.yaml (the fullest fix, for
+      # an OOM): both KEEP --reproducible (D-030 supply-chain property — deterministic
+      # timestamps; its memory cost lands at finalize, after peak-snapshot memory is
+      # freed, so it does not compound with the flags below). Bringing this fragment
+      # up to the same, already-proven pattern:
+      #   --snapshot-mode=redo        hash mtime+size+perms, not file CONTENT (cheaper)
+      #   --compressed-caching=false  do not retain compressed layers in RAM (the big
+      #                               win for a large single-RUN dependency layer)
+      #   --use-new-run               detect RUN-command changes WITHOUT a full-fs
+      #                               snapshot
+      #   --push-retry=3              resilience against a transient push blip riding
+      #                               close to the memory ceiling (kaniko default: 0)
+      # This is the SHARED contract every new-scaffolded repo copies, so the fix
+      # helps every tenant's CI, not just motion's — smallest safe change before
+      # reaching for a per-team memory-limit raise.
+      #
       # SECURITY — preview (pull_request) PUSHES untrusted PR code. Authenticated by the
       # SAME least-privilege harbor-push robot (pull+push on THIS team's OWN project only).
       # The tag is pull-<head-sha>, DISJOINT from dev's git-describe + prod's semver, so a
@@ -651,6 +677,10 @@ jobs:
                     --dockerfile=${DOCKERFILE}
                     --destination=${IMAGE}
                     --reproducible
+                    --snapshot-mode=redo
+                    --compressed-caching=false
+                    --use-new-run
+                    --push-retry=3
                     --verbosity=info";
             if [ "${PUSH}" = "true" ]; then
               echo "==> building + pushing ${IMAGE}";
