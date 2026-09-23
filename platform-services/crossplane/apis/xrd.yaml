@@ -216,6 +216,37 @@ spec:
                   minimum: 8
                   maximum: 32
                   default: 8
+                kanikoMemoryLimitGi:
+                  type: integer
+                  description: >-
+                    Per-tenant `limits.memory` (GiB) on THIS team's own Kaniko BUILD
+                    step pod (the `$job` container in `arc-hook-template-<team>`,
+                    platform-services/crossplane/apis/composition.yaml) — separate
+                    from the arc-runners NAMESPACE default of 8Gi
+                    (platform-services/arc/limitrange.yaml), which every tenant
+                    without this field set still gets untouched.
+                    Default 8, matching that namespace default, so leaving it unset
+                    changes nothing for anybody -- this is a WIDEN-ONLY per-tenant
+                    escape hatch, same shape as `cpuLimit` above, not a new default.
+                    Raise it per-tenant only when a team's own image build genuinely
+                    needs more (motion/attributeextractor pins 16 -- a ~9.7GB
+                    ML image (torch/transformers/spacy/pandas) that OOMKilled
+                    (exit 137) at the 8Gi default even after the shared contract's
+                    Kaniko memory-safety flags (--snapshot-mode=redo,
+                    --compressed-caching=false, --use-new-run) fixed the build-time
+                    OOM: --reproducible still has to rewrite every layer's tar
+                    headers for a ~9.7GB image at PUSH/finalize time, a cost
+                    proportional to image size that no snapshot-mode flag reduces.
+                    16Gi verified live to get motion's build through push+digest;
+                    the flags fix stays the FIRST lever for every other tenant --
+                    reach for this only after that, and only for a team whose own
+                    image is the reason, not a guess.
+                    minimum is 8 (the platform default) DELIBERATELY: this knob is
+                    widen-only, matching `cpuLimit`'s rationale -- a tenant already
+                    fits within the shared default until it demonstrably doesn't.
+                  minimum: 8
+                  maximum: 32
+                  default: 8
                 dbExtensions:
                   type: array
                   description: >-
