@@ -27,3 +27,18 @@ spec:
   previewEnabled: false
   domain: "capstone.uamishub.com"
   database: "mysql"
+  # Kaniko BUILD step-pod memory raise (xrd.yaml spec.kanikoMemoryLimitGi), scoped
+  # to this tenant only -- the arc-runners namespace default (8Gi,
+  # platform-services/arc/limitrange.yaml) stays untouched for every other team.
+  # attributeextractor's image is ~9.7GB (torch/transformers/spacy/pandas); it
+  # OOMKilled (exit 137) at 8Gi even after the shared _contract's Kaniko
+  # memory-safety flags (--snapshot-mode=redo/--compressed-caching=false/
+  # --use-new-run) fixed the build-time OOM -- --reproducible still has to
+  # rewrite every layer's tar headers for the full image size at PUSH/finalize
+  # time. 16Gi verified live (arc-hook-template-motion, hand-patched for the
+  # test ahead of this PR) to get the build through push + digest-file write.
+  # NOTE for the team: the real fix is the CPU-only PyTorch wheel index (see the
+  # devops write-up) -- that would cut this image by roughly two-thirds and make
+  # this override unnecessary. Lower this back toward the platform default once
+  # that lands and the measured image size no longer needs it.
+  kanikoMemoryLimitGi: 16
