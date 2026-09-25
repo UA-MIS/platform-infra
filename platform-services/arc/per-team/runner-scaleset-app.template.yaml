@@ -330,6 +330,21 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: arc-runners
+  # 2026-09-25 CI outage: without this, ArgoCD's periodic reconcile sweep (every
+  # ~2-3 min, cluster-wide, not just on webhook) sees the arc-gha-rs-controller's
+  # own runner-scale-set-id/-name/-group annotation patches on this
+  # AutoscalingRunnerSet as drift and, with selfHeal+ServerSideApply, strips them
+  # straight back out. The controller then finds the ID annotation gone, decides
+  # its ephemeral runner set is "outdated", and tears the whole scale set down
+  # (delete-from-GitHub + recreate) — every cycle, forever, no error logged. See
+  # applicationsets/arc-runner-scaleset-app.yaml for the full incident note; same
+  # fix, mirrored here for hand-rendered teams (composition.yaml is the live
+  # source of truth and carries the identical block).
+  ignoreDifferences:
+    - group: actions.github.com
+      kind: AutoscalingRunnerSet
+      jsonPointers:
+        - /metadata/annotations
   syncPolicy:
     automated:
       prune: true

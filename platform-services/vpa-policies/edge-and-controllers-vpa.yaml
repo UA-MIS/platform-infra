@@ -8,10 +8,6 @@
 #   - cloudflared (2 replicas)           → Cloudflare Tunnel connectors.
 #   - portal (2 replicas)                → apex landing page.
 #
-#  SINGLE-REPLICA (one-time eviction on first reconcile — a brief self-healing blip):
-#   - arc-gha-rs-controller (the ARC runner-scale-set controller — an eviction briefly
-#     pauses runner scaling, in-flight CI jobs are unaffected).
-#
 #  SINGLE-REPLICA, updateMode "Initial" (recommendations applied ONLY at pod creation
 #  — never a live eviction, per https://github.com/kubernetes/autoscaler/blob/master/
 #  vertical-pod-autoscaler/docs/api.md#update-policy):
@@ -22,6 +18,19 @@
 #     updateMode "Auto") — see git history for the full report. "Initial" still
 #     right-sizes on every rollout (image bump, resource-limit change, etc.), just
 #     never mid-session.
+#   - arc-gha-rs-controller (the ARC runner-scale-set controller) — MOVED here from
+#     "Auto" after the 2026-09-25 CI outage: this controller isn't stateless the way
+#     the comment above assumed. It holds long-lived, multi-step, multi-object
+#     reconciles in memory (delete-then-recreate of an AutoscalingRunnerSet spans
+#     several GitHub Actions API round-trips across listener/ephemeral-runner-set/
+#     runner-scale-set cleanup). A VPA eviction landing mid-reconcile truncates it
+#     mid-teardown, leaving the AutoscalingRunnerSet permanently missing its
+#     runner-scale-set-id annotation and listener with no error logged and no retry
+#     — three of eight org runner pools (curb, motion, ua-mis, incl. the shared
+#     fallback pool) silently stopped picking up jobs this way. Same failure shape
+#     as db-admin-console/oauth2-proxy above: single replica, no PDB, an eviction
+#     mid-session is unrecoverable without manual intervention. "Initial" still
+#     right-sizes on every pod recreation, just never mid-reconcile.
 ---
 # ── traefik (kube-system) ─────────────────────────────────────────────────────
 apiVersion: autoscaling.k8s.io/v1
@@ -139,6 +148,8 @@ spec:
         maxAllowed: { cpu: 250m, memory: 256Mi }
 ---
 # ── arc-gha-rs-controller (ARC runner-scale-set controller) ───────────────────
+# updateMode "Initial", NOT "Auto" -- see the file-header comment block above
+# (2026-09-25 CI outage).
 apiVersion: autoscaling.k8s.io/v1
 kind: VerticalPodAutoscaler
 metadata:
@@ -152,7 +163,7 @@ spec:
     kind: Deployment
     name: arc-gha-rs-controller
   updatePolicy:
-    updateMode: "Auto"
+    updateMode: "Initial"
   resourcePolicy:
     containerPolicies:
       - containerName: "*"
