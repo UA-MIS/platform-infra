@@ -398,7 +398,24 @@ spec:
                 type: RuntimeDefault
             containers:
               - name: runner
-                image: ghcr.io/actions/actions-runner:2.335.1   # pinned runner image (bump: 2.328.0 deprecated by GitHub — couldn't connect to the broker)
+                # pinned runner image — ROOT CAUSE of the 2026-09-25/09-27 CI outages (see
+                # platform-services/arc/README.md "Runner version deprecation"): GitHub
+                # deprecates old actions-runner versions on a rolling few-month window and
+                # the broker then 403s ("Runner version vX.Y.Z is deprecated and cannot
+                # receive messages"). The runner exits, the scale set repeatedly scales
+                # 1->0 with no job served, which flips the AutoscalingRunnerSet to
+                # status.phase: Outdated on almost every reconcile — and because the
+                # controller's autoscalingrunnerset controller runs a SINGLE worker
+                # (worker count: 1, from its own startup log), one delete-runner-scale-set
+                # call against a scale set stuck in that loop can block that one worker
+                # indefinitely, freezing reconciliation for ALL scale sets cluster-wide.
+                # 2.328.0 was bumped for the identical symptom before; 2.335.1 has now
+                # silently aged into the same deprecated state (see actions/runner issues
+                # #4392, #3767, #3651 for the recurring pattern). Bump this PROACTIVELY —
+                # don't wait for the next outage — and see the new ARCReconcileStale /
+                # ARCControllerDown alerts (platform-services/monitoring/alerts-arc.yaml)
+                # for the detection that was missing.
+                image: ghcr.io/actions/actions-runner:2.337.0
                 command: ["/home/runner/run.sh"]
                 securityContext:
                   allowPrivilegeEscalation: false

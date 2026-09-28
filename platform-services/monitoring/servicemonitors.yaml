@@ -28,20 +28,18 @@
 #     up the `harbor-exporter` component (not deployed today) — a real new
 #     workload, not a pure ServiceMonitor add, so it's a `harbor-app.yaml` values
 #     change for its own PR, not bundled here.
-#   - ARC (gha-runner-scale-set-controller): the controller pod is running with
-#     `--metrics-addr=0` / `--listener-metrics-addr=0` (metrics OFF) — confirmed via
-#     the live pod args AND the chart's `values.yaml` comment ("If metrics: object
-#     is not provided ... This will disable metrics"). Fix is
-#     `applicationsets/arc-controller-app.yaml` helm.values:
-#       metrics:
-#         controllerManagerAddr: ":8080"
-#         listenerAddr: ":8080"
-#         listenerEndpoint: "/metrics"
-#     which declares a named `metrics` containerPort — then a PodMonitor (the chart
-#     creates no Service) selecting it. Low-risk (single-replica, stateless
-#     controller, a plain rolling restart), but since the port isn't declared today
-#     there is nothing to confirm scraping against until that values change lands —
-#     left as a follow-up rather than shipped unverified.
+#   - ARC (gha-runner-scale-set-controller): FIXED 2026-09-28, part of the CI-outage
+#     root-cause PR. `applicationsets/arc-controller-app.yaml` now sets `metrics:`
+#     (controllerManagerAddr/listenerAddr ":8080", listenerEndpoint "/metrics"),
+#     which declares the named `metrics` containerPort this chart otherwise omits.
+#     Verified live via port-forward before wiring the PodMonitor below: the
+#     endpoint serves real controller-runtime metrics, including
+#     `controller_runtime_max_concurrent_reconciles{controller="autoscalingrunnerset"} 1`
+#     (confirms the single-worker freeze mechanism in that incident's root-cause
+#     writeup, platform-services/arc/README.md) and
+#     `workqueue_longest_running_processor_seconds` (the reconcile-staleness signal
+#     alerts-arc.yaml's ARCReconcileStale alerts on). See the PodMonitor at the
+#     bottom of this file and alerts-arc.yaml.
 ---
 # ArgoCD application-controller metrics — source of argocd_app_info{health_status,
 # sync_status} for the ArgoCDAppDegraded / ArgoCDAppStuckOutOfSync alerts. The
@@ -265,5 +263,34 @@ spec:
       rook_cluster: rook-ceph
   endpoints:
     - port: ceph-exporter-http-metrics
+      path: /metrics
+      interval: 30s
+---
+# ARC (gha-runner-scale-set-controller) metrics — the detection gap from the
+# 2026-09-25/09-27/09-28 CI outages (platform-services/arc/README.md incident
+# section). The chart creates no Service, so this scrapes the controller POD
+# directly (PodMonitor), same shape as external-secrets above. Selector matches
+# ONLY the controller-manager pod (arc-system also runs per-scale-set listener
+# pods, which do not carry app.kubernetes.io/name=gha-rs-controller).
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: arc-gha-rs-controller
+  namespace: monitoring
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    platform.capstone/component: platform
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames: ["arc-system"]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gha-rs-controller
+      app.kubernetes.io/component: controller-manager
+  podMetricsEndpoints:
+    - port: metrics
       path: /metrics
       interval: 30s

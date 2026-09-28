@@ -36,6 +36,20 @@ spec:
       values: |
         # Single-replica controller for Phase-2 local (laptop). Phase-4 scales/HAs.
         replicaCount: 1
+        # Metrics — OFF by default in this chart (values.yaml: "If `metrics:` object
+        # is not provided ... This will disable metrics", confirmed live: the pod ran
+        # with --metrics-addr=0 --listener-metrics-addr=0). This is the detection gap
+        # from the 2026-09-25/09-27/09-28 CI outages: no metrics endpoint meant no
+        # ServiceMonitor, no alert, and a 31-hour total outage produced zero signal.
+        # See platform-services/monitoring/servicemonitors.yaml (PodMonitor) and
+        # platform-services/monitoring/alerts-arc.yaml (ARCControllerDown /
+        # ARCReconcileStale) — both verified against a real scrape, not shipped
+        # unverified (that was explicitly deferred here before, see
+        # servicemonitors.yaml's header comment on this same gap).
+        metrics:
+          controllerManagerAddr: ":8080"
+          listenerAddr: ":8080"
+          listenerEndpoint: "/metrics"
         # The controller watches AutoscalingRunnerSets cluster-wide (multi-tenant
         # later); flags/SA come from the chart defaults. Pin the runner image +
         # resources at the SCALE-SET level (arc-runner-scaleset-app.yaml), not here.
