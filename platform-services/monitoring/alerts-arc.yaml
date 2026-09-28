@@ -1,0 +1,128 @@
+# ARC (Actions Runner Controller) reconcile-health alerting — the detection gap
+# from the 2026-09-25 / 2026-09-27 / 2026-09-28 CI outages
+# (platform-services/arc/README.md "Incident 2026-09-25 -> 2026-09-28"). Before
+# this file, arc-system exported NO Prometheus metrics at all (chart default:
+# `--metrics-addr=0`), so a 31-hour total CI outage — the controller frozen,
+# reporting `Running 1/1` the entire time — produced zero signal anywhere.
+#
+# ── WHAT WAS ACTUALLY WRONG, IN ONE SENTENCE (see the README for the full story)
+# The `autoscalingrunnerset` controller runs a SINGLE reconcile worker
+# (`controller_runtime_max_concurrent_reconciles{controller="autoscalingrunnerset"}
+# == 1`, confirmed live). A pinned-but-deprecated runner image
+# (`ghcr.io/actions/actions-runner:2.335.1`) made GitHub's broker 403 every
+# runner, which flipped scale sets into a create/teardown loop; one teardown's
+# `DeleteRunnerScaleSet` call against that broken state could block indefinitely,
+# and because there is only one worker, that ONE blocked call froze reconciliation
+# for every AutoscalingRunnerSet in the cluster — all 8 pools, not just the wedged
+# one. The runner image is now pinned to a current, non-deprecated release
+# (applicationsets/arc-runner-scaleset-app.yaml et al.), which removes the
+# TRIGGER. This file adds the alarm for if/when it recurs (a new image
+# deprecation, or the still-open upstream "stuck in Outdated forever" bug —
+# actions/actions-runner-controller#4595/#4596/#4608 — which this platform hit
+# live even on a fresh, correctly-registered scale set and had to clear by hand
+# with `kubectl ... --subresource=status --type=merge -p '{"status":{"phase":
+# "Pending", ...}}'`, the exact workaround documented on #4596).
+#
+# ── WHY TWO ALERTS, NOT ONE ───────────────────────────────────────────────────
+# Same reasoning as alerts-cnpg-backups.yaml: a failure-keyed signal alone has a
+# structural blind spot. ARCControllerDown catches the pod disappearing outright.
+# ARCReconcileStale is the positive-liveness arm — it catches the pod reporting
+# healthy (`Running 1/1`, exactly what fooled everyone for 17h then 31h) while
+# its single reconcile worker is wedged on one blocked call. Neither alone would
+# have caught both real incidents: 2026-09-25/09-27 were exactly the
+# stale-but-Running shape; a future OOM/crash-loop would be the Down shape.
+#
+# ── METRICS USED, VERIFIED LIVE (2026-09-28, this cluster, via the new
+#    arc-gha-rs-controller PodMonitor in servicemonitors.yaml) ────────────────
+#   controller_runtime_max_concurrent_reconciles{controller="autoscalingrunnerset"} = 1
+#   workqueue_longest_running_processor_seconds{controller="autoscalingrunnerset"}
+#     — seconds the CURRENT item at the head of the queue has been in progress.
+#     0 when idle; climbs continuously and NEVER resets while stuck (that is
+#     exactly what a permanently blocked reconcile looks like on this metric) — a
+#     healthy reconcile finishes in low single-digit seconds, so any sustained
+#     multi-minute value is the freeze, not a slow-but-fine pass.
+#   up{job="monitoring/arc-gha-rs-controller"} — the PodMonitor scrape itself.
+#
+# ⚠ REGISTERED in kustomization.yaml IN THIS SAME COMMIT — see that file's header
+# on why an unregistered file here deploys nothing while looking merged clean.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: platform-arc
+  namespace: monitoring
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    platform.capstone/component: platform
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: arc-reconcile-health
+      rules:
+        # ── (a) The controller-manager pod is gone or its scrape is failing ────
+        # absent() rather than `up == 0`: `up` only exists once a target has been
+        # scraped at least once, so a target that vanished entirely (Service/Pod
+        # deleted, PodMonitor mis-selected) reads as NO SERIES, not a 0 series —
+        # `up == 0` alone would miss exactly that case, the same absent() lesson
+        # as PostgresWALArchivingStalled in alerts-cnpg-backups.yaml.
+        - alert: ARCControllerDown
+          expr: >-
+            up{job="monitoring/arc-gha-rs-controller"} == 0
+            or absent(up{job="monitoring/arc-gha-rs-controller"})
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "ARC controller-manager is down or unscraped"
+            description: >-
+              The gha-runner-scale-set-controller manager in arc-system is not
+              reporting metrics — either the pod is down/crash-looping or the
+              scrape itself is broken. ALL 8 runner pools depend on this single
+              controller (single replica, single AutoscalingRunnerSet reconcile
+              worker) — this is a total-CI-outage-in-progress alert, not a
+              degraded-service one. Check `kubectl -n arc-system get pods` and
+              `kubectl -n arc-system logs deploy/arc-gha-rs-controller --tail=50`.
+
+        # ── (b) The reconcile loop is alive but its single worker is wedged ────
+        # This is the alert that would have caught both 2026-09 outages on hour
+        # one instead of hour 17/31: the pod stayed `Running 1/1` the entire time.
+        # Threshold: a healthy AutoscalingRunnerSet reconcile completes in low
+        # single-digit seconds (verified live: 8 successful reconciles logged
+        # within the first minute of a fresh controller start). 300s (5m) is
+        # generous headroom over that baseline while still catching a genuine
+        # freeze fast — the two real incidents ran 17h and 31h, so this alerts
+        # ~100x faster than the status quo (nothing, ever) even at a
+        # conservative threshold. `for: 10m` on top of the 300s in-expression
+        # bound means the alert only fires once the SAME stuck item has been
+        # blocking the worker for 15 total minutes, which rules out a
+        # momentarily slow-but-legitimate reconcile (e.g. a GitHub API
+        # rate-limit backoff) tripping it.
+        - alert: ARCReconcileStale
+          expr: >-
+            workqueue_longest_running_processor_seconds{job="monitoring/arc-gha-rs-controller", controller="autoscalingrunnerset"} > 300
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "ARC autoscalingrunnerset reconciler has been stuck on one item for {{ $value | humanizeDuration }}"
+            description: >-
+              The controller pod is Running and scraping fine, but its single
+              autoscalingrunnerset reconcile worker
+              (controller_runtime_max_concurrent_reconciles == 1) has been
+              blocked processing ONE item for over 5 minutes. Because there is
+              only one worker, this freezes reconciliation for EVERY
+              AutoscalingRunnerSet in the cluster, not just the stuck one —
+              new jobs on healthy-looking pools will silently queue forever
+              rather than fail. Find the stuck object:
+              `kubectl -n arc-system logs deploy/arc-gha-rs-controller --tail=20`
+              — the last `AutoscalingRunnerSet` log line before the gap names it.
+              If it ends on "deleting runner scale set", suspect a
+              deprecated/broker-rejected runner image on that scale set (see
+              platform-services/arc/README.md incident section) or the upstream
+              "stuck in Outdated" bug (actions/actions-runner-controller#4596) —
+              recover with `kubectl -n arc-runners patch autoscalingrunnerset
+              <name> --subresource=status --type=merge -p
+              '{"status":{"phase":"Pending","currentRunners":0,
+              "pendingEphemeralRunners":0,"runningEphemeralRunners":0}}'`, then
+              restart the controller pod if other pools are also affected.

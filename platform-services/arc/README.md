@@ -124,3 +124,116 @@ fact.
 2cpu/2Gi) are **values knobs** — they cap a Kaniko build burst from OOMing the
 laptop and scale up on real hardware (Phase-4). Box has ample headroom
 (24c/62Gi/931G).
+
+## Incident 2026-09-25 → 2026-09-28 — controller freeze root cause + fix
+
+Two real contributing causes were fixed first (chart/Application changes,
+merged in #693, don't redo): the controller's VPA was `updateMode: Auto` on a
+single-replica Deployment (an eviction mid-reconcile truncated a
+delete/recreate and permanently stripped a scale set's `runner-scale-set-id`
+annotation), and ArgoCD's `selfHeal` + `ServerSideApply` had no
+`ignoreDifferences` on `AutoscalingRunnerSet` `/metadata/annotations`, so it
+was stripping the controller's own registration annotations back out and
+making the controller think a healthy scale set was "outdated". Both fixed;
+see the VPA policy (`platform-services/vpa-policies/edge-and-controllers-vpa.yaml`)
+and the `ignoreDifferences` block present in all three places a runner scale
+set is rendered (`applicationsets/arc-runner-scaleset-app.yaml`,
+`platform-services/arc/per-team/runner-scaleset-app.template.yaml`,
+`platform-services/crossplane/apis/composition.yaml`).
+
+**The actual root cause survived both fixes**: the pinned runner image,
+`ghcr.io/actions/actions-runner:2.335.1`, had aged into a **GitHub-side
+deprecated runner version**. GitHub deprecates old `actions-runner` releases on
+a rolling few-month window; a deprecated runner's broker poll comes back
+`403 Runner version vX.Y.Z is deprecated and cannot receive messages`, the
+runner pod exits, and the `EphemeralRunnerSet` cycles 1→0 with no job ever
+served. That scale-to-zero-with-no-service transition is what flips the
+`AutoscalingRunnerSet` into `status.phase: Outdated` on almost every
+reconcile — confirmed against `actions/actions-runner-controller` issues
+[#4595](https://github.com/actions/actions-runner-controller/issues/4595),
+[#4596](https://github.com/actions/actions-runner-controller/issues/4596), and
+[#4608](https://github.com/actions/actions-runner-controller/issues/4608)
+(all open, unfixed upstream as of chart `0.14.2`, still the latest chart
+release — **there is no chart/controller version to upgrade to**; the fix is
+the runner image tag, not the Helm chart), and the exact failure mode reported
+independently in
+[actions/runner#4392](https://github.com/actions/runner/issues/4392) and
+[actions/runner#3767](https://github.com/actions/runner/issues/3767). This
+repo already carried a comment recording the identical symptom once before
+(`2.328.0 deprecated by GitHub — couldn't connect to the broker`, bumped to
+2.335.1) — that bump was never revisited and 2.335.1 silently aged into the
+same state.
+
+Why one deprecated runner froze the **entire** controller, not just its own
+pool: the `autoscalingrunnerset` controller runs a single reconcile worker
+(`Starting workers ... worker count: 1` at controller startup — confirmed live
+in this cluster's own logs). The `DeleteRunnerScaleSet` call the controller
+makes against the Actions service as the last step of tearing down an
+`Outdated` scale set is not guarded by a request-scoped timeout in this chart
+version; against a scale set already in the broken broker-403 state that call
+can block indefinitely, and because there is only one worker, that one blocked
+call halts reconciliation for **every** `AutoscalingRunnerSet` in the cluster,
+not just the wedged one — matching this incident exactly: two independent
+17h/31h total-CI-outage events, each ending on `deleting runner scale set` as
+the last log line, and a live re-freeze observed on 2026-09-28 within
+seconds of a manual controller restart (`mychef-kaniko` then `ua-mis-kaniko`,
+both already in the broken state, both hung the next reconcile immediately).
+
+**Fix applied**: bump the pinned runner image to `2.337.0` (current latest
+`actions/runner` release, un-deprecated) in all three render sites, listed
+above. Bump this **proactively** going forward — don't wait for the symptom —
+and watch the new `ARCReconcileStale` / `ARCControllerDown` alerts
+(`platform-services/monitoring/alerts-arc.yaml`).
+
+**Stop-the-bleeding steps taken live in-cluster before this PR** (not yet
+reflected in git until merge): `platform-arc-runner-mychef` and
+`platform-arc-runner-scaleset` (ua-mis) had `syncPolicy.automated` cleared and
+their broken `AutoscalingRunnerSet` objects deleted, mirroring the existing
+`curb` safe-state, to stop the controller from re-entering the freeze while
+the fix above was being prepared and verified. All three are restored under
+the fixed runner image (see rollback plan in the PR description) with
+automated sync re-enabled once verified against a deliberate delete/recreate
+cycle.
+
+### A second, SEPARATE, still-open bug — honest disclosure
+
+Verification surfaced a second bug in this same controller version that the
+runner-image fix does **not** touch and did **not** cause. After a scale set
+processes a real job and scales back to 0, the `AutoscalingRunnerSet` can flip
+to `status.phase: Outdated` and **never recover on its own** — reproduced live,
+repeatedly, this session, on `ua-mis-kaniko`, `curb-kaniko`, `mychef-kaniko`,
+and `ida-llm-kaniko` (the last of those untouched for 40+ minutes beforehand,
+so this is not an artifact of the live testing above). This is
+[actions/actions-runner-controller#4596](https://github.com/actions/actions-runner-controller/issues/4596)
+/ [#4595](https://github.com/actions/actions-runner-controller/issues/4595) /
+[#4608](https://github.com/actions/actions-runner-controller/issues/4608) — all
+open upstream, no fix released as of chart `0.14.2` (still current). Recovery
+is the workaround documented on #4596:
+```
+kubectl -n arc-runners patch autoscalingrunnerset <name> \
+  --subresource=status --type=merge \
+  -p '{"status":{"phase":"Pending","currentRunners":0,
+       "pendingEphemeralRunners":0,"runningEphemeralRunners":0}}'
+```
+**Why this is a materially smaller problem than the outage this PR fixes**: the
+flip happens to ONE object, after its job already ran (confirmed — the
+`ua-mis-kaniko` job proof below completed successfully before that scale set
+later flipped), and it does not block any other `AutoscalingRunnerSet`'s
+reconcile — every other pool kept working throughout. That is the direct
+payoff of removing the deprecated-runner trigger: the SAME upstream "stuck in
+Outdated" behavior no longer has a path to freeze the single shared reconcile
+worker and take down all 8 pools with it — worst case now is one pool
+queuing jobs until someone (or an alert) notices and runs the one-line patch
+above, not a 31-hour blackout.
+
+**Known gap**: `ARCReconcileStale` (below) does **not** catch this — a
+stuck-in-Outdated object isn't an active reconcile hogging the worker, it's a
+reconcile that finished and never got re-triggered, so
+`workqueue_longest_running_processor_seconds` stays at 0. Catching this
+properly needs the object's `.status.phase` as a metric, e.g. a
+kube-state-metrics `CustomResourceState` config for `AutoscalingRunnerSet`
+(the same mechanism `platform-services/monitoring/crossplane-mr-metrics.yaml`
+already uses for the 11 Crossplane MR kinds) alerting on
+`phase="Outdated"` persisting past a few minutes. Left as a follow-up, not
+bodged into this PR — flagging it explicitly rather than shipping a
+false sense of complete coverage.

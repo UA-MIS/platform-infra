@@ -274,7 +274,11 @@ spec:
                 type: RuntimeDefault
             containers:
               - name: runner
-                image: ghcr.io/actions/actions-runner:2.335.1
+                # KEEP IN SYNC with applicationsets/arc-runner-scaleset-app.yaml and
+                # platform-services/crossplane/apis/composition.yaml — see that file's
+                # comment for why this version pin is a live outage root cause, not
+                # cosmetic (2026-09-25/09-27 CI outages, platform-services/arc/README.md).
+                image: ghcr.io/actions/actions-runner:2.337.0
                 command: ["/home/runner/run.sh"]
                 securityContext:
                   allowPrivilegeEscalation: false

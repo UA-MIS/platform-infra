@@ -2136,7 +2136,11 @@ spec:
                                   type: RuntimeDefault
                               containers:
                                 - name: runner
-                                  image: ghcr.io/actions/actions-runner:2.335.1
+                                  # KEEP IN SYNC with applicationsets/arc-runner-scaleset-app.yaml
+                                  # and platform-services/arc/per-team/runner-scaleset-app.template.yaml
+                                  # — root cause of the 2026-09-25/09-27 CI outages, see that file's
+                                  # comment and platform-services/arc/README.md.
+                                  image: ghcr.io/actions/actions-runner:2.337.0
                                   command: ["/home/runner/run.sh"]
                                   securityContext:
                                     allowPrivilegeEscalation: false

@@ -175,6 +175,12 @@ resources:
   # (mis321-demo-prod). One-off, not a namespace-templated tenant view, so it
   # gets its own "MIS 321" folder, same reasoning as Crimson Copies above.
   - dashboard-mis321-tapwar.yaml
+  # ARC reconcile-health alerting (2026-09-25/09-27/09-28 CI-outage root-cause
+  # PR). Read alerts-arc.yaml's header before touching it — the ARC controller
+  # exported NO metrics at all before this file's PodMonitor (servicemonitors.yaml)
+  # made the series exist; ARCReconcileStale/ARCControllerDown are inert without
+  # it, same required-pairing as scrape-velero.yaml/alerts-velero.yaml above.
+  - alerts-arc.yaml
 
 labels:
   - pairs:
