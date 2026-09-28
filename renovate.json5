@@ -1,0 +1,389 @@
+// Renovate config for platform-infra.
+//
+// WHY THIS EXISTS (read before editing): the 2026-09-25..09-28 CI outage (~48h,
+// every team) was caused by ghcr.io/actions/actions-runner:2.335.1 aging into a
+// GitHub-deprecated version. It was pinned in FOUR places, nothing watched it,
+// and the failure surfaced as a frozen ARC controller, not an error message
+// (see platform-services/monitoring/alerts-arc.yaml and platform-services/arc/
+// README.md "Incident 2026-09-25 -> 2026-09-28"). This config's job is "nothing
+// pinned goes unwatched" -- it is deliberately narrow in *what kinds* of files it
+// touches (infra pins: container images, Helm chart versions, GitHub Actions) and
+// deliberately excludes application dependency managers (npm/yarn under
+// platform-services/backstage/app and the scaffolder templates) -- those are a
+// different risk surface with their own churn profile and are out of scope here.
+//
+// See docs/operator/renovate.md for the full inventory, the deliberate-pin
+// exceptions and why each one exists, and the actions-runner-deprecation-check
+// workflow that covers what Renovate structurally cannot (a pin being *newer*
+// vs. a pin being *deprecated* are different questions -- Renovate only answers
+// the first).
+{
+  $schema: 'https://docs.renovatebot.com/renovate-schema.json',
+  // helpers:pinGitHubActionDigests: a few `actions/checkout@v4` floating refs
+  // remain, inconsistent with the repo's own SHA-pinning convention
+  // elsewhere -- same "nothing floating, unattended" principle applied to
+  // Actions themselves.
+  extends: ['config:recommended', 'helpers:pinGitHubActionDigests'],
+
+  dependencyDashboard: true,
+  dependencyDashboardTitle: 'Renovate Dashboard: pinned versions (platform-infra)',
+  dependencyDashboardHeader: "This dashboard is the handoff artifact: it lists every pinned version this config tracks, without anyone having to read every file. See docs/operator/renovate.md for what is deliberately excluded and why (node 24.16 keepAlive regression, rook-ceph v1.20 CSI migration, CNPG Postgres major version, this platform's own CI-built images). PRs only -- nothing here auto-merges.",
+
+  labels: ['renovate', 'dependencies'],
+  timezone: 'America/Chicago',
+
+  // Grouped weekly batches, not a PR storm. Security PRs are carved out below
+  // and are NOT subject to this schedule.
+  schedule: ['before 6am on monday'],
+  prConcurrentLimit: 12,
+  prHourlyLimit: 0,
+
+  semanticCommits: 'enabled',
+  commitMessagePrefix: 'chore(deps):',
+  commitMessageAction: 'update',
+  commitMessageTopic: '{{depName}}',
+
+  // PRs only. No automerge anywhere, full stop -- this platform already has
+  // enough silent-failure modes without adding an unattended-merge one.
+  automerge: false,
+  platformAutomerge: false,
+  rebaseWhen: 'conflicted',
+
+  // Explicit allow-list. config:recommended would otherwise also spin up the
+  // npm manager against platform-services/backstage/app's yarn.lock (a
+  // different, much noisier dependency surface, out of scope for this pass --
+  // see docs/operator/renovate.md "What's not covered").
+  enabledManagers: [
+    'dockerfile',
+    'github-actions',
+    'kubernetes',
+    'argocd',
+    'custom.regex',
+  ],
+
+  dockerfile: {
+    // Native manager, default managerFilePatterns already catches every
+    // Dockerfile* in the repo, including the deliberately-pinned backend one
+    // (see packageRules below) and the distroless/base-image FROM lines in
+    // the scaffolder skeleton fragments.
+    enabled: true,
+  },
+
+  'github-actions': {
+    enabled: true,
+  },
+
+  kubernetes: {
+    // Off by default (managerFilePatterns: [] upstream) -- must be told
+    // where the real Deployment/StatefulSet/CronJob/Job manifests with a
+    // literal `image:` field live. Curated allow-list, not a blanket
+    // platform-services/**/*.yaml: this repo also has Helm chart values
+    // files, Crossplane Composition/XRD YAML, and Backstage software-template
+    // skeletons living under platform-services/, and none of those parse as
+    // plain Kubernetes workload manifests (nor should Renovate try). Every
+    // file below was confirmed by grep to contain a real `image:` field.
+    managerFilePatterns: [
+      'platform-services/agile/deployment.yaml',
+      'platform-services/cf-vm-access/cronjob.yaml',
+      'platform-services/cloudflared/deployment.yaml',
+      'platform-services/cohort-gc/cohort-cleanup-cronjob.yaml',
+      'platform-services/cohort-gc/preview-ttl-cronjob.yaml',
+      'platform-services/crossplane-mr-prune/cronjob.yaml',
+      'platform-services/db-admin/deployment.yaml',
+      'platform-services/db-console-auth/deployment.yaml',
+      'platform-services/dex/deployment.yaml',
+      'platform-services/external-secrets/vault-policies/backstage-writer-semantics-test.yaml',
+      'platform-services/harbor-base-images/dockerhub-mirror-cronjob.yaml',
+      'platform-services/harbor-oidc-config/configure-oidc-job.yaml',
+      'platform-services/harbor-onboarding/onboard-team-job.yaml',
+      'platform-services/harbor-retention-gc-config/configure-retention-gc-job.yaml',
+      'platform-services/lab-db/adminer.yaml',
+      'platform-services/lab-db/mariadb.yaml',
+      'platform-services/labmx/deployment-attendance.yaml',
+      'platform-services/labmx/deployment-hub.yaml',
+      'platform-services/local-path-provisioner/configmap.yaml',
+      'platform-services/local-path-provisioner/deployment.yaml',
+      'platform-services/minio/minio-provision-job.yaml',
+      'platform-services/minio/statefulset.yaml',
+      'platform-services/monitoring/crossplane-mr-metrics.yaml',
+      'platform-services/monitoring/ntfy.yaml',
+      'platform-services/monitoring/tempo.yaml',
+      'platform-services/monitoring/thanos.yaml',
+      'platform-services/npm-mirror/statefulset.yaml',
+      'platform-services/portal-tenants-refresh/cronjob.yaml',
+      'platform-services/portal-tenants-refresh/seed-job.yaml',
+      'platform-services/portal/deployment.yaml',
+      'platform-services/spire/demo-workload.yaml',
+      'platform-services/vault/raft-snapshot.yaml',
+      'platform-services/vault/transit-token-renewer.yaml',
+    ],
+  },
+
+  argocd: {
+    // Native manager: reads spec.source.{repoURL,chart,targetRevision} on
+    // plain `kind: Application` manifests. Covers every Helm-sourced
+    // ArgoCD Application in applicationsets/ (harbor, traefik, kyverno,
+    // rook-ceph, cnpg-operator, mariadb-operator, vault, external-secrets,
+    // kube-prometheus-stack, loki, alloy, otel-collector, velero, goldilocks,
+    // vpa, reloader, descheduler, metrics-server, argo-rollouts, opencost,
+    // minio, gha-runner-scale-set + -controller, crossplane-core). It does
+    // NOT see raw `image:` strings baked into an Application's `values: |`
+    // block (that's a YAML string scalar, not structured YAML) -- those are
+    // covered by the custom regex managers below.
+    managerFilePatterns: ['applicationsets/*.yaml'],
+  },
+
+  customManagers: [
+    // ------------------------------------------------------------------
+    // 1) ARC runner image -- the actual outage cause. Pinned in THREE
+    //    places that the repo's own comments say must change together
+    //    ("Change ALL THREE or none"): the ApplicationSet's Helm values
+    //    blob, the Crossplane Composition base, and the per-team Go
+    //    template. One depName across all three files + a groupName
+    //    packageRule below forces one atomic PR instead of three
+    //    independent (and driftable) ones.
+    // ------------------------------------------------------------------
+    {
+      customType: 'regex',
+      description: 'ARC runner image (ghcr.io/actions/actions-runner) -- 3 sync locations',
+      managerFilePatterns: [
+        'applicationsets/arc-runner-scaleset-app.yaml',
+        'platform-services/crossplane/apis/composition.yaml',
+        'platform-services/arc/per-team/runner-scaleset-app.template.yaml',
+      ],
+      matchStrings: [
+        'image:\\s*ghcr\\.io/actions/actions-runner:(?<currentValue>[0-9.]+)',
+      ],
+      depNameTemplate: 'ghcr.io/actions/actions-runner',
+      datasourceTemplate: 'docker',
+      versioningTemplate: 'docker',
+    },
+
+    // ------------------------------------------------------------------
+    // 2) Single-line `image: repo:tag` embedded in an Application's Helm
+    //    values block (rook-ceph's Ceph image, MariaDB's server image, the
+    //    kube-prometheus-stack Thanos sidecar). Excludes
+    //    arc-runner-scaleset-app.yaml (owned by manager #1 above, to avoid
+    //    two managers matching the same line).
+    // ------------------------------------------------------------------
+    {
+      customType: 'regex',
+      description: 'Container images embedded in ArgoCD Application Helm values blocks (single-line repo:tag form)',
+      managerFilePatterns: [
+        'applicationsets/rook-ceph-cluster-app.yaml',
+        'applicationsets/mariadb-cluster-app.yaml',
+        'applicationsets/kube-prometheus-stack-app.yaml',
+      ],
+      matchStrings: [
+        'image:\\s*"?(?<depName>[a-zA-Z0-9-]+(?:\\.[a-zA-Z0-9-]+)*(?:/[a-zA-Z0-9._-]+)+):(?<currentValue>[a-zA-Z0-9._-]+)"?\\s*(?:#.*)?$',
+      ],
+      datasourceTemplate: 'docker',
+    },
+
+    // ------------------------------------------------------------------
+    // 3) Split `image: { repository:, tag: }` form embedded in Helm values
+    //    blocks (Vault, Vault unsealer, otel-collector).
+    // ------------------------------------------------------------------
+    {
+      customType: 'regex',
+      description: 'Container images embedded in ArgoCD Application Helm values blocks (split repository/tag form)',
+      managerFilePatterns: [
+        'applicationsets/vault-app.yaml',
+        'applicationsets/vault-unsealer-app.yaml',
+        'applicationsets/otel-collector-app.yaml',
+      ],
+      matchStrings: [
+        'repository:\\s*"?(?<depName>[a-zA-Z0-9-]+(?:\\.[a-zA-Z0-9-]+)*(?:/[a-zA-Z0-9._-]+)+)"?\\s*\\n\\s*tag:\\s*"?(?<currentValue>[a-zA-Z0-9._-]+)"?',
+      ],
+      matchStringsStrategy: 'any',
+      datasourceTemplate: 'docker',
+    },
+
+    // ------------------------------------------------------------------
+    // 4) CNPG Postgres image -- CloudNativePG's `Cluster.spec.imageName`.
+    //    Real Kubernetes CRs, but `Cluster` isn't a workload kind the
+    //    built-in kubernetes manager recognizes, and the field is
+    //    `imageName`, not `image`. Two clusters (platform + tenant),
+    //    pinned identically -- grouped below.
+    // ------------------------------------------------------------------
+    {
+      customType: 'regex',
+      description: 'CNPG Postgres image (Cluster.spec.imageName)',
+      managerFilePatterns: [
+        'platform-services/cnpg/cluster/cluster.yaml',
+        'platform-services/cnpg/tenant-cluster/cluster.yaml',
+      ],
+      matchStrings: [
+        'imageName:\\s*(?<depName>ghcr\\.io/cloudnative-pg/postgresql):(?<currentValue>[\\w.-]+)',
+      ],
+      datasourceTemplate: 'docker',
+      // CNPG tags are `<pg-major>.<pg-minor>-<buildstamp>-<flavor>`, e.g.
+      // 17.9-202605110912-standard-trixie -- not strict semver. This teaches
+      // Renovate the major.minor.patch ordering so it can tell a same-major
+      // rebuild apart from a Postgres major-version bump (the latter needs
+      // pg_upgrade and a human, never a routine PR -- see packageRules).
+      versioningTemplate: 'regex:^(?<major>\\d+)\\.(?<minor>\\d+)-(?<patch>\\d+)-(?<compatibility>.*)$',
+    },
+
+    // ------------------------------------------------------------------
+    // 5) The dockerhub-mirror pre-cache list. Tag-based entries only
+    //    (`repo:tag [source]`); digest-pinned entries (`repo@sha256:...`)
+    //    are excluded by construction (the pattern requires no `@` on the
+    //    line) because those are deliberately bumped by hand via the
+    //    Replication MRs in the same directory, per that file's own header.
+    // ------------------------------------------------------------------
+    {
+      customType: 'regex',
+      description: 'dockerhub-mirror-configmap.yaml tag-based pre-cache entries',
+      managerFilePatterns: [
+        'platform-services/harbor-base-images/dockerhub-mirror-configmap.yaml',
+      ],
+      // Anchored to the whole line (indentation -> optional trailing source
+      // column) on purpose: a digest-pinned line (`repo@sha256:<hex> source`)
+      // cannot match here because `@` is not in the depName character class,
+      // so the anchored match fails at its only valid start position instead
+      // of finding a false-positive substring further into the line.
+      matchStrings: [
+        '^\\s+(?<depName>[a-zA-Z0-9-]+(?:\\.[a-zA-Z0-9-]+)*(?:/[a-zA-Z0-9._-]+)+):(?<currentValue>[a-zA-Z0-9._-]+)(?:\\s+\\S+)?\\s*$',
+      ],
+      datasourceTemplate: 'docker',
+    },
+  ],
+
+  packageRules: [
+    // ==================================================================
+    // DELIBERATE PINS -- do not remove these without re-reading why.
+    // ==================================================================
+
+    // node:24.16 (backend Dockerfile ARG). 24.17 shipped a keepAlive
+    // regression (Node CVE-2026-48931 fix) that broke @backstage/
+    // catalog-client's localhost fetch and caused an infinite OIDC
+    // sign-in loop (Backstage issue #34651, this platform's M2 incident).
+    // Allow digest refreshes ONLY (picks up trixie OS security patches on
+    // the same 24.16 tag) -- never a version bump off 24.16.
+    // Matched on currentValue rather than a specific file/packageName on
+    // purpose: node:24.16 shows up under several different depNames across
+    // the repo depending on registry prefix --
+    // `docker.io/library/node` (backend Dockerfile ARG, the actual
+    // regression pin), `library/node` (dockerhub-mirror-configmap.yaml's
+    // pre-cache entries), and
+    // `harbor.capstone.uamishub.com/dockerhub-proxy/library/node` (CI job
+    // containers in portal-tests.yaml / ci-scripts-sync-check.yaml that were
+    // bumped to the same 24.16 in lockstep, found by dry-run: see
+    // docs/operator/renovate.md verification section). A currentValue match
+    // catches all of them without needing to keep the packageName list in
+    // sync by hand every time a new proxy/mirror path is added.
+    {
+      description: 'node:24.16.x is pinned repo-wide for the Backstage catalog-client keepAlive regression -- digest refreshes only, never a version bump off 24.16',
+      matchDatasources: ['docker'],
+      matchPackageNames: ['**/node', 'node'],
+      matchCurrentValue: '/^24\\.16/',
+      matchUpdateTypes: ['major', 'minor', 'patch', 'replacement', 'rollback'],
+      enabled: false,
+    },
+
+    // rook-ceph / rook-ceph-cluster charts: pinned to v1.19.x on purpose.
+    // v1.20 changes the CSI driver deployment model (mandatory CSI-operator
+    // migration) -- see applicationsets/rook-ceph-operator-app.yaml header.
+    // Allow patch/minor movement within 1.19.x (still useful, still safe);
+    // never let Renovate propose 1.20+ as a routine bump.
+    {
+      description: 'rook-ceph charts: stay on v1.19.x until the CSI-operator migration is done deliberately',
+      matchManagers: ['argocd'],
+      matchPackageNames: ['rook-ceph', 'rook-ceph-cluster'],
+      allowedVersions: '<1.20.0',
+    },
+
+    // CNPG Postgres image: never auto-propose a Postgres MAJOR version bump.
+    // That needs pg_upgrade and a human, not a Monday batch PR. Minor/patch
+    // (build/flavor refresh within PG 17) stays enabled.
+    {
+      description: 'CNPG Postgres image: never auto-bump the Postgres major version (needs pg_upgrade, human-led)',
+      matchPackageNames: ['ghcr.io/cloudnative-pg/postgresql'],
+      matchUpdateTypes: ['major'],
+      enabled: false,
+    },
+
+    // MariaDB cluster image: pinned to 11.8.8 for version parity with the
+    // off-cluster ua-mis-db-1 box (applicationsets/mariadb-cluster-app.yaml).
+    // Stay inside 11.8.x; a minor/major bump would break that parity and
+    // needs a deliberate, coordinated bump of both sides.
+    {
+      description: 'mariadb image: version-parity pin with the off-cluster DB box -- stay in 11.8.x',
+      matchPackageNames: ['mariadb'],
+      matchFileNames: ['applicationsets/mariadb-cluster-app.yaml'],
+      allowedVersions: '<11.9.0',
+    },
+
+    // This platform's OWN application images, bumped by its own CI
+    // (bump-dev/bump-portal/promote-to-prod, "ci: bump image to <sha>
+    // [skip ci]" commits) -- not vendor dependencies Renovate can
+    // meaningfully version-check. Leave them to the existing pipeline.
+    {
+      description: "This platform's own CI-built images (agile-board, backstage, labmx) -- excluded, bumped by the existing pipeline",
+      matchDatasources: ['docker'],
+      matchPackageNames: [
+        'harbor.capstone.uamishub.com/platform/**',
+        'harbor.capstone.uamishub.com/labmx/**',
+        'harbor.capstone.uamishub.com/backstage/**',
+      ],
+      enabled: false,
+    },
+
+    // ==================================================================
+    // GROUPING -- atomic multi-location bumps and weekly batches.
+    // ==================================================================
+
+    // The actual outage cause: force one PR across all 3 sync locations.
+    {
+      description: 'ARC runner image must move in lockstep across all 3 pinned locations',
+      matchPackageNames: ['ghcr.io/actions/actions-runner'],
+      groupName: 'ARC runner image (3 sync locations)',
+      commitMessageTopic: 'ghcr.io/actions/actions-runner (3 sync locations)',
+      schedule: ['at any time'],
+      prPriority: 5,
+    },
+
+    // Thanos sidecar image is pinned identically in two places on purpose
+    // (applicationsets/kube-prometheus-stack-app.yaml's comment: "matches
+    // platform-services/monitoring/thanos.yaml"). Move together.
+    {
+      description: 'Thanos image must stay identical between the Prometheus sidecar config and the standalone Thanos deployment',
+      matchPackageNames: ['quay.io/thanos/thanos'],
+      groupName: 'Thanos image (kube-prometheus-stack sidecar + monitoring/thanos.yaml)',
+    },
+
+    {
+      description: 'Weekly batch: Dockerfile base images',
+      matchManagers: ['dockerfile'],
+      groupName: 'Docker base images',
+    },
+    {
+      description: 'Weekly batch: Kubernetes manifest images',
+      matchManagers: ['kubernetes', 'custom.regex'],
+      groupName: 'Kubernetes / embedded container images',
+    },
+    {
+      description: 'Weekly batch: ArgoCD Helm chart versions',
+      matchManagers: ['argocd'],
+      groupName: 'ArgoCD Helm chart versions',
+    },
+    {
+      description: 'Weekly batch: GitHub Actions',
+      matchManagers: ['github-actions'],
+      groupName: 'GitHub Actions',
+    },
+  ],
+
+  // Security updates are carved OUT of the weekly-batch groups above and are
+  // never folded into one of them -- they get their own PR, their own label,
+  // and run any day, not just Monday (top-level vulnerabilityAlerts always
+  // takes priority over a matching packageRules groupName).
+
+  vulnerabilityAlerts: {
+    enabled: true,
+    labels: ['security'],
+    schedule: ['at any time'],
+    dependencyDashboardApproval: false,
+  },
+}

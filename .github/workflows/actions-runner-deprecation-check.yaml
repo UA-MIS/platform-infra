@@ -1,0 +1,174 @@
+# ============================================================================
+# actions-runner-deprecation-check.yaml
+#
+# WHY THIS EXISTS: Renovate (renovate.json5) tells you when actions-runner has
+# a NEWER release. It does not tell you when the version you already have
+# pinned has aged into a GitHub-DEPRECATED one -- that is a different question,
+# and it is the one that actually caused the 2026-09-25..09-28 outage.
+# ghcr.io/actions/actions-runner:2.335.1 was pinned in 4 places, nothing was
+# newer at the time, and it still got rejected: GitHub deprecates old runner
+# versions on a rolling few-month window (see platform-services/arc/README.md
+# and platform-services/monitoring/alerts-arc.yaml), independent of whether a
+# newer release exists yet. This workflow closes that specific gap.
+#
+# WHAT IT DOES, small and obvious on purpose:
+#   1. Reads the pinned version out of all 3 sync locations (the exact files
+#      renovate.json5's ARC-runner customManager also watches) and fails loudly
+#      if they disagree -- that is the "change all three or none" invariant,
+#      checked mechanically instead of by memory.
+#   2. Fetches actions/runner's release list from the GitHub API.
+#   3. There is no public "is version X deprecated right now" endpoint --
+#      GitHub's broker enforces that server-side, not through releases data.
+#      This is a HEURISTIC early-warning, not a guarantee: it fails loudly if
+#      the pinned version is not the latest release AND that pinned version's
+#      release is older than DEPRECATION_WARN_DAYS (75, comfortably inside the
+#      "few months" window the postmortem observed). Treat a failure here as
+#      "go check/bump now", and treat a pass as "no known risk today" -- not as
+#      proof GitHub won't deprecate it tomorrow.
+#
+# Runs weekly + on demand. Opens/updates a single tracking issue instead of
+# just failing red into the void, so this surfaces the same way the ARC
+# reconcile-health alerts do: loud, not silent.
+# ============================================================================
+name: actions-runner-deprecation-check
+
+on:
+  schedule:
+    - cron: '17 13 * * 1' # weekly, Monday ~13:17 UTC (offset from Renovate's own Monday run)
+  workflow_dispatch:
+    inputs:
+      override_version:
+        description: 'Check this version instead of what is pinned in-repo (for testing the check itself, e.g. 2.328.0)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  DEPRECATION_WARN_DAYS: 75
+  PINNED_FILES: >-
+    applicationsets/arc-runner-scaleset-app.yaml
+    platform-services/crossplane/apis/composition.yaml
+    platform-services/arc/per-team/runner-scaleset-app.template.yaml
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Extract pinned version from all 3 sync locations and confirm they agree
+        id: pinned
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.override_version }}" ]; then
+            echo "version=${{ inputs.override_version }}" >> "$GITHUB_OUTPUT"
+            echo "Testing override version ${{ inputs.override_version }} (not reading pinned files)."
+            exit 0
+          fi
+
+          versions=""
+          for f in $PINNED_FILES; do
+            v=$(grep -oE 'ghcr\.io/actions/actions-runner:[0-9]+\.[0-9]+\.[0-9]+' "$f" | head -1 | cut -d: -f2)
+            if [ -z "$v" ]; then
+              echo "::error file=$f::No ghcr.io/actions/actions-runner:X.Y.Z pin found. This file is supposed to be one of the 3 sync locations -- did it move?"
+              exit 1
+            fi
+            echo "$f -> $v"
+            versions="$versions $v"
+          done
+
+          # Confirm all 3 agree -- the "change all three or none" invariant,
+          # checked mechanically.
+          uniq_count=$(echo "$versions" | tr ' ' '\n' | sed '/^$/d' | sort -u | wc -l)
+          if [ "$uniq_count" -ne 1 ]; then
+            echo "::error::The 3 pinned locations DISAGREE on the actions-runner version ($versions). They must move together -- see the header comment in any of: $PINNED_FILES"
+            exit 1
+          fi
+
+          pinned=$(echo "$versions" | tr ' ' '\n' | sed '/^$/d' | sort -u)
+          echo "All 3 locations agree: $pinned"
+          echo "version=$pinned" >> "$GITHUB_OUTPUT"
+
+      - name: Compare against GitHub's actions/runner releases and evaluate risk
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PINNED: ${{ steps.pinned.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          latest_tag=$(gh api repos/actions/runner/releases/latest -q '.tag_name' | sed 's/^v//')
+          echo "Latest actions/runner release: $latest_tag"
+          echo "Pinned version: $PINNED"
+
+          if [ "$PINNED" = "$latest_tag" ]; then
+            echo "status=ok" >> "$GITHUB_OUTPUT"
+            echo "reason=Pinned version $PINNED is the latest release. No deprecation risk from staleness." >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          published_at=$(gh api repos/actions/runner/releases/tags/v"$PINNED" -q '.published_at' 2>/dev/null || echo "")
+          if [ -z "$published_at" ]; then
+            echo "status=unknown" >> "$GITHUB_OUTPUT"
+            echo "reason=Pinned version $PINNED not found in actions/runner releases at all -- it may already be pulled/yanked. Treat as HIGH risk and bump now." >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          published_epoch=$(date -d "$published_at" +%s)
+          now_epoch=$(date +%s)
+          age_days=$(( (now_epoch - published_epoch) / 86400 ))
+          echo "Pinned version $PINNED was released $age_days days ago ($published_at)."
+
+          if [ "$age_days" -ge "$DEPRECATION_WARN_DAYS" ]; then
+            echo "status=stale" >> "$GITHUB_OUTPUT"
+            echo "reason=Pinned version $PINNED is $age_days days old (>= ${DEPRECATION_WARN_DAYS}d threshold) and is not the latest ($latest_tag). GitHub deprecates runner versions on a rolling few-month window (see platform-services/arc/README.md) -- this is now inside the risk window. Bump it proactively, before the broker starts rejecting it." >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          echo "status=ok" >> "$GITHUB_OUTPUT"
+          echo "reason=Pinned version $PINNED is $age_days days old, behind latest ($latest_tag) but still comfortably inside the ${DEPRECATION_WARN_DAYS}d warning window." >> "$GITHUB_OUTPUT"
+
+      - name: Open/update tracking issue on risk
+        if: failure() && inputs.override_version == ''
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const title = 'actions-runner deprecation risk detected';
+            const body = [
+              `Pinned version: \`${{ steps.pinned.outputs.version }}\``,
+              `Status: \`${{ steps.check.outputs.status }}\``,
+              '',
+              '${{ steps.check.outputs.reason }}',
+              '',
+              'Bump `ghcr.io/actions/actions-runner` in all 3 sync locations (see the header comment in `applicationsets/arc-runner-scaleset-app.yaml`) to the latest release, in one PR, same as `fix(arc): bump deprecated runner image` (#694).',
+              '',
+              '_Opened automatically by .github/workflows/actions-runner-deprecation-check.yaml_',
+            ].join('\n');
+
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'actions-runner-deprecation',
+            });
+            const existing = issues.find((i) => i.title === title);
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['actions-runner-deprecation', 'security'],
+              });
+            }
