@@ -150,6 +150,15 @@ def test_get_cached_key_returns_none_when_absent(app_module):
     )
 
 
+def test_init_db_locks_down_file_permissions(app_module, tmp_path):
+    """The db holds raw LiteLLM keys in the clear -- it must be
+    owner-only (0600), and its parent directory owner-only (0700)."""
+    db_path = tmp_path / "sub" / "perm-test.db"
+    app_module.init_db(str(db_path))
+    assert oct(db_path.stat().st_mode)[-3:] == "600"
+    assert oct(db_path.parent.stat().st_mode)[-3:] == "700"
+
+
 def test_issue_key_stores_in_db_and_calls_litellm_with_master_key(
     app_module, mocker, fake_response
 ):
@@ -169,6 +178,27 @@ def test_issue_key_stores_in_db_and_calls_litellm_with_master_key(
     assert (
         app_module.get_cached_key(config.db_path, "new@crimson.ua.edu")
         == "sk-newkey123"
+    )
+
+
+def test_issue_key_never_sets_user_id(app_module, mocker, fake_response):
+    """Regression test for the shipped promotion bug (2026-09-29): a key
+    generated with user_id=email can never be promoted via /key/update,
+    because LiteLLM's team-membership check keys off key.user_id and no
+    User/membership row is ever created for that literal string (see
+    issue_key()'s docstring and test_live_integration.py for the live
+    proof). The payload sent to /key/generate must not contain
+    "user_id" at all -- not None, not the email, absent."""
+    config = app_module.CONFIG
+    post_mock = mocker.patch(
+        "app.httpx.post", return_value=fake_response({"key": "sk-nouserid"})
+    )
+    app_module.issue_key(config, "nouserid@crimson.ua.edu", config.pending_team_id)
+    assert "user_id" not in post_mock.call_args.kwargs["json"]
+    assert post_mock.call_args.kwargs["json"]["key_alias"] == "nouserid@crimson.ua.edu"
+    assert (
+        post_mock.call_args.kwargs["json"]["metadata"]["portal_email"]
+        == "nouserid@crimson.ua.edu"
     )
 
 

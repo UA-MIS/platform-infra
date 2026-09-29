@@ -111,6 +111,20 @@ def load_config() -> Config:
 
 
 def init_db(db_path: str) -> None:
+    """Create the keys table if needed, and lock the db file down to
+    owner-only (0600) and its parent directory to 0700.
+
+    This file holds RAW LiteLLM keys in the clear (see issue_key()) --
+    a deliberate tradeoff for the "come back to this page and see your
+    key again" UX, not an oversight. Tightening permissions is the one
+    mitigation available at this layer; see README.md's "Key storage"
+    section for the full tradeoff and who else can already reach this
+    file (docker/root on the box).
+    """
+    parent = os.path.dirname(db_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+        os.chmod(parent, 0o700)
     with closing(sqlite3.connect(db_path)) as conn:
         conn.execute(
             """CREATE TABLE IF NOT EXISTS keys (
@@ -121,6 +135,7 @@ def init_db(db_path: str) -> None:
             )"""
         )
         conn.commit()
+    os.chmod(db_path, 0o600)
 
 
 def verify_access_jwt(
@@ -176,14 +191,38 @@ def issue_key(config: Config, email: str, team_id: str) -> str:
     makes promotion-without-reissue (D11) work at all, and symmetrically
     what makes revoke_and_reissue() below safe to call on an
     already-promoted key without silently un-promoting it.
+
+    Deliberately does NOT set `user_id` either, even though it's tempting
+    to bind the key to the visitor's email for traceability -- DO NOT
+    ADD THIS BACK. `email` is carried in `key_alias`/`metadata` instead.
+
+    This was a real, shipped bug (2026-09-29): a key generated with
+    `user_id=email` gets that string written onto
+    LiteLLM_VerificationToken.user_id, but /key/generate does NOT create
+    a matching LiteLLM_UserTable row for an arbitrary string -- so no
+    team membership can ever exist for it. LiteLLM's /key/update then
+    hard-fails every promotion with `User=<email> is not a member of the
+    team=<team_id>` (see key_management_endpoints.py's
+    `_get_user_in_team`, which is only even consulted `if key.user_id is
+    not None`). /team/member_add doesn't fix it either: given
+    `user_email` for a user who doesn't already exist, LiteLLM mints a
+    *new* User row with a fresh random UUID as user_id -- which will
+    never equal the email string sitting on the key, permanently. Omit
+    `user_id` and the whole membership check is skipped (`key.user_id is
+    None`), which is exactly what `provision-teams.sh` already does for
+    the `ungraded` key -- this makes the portal consistent with that,
+    not a new pattern. Verified live against this deployment's actual
+    LiteLLM 1.103.0, both ways: with `user_id` set, `/key/update
+    {"team_id": ...}` 403s; without it, the same call succeeds in one
+    step, same key string, team_id flips immediately.
     """
     resp = httpx.post(
         f"{config.litellm_base_url}/key/generate",
         headers={"Authorization": f"Bearer {config.litellm_master_key}"},
         json={
             "team_id": team_id,
-            "user_id": email,
             "key_alias": email,
+            "metadata": {"portal_email": email},
             "duration": "365d",
         },
         timeout=15.0,
