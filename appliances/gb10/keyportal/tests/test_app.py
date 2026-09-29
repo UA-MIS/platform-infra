@@ -246,70 +246,199 @@ def test_issue_key_overwrites_existing_row_for_same_email(
     )
 
 
-def test_issue_key_cas_prevents_orphan_when_row_changes_mid_flight(
+def test_issue_key_claim_lost_returns_winners_key_without_minting(
     app_module, mocker, fake_response
 ):
-    """Security review B1 hardening (2026-09-30): issue_key()'s final
-    write is a compare-and-swap against the row it read BEFORE calling
-    LiteLLM, arbitrated by sqlite itself -- a guard that stays correct
-    independent of _lock_for_email(), specifically so this doesn't
-    silently reopen if a future deployment ever runs more than one
-    process. Simulates that exact scenario directly, bypassing the
-    in-process lock entirely: the DB row changes to a DIFFERENT key
-    WHILE issue_key() is "waiting" on LiteLLM, as if a second process
-    had already won the race."""
+    """Security review B1 hardening, round 2 (2026-09-30): issue_key()
+    now CLAIMS the row before ever calling LiteLLM, rather than minting
+    speculatively and cleaning up a loser afterward -- a failed cleanup
+    in that design left a real, live, untracked ACTIVE key (B1's exact
+    failure shape, through a rarer door). Simulates losing the claim by
+    injecting a race directly into _claim_key_row(): something else
+    changes the row to a DIFFERENT value between issue_key()'s own read
+    of `previous_key` and its own claim attempt, so the real
+    _claim_key_row() correctly finds its CAS condition no longer holds.
+    Confirms LiteLLM's /key/generate is NEVER called by the loser, and
+    once the claim resolves to a real key (a background thread standing
+    in for the winner), the loser returns THAT key."""
+    import sqlite3
+    import threading
+    import time as time_module
+    from contextlib import closing
+
+    config = app_module.CONFIG
+    email = "claim-lost@crimson.ua.edu"
+    with mocker_seed_cache(app_module, config, email, "sk-claimold"):
+        pass
+
+    real_claim_key_row = app_module._claim_key_row
+
+    def claim_side_effect(cfg, target_email, previous_key):
+        # A concurrent "other process" wins the claim right between
+        # issue_key()'s own read and its own claim attempt.
+        with closing(sqlite3.connect(cfg.db_path)) as conn:
+            conn.execute(
+                "UPDATE keys SET litellm_key = ?, key_id = 'claiming' WHERE email = ?",
+                (f"{app_module._CLAIM_PREFIX}otherprocess", target_email),
+            )
+            conn.commit()
+        # Now the real function correctly observes its CAS condition no
+        # longer holds and returns None.
+        return real_claim_key_row(cfg, target_email, previous_key)
+
+    mocker.patch("app._claim_key_row", side_effect=claim_side_effect)
+
+    def resolve_after_delay():
+        time_module.sleep(0.05)
+        with closing(sqlite3.connect(config.db_path)) as conn:
+            conn.execute(
+                "UPDATE keys SET litellm_key = ? WHERE email = ?",
+                ("sk-claimwinner", email),
+            )
+            conn.commit()
+
+    threading.Thread(target=resolve_after_delay).start()
+
+    generate_mock = mocker.patch("app.httpx.post")
+    result = app_module.issue_key(config, email, config.students_team_id)
+
+    assert result == "sk-claimwinner"
+    generate_mock.assert_not_called()  # the loser never mints anything
+
+
+def test_issue_key_claim_lost_and_never_resolves_raises(app_module, mocker):
+    """If the claim never resolves within the short, bounded retry
+    window -- a crashed winner, in practice -- issue_key() fails loudly
+    rather than waiting forever or minting a second key. (A permanently
+    stuck claim token is not silent, either: it is not a valid LiteLLM
+    key shape, so it shows up as an explicit stale row in
+    list_issued_users()/`/admin`, same as any other key LiteLLM does not
+    recognize.)"""
     import sqlite3
     from contextlib import closing
 
     config = app_module.CONFIG
-    email = "cas-race@crimson.ua.edu"
-    with mocker_seed_cache(app_module, config, email, "sk-casold"):
+    email = "claim-stuck@crimson.ua.edu"
+    with mocker_seed_cache(app_module, config, email, "sk-stuckold"):
+        pass
+
+    def claim_side_effect(cfg, target_email, previous_key):
+        # Someone else's claim, which will never resolve (simulating a
+        # crashed winner) -- our own CAS attempt correctly loses.
+        with closing(sqlite3.connect(cfg.db_path)) as conn:
+            conn.execute(
+                "UPDATE keys SET litellm_key = ?, key_id = 'claiming' WHERE email = ?",
+                (f"{app_module._CLAIM_PREFIX}neverresolves", target_email),
+            )
+            conn.commit()
+        return None
+
+    mocker.patch("app._claim_key_row", side_effect=claim_side_effect)
+
+    generate_mock = mocker.patch("app.httpx.post")
+    with pytest.raises(RuntimeError, match="already issuing a key"):
+        app_module.issue_key(config, email, config.students_team_id)
+    generate_mock.assert_not_called()
+
+
+def test_issue_key_releases_claim_when_litellm_call_fails_existing_row(
+    app_module, mocker, fake_response
+):
+    """An ORDINARY failure (LiteLLM errors) must release the claim --
+    restoring the previous key -- rather than leaving the row stuck.
+    Only an actual process crash should ever leave a claim token sitting
+    in litellm_key."""
+    config = app_module.CONFIG
+    email = "claim-release@crimson.ua.edu"
+    with mocker_seed_cache(app_module, config, email, "sk-releaseold"):
+        pass
+    mocker.patch(
+        "app.httpx.post",
+        return_value=fake_response({"error": "boom"}, status_code=500),
+    )
+    with pytest.raises(Exception):
+        app_module.issue_key(config, email, config.students_team_id)
+    # Restored to the PREVIOUS key -- not stuck on a claim token, not deleted.
+    assert app_module.get_cached_key(config.db_path, email) == "sk-releaseold"
+
+
+def test_issue_key_releases_claim_when_litellm_call_fails_fresh_row(
+    app_module, mocker, fake_response
+):
+    """Same as above, but for a brand-new email (no previous key) -- the
+    claim row must be deleted entirely, not left behind."""
+    config = app_module.CONFIG
+    email = "claim-release-fresh@crimson.ua.edu"
+    mocker.patch(
+        "app.httpx.post",
+        return_value=fake_response({"error": "boom"}, status_code=500),
+    )
+    with pytest.raises(Exception):
+        app_module.issue_key(config, email, config.pending_team_id)
+    assert app_module.get_cached_key(config.db_path, email) is None
+
+
+def test_issue_key_cleans_up_minted_key_if_finalize_write_fails(
+    app_module, mocker, fake_response
+):
+    """The exceedingly narrow residual case: LiteLLM successfully mints
+    a key, but the local finalize write itself then fails (e.g. a disk
+    error) -- best-effort deletes the minted key rather than leaving it
+    as a live, untracked orphan. Forces the THIRD sqlite3.connect() call
+    in the sequence (issue_key's own read, then _claim_key_row's claim
+    write, then issue_key's finalize write) to fail -- the finalize
+    write is the only one of the three that happens AFTER a successful
+    LiteLLM mint."""
+    config = app_module.CONFIG
+    email = "claim-finalize-fails@crimson.ua.edu"
+    with mocker_seed_cache(app_module, config, email, "sk-finalizeold"):
         pass
 
     delete_calls = []
 
     def post_side_effect(url, **kwargs):
         if url.endswith("/key/generate"):
-            # A "concurrent other process" wins the race and updates
-            # the row while THIS call is still "waiting" on LiteLLM.
-            with closing(sqlite3.connect(config.db_path)) as conn:
-                conn.execute(
-                    "UPDATE keys SET litellm_key = ? WHERE email = ?",
-                    ("sk-caswinner", email),
-                )
-                conn.commit()
-            return fake_response({"key": "sk-casloser"})
+            return fake_response({"key": "sk-finalizeminted"})
         if url.endswith("/key/delete"):
             delete_calls.append(kwargs["json"]["keys"][0])
             return fake_response({"deleted_keys": kwargs["json"]["keys"]})
         raise AssertionError(f"unexpected POST to {url}")
 
     mocker.patch("app.httpx.post", side_effect=post_side_effect)
-    result = app_module.issue_key(config, email, config.students_team_id)
 
-    # The loser's freshly-minted key must be cleaned up, not left as a
-    # live, untracked orphan in LiteLLM.
-    assert "sk-casloser" in delete_calls
-    # The caller still gets back a real, TRACKED key -- the winner's,
-    # not the orphan -- so nobody is left without a working key.
-    assert result == "sk-caswinner"
-    assert app_module.get_cached_key(config.db_path, email) == "sk-caswinner"
+    import sqlite3 as real_sqlite3
+
+    real_connect = real_sqlite3.connect
+    call_count = {"n": 0}
+
+    def connect_side_effect(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 3:
+            raise Exception("simulated disk failure")
+        return real_connect(*args, **kwargs)
+
+    mocker.patch("app.sqlite3.connect", side_effect=connect_side_effect)
+
+    with pytest.raises(Exception, match="simulated disk failure"):
+        app_module.issue_key(config, email, config.students_team_id)
+
+    assert "sk-finalizeminted" in delete_calls
 
 
-def test_issue_key_cas_first_time_issuance_still_wins_normally(
+def test_issue_key_first_time_issuance_still_wins_normally(
     app_module, mocker, fake_response
 ):
-    """Sanity check that the CAS logic doesn't break the ordinary,
-    non-racing first-issuance path (previous_key=None -> INSERT OR
-    IGNORE)."""
+    """Sanity check that claim-before-mint doesn't break the ordinary,
+    non-racing first-issuance path (previous_key=None -> claim via
+    INSERT OR IGNORE, then finalize)."""
     config = app_module.CONFIG
-    mocker.patch("app.httpx.post", return_value=fake_response({"key": "sk-casfirst"}))
+    mocker.patch("app.httpx.post", return_value=fake_response({"key": "sk-firstwin"}))
     key = app_module.issue_key(
-        config, "cas-first@crimson.ua.edu", config.pending_team_id
+        config, "claim-first@crimson.ua.edu", config.pending_team_id
     )
-    assert key == "sk-casfirst"
-    assert app_module.get_cached_key(config.db_path, "cas-first@crimson.ua.edu") == (
-        "sk-casfirst"
+    assert key == "sk-firstwin"
+    assert app_module.get_cached_key(config.db_path, "claim-first@crimson.ua.edu") == (
+        "sk-firstwin"
     )
 
 

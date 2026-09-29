@@ -21,6 +21,7 @@ import sqlite3
 import sys
 import threading
 import time
+import uuid
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -336,6 +337,69 @@ def get_cached_key(db_path: str, email: str) -> Optional[str]:
         return row[0] if row else None
 
 
+# A claim token is never a valid LiteLLM key shape (real keys are
+# "sk-..."), so get_current_team_id()'s /key/info lookup will correctly
+# fail to recognize one -- which is exactly what makes a STUCK claim
+# (a winner that crashed mid-flight) automatically visible as a stale
+# row in list_issued_users()/`/admin`, with no extra code needed for
+# that case. See issue_key()'s docstring for the full design.
+_CLAIM_PREFIX = "__claiming__"
+
+
+def _claim_key_row(
+    config: Config, email: str, previous_key: Optional[str]
+) -> Optional[str]:
+    """Atomically claim the right to (re)issue a key for `email`, BEFORE
+    calling LiteLLM (security review B1, hardening round 2, 2026-09-30).
+    Writes a unique claim token into litellm_key, conditioned on the row
+    still holding exactly `previous_key` (or not existing at all, for a
+    brand-new email) -- the same sqlite-arbitrated compare-and-swap
+    pattern as mark_preauthorized_redeemed(), safe across any number of
+    processes. Returns the claim token on success, None if someone else
+    already holds it.
+    """
+    token = f"{_CLAIM_PREFIX}{uuid.uuid4().hex}"
+    now = time.time()
+    with closing(sqlite3.connect(config.db_path)) as conn:
+        if previous_key is None:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO keys (email, litellm_key, key_id, created_at) "
+                "VALUES (?, ?, 'claiming', ?)",
+                (email, token, now),
+            )
+        else:
+            cur = conn.execute(
+                "UPDATE keys SET litellm_key = ?, key_id = 'claiming', "
+                "created_at = ? WHERE email = ? AND litellm_key = ?",
+                (token, now, email, previous_key),
+            )
+        conn.commit()
+        won = cur.rowcount == 1
+    return token if won else None
+
+
+def _release_claim(
+    config: Config, email: str, token: str, restore_to: Optional[str]
+) -> None:
+    """Undo a claim on ordinary failure (the LiteLLM call raised, or a
+    local write failed right after a successful mint) so the row never
+    gets stuck for a reason that isn't an actual process crash. Restores
+    the previous key if there was one, or deletes the row entirely for a
+    claim that started from nothing."""
+    with closing(sqlite3.connect(config.db_path)) as conn:
+        if restore_to is None:
+            conn.execute(
+                "DELETE FROM keys WHERE email = ? AND litellm_key = ?",
+                (email, token),
+            )
+        else:
+            conn.execute(
+                "UPDATE keys SET litellm_key = ? WHERE email = ? AND litellm_key = ?",
+                (restore_to, email, token),
+            )
+        conn.commit()
+
+
 def issue_key(config: Config, email: str, team_id: str) -> str:
     """Issue a key into `team_id`.
 
@@ -370,89 +434,111 @@ def issue_key(config: Config, email: str, team_id: str) -> str:
     {"team_id": ...}` 403s; without it, the same call succeeds in one
     step, same key string, team_id flips immediately.
     """
-    # Security review B1 hardening (2026-09-30): read the row's CURRENT
-    # key BEFORE calling LiteLLM, as the baseline for a compare-and-swap
-    # write below. This is the guard that stays correct even if
-    # _lock_for_email() is ever bypassed or stops mattering (a future
-    # --workers deployment, a second replica) -- sqlite arbitrates the
-    # CAS across ANY number of processes, the same way
-    # mark_preauthorized_redeemed()'s atomic claim does. The in-process
-    # lock remains the FIRST line of defense (it also avoids wasting a
-    # LiteLLM call on the side that's going to lose), but correctness no
-    # longer depends on it being read and respected by every future
-    # caller.
+    # Security review B1 hardening, round 2 (2026-09-30): CLAIM the row
+    # BEFORE calling LiteLLM, rather than minting speculatively and
+    # cleaning up the loser afterward. The previous (round-1 hardening)
+    # design called LiteLLM first and used a compare-and-swap only on
+    # the FINAL write; if the loser's post-hoc `/key/delete` cleanup
+    # itself failed, that left a real, live, untracked ACTIVE key --
+    # B1's exact failure shape, reached through a rarer door. With
+    # claim-before-mint, the loser NEVER calls LiteLLM at all, so there
+    # is nothing to clean up that can fail: no code path mints a key
+    # this database does not track.
+    #
+    # The claim is a random token written into litellm_key itself (no
+    # schema change -- key_id becomes the literal string "claiming",
+    # created_at becomes the claim time, both already-existing
+    # columns), via the SAME sqlite-arbitrated compare-and-swap pattern
+    # as mark_preauthorized_redeemed(), so it is safe across ANY number
+    # of processes, not just within one.
     with closing(sqlite3.connect(config.db_path)) as conn:
         row = conn.execute(
             "SELECT litellm_key FROM keys WHERE email = ?", (email,)
         ).fetchone()
     previous_key = row[0] if row else None
 
-    resp = httpx.post(
-        f"{config.litellm_base_url}/key/generate",
-        headers={"Authorization": f"Bearer {config.litellm_master_key}"},
-        json={
-            "team_id": team_id,
-            "key_alias": email,
-            "metadata": {"portal_email": email},
-            "duration": "365d",
-        },
-        timeout=15.0,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    key = data["key"]
-    key_id = data.get("token_id") or data.get("key_name") or email
+    token = _claim_key_row(config, email, previous_key)
+    if token is None:
+        # Lost the claim. Normally unreachable within one process
+        # (_lock_for_email() already serializes this), so this is the
+        # cross-process case: give the winner a brief moment -- its
+        # LiteLLM call is a fast management-API request, not a slow
+        # inference call -- and check once more before failing loudly.
+        # No open-ended polling: a winner that never finishes (e.g. it
+        # crashed mid-flight) leaves a claim token as litellm_key, which
+        # LiteLLM's /key/info will not recognize -- list_issued_users()
+        # already renders exactly that shape as an explicit stale row
+        # (security review B2/B3), so a stuck claim surfaces in /admin
+        # on its own, with no special-case code needed here.
+        time.sleep(0.3)
+        with closing(sqlite3.connect(config.db_path)) as conn:
+            row = conn.execute(
+                "SELECT litellm_key FROM keys WHERE email = ?", (email,)
+            ).fetchone()
+        if row and not row[0].startswith(_CLAIM_PREFIX):
+            return row[0]
+        raise RuntimeError(
+            f"Another request is already issuing a key for {email} -- "
+            f"please reload in a moment."
+        )
 
-    with closing(sqlite3.connect(config.db_path)) as conn:
-        if previous_key is None:
-            cur = conn.execute(
-                "INSERT OR IGNORE INTO keys (email, litellm_key, key_id, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                (email, key, key_id, time.time()),
-            )
-        else:
-            cur = conn.execute(
-                "UPDATE keys SET litellm_key = ?, key_id = ?, created_at = ? "
-                "WHERE email = ? AND litellm_key = ?",
-                (key, key_id, time.time(), email, previous_key),
-            )
-        conn.commit()
-        won = cur.rowcount == 1
-
-    if won:
-        return key
-
-    # LOST the race: some other caller's write landed between our read
-    # of `previous_key` above and this write -- normally impossible
-    # within one process (that's what _lock_for_email() is for), but
-    # this branch is what makes it impossible ACROSS processes too.
-    # Self-clean the key we just minted (it would otherwise be a real,
-    # live, ACTIVE-team, completely untracked orphan -- exactly the B1
-    # failure shape) rather than either silently clobbering the
-    # winner's row or leaving our own key dangling in LiteLLM. Best
-    # effort: a failure to delete here is logged, not raised -- the
-    # caller still gets a real, working, TRACKED key back either way.
+    minted_key = None
     try:
-        delete_resp = httpx.post(
-            f"{config.litellm_base_url}/key/delete",
+        resp = httpx.post(
+            f"{config.litellm_base_url}/key/generate",
             headers={"Authorization": f"Bearer {config.litellm_master_key}"},
-            json={"keys": [key]},
+            json={
+                "team_id": team_id,
+                "key_alias": email,
+                "metadata": {"portal_email": email},
+                "duration": "365d",
+            },
             timeout=15.0,
         )
-        delete_resp.raise_for_status()
-    except httpx.HTTPError as exc:
-        print(
-            f"WARNING: issue_key() lost a compare-and-swap race for "
-            f"{email} and failed to clean up the losing key: {exc}. "
-            f"That key may now be an ORPHAN in LiteLLM.",
-            file=sys.stderr,
-        )
-    with closing(sqlite3.connect(config.db_path)) as conn:
-        winner_row = conn.execute(
-            "SELECT litellm_key FROM keys WHERE email = ?", (email,)
-        ).fetchone()
-    # winner_row must exist -- something won the write we just lost.
-    return winner_row[0]
+        resp.raise_for_status()
+        data = resp.json()
+        minted_key = data["key"]
+        key_id = data.get("token_id") or data.get("key_name") or email
+        with closing(sqlite3.connect(config.db_path)) as conn:
+            # Finalize: replace our own exclusively-held claim token
+            # with the real key. This CAS is guaranteed to succeed --
+            # nothing else can hold this specific token.
+            conn.execute(
+                "UPDATE keys SET litellm_key = ?, key_id = ?, created_at = ? "
+                "WHERE email = ? AND litellm_key = ?",
+                (minted_key, key_id, time.time(), email, token),
+            )
+            conn.commit()
+        return minted_key
+    except Exception:
+        # Ordinary failure (LiteLLM error, or -- vanishingly rare -- the
+        # local DB write itself failing right after a successful mint).
+        # Release the claim so the row never gets stuck for a reason
+        # that isn't an actual process crash.
+        if minted_key is not None:
+            # LiteLLM DID mint a key before something else failed (the
+            # finalize write) -- best-effort clean it up rather than
+            # leave a real, live, untracked key. Logged, not raised, on
+            # failure: the exception already in flight is the one that
+            # matters to the caller.
+            try:
+                delete_resp = httpx.post(
+                    f"{config.litellm_base_url}/key/delete",
+                    headers={"Authorization": f"Bearer {config.litellm_master_key}"},
+                    json={"keys": [minted_key]},
+                    timeout=15.0,
+                )
+                delete_resp.raise_for_status()
+            except httpx.HTTPError as exc:
+                print(
+                    f"WARNING: issue_key() minted a key for {email} but "
+                    f"then failed before tracking it, and failed to "
+                    f"clean it up too: {exc}. That key may now be an "
+                    f"ORPHAN in LiteLLM.",
+                    file=sys.stderr,
+                )
+        _release_claim(config, email, token, previous_key)
+        raise
 
 
 def get_current_team_id(config: Config, key: str) -> Optional[str]:
