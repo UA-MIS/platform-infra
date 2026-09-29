@@ -2559,6 +2559,100 @@ def test_revoke_and_reissue_holds_lock_across_entire_body(
     assert not lock.locked()  # released afterward
 
 
+def test_revoke_and_reissue_claim_lost_raises_before_deleting(app_module, mocker):
+    """Security review round 3, DB-CAS extension (2026-09-30):
+    revoke_and_reissue() now claims the row -- conditioned on it still
+    holding exactly the old_key it read -- before ever calling
+    /key/delete, the same sqlite-arbitrated CAS issue_key() already uses
+    for claim-before-mint. Simulates losing that claim by injecting a
+    race directly into _claim_key_row(): something else rotates the row
+    to a DIFFERENT value between revoke_and_reissue()'s own read of
+    old_key and its own claim attempt, so the real _claim_key_row()
+    correctly finds its CAS condition no longer holds. This is exactly
+    the scenario the extension exists for -- a future multi-process
+    (`--workers`) deployment where the in-process lock no longer spans
+    processes: without this CAS, revoke_and_reissue() would proceed to
+    delete a key that may no longer correspond to the row's actual
+    current state. Confirms /key/delete (and /key/generate) are NEVER
+    called, and that the row is left exactly as the "other process"
+    left it -- untouched by our failed attempt."""
+    import sqlite3
+    from contextlib import closing
+
+    config = app_module.CONFIG
+    email = "revoke-claim-lost@crimson.ua.edu"
+    with mocker_seed_cache(app_module, config, email, "sk-revokeold"):
+        pass
+    mocker.patch.object(
+        app_module, "get_current_team_id", return_value=config.students_team_id
+    )
+
+    real_claim_key_row = app_module._claim_key_row
+
+    def claim_side_effect(cfg, target_email, previous_key):
+        with closing(sqlite3.connect(cfg.db_path)) as conn:
+            conn.execute(
+                "UPDATE keys SET litellm_key = ? WHERE email = ?",
+                ("sk-rotated1", target_email),
+            )
+            conn.commit()
+        # The real function now correctly observes its CAS condition no
+        # longer holds (the row no longer matches `previous_key`) and
+        # returns None.
+        return real_claim_key_row(cfg, target_email, previous_key)
+
+    mocker.patch("app._claim_key_row", side_effect=claim_side_effect)
+    post_mock = mocker.patch("app.httpx.post")
+
+    with pytest.raises(RuntimeError, match="already changed"):
+        app_module.revoke_and_reissue(config, email)
+
+    post_mock.assert_not_called()  # never reached /key/delete or /key/generate
+    assert app_module.get_cached_key(config.db_path, email) == "sk-rotated1"
+
+
+def test_revoke_and_reissue_releases_claim_when_delete_fails(app_module, mocker):
+    """A failed /key/delete after a successful claim must release the
+    claim back to old_key -- not leave the row stuck holding a claim
+    token forever for a reason that is not an actual process crash (the
+    same "ordinary failure releases the claim" contract issue_key()
+    already has for its own claim-before-mint).
+
+    Spies on _release_claim() rather than only checking the end state:
+    without the claim, the row is simply never touched before the
+    delete fails, so "the key is still there afterward" would ALSO be
+    true if the whole claim/release mechanism were removed entirely --
+    that end-state-only assertion would not actually distinguish the
+    fixed shape from the pre-fix one. Asserting _release_claim() was
+    actually invoked (mocker.spy still runs the real function, so the
+    restore itself is genuinely exercised, not skipped) is what makes
+    this test mean something."""
+    import httpx as httpx_lib
+
+    config = app_module.CONFIG
+    email = "revoke-delete-fails@crimson.ua.edu"
+    with mocker_seed_cache(app_module, config, email, "sk-revokedelfail"):
+        pass
+    mocker.patch.object(
+        app_module, "get_current_team_id", return_value=config.students_team_id
+    )
+    release_spy = mocker.spy(app_module, "_release_claim")
+
+    def post_side_effect(url, **kwargs):
+        if url.endswith("/key/delete"):
+            raise httpx_lib.HTTPError("boom")
+        raise AssertionError(f"unexpected POST {url}")
+
+    mocker.patch("app.httpx.post", side_effect=post_side_effect)
+
+    with pytest.raises(httpx_lib.HTTPError):
+        app_module.revoke_and_reissue(config, email)
+
+    release_spy.assert_called_once_with(config, email, mocker.ANY, "sk-revokedelfail")
+    # Released back to the original key -- not stuck on a claim token.
+    assert app_module.get_cached_key(config.db_path, email) == "sk-revokedelfail"
+
+
 def test_index_preauthorized_first_login_is_active(
     app_module, client, mocker, fake_response
 ):

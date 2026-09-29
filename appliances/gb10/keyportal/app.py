@@ -723,28 +723,65 @@ def revoke_and_reissue(config: Config, email: str) -> str:
     once the first has fully committed, so it sees the FIRST call's new
     key as "the old key" and proceeds from there -- never two
     independent mutations racing the same stale state.
+
+    Security review round 3, DB-CAS extension (2026-09-30): the lock
+    above only protects against a race WITHIN one process. This service
+    runs single-process/single-worker today (see _lock_for_email()'s own
+    docstring), but B1-A's event-loop-freeze fix makes adding `--workers`
+    a genuinely plausible future change -- and if that ever happens with
+    only the in-process lock in place, this exact B1 shape reopens
+    silently, with no test able to catch it (a lock cannot serialize
+    across processes). Claims the row -- conditioned on it still holding
+    exactly `old_key`, via the SAME sqlite-arbitrated CAS as
+    issue_key()'s own claim-before-mint (_claim_key_row()) -- BEFORE
+    calling /key/delete. A lost claim (rowcount 0, someone else already
+    rotated this row since we read old_key) fails loudly instead of
+    deleting a key that may no longer correspond to the row's current
+    state. This makes the in-process lock an OPTIMIZATION (skips the
+    round-trip when uncontended) rather than the sole correctness
+    guarantee, exactly the property team-lead asked this extension to
+    establish.
     """
     with _lock_for_email(email):
         old_key = get_cached_key(config.db_path, email)
         team_id = config.pending_team_id
         if old_key:
             team_id = get_current_team_id(config, old_key) or config.pending_team_id
-            delete_resp = httpx.post(
-                f"{config.litellm_base_url}/key/delete",
-                headers={"Authorization": f"Bearer {config.litellm_master_key}"},
-                json={"keys": [old_key]},
-                timeout=15.0,
-            )
-            # Security review F2 (2026-09-30): a silently-failed delete
-            # here is exactly how a stale row that no longer matches a
-            # live LiteLLM key ends up sitting in `keys` -- the old key
-            # would still exist in LiteLLM (never actually deleted)
-            # while a NEW key also gets issued and cached below, or
-            # worse, the delete partially succeeds server-side but
-            # reports failure. Fail loudly here instead of proceeding to
-            # issue a second key on top of an old one whose deletion
-            # status is unknown.
-            delete_resp.raise_for_status()
+            claim_token = _claim_key_row(config, email, old_key)
+            if claim_token is None:
+                raise RuntimeError(
+                    f"Another request already changed {email}'s key -- "
+                    f"please reload and try again."
+                )
+            try:
+                delete_resp = httpx.post(
+                    f"{config.litellm_base_url}/key/delete",
+                    headers={"Authorization": f"Bearer {config.litellm_master_key}"},
+                    json={"keys": [old_key]},
+                    timeout=15.0,
+                )
+                # Security review F2 (2026-09-30): a silently-failed delete
+                # here is exactly how a stale row that no longer matches a
+                # live LiteLLM key ends up sitting in `keys` -- the old key
+                # would still exist in LiteLLM (never actually deleted)
+                # while a NEW key also gets issued and cached below, or
+                # worse, the delete partially succeeds server-side but
+                # reports failure. Fail loudly here instead of proceeding to
+                # issue a second key on top of an old one whose deletion
+                # status is unknown.
+                delete_resp.raise_for_status()
+                return issue_key(config, email, team_id)
+            except Exception:
+                # The delete failed (or, vanishingly rarely, something
+                # between here and issue_key()'s own claim did) -- release
+                # OUR claim back to old_key so the row never gets stuck
+                # holding a claim token for a reason that is not an actual
+                # process crash. If issue_key() itself later fails after
+                # successfully re-claiming from our token, ITS OWN release
+                # already restores the row to our token first; this
+                # release then completes the chain back to old_key.
+                _release_claim(config, email, claim_token, old_key)
+                raise
         return issue_key(config, email, team_id)
 
 
