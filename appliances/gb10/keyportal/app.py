@@ -1968,24 +1968,86 @@ def _team_id_for_key_or_reissue(config: Config, email: str, key: str) -> tuple:
     then fails, leaving the row restored to an old_key LiteLLM has
     already deleted.
 
-    Catches specifically httpx.HTTPStatusError -- LiteLLM answered
-    clearly that this key does not exist -- and re-issues via
-    issue_key() directly onto PENDING, reusing its own claim-before-mint
-    CAS unconditionally rather than guessing at a team we have no way to
-    verify (the whole reason we are here is that LiteLLM will not tell
-    us anything about the old key). This is the same "a race silently
-    falls through to pending instead of an uncontrolled active key"
-    tradeoff issue_initial_key() already accepts -- it costs the student
-    one Promote click from an admin, not a second, unverifiable active
-    key. Deliberately does NOT catch httpx.RequestError/TimeoutException:
-    an actual LiteLLM outage would make the re-issue attempt fail too,
-    and that failure is transient and self-healing on the next reload,
-    not the permanent-until-manual-intervention failure this fix exists
-    to remove.
+    Security review round 5, BLOCKER B6 (2026-09-30): the original
+    version of this fix caught the whole of httpx.HTTPStatusError, which
+    raise_for_status() raises for EVERY non-2xx status -- a LiteLLM
+    SERVER error on /key/info (a degraded database, connection-pool
+    exhaustion, or a restart where the API answers before its own DB is
+    ready) was therefore indistinguishable from "this key does not
+    exist". Reviewer probed 404/400/500/502/503 against the mocked
+    shape and got a re-issue on all five -- meaning a LiteLLM incident
+    that 5xx's /key/info would silently orphan every affected student's
+    key: the OLD key is never deleted (this function has no reason to
+    delete it -- it believes LiteLLM already lost it), so it sits live
+    and untracked, invisible to list_issued_users()/`/admin`,
+    unreachable by demote_user() for 365 days, while the student is
+    ALSO silently dropped to pending. This is the exact class of harm
+    every round since B1 has been closing, reached this time through an
+    exception hierarchy that does not distinguish "the resource does
+    not exist" from "the server is unwell" -- and it hits every student
+    who happens to reload during the incident, not one at a time.
+
+    Fixed by keying off the REAL, LIVE-VERIFIED status LiteLLM returns
+    for a key it does not recognize -- confirmed against this
+    deployment's actual LiteLLM by looking up a fabricated hash: a
+    clean 404 (`{"error": {..., "code": "404"}}`), not guessed at.
+    Catches httpx.HTTPStatusError but re-raises anything whose
+    `exc.response.status_code` is not 404 -- a 5xx now propagates as an
+    ordinary unhandled error (a transient, self-healing failure on the
+    next reload, exactly the docstring's own stated policy for
+    RequestError/TimeoutException below, now actually implemented for
+    the status-code path too). Uses `exc.response`, not `exc.request`:
+    a real httpx.HTTPStatusError always carries a `.response` (it is
+    what raise_for_status() failed on), but this codebase's own test
+    double (FakeResponse in conftest.py) never sets a request object,
+    and real httpx refuses to even evaluate a property that touches
+    `.request` in that shape.
+
+    Known, separate, NOT fixed by this: a genuinely soft-deleted key
+    (confirmed live -- LiteLLM's own /key/delete does not remove the
+    row; a later /key/info on the same hash still returns 200, now with
+    `"status": "deleted"` added) never raises HTTPStatusError at all,
+    so this wrap never sees it and never re-issues for that specific
+    path -- get_current_team_id() just returns None, which
+    team_grants_access() already handles gracefully as "not active",
+    so the student sees pending rather than a crash, but their dead key
+    stays displayed/cached rather than being replaced. Flagged, not
+    silently left implicit; a separate fix from B6.
+
+    Re-issues via issue_key() directly onto PENDING, reusing its own
+    claim-before-mint CAS unconditionally rather than guessing at a team
+    we have no way to verify (the whole reason we are here is that
+    LiteLLM will not tell us anything about the old key). This is the
+    same "a race silently falls through to pending instead of an
+    uncontrolled active key" tradeoff issue_initial_key() already
+    accepts -- it costs the student one Promote click from an admin,
+    not a second, unverifiable active key. Deliberately does NOT catch
+    httpx.RequestError/TimeoutException: an actual LiteLLM outage would
+    make the re-issue attempt fail too, and that failure is transient
+    and self-healing on the next reload, not the permanent-until-
+    manual-intervention failure this fix exists to remove.
+
+    Security review round 5, step 6 (2026-09-30): logs every re-issue at
+    WARNING, since landing on pending is a SILENT demotion for an
+    already-promoted student with no admin-side signal otherwise --
+    team-lead is deciding separately whether a `last_known_team_id`
+    column is worth adding to restore the real team instead of guessing
+    pending; this log line is the floor, not a replacement for that.
     """
     try:
         return key, get_current_team_id(config, key)
-    except httpx.HTTPStatusError:
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 404:
+            raise
+        print(
+            f"WARNING: {email}'s cached key was not found by LiteLLM "
+            f"(404) -- re-issuing onto PENDING. If they were previously "
+            f"promoted, this is a SILENT DEMOTION an admin will need to "
+            f"notice and re-promote; this function has no way to verify "
+            f"their prior team once LiteLLM no longer recognizes the "
+            f"old key.",
+            file=sys.stderr,
+        )
         key = issue_key(config, email, config.pending_team_id)
         return key, get_current_team_id(config, key)
 

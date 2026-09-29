@@ -1126,6 +1126,88 @@ def test_regenerate_unrecognized_key_from_revoke_reissues_instead_of_500(
     assert app_module.get_cached_key(config.db_path, email) == "sk-recovered"
 
 
+def test_team_id_for_key_or_reissue_404_reissues(app_module, mocker, fake_response):
+    """Security review round 5, BLOCKER B6 (2026-09-30): the first test
+    in this codebase to inspect exc.response.status_code at all --
+    before this, zero of 160 tests did, which is exactly why an
+    over-broad `except httpx.HTTPStatusError` read as correct. Confirms
+    the POSITIVE case: a real, live-verified 404 (confirmed against this
+    deployment's actual LiteLLM by looking up a fabricated key hash,
+    2026-09-30) -- not a guess -- triggers a re-issue."""
+    config = app_module.CONFIG
+    email = "b6-404-reissue@crimson.ua.edu"
+    call_count = {"n": 0}
+
+    def get_side_effect(url, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return fake_response({"error": "not found"}, status_code=404)
+        return fake_response({"info": {"team_id": config.pending_team_id}})
+
+    mocker.patch("app.httpx.get", side_effect=get_side_effect)
+    post_mock = mocker.patch(
+        "app.httpx.post", return_value=fake_response({"key": "sk-b6reissued"})
+    )
+
+    key, team_id = app_module._team_id_for_key_or_reissue(config, email, "sk-b6deadkey")
+    assert key == "sk-b6reissued"
+    assert team_id == config.pending_team_id
+    post_mock.assert_called_once()
+
+
+def test_team_id_for_key_or_reissue_5xx_does_not_reissue(
+    app_module, mocker, fake_response
+):
+    """Security review round 5, BLOCKER B6 (2026-09-30): the negative
+    case -- a LiteLLM SERVER error must NOT be treated as "key not
+    found". Doing so would silently orphan a perfectly good live key
+    (never deleted, since the code would believe LiteLLM already lost
+    it) and silently demote the student to pending, hitting every
+    student who reloads during the incident. Confirms a 500 re-raises
+    rather than re-issuing -- zero /key/generate calls -- so the
+    failure is transient and self-healing on the next reload instead of
+    a masked, permanent demotion. Uses `exc.response`, not
+    `exc.request`: FakeResponse (conftest.py) constructs
+    HTTPStatusError(request=None, response=self), and real httpx
+    refuses to even evaluate a property touching `.request` in that
+    shape."""
+    import httpx as httpx_lib
+
+    config = app_module.CONFIG
+    email = "b6-5xx-noreissue@crimson.ua.edu"
+    mocker.patch(
+        "app.httpx.get",
+        return_value=fake_response({"error": "internal"}, status_code=500),
+    )
+    post_mock = mocker.patch("app.httpx.post")
+
+    with pytest.raises(httpx_lib.HTTPStatusError):
+        app_module._team_id_for_key_or_reissue(config, email, "sk-b6stillgood")
+    post_mock.assert_not_called()
+
+
+def test_team_id_for_key_or_reissue_400_does_not_reissue(
+    app_module, mocker, fake_response
+):
+    """Same property as the 500 case, for a 4xx that is NOT 404 --
+    reviewer also probed 400 and got a re-issue under the pre-fix broad
+    catch. Any status other than the one real, confirmed "not found"
+    value must re-raise, not just 5xx specifically."""
+    import httpx as httpx_lib
+
+    config = app_module.CONFIG
+    email = "b6-400-noreissue@crimson.ua.edu"
+    mocker.patch(
+        "app.httpx.get",
+        return_value=fake_response({"error": "bad request"}, status_code=400),
+    )
+    post_mock = mocker.patch("app.httpx.post")
+
+    with pytest.raises(httpx_lib.HTTPStatusError):
+        app_module._team_id_for_key_or_reissue(config, email, "sk-b6stillgood2")
+    post_mock.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # require_admin -- the authorization boundary for the whole /admin* surface.
 # ---------------------------------------------------------------------------
