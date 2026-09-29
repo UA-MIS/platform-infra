@@ -124,6 +124,13 @@ services:
       # require_admin()/_load_admin_emails() in app.py). Real values are
       # the owner's to set in .env at deploy time.
       - ADMIN_EMAILS=${ADMIN_EMAILS}
+      # The portal's real external hostname, for the same-origin CSRF
+      # check on state-changing POSTs (security review F5/B2,
+      # 2026-09-30) -- see verify_same_origin() in app.py. Deliberately
+      # a real required var, not derived from the Host header the
+      # container sees (which reflects internal tunnel routing, not the
+      # portal's real identity, and which an attacker controls anyway).
+      - KEYPORTAL_HOSTNAME=${KEYPORTAL_HOSTNAME}
     volumes:
       - keyportal-data:/data
     depends_on:

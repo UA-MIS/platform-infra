@@ -89,6 +89,7 @@ def live_config():
         allowed_email_suffixes=("@crimson.ua.edu", "@ua.edu"),
         admin_contact="Test Admin",
         admin_emails=("unused-for-this-test@ua.edu",),
+        keyportal_hostname="unused-for-this-test.example",
         db_path=f"/tmp/keyportal-live-test-{uuid.uuid4().hex}.db",
     )
 

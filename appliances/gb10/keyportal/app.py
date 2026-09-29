@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from html import escape
 from typing import Optional
+from urllib.parse import urlsplit
 
 import httpx
 import jwt
@@ -85,6 +86,7 @@ class Config:
     allowed_email_suffixes: tuple
     admin_contact: str
     admin_emails: tuple
+    keyportal_hostname: str
     db_path: str
 
     @property
@@ -118,6 +120,20 @@ def load_config() -> Config:
         ),
         admin_contact=os.environ.get("ADMIN_CONTACT", "your course instructor"),
         admin_emails=_load_admin_emails(),
+        # The portal's real external hostname, for the same-origin check
+        # on state-changing POSTs (security review F5, 2026-09-30).
+        # Deliberately NOT derived from the Host header, which an
+        # attacker controls and which behind the cloudflared tunnel
+        # reflects internal routing, not the portal's real identity.
+        keyportal_hostname=_require_env(
+            "KEYPORTAL_HOSTNAME",
+            hint=(
+                "Set KEYPORTAL_HOSTNAME in .env on the box to the keys "
+                "portal's real external hostname, e.g. "
+                "KEYPORTAL_HOSTNAME=local-llm-keys.uamishub.com -- then "
+                "run: docker compose up -d keyportal"
+            ),
+        ),
         db_path=os.environ.get("KEYPORTAL_DB_PATH", "/data/keyportal.db"),
     )
 
@@ -247,6 +263,69 @@ def require_admin(email: str, config: Config) -> None:
     """
     if email.strip().lower() not in config.admin_emails:
         raise HTTPException(status_code=403, detail=_ADMIN_FORBIDDEN_DETAIL)
+
+
+def _scheme_and_netloc(url: str) -> str:
+    parsed = urlsplit(url)
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def verify_same_origin(request: Request, config: Config) -> None:
+    """CSRF defense for every state-changing POST (security review F5,
+    2026-09-30): /regenerate, /admin/promote, /admin/demote,
+    /admin/preauthorize, /admin/preauthorize/remove.
+
+    Cloudflare Access's default SameSite cookie behavior already makes
+    a cross-site forged POST non-exploitable today -- but that safety
+    rests entirely on an off-box Zero Trust dashboard toggle nobody on
+    this team controls, that no test here can pin down, and that
+    someone could flip years from now while debugging an unrelated
+    embedding problem. Defend at the application layer too, rather than
+    depend on a setting outside this codebase. Concrete threat model:
+    a student emails an admin a support-request link; the page the
+    admin's browser is tricked into visiting auto-submits
+    target_email=<the attacker's own email>&target_team=faculty. No
+    enumeration needed -- the attacker already knows their own email.
+
+    Validates the Origin header when present; falls back to Referer
+    ONLY when Origin is absent (some older clients omit Origin on
+    same-origin POSTs -- Referer is the fallback, not a second chance
+    for a mismatched Origin). A request with NEITHER header present is
+    REJECTED, not allowed through -- this is a state-changing POST, and
+    failing open here would silently defeat the entire point, the same
+    "fail loudly, never silently" contract as the rest of this file.
+
+    Compares scheme+host+port EXACTLY against config.keyportal_hostname
+    (never the Host header, which an attacker controls and which,
+    behind the cloudflared tunnel, reflects internal routing rather
+    than the portal's real external identity) via urlsplit()'s own
+    parsing -- not a substring or `startswith` check, which is the same
+    class of bug as the require_admin substring mutant that survived
+    testing earlier in this review:
+    "https://local-llm-keys.uamishub.com.attacker.example" must fail,
+    and would pass a naive `.startswith(expected)` or `expected in
+    origin` check.
+    """
+    expected = _scheme_and_netloc(f"https://{config.keyportal_hostname}")
+    origin = request.headers.get("Origin")
+    if origin is not None:
+        candidate = _scheme_and_netloc(origin)
+    else:
+        referer = request.headers.get("Referer")
+        if referer is None:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Origin mismatch -- no Origin or Referer header on a "
+                    "state-changing request."
+                ),
+            )
+        candidate = _scheme_and_netloc(referer)
+    if candidate != expected:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Origin mismatch -- expected {expected}, got {candidate}.",
+        )
 
 
 def get_cached_key(db_path: str, email: str) -> Optional[str]:
@@ -706,22 +785,58 @@ class PreauthorizeResult:
 
 
 def _split_pasted_emails(raw_text: str) -> list:
-    """Newline AND/OR comma separated -- people paste out of Excel and
-    Canvas and the separators are never consistent. Trim, lowercase,
-    drop blanks; does NOT dedupe (add_preauthorized_emails() does that
-    against both this paste and the existing table in one pass)."""
-    return [e.strip().lower() for e in re.split(r"[,\n]+", raw_text) if e.strip()]
+    """Newline, comma, semicolon, AND any other whitespace (tabs, stray
+    spaces, \\r from Windows line endings) all count as separators
+    (security review B4, 2026-09-30) -- people paste out of Excel (name
+    and email in adjacent cells, tab-separated) and Outlook
+    (semicolon-joined address lists), and the separators are never
+    consistent. Splitting on comma-only was the actual shipped bug: a
+    tab- or semicolon-joined line that happened to END in a valid
+    address (e.g. "Smith\\tstudent@ua.edu") passed the old suffix-only
+    check as ONE bogus token and was silently stored, authorizing
+    nobody while reporting success. Trim, lowercase, drop blanks; does
+    NOT dedupe or validate shape (add_preauthorized_emails() dedupes
+    against both this paste and the existing table, and
+    _looks_like_email() validates shape, in one pass)."""
+    return [e.strip().lower() for e in re.split(r"[,;\s]+", raw_text) if e.strip()]
+
+
+# A local part that starts alphanumeric and otherwise only contains the
+# usual local-part characters. Deliberately not a full RFC 5322
+# validator -- just enough to reject the shapes a malformed paste
+# actually produces (angle brackets, semicolons, spaces, SQL-shaped
+# punctuation) without rejecting any real UA address.
+_LOCAL_PART_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._%+-]*$")
+
+
+def _looks_like_email(candidate: str, config: Config) -> bool:
+    """Shape validation, not just a suffix check (security review B4,
+    2026-09-30). `candidate.endswith(suffixes)` alone only constrains
+    the END of the string -- it says nothing about what comes before
+    the "@", so a whole "Smith\\tc@ua.edu"-shaped token (before
+    _split_pasted_emails() above also learned to split on whitespace)
+    or an SQL/HTML-injection-shaped string ending in a real suffix would
+    pass it. Requires exactly one "@" and a local part that looks like
+    one, on top of the existing suffix check.
+    """
+    if candidate.count("@") != 1:
+        return False
+    local, _, _domain = candidate.partition("@")
+    if not _LOCAL_PART_RE.match(local):
+        return False
+    return candidate.endswith(config.allowed_email_suffixes)
 
 
 def add_preauthorized_emails(config: Config, raw_text: str) -> PreauthorizeResult:
     """Parse, normalize, validate, and store a pasted roster.
 
     Order of operations matters for correct reporting: reject invalid
-    domains BEFORE checking "already stored", so a re-pasted invalid
-    address is reported as rejected (actionable: "this is a typo"), not
-    silently swallowed as "already present". Dedupes both within THIS
-    paste (a roster copy/pasted twice) and against rows already in the
-    table (redeemed or not -- either way there is nothing new to do).
+    shapes/domains BEFORE checking "already stored", so a re-pasted
+    invalid address is reported as rejected (actionable: "this is a
+    typo"), not silently swallowed as "already present". Dedupes both
+    within THIS paste (a roster copy/pasted twice) and against rows
+    already in the table (redeemed or not -- either way there is
+    nothing new to do).
     """
     candidates = _split_pasted_emails(raw_text)
     seen_this_paste = set()
@@ -731,7 +846,7 @@ def add_preauthorized_emails(config: Config, raw_text: str) -> PreauthorizeResul
         if email in seen_this_paste:
             continue
         seen_this_paste.add(email)
-        if not email.endswith(config.allowed_email_suffixes):
+        if not _looks_like_email(email, config):
             rejected.append((email, "not a crimson.ua.edu or ua.edu address"))
             continue
         to_insert.append(email)
@@ -1130,7 +1245,7 @@ def _preauth_result_banner(result: "PreauthorizeResult") -> str:
 
 def render_admin_page(
     admin_email: str,
-    users: list,
+    users: Optional[list],
     preauthorized: list,
     config: Config,
     preauthorize_result: Optional["PreauthorizeResult"] = None,
@@ -1146,9 +1261,24 @@ def render_admin_page(
     why that is the actual mechanism that keeps a key from ever reaching
     this page. `preauthorize_result` is only set right after a POST
     /admin/preauthorize, to report exactly what happened to that paste.
+
+    `users=None` (security review B3, 2026-09-30) means the key list
+    could not be read at all -- distinct from `users=[]`, which means it
+    read fine and is genuinely empty. The roster and any
+    preauthorize_result are independent of this and render normally
+    either way: this whole page must degrade gracefully when LiteLLM is
+    unreachable, not go dark, since that is exactly when an admin needs
+    the roster and the promote/demote history most.
     """
     head = _PAGE_HEAD.format(style=_STYLE + _ADMIN_STYLE)
-    if users:
+    if users is None:
+        table = (
+            '<p class="policy"><strong>Key list is temporarily '
+            "unavailable</strong> -- a LiteLLM lookup failed. The "
+            "pre-authorized roster below is unaffected; promote/demote "
+            "will work again once LiteLLM is reachable.</p>"
+        )
+    elif users:
         rows = "\n".join(_admin_row(u) for u in users)
         table = f"""<table>
 <thead><tr><th>Email</th><th>Team</th><th>State</th><th>Issued</th><th>Actions</th></tr></thead>
@@ -1240,6 +1370,30 @@ def _required_form_field(form, name: str) -> str:
     return value
 
 
+def _list_issued_users_or_none(config: Config):
+    """Defense in depth on top of list_issued_users()'s own per-row
+    resilience (security review B3, 2026-09-30). Every /admin* route
+    calls this instead of list_issued_users() directly, AFTER computing
+    and holding anything a mutation on that route needs to report (a
+    promote/demote's own success, or add_preauthorized_emails()'s
+    added/already_present/rejected report) and AFTER reading the
+    pre-authorized roster, which is pure sqlite with zero outbound HTTP
+    and must never be held hostage by the key list.
+
+    Broad `except Exception` is deliberate here, not laziness: this is
+    a read-only, already-idempotent listing feeding a rendering path,
+    not a mutation -- degrading gracefully to "key list unavailable"
+    is strictly better than a 500 that also discards whatever the
+    route's own mutation already reported. Returns None on any failure;
+    render_admin_page() shows an explicit "unavailable" message rather
+    than an empty table in that case.
+    """
+    try:
+        return list_issued_users(config)
+    except Exception:
+        return None
+
+
 CONFIG = load_config()
 JWKS_CLIENT = PyJWKClient(CONFIG.jwks_url)
 init_db(CONFIG.db_path)
@@ -1265,6 +1419,13 @@ def index(request: Request) -> str:
 
 @app.post("/regenerate", response_class=HTMLResponse)
 def regenerate(request: Request) -> str:
+    # Security review F5 (2026-09-30): /regenerate is student-facing,
+    # not admin -- but a forged POST here (Cloudflare Access's cookie
+    # travels automatically for a same-authenticated-user request, valid
+    # JWT and all) would silently invalidate a student's working key.
+    # Same same-origin defense as the admin routes below, first thing on
+    # the route.
+    verify_same_origin(request, CONFIG)
     email = verify_access_jwt(request, CONFIG, JWKS_CLIENT)
     key = revoke_and_reissue(CONFIG, email)
     team_id = get_current_team_id(CONFIG, key)
@@ -1276,13 +1437,22 @@ def regenerate(request: Request) -> str:
 def admin_index(request: Request) -> str:
     email = verify_access_jwt(request, CONFIG, JWKS_CLIENT)
     require_admin(email, CONFIG)
-    users = list_issued_users(CONFIG)
+    # Security review B3 (2026-09-30): read the roster (pure sqlite, no
+    # outbound HTTP) BEFORE the key list, and read the key list through
+    # the fail-safe wrapper -- a LiteLLM problem must never take the
+    # roster down with it. This is precisely the moment an admin needs
+    # the roster most: when the key path is misbehaving and they are
+    # trying to fix someone's access.
     preauthorized = list_preauthorized(CONFIG)
+    users = _list_issued_users_or_none(CONFIG)
     return render_admin_page(email, users, preauthorized, CONFIG)
 
 
 @app.post("/admin/promote", response_class=HTMLResponse)
 async def admin_promote(request: Request) -> str:
+    # Security review F5 (2026-09-30): same-origin check first, before
+    # any auth or parsing -- cheap, and applies regardless of auth state.
+    verify_same_origin(request, CONFIG)
     # Re-verify and re-check the allowlist here too -- never assume the
     # GET that rendered the form already gated this POST. Every /admin*
     # route is independently authorized.
@@ -1302,33 +1472,43 @@ async def admin_promote(request: Request) -> str:
     form = await request.form()
     target_email = _required_form_field(form, "target_email")
     target_team = _required_form_field(form, "target_team")
-    promote_user(CONFIG, target_email, target_team)
-    users = list_issued_users(CONFIG)
+    promote_user(CONFIG, target_email, target_team)  # the mutation
+    # Security review B3 (2026-09-30): roster first, key list through
+    # the fail-safe wrapper -- a stale key elsewhere must not turn a
+    # SUCCESSFUL promote into a 500 with no way to tell it worked.
     preauthorized = list_preauthorized(CONFIG)
+    users = _list_issued_users_or_none(CONFIG)
     return render_admin_page(admin_email, users, preauthorized, CONFIG)
 
 
 @app.post("/admin/demote", response_class=HTMLResponse)
 async def admin_demote(request: Request) -> str:
+    verify_same_origin(request, CONFIG)
     admin_email = verify_access_jwt(request, CONFIG, JWKS_CLIENT)
     require_admin(admin_email, CONFIG)
     form = await request.form()
     target_email = _required_form_field(form, "target_email")
-    demote_user(CONFIG, target_email)
-    users = list_issued_users(CONFIG)
+    demote_user(CONFIG, target_email)  # the mutation
     preauthorized = list_preauthorized(CONFIG)
+    users = _list_issued_users_or_none(CONFIG)
     return render_admin_page(admin_email, users, preauthorized, CONFIG)
 
 
 @app.post("/admin/preauthorize", response_class=HTMLResponse)
 async def admin_preauthorize(request: Request) -> str:
+    verify_same_origin(request, CONFIG)
     admin_email = verify_access_jwt(request, CONFIG, JWKS_CLIENT)
     require_admin(admin_email, CONFIG)
     form = await request.form()
     emails = _required_form_field(form, "emails")
+    # Security review B3 (2026-09-30): the mutation AND its report are
+    # computed and held here, BEFORE anything that could still fail --
+    # `result` is the ONLY channel telling the admin which addresses
+    # were added/already-present/rejected, and it must survive even if
+    # the key-list read below does not.
     result = add_preauthorized_emails(CONFIG, emails)
-    users = list_issued_users(CONFIG)
     preauthorized = list_preauthorized(CONFIG)
+    users = _list_issued_users_or_none(CONFIG)
     return render_admin_page(
         admin_email, users, preauthorized, CONFIG, preauthorize_result=result
     )
@@ -1336,13 +1516,14 @@ async def admin_preauthorize(request: Request) -> str:
 
 @app.post("/admin/preauthorize/remove", response_class=HTMLResponse)
 async def admin_preauthorize_remove(request: Request) -> str:
+    verify_same_origin(request, CONFIG)
     admin_email = verify_access_jwt(request, CONFIG, JWKS_CLIENT)
     require_admin(admin_email, CONFIG)
     form = await request.form()
     target_email = _required_form_field(form, "target_email")
-    remove_preauthorized_email(CONFIG, target_email)
-    users = list_issued_users(CONFIG)
+    remove_preauthorized_email(CONFIG, target_email)  # the mutation
     preauthorized = list_preauthorized(CONFIG)
+    users = _list_issued_users_or_none(CONFIG)
     return render_admin_page(admin_email, users, preauthorized, CONFIG)
 
 

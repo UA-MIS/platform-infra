@@ -28,6 +28,7 @@ def _required_env(tmp_path_factory):
             # exercises the case-insensitive, whitespace-stripped matching
             # require_admin() must do.
             "ADMIN_EMAILS": " admin@ua.edu , Faculty-Admin@Crimson.UA.EDU ",
+            "KEYPORTAL_HOSTNAME": "local-llm-keys.uamishub.com",
             "KEYPORTAL_DB_PATH": str(db_path),
         }
     )

@@ -702,6 +702,11 @@ def test_index_active_user_sees_key_and_config(
 
 ADMIN_EMAIL = "admin@ua.edu"  # matches conftest.py's ADMIN_EMAILS fixture
 NON_ADMIN_EMAIL = "student@crimson.ua.edu"
+# Matches conftest.py's KEYPORTAL_HOSTNAME fixture. Security review F5
+# (2026-09-30) added a same-origin check to every state-changing POST,
+# so every test that expects to get PAST that check -- including tests
+# of unrelated behavior like auth or form validation -- must send this.
+VALID_ORIGIN_HEADER = {"Origin": "https://local-llm-keys.uamishub.com"}
 
 
 def test_require_admin_allows_exact_match(app_module):
@@ -952,6 +957,22 @@ def test_render_admin_page_empty_state(app_module):
     assert "No one is pre-authorized" in html
 
 
+def test_render_admin_page_users_none_shows_unavailable_but_roster_intact(app_module):
+    """Security review B3 (2026-09-30): users=None is distinct from
+    users=[] -- it means the key list could not be read at all, not that
+    it read fine and is empty. The roster must render normally either
+    way."""
+    config = app_module.CONFIG
+    preauthorized = [
+        app_module.PreauthorizedEntry(
+            email="waiting@ua.edu", added_at=1_700_000_000.0, redeemed_at=None
+        )
+    ]
+    html = app_module.render_admin_page(ADMIN_EMAIL, None, preauthorized, config)
+    assert "unavailable" in html.lower()
+    assert "waiting@ua.edu" in html
+
+
 def test_render_admin_page_escapes_user_table_values(app_module):
     """Security review (2026-09-30): a surviving mutant showed removing
     escape() from the issued-users table rows changed nothing observable
@@ -1156,12 +1177,17 @@ def test_admin_promote_no_jwt_returns_401(client):
     resp = client.post(
         "/admin/promote",
         data={"target_email": "x@crimson.ua.edu", "target_team": "students"},
+        headers=VALID_ORIGIN_HEADER,
     )
     assert resp.status_code == 401
 
 
 def test_admin_demote_no_jwt_returns_401(client):
-    resp = client.post("/admin/demote", data={"target_email": "x@crimson.ua.edu"})
+    resp = client.post(
+        "/admin/demote",
+        data={"target_email": "x@crimson.ua.edu"},
+        headers=VALID_ORIGIN_HEADER,
+    )
     assert resp.status_code == 401
 
 
@@ -1177,9 +1203,10 @@ def test_admin_promote_non_admin_returns_403(app_module, client, mocker):
     resp = client.post(
         "/admin/promote",
         data={"target_email": "x@crimson.ua.edu", "target_team": "students"},
-        headers={"Cf-Access-Jwt-Assertion": "irrelevant"},
+        headers={"Cf-Access-Jwt-Assertion": "irrelevant", **VALID_ORIGIN_HEADER},
     )
     assert resp.status_code == 403
+    assert resp.json()["detail"] == app_module._ADMIN_FORBIDDEN_DETAIL
     # The allowlist check must happen BEFORE any LiteLLM call, not after.
     post_mock.assert_not_called()
 
@@ -1190,9 +1217,10 @@ def test_admin_demote_non_admin_returns_403(app_module, client, mocker):
     resp = client.post(
         "/admin/demote",
         data={"target_email": "x@crimson.ua.edu"},
-        headers={"Cf-Access-Jwt-Assertion": "irrelevant"},
+        headers={"Cf-Access-Jwt-Assertion": "irrelevant", **VALID_ORIGIN_HEADER},
     )
     assert resp.status_code == 403
+    assert resp.json()["detail"] == app_module._ADMIN_FORBIDDEN_DETAIL
     post_mock.assert_not_called()
 
 
@@ -1212,7 +1240,7 @@ def test_admin_promote_non_admin_malformed_body_still_403(app_module, client, mo
     resp = client.post(
         "/admin/promote",
         data={},  # both required fields missing
-        headers={"Cf-Access-Jwt-Assertion": "irrelevant"},
+        headers={"Cf-Access-Jwt-Assertion": "irrelevant", **VALID_ORIGIN_HEADER},
     )
     assert resp.status_code == 403
     post_mock.assert_not_called()
@@ -1227,7 +1255,7 @@ def test_admin_promote_admin_malformed_body_returns_422_after_auth(
     resp = client.post(
         "/admin/promote",
         data={"target_email": "someone@ua.edu"},  # target_team missing
-        headers={"Cf-Access-Jwt-Assertion": "irrelevant"},
+        headers={"Cf-Access-Jwt-Assertion": "irrelevant", **VALID_ORIGIN_HEADER},
     )
     assert resp.status_code == 422
 
@@ -1236,7 +1264,9 @@ def test_admin_demote_non_admin_malformed_body_still_403(app_module, client, moc
     mocker.patch.object(app_module, "verify_access_jwt", return_value=NON_ADMIN_EMAIL)
     post_mock = mocker.patch("app.httpx.post")
     resp = client.post(
-        "/admin/demote", data={}, headers={"Cf-Access-Jwt-Assertion": "irrelevant"}
+        "/admin/demote",
+        data={},
+        headers={"Cf-Access-Jwt-Assertion": "irrelevant", **VALID_ORIGIN_HEADER},
     )
     assert resp.status_code == 403
     post_mock.assert_not_called()
@@ -1249,7 +1279,7 @@ def test_admin_preauthorize_non_admin_malformed_body_still_403(
     resp = client.post(
         "/admin/preauthorize",
         data={},
-        headers={"Cf-Access-Jwt-Assertion": "irrelevant"},
+        headers={"Cf-Access-Jwt-Assertion": "irrelevant", **VALID_ORIGIN_HEADER},
     )
     assert resp.status_code == 403
 
@@ -1261,7 +1291,7 @@ def test_admin_preauthorize_remove_non_admin_malformed_body_still_403(
     resp = client.post(
         "/admin/preauthorize/remove",
         data={},
-        headers={"Cf-Access-Jwt-Assertion": "irrelevant"},
+        headers={"Cf-Access-Jwt-Assertion": "irrelevant", **VALID_ORIGIN_HEADER},
     )
     assert resp.status_code == 403
 
@@ -1304,7 +1334,7 @@ def test_admin_promote_succeeds_even_with_unrelated_stale_row(
     resp = client.post(
         "/admin/promote",
         data={"target_email": target_email, "target_team": "students"},
-        headers={"Cf-Access-Jwt-Assertion": "irrelevant"},
+        headers={"Cf-Access-Jwt-Assertion": "irrelevant", **VALID_ORIGIN_HEADER},
     )
     assert resp.status_code == 200
     assert target_email in resp.text
@@ -1346,7 +1376,7 @@ def test_admin_promote_route_happy_path_updates_and_redisplays(
     resp = client.post(
         "/admin/promote",
         data={"target_email": email, "target_team": "students"},
-        headers={"Cf-Access-Jwt-Assertion": "irrelevant"},
+        headers={"Cf-Access-Jwt-Assertion": "irrelevant", **VALID_ORIGIN_HEADER},
     )
     assert resp.status_code == 200
     assert email in resp.text
@@ -1370,11 +1400,201 @@ def test_admin_demote_route_happy_path(app_module, client, mocker, fake_response
     resp = client.post(
         "/admin/demote",
         data={"target_email": email},
-        headers={"Cf-Access-Jwt-Assertion": "irrelevant"},
+        headers={"Cf-Access-Jwt-Assertion": "irrelevant", **VALID_ORIGIN_HEADER},
     )
     assert resp.status_code == 200
     team_call = post_mock.call_args_list[1]
     assert team_call.kwargs["json"]["team_id"] == config.pending_team_id
+
+
+# ---------------------------------------------------------------------------
+# verify_same_origin -- CSRF defense for every state-changing POST
+# (security review F5, 2026-09-30). Cloudflare Access's SameSite cookie
+# behavior already makes a forged cross-site POST non-exploitable today,
+# but that safety rests on an off-box dashboard toggle nobody here
+# controls -- this is the application-layer backstop.
+# ---------------------------------------------------------------------------
+
+EXPECTED_ORIGIN = "https://local-llm-keys.uamishub.com"
+
+
+def test_verify_same_origin_valid_origin_passes(app_module, make_request):
+    request = make_request(headers={"Origin": EXPECTED_ORIGIN})
+    app_module.verify_same_origin(request, app_module.CONFIG)  # must not raise
+
+
+def test_verify_same_origin_wrong_host_rejected(app_module, make_request):
+    request = make_request(headers={"Origin": "https://attacker.example"})
+    with pytest.raises(HTTPException) as exc_info:
+        app_module.verify_same_origin(request, app_module.CONFIG)
+    assert exc_info.value.status_code == 403
+    assert "origin mismatch" in exc_info.value.detail.lower()
+
+
+def test_verify_same_origin_suffix_attack_host_rejected(app_module, make_request):
+    """Same class of bug as the require_admin substring mutant: a naive
+    `startswith`/`in` check would accept a host that merely STARTS WITH
+    the expected hostname as a subdomain-looking prefix of an attacker
+    domain."""
+    request = make_request(
+        headers={"Origin": "https://local-llm-keys.uamishub.com.attacker.example"}
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        app_module.verify_same_origin(request, app_module.CONFIG)
+    assert exc_info.value.status_code == 403
+
+
+def test_verify_same_origin_absent_origin_valid_referer_passes(
+    app_module, make_request
+):
+    request = make_request(headers={"Referer": f"{EXPECTED_ORIGIN}/admin"})
+    app_module.verify_same_origin(request, app_module.CONFIG)  # must not raise
+
+
+def test_verify_same_origin_referer_does_not_override_a_present_origin(
+    app_module, make_request
+):
+    """Referer is a FALLBACK for when Origin is absent, never a second
+    chance for a mismatched Origin -- a request with a bad Origin AND a
+    good Referer must still be rejected."""
+    request = make_request(
+        headers={
+            "Origin": "https://attacker.example",
+            "Referer": f"{EXPECTED_ORIGIN}/admin",
+        }
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        app_module.verify_same_origin(request, app_module.CONFIG)
+    assert exc_info.value.status_code == 403
+
+
+def test_verify_same_origin_both_absent_rejected(app_module, make_request):
+    """Fail closed: a state-changing POST with NEITHER header must be
+    rejected, not allowed through -- the same "never silently permissive"
+    contract as the rest of this file."""
+    request = make_request(headers={})
+    with pytest.raises(HTTPException) as exc_info:
+        app_module.verify_same_origin(request, app_module.CONFIG)
+    assert exc_info.value.status_code == 403
+
+
+def test_admin_promote_wrong_origin_rejected_zero_calls(app_module, client, mocker):
+    mocker.patch.object(app_module, "verify_access_jwt", return_value=ADMIN_EMAIL)
+    post_mock = mocker.patch("app.httpx.post")
+    resp = client.post(
+        "/admin/promote",
+        data={"target_email": "x@crimson.ua.edu", "target_team": "students"},
+        headers={
+            "Cf-Access-Jwt-Assertion": "irrelevant",
+            "Origin": "https://attacker.example",
+        },
+    )
+    assert resp.status_code == 403
+    assert "origin mismatch" in resp.json()["detail"].lower()
+    post_mock.assert_not_called()
+    assert (
+        app_module.get_cached_key(app_module.CONFIG.db_path, "x@crimson.ua.edu") is None
+    )
+
+
+def test_admin_promote_suffix_attack_origin_rejected(app_module, client, mocker):
+    mocker.patch.object(app_module, "verify_access_jwt", return_value=ADMIN_EMAIL)
+    post_mock = mocker.patch("app.httpx.post")
+    resp = client.post(
+        "/admin/promote",
+        data={"target_email": "x@crimson.ua.edu", "target_team": "students"},
+        headers={
+            "Cf-Access-Jwt-Assertion": "irrelevant",
+            "Origin": "https://local-llm-keys.uamishub.com.attacker.example",
+        },
+    )
+    assert resp.status_code == 403
+    post_mock.assert_not_called()
+
+
+def test_admin_preauthorize_wrong_origin_no_db_write(app_module, client, mocker):
+    mocker.patch.object(app_module, "verify_access_jwt", return_value=ADMIN_EMAIL)
+    resp = client.post(
+        "/admin/preauthorize",
+        data={"emails": "wouldbe@crimson.ua.edu"},
+        headers={
+            "Cf-Access-Jwt-Assertion": "irrelevant",
+            "Origin": "https://attacker.example",
+        },
+    )
+    assert resp.status_code == 403
+    # Zero DB writes on rejection -- the paste never took effect.
+    assert (
+        app_module.is_preauthorized(app_module.CONFIG, "wouldbe@crimson.ua.edu")
+        is False
+    )
+    assert app_module.list_preauthorized(app_module.CONFIG) == []
+
+
+def test_regenerate_wrong_origin_rejected_key_untouched(app_module, client, mocker):
+    """Security review F5 (2026-09-30) explicitly calls out /regenerate:
+    it is student-facing, not admin, but a forged POST here would
+    silently invalidate a student's working key. Must be covered by its
+    own test, not just inferred from the admin routes."""
+    config = app_module.CONFIG
+    email = "regen-origin-check@crimson.ua.edu"
+    with mocker_seed_cache(app_module, config, email, "sk-regenorigin"):
+        pass
+    mocker.patch.object(app_module, "verify_access_jwt", return_value=email)
+    post_mock = mocker.patch("app.httpx.post")
+    resp = client.post("/regenerate", headers={"Origin": "https://attacker.example"})
+    assert resp.status_code == 403
+    assert "origin mismatch" in resp.json()["detail"].lower()
+    post_mock.assert_not_called()
+    # The student's key must be completely untouched by the rejected
+    # forgery attempt.
+    assert app_module.get_cached_key(config.db_path, email) == "sk-regenorigin"
+
+
+def test_regenerate_no_origin_or_referer_rejected(app_module, client, mocker):
+    config = app_module.CONFIG
+    email = "regen-no-origin@crimson.ua.edu"
+    with mocker_seed_cache(app_module, config, email, "sk-regennoorigin"):
+        pass
+    mocker.patch.object(app_module, "verify_access_jwt", return_value=email)
+    post_mock = mocker.patch("app.httpx.post")
+    resp = client.post("/regenerate")
+    assert resp.status_code == 403
+    post_mock.assert_not_called()
+
+
+def test_regenerate_valid_origin_succeeds(app_module, client, mocker, fake_response):
+    """Confirms the check does not accidentally break the real student
+    path -- a valid same-origin regenerate must still work end to end.
+    Mocks an ACTIVE (students) team throughout, so the new key actually
+    shows up in the response -- the app correctly HIDES the key while
+    pending, so that state wouldn't prove the round trip worked."""
+    config = app_module.CONFIG
+    email = "regen-valid-origin@crimson.ua.edu"
+    with mocker_seed_cache(app_module, config, email, "sk-regenvalid"):
+        pass
+    mocker.patch.object(app_module, "verify_access_jwt", return_value=email)
+
+    def get_side_effect(url, **kwargs):
+        if url.endswith("/key/info"):
+            return fake_response({"info": {"team_id": config.students_team_id}})
+        if url.endswith("/team/info"):
+            return fake_response({"team_info": {"models": ["qwen3.8-27b"]}})
+        raise AssertionError(f"unexpected GET {url}")
+
+    mocker.patch("app.httpx.get", side_effect=get_side_effect)
+
+    def post_side_effect(url, **kwargs):
+        if url.endswith("/key/delete"):
+            return fake_response({"deleted_keys": kwargs["json"]["keys"]})
+        if url.endswith("/key/generate"):
+            return fake_response({"key": "sk-regenfresh"})
+        raise AssertionError(f"unexpected POST to {url}")
+
+    mocker.patch("app.httpx.post", side_effect=post_side_effect)
+    resp = client.post("/regenerate", headers=VALID_ORIGIN_HEADER)
+    assert resp.status_code == 200
+    assert "sk-regenfresh" in resp.text
 
 
 # ---------------------------------------------------------------------------
@@ -1397,36 +1617,109 @@ def test_add_preauthorized_emails_accepts_valid_ua_emails(app_module):
 
 
 def test_add_preauthorized_emails_normalizes_messy_paste(app_module):
-    """Mixed separators (comma AND newline), stray whitespace, mixed
-    case, and an internal duplicate -- exactly what a Canvas/Excel paste
-    looks like in practice."""
+    """Mixed separators (comma, newline, semicolon, AND tab), stray
+    whitespace, mixed case, and an internal duplicate -- exactly what a
+    Canvas/Excel/Outlook paste looks like in practice. Extended per
+    security review B4 (2026-09-30) to cover tab and semicolon, which is
+    precisely the separator class that shipped broken."""
     config = app_module.CONFIG
-    raw = "  Alice@Crimson.UA.EDU \n bob@ua.edu, ALICE@crimson.ua.edu\n\ncarol@ua.edu ,"
+    raw = (
+        "  Alice@Crimson.UA.EDU \n bob@ua.edu, ALICE@crimson.ua.edu\n\n"
+        "carol@ua.edu ;dave@ua.edu\teve@ua.edu"
+    )
     result = app_module.add_preauthorized_emails(config, raw)
     # alice appears twice (different case) but must be added only once.
-    assert result.added == ("alice@crimson.ua.edu", "bob@ua.edu", "carol@ua.edu")
+    assert result.added == (
+        "alice@crimson.ua.edu",
+        "bob@ua.edu",
+        "carol@ua.edu",
+        "dave@ua.edu",
+        "eve@ua.edu",
+    )
     assert result.already_present == ()
     assert result.rejected == ()
     emails = {e.email for e in app_module.list_preauthorized(config)}
-    assert emails == {"alice@crimson.ua.edu", "bob@ua.edu", "carol@ua.edu"}
+    assert emails == {
+        "alice@crimson.ua.edu",
+        "bob@ua.edu",
+        "carol@ua.edu",
+        "dave@ua.edu",
+        "eve@ua.edu",
+    }
+
+
+def test_add_preauthorized_emails_rejects_multi_field_paste_shapes(app_module):
+    """Security review B4 (2026-09-30): a tab- or semicolon-separated
+    roster paste (a name in one Excel cell, the email in the next; a
+    semicolon-joined Outlook address list) used to authorize NOBODY
+    while reporting success -- the suffix-only check let a whole
+    "Name\\tEmail" or "email1;email2" line through as one bogus stored
+    "email", and nothing was ever reported as rejected. This is the
+    exact reproduction from the review, including a stray \\r (Windows
+    line ending)."""
+    config = app_module.CONFIG
+    raw = (
+        "a@ua.edu\r\nb@crimson.ua.edu\nSmith\tc@ua.edu\nd@ua.edu;e@ua.edu\n  f@ua.edu  "
+    )
+    result = app_module.add_preauthorized_emails(config, raw)
+    assert set(result.added) == {
+        "a@ua.edu",
+        "b@crimson.ua.edu",
+        "c@ua.edu",
+        "d@ua.edu",
+        "e@ua.edu",
+        "f@ua.edu",
+    }
+    # "Smith" must be REPORTED, not silently dropped -- that promise
+    # (app.py's own render_admin_page help text) was broken before this
+    # fix.
+    rejected_emails = [e for e, _reason in result.rejected]
+    assert "smith" in rejected_emails
+    for email in ("c@ua.edu", "d@ua.edu", "e@ua.edu"):
+        assert app_module.is_preauthorized(config, email) is True
+
+
+def test_looks_like_email_rejects_malformed_shapes(app_module):
+    """Direct unit coverage of the shape check itself (security review
+    B4/N1, 2026-09-30) -- these are the specific lookalikes the reviewer
+    traced as inert-but-confusing under the old suffix-only check."""
+    config = app_module.CONFIG
+    assert app_module._looks_like_email("plain@ua.edu", config) is True
+    assert app_module._looks_like_email("@ua.edu", config) is False  # empty local part
+    assert app_module._looks_like_email("two@at@ua.edu", config) is False  # 2 "@"s
+    assert (
+        app_module._looks_like_email("<jane@ua.edu", config) is False
+    )  # angle bracket
+    assert app_module._looks_like_email("-leading-dash@ua.edu", config) is False
 
 
 def test_add_preauthorized_emails_rejects_non_ua_domain_and_reports_it(app_module):
     config = app_module.CONFIG
     result = app_module.add_preauthorized_emails(
-        config, "good@crimson.ua.edu, bad@gmail.com, also-bad@outlook.com"
+        config,
+        "good@crimson.ua.edu, bad@gmail.com, also-bad@outlook.com, foo@ua.edu.evil.com",
     )
     assert result.added == ("good@crimson.ua.edu",)
-    assert len(result.rejected) == 2
+    assert len(result.rejected) == 3
     rejected_emails = [e for e, _reason in result.rejected]
     assert "bad@gmail.com" in rejected_emails
     assert "also-bad@outlook.com" in rejected_emails
+    # Security review test gap (2026-09-30): the ONLY rejection examples
+    # here used to be gmail.com/outlook.com, which contain no "@ua.edu"
+    # substring at all -- so a mutant that changed the domain check from
+    # `.endswith(suffixes)` to `any(s in email for s in suffixes)` would
+    # have passed this test while silently accepting every lookalike
+    # domain. "foo@ua.edu.evil.com" DOES contain "@ua.edu" as a
+    # substring but must still be rejected -- exact suffix anchoring is
+    # the entire point of the check.
+    assert "foo@ua.edu.evil.com" in rejected_emails
     for _email, reason in result.rejected:
         assert "crimson.ua.edu or ua.edu" in reason
     # Rejected emails are never silently added.
     stored = {e.email for e in app_module.list_preauthorized(config)}
     assert "bad@gmail.com" not in stored
     assert "also-bad@outlook.com" not in stored
+    assert "foo@ua.edu.evil.com" not in stored
 
 
 def test_add_preauthorized_emails_dedupes_against_already_stored(app_module):
@@ -1748,12 +2041,20 @@ def test_remove_preauthorized_redeemed_refuses_with_409(
 
 
 def test_admin_preauthorize_no_jwt_returns_401(client):
-    resp = client.post("/admin/preauthorize", data={"emails": "x@ua.edu"})
+    resp = client.post(
+        "/admin/preauthorize",
+        data={"emails": "x@ua.edu"},
+        headers=VALID_ORIGIN_HEADER,
+    )
     assert resp.status_code == 401
 
 
 def test_admin_preauthorize_remove_no_jwt_returns_401(client):
-    resp = client.post("/admin/preauthorize/remove", data={"target_email": "x@ua.edu"})
+    resp = client.post(
+        "/admin/preauthorize/remove",
+        data={"target_email": "x@ua.edu"},
+        headers=VALID_ORIGIN_HEADER,
+    )
     assert resp.status_code == 401
 
 
@@ -1762,7 +2063,7 @@ def test_admin_preauthorize_non_admin_returns_403(app_module, client, mocker):
     resp = client.post(
         "/admin/preauthorize",
         data={"emails": "x@crimson.ua.edu"},
-        headers={"Cf-Access-Jwt-Assertion": "irrelevant"},
+        headers={"Cf-Access-Jwt-Assertion": "irrelevant", **VALID_ORIGIN_HEADER},
     )
     assert resp.status_code == 403
     assert app_module.is_preauthorized(app_module.CONFIG, "x@crimson.ua.edu") is False
@@ -1773,7 +2074,7 @@ def test_admin_preauthorize_remove_non_admin_returns_403(app_module, client, moc
     resp = client.post(
         "/admin/preauthorize/remove",
         data={"target_email": "x@crimson.ua.edu"},
-        headers={"Cf-Access-Jwt-Assertion": "irrelevant"},
+        headers={"Cf-Access-Jwt-Assertion": "irrelevant", **VALID_ORIGIN_HEADER},
     )
     assert resp.status_code == 403
 
@@ -1785,7 +2086,7 @@ def test_admin_preauthorize_route_happy_path_reports_rejections(
     resp = client.post(
         "/admin/preauthorize",
         data={"emails": "good@crimson.ua.edu\nbad@gmail.com"},
-        headers={"Cf-Access-Jwt-Assertion": "irrelevant"},
+        headers={"Cf-Access-Jwt-Assertion": "irrelevant", **VALID_ORIGIN_HEADER},
     )
     assert resp.status_code == 200
     assert "good@crimson.ua.edu" in resp.text
@@ -1801,7 +2102,7 @@ def test_admin_preauthorize_remove_route_happy_path(app_module, client, mocker):
     resp = client.post(
         "/admin/preauthorize/remove",
         data={"target_email": "route-remove@ua.edu"},
-        headers={"Cf-Access-Jwt-Assertion": "irrelevant"},
+        headers={"Cf-Access-Jwt-Assertion": "irrelevant", **VALID_ORIGIN_HEADER},
     )
     assert resp.status_code == 200
     assert app_module.list_preauthorized(config) == []
@@ -1815,3 +2116,66 @@ def test_admin_index_shows_preauthorized_section(app_module, client, mocker):
     assert resp.status_code == 200
     assert "listed-roster@ua.edu" in resp.text
     assert "Waiting" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# B3 delta (security review, 2026-09-30): the mutation (and its report --
+# for /admin/preauthorize, the ONLY channel telling the admin what a
+# paste did) must be computed and captured, and the roster must be read,
+# INDEPENDENTLY of whatever the key list is doing. Forces
+# list_issued_users() itself to raise (not just a per-row HTTPError) to
+# isolate this from the per-row resilience fix already covered above.
+# ---------------------------------------------------------------------------
+
+
+def test_admin_preauthorize_reports_result_even_if_key_list_fails(
+    app_module, client, mocker
+):
+    mocker.patch.object(app_module, "verify_access_jwt", return_value=ADMIN_EMAIL)
+    mocker.patch.object(
+        app_module, "list_issued_users", side_effect=RuntimeError("boom")
+    )
+    resp = client.post(
+        "/admin/preauthorize",
+        data={"emails": "good@crimson.ua.edu, bad@gmail.com"},
+        headers={"Cf-Access-Jwt-Assertion": "irrelevant", **VALID_ORIGIN_HEADER},
+    )
+    assert resp.status_code == 200
+    # The mutation's report -- both halves -- survives the key-list crash.
+    assert "good@crimson.ua.edu" in resp.text
+    assert "bad@gmail.com" in resp.text
+    assert "unavailable" in resp.text.lower()
+    # And the mutation genuinely applied, not just its report.
+    assert app_module.is_preauthorized(app_module.CONFIG, "good@crimson.ua.edu") is True
+
+
+def test_admin_preauthorize_remove_succeeds_even_if_key_list_fails(
+    app_module, client, mocker
+):
+    config = app_module.CONFIG
+    mocker.patch.object(app_module, "verify_access_jwt", return_value=ADMIN_EMAIL)
+    app_module.add_preauthorized_emails(config, "remove-amid-failure@ua.edu")
+    mocker.patch.object(
+        app_module, "list_issued_users", side_effect=RuntimeError("boom")
+    )
+    resp = client.post(
+        "/admin/preauthorize/remove",
+        data={"target_email": "remove-amid-failure@ua.edu"},
+        headers={"Cf-Access-Jwt-Assertion": "irrelevant", **VALID_ORIGIN_HEADER},
+    )
+    assert resp.status_code == 200
+    assert app_module.list_preauthorized(config) == []  # the mutation applied
+    assert "unavailable" in resp.text.lower()
+
+
+def test_admin_index_shows_roster_even_if_key_list_fails(app_module, client, mocker):
+    config = app_module.CONFIG
+    mocker.patch.object(app_module, "verify_access_jwt", return_value=ADMIN_EMAIL)
+    app_module.add_preauthorized_emails(config, "roster-visible@ua.edu")
+    mocker.patch.object(
+        app_module, "list_issued_users", side_effect=RuntimeError("boom")
+    )
+    resp = client.get("/admin", headers={"Cf-Access-Jwt-Assertion": "irrelevant"})
+    assert resp.status_code == 200
+    assert "roster-visible@ua.edu" in resp.text
+    assert "unavailable" in resp.text.lower()
