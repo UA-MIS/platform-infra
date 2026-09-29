@@ -309,17 +309,101 @@ def revoke_and_reissue(config: Config, email: str) -> str:
     return issue_key(config, email, team_id)
 
 
+# Shared, plain, dependency-free CSS -- no framework, no CDN, no build
+# step. UA crimson used sparingly as an accent (headings, links, the
+# course-policy rule, button outline) -- not an attempt to reproduce an
+# official UA page. The viewport meta tag (in _PAGE_HEAD) matters as much
+# as this: without it, phones render at a virtual ~980px width and the
+# font-size rules below are meaningless.
+_STYLE = """
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; max-width: 680px; margin: 32px auto; padding: 0 16px; line-height: 1.55; color: #1a1a1a; background: #ffffff; overflow-wrap: break-word; word-wrap: break-word; }
+h1 { color: #9E1B32; margin-bottom: 4px; font-size: 1.6rem; }
+h2 { margin-top: 28px; font-size: 1.15rem; }
+.intro { background: #faf9f7; border: 1px solid #e6e1da; padding: 16px 18px; border-radius: 8px; }
+.policy { border-left: 4px solid #9E1B32; padding: 4px 0 4px 12px; margin: 16px 0; }
+.pending { background: #fff3cd; border: 1px solid #ffe69c; padding: 16px; border-radius: 8px; }
+pre { background: #f4f4f4; padding: 12px; overflow-x: auto; white-space: pre-wrap; word-break: break-word; border-radius: 6px; font-size: 0.9rem; }
+code { background: #f0f0f0; padding: 1px 5px; border-radius: 4px; font-size: 0.9em; }
+button { padding: 10px 18px; cursor: pointer; font-size: 1rem; border-radius: 6px; border: 1px solid #9E1B32; background: #ffffff; color: #9E1B32; }
+button:hover { background: #9E1B32; color: #ffffff; }
+a { color: #7a1526; }
+@media (max-width: 480px) {
+  body { margin: 20px auto; }
+  h1 { font-size: 1.4rem; }
+}
+"""
+
+
+def _manual_config_block(api_key_placeholder: str = "&lt;your key&gt;") -> str:
+    """The same shape as the personalized block below, but with a
+    placeholder key -- shown to EVERY visitor (pending or active) so a
+    beginner can see exactly what the file should look like even before
+    their key is usable, without leaving this page."""
+    return f"""models:
+  - name: UA MIS Local
+    provider: openai
+    model: {MODEL_NAME}
+    apiBase: {MODEL_ENDPOINT}
+    apiKey: {api_key_placeholder}
+    roles: {CONTINUE_ROLES}"""
+
+
+def render_intro(email: str, config: Config) -> str:
+    """The student-landing-page content, shown above the key section in
+    BOTH the pending and active states (D-<team-lead-brief>, 2026-09-29):
+    what this is, how to use it, honest performance expectations, the
+    course-policy line, and who to contact. `config.admin_contact` is the
+    ADMIN_CONTACT env var -- never hardcode a name here.
+    """
+    return f"""<h1>UA MIS Local LLM</h1>
+<p>Signed in as <strong>{email}</strong>.</p>
+<section class="intro">
+<p>This is a private AI coding assistant that runs on a computer owned by
+the MIS program. It's free for you to use, and your code and questions
+are never sent to any outside company -- everything stays on this
+machine.</p>
+
+<h2>How to use it</h2>
+<ol>
+<li>Get your API key -- it's below on this page.</li>
+<li>Install the free <strong>Continue</strong> extension in VS Code
+(Extensions panel &rarr; search &quot;Continue&quot; &rarr; Install).</li>
+<li>Paste the configuration below into <code>~/.continue/config.yaml</code>.</li>
+</ol>
+<p>Setup scripts that do steps 2 and 3 for you (macOS, Linux, Windows):
+<a href="{ONBOARDING_URL}">{ONBOARDING_URL}</a></p>
+<pre>{_manual_config_block()}</pre>
+
+<h2>What to expect</h2>
+<p>This one machine serves the whole MIS program -- it is not a
+datacenter, and it is noticeably slower than ChatGPT or Claude. A full
+answer usually takes <strong>30-60 seconds</strong>, and the text streams
+in as it's generated rather than appearing all at once. That's normal,
+not a sign that something is broken.</p>
+
+<p class="policy"><strong>Course policy:</strong> using this tool does not override your course's rules on AI assistance -- always follow your
+assignment's instructions.</p>
+
+<p>Questions or problems? Contact <strong>{config.admin_contact}</strong>.</p>
+</section>
+<hr>
+"""
+
+
+_PAGE_HEAD = """<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UA-MIS Local LLM Key</title>
+<style>{style}</style>"""
+
+
 def render_page(email: str, key: str, active: bool, config: Config) -> str:
+    intro = render_intro(email, config)
+    head = _PAGE_HEAD.format(style=_STYLE)
     if not active:
         return f"""<!doctype html>
-<html><head><title>UA-MIS Local LLM Key</title>
-<style>
-body {{ font-family: sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; }}
-.pending {{ background: #fff3cd; border: 1px solid #ffe69c; padding: 16px; border-radius: 4px; }}
-</style></head>
+<html><head>{head}</head>
 <body>
-<h1>UA-MIS Local LLM</h1>
-<p>Signed in as <strong>{email}</strong>.</p>
+{intro}
 <div class="pending">
 <p><strong>Your key is issued but not yet activated -- contact
 {config.admin_contact} to be added to a course team.</strong></p>
@@ -328,7 +412,6 @@ already have will start working, and you'll see the
 <code>~/.continue/config.yaml</code> block to paste. You do not need to
 do anything else right now, and you do not need to regenerate anything.</p>
 </div>
-<p>Setup scripts for VS Code / Continue: <a href="{ONBOARDING_URL}">{ONBOARDING_URL}</a></p>
 </body></html>"""
     config_snippet = f"""models:
   - name: UA MIS Local
@@ -341,15 +424,10 @@ do anything else right now, and you do not need to regenerate anything.</p>
     # handles inline completions; this shared GPU box shouldn't spend
     # capacity on every keystroke."""
     return f"""<!doctype html>
-<html><head><title>UA-MIS Local LLM Key</title>
-<style>
-body {{ font-family: sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; }}
-pre {{ background: #f4f4f4; padding: 12px; overflow-x: auto; white-space: pre-wrap; }}
-button {{ padding: 8px 16px; cursor: pointer; }}
-</style></head>
+<html><head>{head}</head>
 <body>
-<h1>UA-MIS Local LLM</h1>
-<p>Signed in as <strong>{email}</strong>.</p>
+{intro}
+<h2>Your key</h2>
 <p>Your LiteLLM key:</p>
 <pre id="key">{key}</pre>
 <button type="button" onclick="navigator.clipboard.writeText(document.getElementById('key').textContent)">Copy key</button>
@@ -358,8 +436,6 @@ button {{ padding: 8px 16px; cursor: pointer; }}
 <form method="post" action="/regenerate">
 <button type="submit">Regenerate key (invalidates the one above)</button>
 </form>
-<p>Full setup scripts (VS Code / Continue, macOS/Linux/Windows):
-<a href="{ONBOARDING_URL}">{ONBOARDING_URL}</a></p>
 </body></html>"""
 
 

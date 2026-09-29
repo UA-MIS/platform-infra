@@ -458,6 +458,80 @@ def test_render_page_links_to_onboarding_scripts_both_states(app_module):
 
 
 # ---------------------------------------------------------------------------
+# render_page -- student landing-page intro, added ABOVE the key section
+# (team-lead brief, 2026-09-29): what-this-is, how-to-use-it, honest
+# expectations, course-policy line, who-to-contact. Must appear in BOTH
+# pending and active states without regressing anything already covered
+# above.
+# ---------------------------------------------------------------------------
+
+
+def test_render_page_intro_appears_in_both_states(app_module):
+    config = app_module.CONFIG
+    pending_html = app_module.render_page("a@ua.edu", "sk-a", False, config)
+    active_html = app_module.render_page("b@ua.edu", "sk-b", True, config)
+    for html in (pending_html, active_html):
+        assert "MIS program" in html
+        assert "outside company" in html
+        assert "How to use it" in html
+        assert "30" in html and "60 seconds" in html
+        assert "does not override your course" in html
+        assert config.admin_contact in html
+
+
+def test_render_page_intro_admin_contact_is_from_config_not_hardcoded(app_module):
+    """The contact line must come from config.admin_contact (ADMIN_CONTACT
+    env var), never a hardcoded name -- the box's current value happens to
+    be "LabMx", but the portal must not assume that."""
+    from dataclasses import replace
+
+    config = replace(app_module.CONFIG, admin_contact="Some Other Contact")
+    html = app_module.render_page("a@ua.edu", "sk-a", False, config)
+    assert "Some Other Contact" in html
+
+
+def test_render_page_intro_course_policy_line_present_both_states(app_module):
+    config = app_module.CONFIG
+    pending_html = app_module.render_page("a@ua.edu", "sk-a", False, config)
+    active_html = app_module.render_page("b@ua.edu", "sk-b", True, config)
+    for html in (pending_html, active_html):
+        assert "course" in html.lower()
+        assert "assignment" in html.lower()
+
+
+def test_render_page_intro_includes_generic_manual_config_with_placeholder(
+    app_module,
+):
+    """The manual copy-paste config block belongs on the page itself (not
+    only a link out to onboarding/), so a pending user -- who never sees a
+    real key -- can still see the shape of the file. It must use a
+    placeholder, never leak the caller's real key."""
+    config = app_module.CONFIG
+    hidden_key = "sk-pendhide"  # must never leak into the pending page
+    html = app_module.render_page("a@ua.edu", hidden_key, False, config)
+    assert "your key" in html.lower()
+    assert app_module.MODEL_NAME in html
+    assert app_module.MODEL_ENDPOINT in html
+    assert hidden_key not in html
+
+
+def test_render_page_intro_does_not_imply_ai_always_allowed(app_module):
+    """MIS 221 forbids AI assistance on PA-1 -- the page must not claim or
+    imply the tool is unconditionally fine to use for coursework."""
+    config = app_module.CONFIG
+    html = app_module.render_page("a@ua.edu", "sk-a", False, config)
+    lowered = html.lower()
+    assert "always allowed" not in lowered
+    assert "use this for any assignment" not in lowered
+
+
+def test_render_page_has_viewport_meta_for_mobile(app_module):
+    config = app_module.CONFIG
+    html = app_module.render_page("a@ua.edu", "sk-a", False, config)
+    assert "width=device-width" in html
+
+
+# ---------------------------------------------------------------------------
 # HTTP-level routes via FastAPI TestClient
 # ---------------------------------------------------------------------------
 
