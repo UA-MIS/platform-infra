@@ -8,8 +8,26 @@
 # (appliances/gb10/deploy/gb10-appliance.service) already calls that script
 # as ExecStartPre on every boot. The rendered alertmanager.yml is gitignored
 # (see appliances/gb10/.gitignore) — only this template is committed.
+#
+# route.receiver is itself a placeholder (2026-09-30 fix): if
+# ALERTMANAGER_SLACK_WEBHOOK_URL is unset/blank in .env (the owner has
+# ruled out Slack), render-config.sh points it at the 'null' receiver
+# below instead of 'slack' -- Alertmanager's own documented idiom for
+# "accept and evaluate alerts, deliver none of them." This keeps
+# Alertmanager itself starting (and therefore keeps ExecStartPre, and
+# therefore the whole systemd unit, from being permanently fatal just
+# because a webhook was never configured) instead of shipping a 'slack'
+# receiver with an empty api_url, which Alertmanager would reject at
+# startup the first time it tried to actually fire a notification.
 route:
-  receiver: slack
+  # Quoted deliberately: an UNQUOTED `receiver: null` after substitution
+  # would be parsed by YAML as the null VALUE, not the string "null" --
+  # a receiver reference of nothing, not a reference to the receiver
+  # actually named 'null' below. Caught live: rendering with the
+  # webhook unset and feeding the result to a real Alertmanager binary
+  # (`amtool check-config`) failed on exactly this before the quotes
+  # were added.
+  receiver: 'ROUTE_RECEIVER_PLACEHOLDER'
   group_by: ['alertname']
   group_wait: 30s
   group_interval: 5m
@@ -23,3 +41,4 @@ receivers:
         send_resolved: true
         title: '{{ .CommonAnnotations.summary }}'
         text: '{{ .CommonAnnotations.description }}'
+  - name: 'null'
