@@ -1055,6 +1055,67 @@ def test_list_issued_users_stale_row_is_explicit_not_fatal(
     assert stale_user.lookup_error is not None
 
 
+def test_list_issued_users_connection_failure_wording_differs_from_bad_key(
+    app_module, mocker
+):
+    """Security review round 3, same-pass item (2026-09-30): a
+    connection/timeout failure (httpx.RequestError -- LiteLLM
+    unreachable) must NOT get the same "does not recognize this key"
+    wording as a real 404 on one bad key. That wording implies LiteLLM
+    answered and said no; a RequestError means it never answered at
+    all, and almost certainly affects every row, not just this one."""
+    import httpx as httpx_lib
+
+    config = app_module.CONFIG
+    email = "unreachable-row@crimson.ua.edu"
+    with mocker_seed_cache(app_module, config, email, "sk-unreachable"):
+        pass
+    mocker.patch(
+        "app.httpx.get",
+        side_effect=httpx_lib.ConnectError("connection refused"),
+    )
+    users = app_module.list_issued_users(config)
+    assert len(users) == 1
+    user = users[0]
+    assert user.stale is True
+    assert "does not recognize this key" not in user.team_label
+    assert "could not reach litellm" in user.team_label.lower()
+
+
+def test_list_issued_users_bad_json_body_wording_differs_from_both(
+    app_module, mocker, fake_response
+):
+    """Security review round 3, same-pass item (2026-09-30): before this
+    fix, a 2xx response with a body get_current_team_id() could not
+    parse as JSON raised an unhandled ValueError (json.JSONDecodeError)
+    -- reproducing the exact "one bad row 500s the whole listing"
+    failure F2 fixed, just via an exception type the original except
+    clause did not catch. Must render as its own distinct stale row
+    instead, not crash and not reuse either of the other two wordings."""
+
+    class BadJsonResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+    config = app_module.CONFIG
+    email = "badjson-row@crimson.ua.edu"
+    with mocker_seed_cache(app_module, config, email, "sk-badjson"):
+        pass
+    mocker.patch("app.httpx.get", return_value=BadJsonResponse())
+    users = app_module.list_issued_users(config)
+    assert len(users) == 1
+    user = users[0]
+    assert user.stale is True
+    assert "does not recognize this key" not in user.team_label
+    assert "could not reach litellm" not in user.team_label.lower()
+    assert "unexpected response" in user.team_label.lower()
+
+
 def test_list_issued_users_caches_team_grants_access_per_team(
     app_module, mocker, fake_response
 ):

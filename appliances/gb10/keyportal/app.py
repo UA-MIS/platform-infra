@@ -817,6 +817,25 @@ def list_issued_users(config: Config) -> list:
     failure is now caught and rendered as an explicit stale row (see
     IssuedUser.lookup_error) instead of aborting the whole listing.
 
+    Security review round 3, same-pass item (2026-09-30): the original
+    F2 fix caught only `httpx.HTTPError` with one wording ("LiteLLM does
+    not recognize this key") for every failure. That wording is right
+    for the common case -- a real 404 on a specific key -- but wrong and
+    actively misleading if LiteLLM itself is unreachable (a
+    `ConnectError`/`TimeoutException`, both `httpx.RequestError`
+    subclasses, not a status code at all): an admin loading /admin
+    during a LiteLLM outage would see EVERY row individually marked
+    "does not recognize this key" and could reasonably conclude every
+    student's key had been revoked, when actually none were checked at
+    all. Also widened to catch `ValueError` (covers
+    `json.JSONDecodeError`), since `get_current_team_id()`/
+    `team_grants_access()` both call `resp.json()` -- an unexpected
+    non-JSON body (a proxy error page, a bad deploy) used to reproduce
+    the exact "one bad row 500s the whole page" failure this function
+    exists to prevent, just via a different exception type than the
+    original fix anticipated. Each of the three cases now gets wording
+    that tells the admin what actually happened.
+
     Also caches team_grants_access() per team_id within one call --
     there are only a handful of distinct teams (pending/students/
     faculty) no matter how many rows are in `keys`, so a 300-row roster
@@ -836,12 +855,52 @@ def list_issued_users(config: Config) -> list:
             if team_id not in team_active_cache:
                 team_active_cache[team_id] = team_grants_access(config, team_id)
             active = team_active_cache[team_id]
-        except httpx.HTTPError as exc:
+        except httpx.HTTPStatusError as exc:
+            # A real HTTP status came back (typically 404) -- LiteLLM is
+            # reachable and answered; it just does not recognize this
+            # specific key. This is the common, per-row case F2 targeted.
             users.append(
                 IssuedUser(
                     email=email,
                     team_id=None,
                     team_label="(unknown -- LiteLLM does not recognize this key)",
+                    active=False,
+                    created_at=created_at,
+                    lookup_error=str(exc),
+                )
+            )
+            continue
+        except httpx.RequestError as exc:
+            # No status code at all -- a connection/timeout failure
+            # (httpx.ConnectError, httpx.TimeoutException, etc). This is
+            # almost certainly NOT specific to this one row: LiteLLM is
+            # probably down or unreachable for every row on this page.
+            # Different wording so an admin does not mistake "the whole
+            # backend is unreachable" for "every student's key was
+            # individually revoked."
+            users.append(
+                IssuedUser(
+                    email=email,
+                    team_id=None,
+                    team_label="(unknown -- could not reach LiteLLM to check this key)",
+                    active=False,
+                    created_at=created_at,
+                    lookup_error=str(exc),
+                )
+            )
+            continue
+        except ValueError as exc:
+            # resp.json() raised (covers json.JSONDecodeError) -- LiteLLM
+            # answered with a 2xx but a body that was not the JSON shape
+            # expected (a proxy error page, a bad deploy). Distinct from
+            # both cases above: a status code path was fine, but the
+            # payload was not something get_current_team_id()/
+            # team_grants_access() could parse.
+            users.append(
+                IssuedUser(
+                    email=email,
+                    team_id=None,
+                    team_label="(unknown -- LiteLLM returned an unexpected response for this key)",
                     active=False,
                     created_at=created_at,
                     lookup_error=str(exc),
