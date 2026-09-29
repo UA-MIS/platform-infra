@@ -386,20 +386,56 @@ def verify_same_origin(request: Request, config: Config) -> None:
 
 
 def get_cached_key(db_path: str, email: str) -> Optional[str]:
+    """The one place every caller reads "does this email have a usable
+    key". Security review round 4, B5 fix 1 (2026-09-30): a claim token
+    (see _CLAIM_PREFIX below) is NOT a usable key -- it is a row mid-
+    flight, either genuinely in progress or abandoned by a process that
+    crashed between claiming and finalizing. Before this fix, a stuck
+    claim was indistinguishable from a real key to every caller of this
+    function: index()/regenerate() would hand it straight to
+    get_current_team_id(), which raises on a key LiteLLM does not
+    recognize (a claim token is never a valid LiteLLM key shape) --
+    turning a crashed mint into a PERMANENT 500 on every reload for that
+    student, forever, with no self-service recovery. Filtering it out
+    here means every caller correctly sees "no key yet", the same state
+    as a brand-new visitor -- issue_initial_key()'s own claim (fix 2,
+    same review) then either reclaims the stale slot or discovers a
+    genuinely live one in progress, rather than this function ever
+    handing out a value nothing can use.
+    """
     with closing(sqlite3.connect(db_path)) as conn:
         row = conn.execute(
             "SELECT litellm_key FROM keys WHERE email = ?", (email,)
         ).fetchone()
-        return row[0] if row else None
+    if row is None:
+        return None
+    key = row[0]
+    if key.startswith(_CLAIM_PREFIX):
+        return None
+    return key
 
 
 # A claim token is never a valid LiteLLM key shape (real keys are
 # "sk-..."), so get_current_team_id()'s /key/info lookup will correctly
 # fail to recognize one -- which is exactly what makes a STUCK claim
-# (a winner that crashed mid-flight) automatically visible as a stale
-# row in list_issued_users()/`/admin`, with no extra code needed for
-# that case. See issue_key()'s docstring for the full design.
+# (a winner that crashed mid-flight) visible as a stale row in
+# list_issued_users()/`/admin`. That admin-side visibility is real but
+# was NOT a fix on its own (security review round 4, B5, 2026-09-30):
+# an admin has no button for it (promote/demote are suppressed on a
+# stale row) and its own hint pointed at LiteLLM's key list, which is
+# the wrong system -- the bad data lives in THIS database, not there.
+# get_cached_key() now filters this prefix out (treats a claim as "no
+# key"), and _claim_key_row() below reclaims a claim old enough to be
+# abandoned rather than leaving it stuck forever.
 _CLAIM_PREFIX = "__claiming__"
+
+# How long a claim is trusted before it is treated as abandoned (a
+# process that crashed between claiming and finalizing) rather than
+# genuinely in progress. issue_key()'s LiteLLM round trip is a fast
+# management-API call, not slow inference -- comfortably done in well
+# under this window in the ordinary case, so anything still unresolved
+# past it is far more likely a crash than a slow winner.
+_CLAIM_TTL_SECONDS = 60
 
 
 def _claim_key_row(
@@ -413,6 +449,19 @@ def _claim_key_row(
     pattern as mark_preauthorized_redeemed(), safe across any number of
     processes. Returns the claim token on success, None if someone else
     already holds it.
+
+    Security review round 4, B5 fix 2 (2026-09-30): if the direct CAS
+    attempt above loses, the row might not be a live contest -- it might
+    be a claim abandoned by a crashed process, sitting there forever
+    with nothing to ever clear it (get_cached_key() now hides it from
+    every reader, but hiding it is not the same as reclaiming it). Before
+    giving up, re-read the row: if it currently holds ANY claim token
+    (not necessarily `previous_key` -- the caller may have believed
+    there was no key at all) older than _CLAIM_TTL_SECONDS, treat it as
+    abandoned and CAS from that exact value instead. A genuinely live
+    claim (younger than the TTL) is left alone -- that is still a real
+    contest, and the caller's existing bounded-retry-then-raise handles
+    it correctly.
     """
     token = f"{_CLAIM_PREFIX}{uuid.uuid4().hex}"
     now = time.time()
@@ -429,8 +478,27 @@ def _claim_key_row(
                 "created_at = ? WHERE email = ? AND litellm_key = ?",
                 (token, now, email, previous_key),
             )
-        conn.commit()
         won = cur.rowcount == 1
+        if not won:
+            row = conn.execute(
+                "SELECT litellm_key, created_at FROM keys WHERE email = ?",
+                (email,),
+            ).fetchone()
+            if (
+                row
+                and row[0].startswith(_CLAIM_PREFIX)
+                and (now - row[1]) > _CLAIM_TTL_SECONDS
+            ):
+                reclaim_token = f"{_CLAIM_PREFIX}{uuid.uuid4().hex}"
+                cur2 = conn.execute(
+                    "UPDATE keys SET litellm_key = ?, key_id = 'claiming', "
+                    "created_at = ? WHERE email = ? AND litellm_key = ?",
+                    (reclaim_token, now, email, row[0]),
+                )
+                if cur2.rowcount == 1:
+                    token = reclaim_token
+                    won = True
+        conn.commit()
     return token if won else None
 
 
@@ -522,22 +590,40 @@ def issue_key(config: Config, email: str, team_id: str) -> str:
         # inference call -- and check once more before failing loudly.
         # No open-ended polling: a winner that never finishes (e.g. it
         # crashed mid-flight) leaves a claim token as litellm_key, which
-        # LiteLLM's /key/info will not recognize -- list_issued_users()
-        # already renders exactly that shape as an explicit stale row
-        # (security review B2/B3), so a stuck claim surfaces in /admin
-        # on its own, with no special-case code needed here.
+        # _claim_key_row() itself now reclaims once it is old enough
+        # (security review round 4, B5 fix 2) -- so a genuinely stuck
+        # claim self-heals on the NEXT caller rather than needing
+        # special-case code here.
         time.sleep(0.3)
-        with closing(sqlite3.connect(config.db_path)) as conn:
-            row = conn.execute(
-                "SELECT litellm_key FROM keys WHERE email = ?", (email,)
-            ).fetchone()
-        if row and not row[0].startswith(_CLAIM_PREFIX):
-            return row[0]
+        row = get_cached_key(config.db_path, email)
+        if row is not None:
+            return row
         raise RuntimeError(
             f"Another request is already issuing a key for {email} -- "
             f"please reload in a moment."
         )
 
+    return _mint_and_finalize_claim(config, email, team_id, token, previous_key)
+
+
+def _mint_and_finalize_claim(
+    config: Config,
+    email: str,
+    team_id: str,
+    token: str,
+    previous_key: Optional[str],
+) -> str:
+    """The "call LiteLLM, then finalize the already-won claim" back half
+    of issue_key(), extracted (security review round 4, finding 2,
+    2026-09-30) so issue_initial_key() can reuse it after doing its OWN
+    claim step atomically with its own existence check -- see that
+    function's docstring for why issue_key()'s own claim-before-mint,
+    called AFTER a separate get_cached_key() read, is not by itself
+    sufficient for the first-issue case. The caller has already won
+    _claim_key_row() (or an equivalent atomic claim); this function only
+    ever mints and finalizes onto a token it is handed, never claims
+    anything itself.
+    """
     minted_key = None
     try:
         resp = httpx.post(
@@ -556,15 +642,42 @@ def issue_key(config: Config, email: str, team_id: str) -> str:
         minted_key = data["key"]
         key_id = data.get("token_id") or data.get("key_name") or email
         with closing(sqlite3.connect(config.db_path)) as conn:
-            # Finalize: replace our own exclusively-held claim token
-            # with the real key. This CAS is guaranteed to succeed --
-            # nothing else can hold this specific token.
-            conn.execute(
+            # Finalize: replace our own claim token with the real key.
+            #
+            # Security review round 4, finding 1 (2026-09-30): the old
+            # comment here claimed this CAS is "guaranteed to succeed --
+            # nothing else can hold this specific token", which is
+            # FALSE. _claim_key_row() treats a claim token as an
+            # ordinary `previous_key` like any other -- it has no
+            # concept of "this value is a claim, not a real key" -- so a
+            # SECOND caller reading THIS token as its own previous_key
+            # (e.g. a stray revoke_and_reissue() racing the same row,
+            # once --workers exists) can successfully CAS *from* it and
+            # win. Before this fix, that second caller's finalize would
+            # then succeed while THIS rowcount check did not exist to
+            # catch it -- this UPDATE would silently affect 0 rows, and
+            # the code below still returned `minted_key` as if it were
+            # safely tracked: B1's exact failure shape (a live, minted,
+            # untracked key), reached through the assumption in this
+            # comment rather than through the mint path B1 originally
+            # closed. Checking rowcount routes this through the SAME
+            # except block below that already knows how to clean up a
+            # minted-but-untracked key and release the claim correctly.
+            cur = conn.execute(
                 "UPDATE keys SET litellm_key = ?, key_id = ?, created_at = ? "
                 "WHERE email = ? AND litellm_key = ?",
                 (minted_key, key_id, time.time(), email, token),
             )
             conn.commit()
+            if cur.rowcount != 1:
+                raise RuntimeError(
+                    f"Finalize lost its own claim token for {email} -- "
+                    f"something else claimed FROM our token before we "
+                    f"could finalize. Not reachable under the documented "
+                    f"single-process invariant; if it happens, the "
+                    f"except block below cleans up the just-minted key "
+                    f"rather than leaving it live and untracked."
+                )
         return minted_key
     except Exception:
         # Ordinary failure (LiteLLM error, or -- vanishingly rare -- the
@@ -587,10 +700,10 @@ def issue_key(config: Config, email: str, team_id: str) -> str:
                 delete_resp.raise_for_status()
             except httpx.HTTPError as exc:
                 print(
-                    f"WARNING: issue_key() minted a key for {email} but "
-                    f"then failed before tracking it, and failed to "
-                    f"clean it up too: {exc}. That key may now be an "
-                    f"ORPHAN in LiteLLM.",
+                    f"WARNING: _mint_and_finalize_claim() minted a key "
+                    f"for {email} but then failed before tracking it, "
+                    f"and failed to clean it up too: {exc}. That key "
+                    f"may now be an ORPHAN in LiteLLM.",
                     file=sys.stderr,
                 )
         _release_claim(config, email, token, previous_key)
@@ -737,10 +850,22 @@ def revoke_and_reissue(config: Config, email: str) -> str:
     calling /key/delete. A lost claim (rowcount 0, someone else already
     rotated this row since we read old_key) fails loudly instead of
     deleting a key that may no longer correspond to the row's current
-    state. This makes the in-process lock an OPTIMIZATION (skips the
-    round-trip when uncontended) rather than the sole correctness
-    guarantee, exactly the property team-lead asked this extension to
-    establish.
+    state. For THIS FUNCTION SPECIFICALLY, this makes the in-process
+    lock an optimization (skips the round-trip when uncontended) rather
+    than the sole correctness guarantee -- exactly the property
+    team-lead asked this extension to establish here.
+
+    Security review round 4, finding 2 correction (2026-09-30): the
+    previous wording of the paragraph above described the lock, without
+    qualification, as "an optimisation rather than the sole correctness
+    guarantee" -- true of THIS function after this extension, but NOT
+    of _lock_for_email() as used elsewhere in this module. Until every
+    caller gets the equivalent treatment (issue_initial_key() got it in
+    this same review round; see its own docstring), the lock remains
+    the SOLE correctness guarantee for those other callers, and a
+    maintainer skimming only this docstring could otherwise conclude
+    the module's locking model is uniformly cross-process-safe when it
+    is not.
     """
     with _lock_for_email(email):
         old_key = get_cached_key(config.db_path, email)
@@ -1255,30 +1380,79 @@ def issue_initial_key(config: Config, email: str) -> str:
     index() checks get_cached_key() OUTSIDE this lock (it has to -- that
     is what decides whether to call this function at all), so two
     concurrent first-time requests for the same email both see None and
-    both enter this function. The lock then serializes them, but without
-    this re-check the SECOND caller would still unconditionally call
-    mark_preauthorized_redeemed() (correctly losing) and then issue_key()
-    AGAIN for a pending key -- and issue_key()'s own claim-before-mint
-    CAS has no way to know that row already holds the FIRST caller's
-    freshly-issued, already-handed-to-the-student ACTIVE key rather than
-    some stale leftover; it would claim over it and overwrite it with a
-    second, pending-team key, exactly reproducing B1 (an active key that
-    is live in LiteLLM, already in the student's hands, but no longer
-    the one this database tracks -- invisible to list_issued_users()/
-    `/admin`, unreachable by demote_user()). Re-reading inside the lock
-    means the second caller, once it gets the lock, sees the first
-    caller's result already committed and simply returns it -- it never
-    calls mark_preauthorized_redeemed() or issue_key() a second time at
-    all.
+    both enter this function. The lock then serializes them.
+
+    Security review round 4, finding 2 (2026-09-30): the round-3 fix
+    above closed the WITHIN-PROCESS race but was still a plain
+    get_cached_key() READ followed, separately, by a call into
+    issue_key() -- which does its OWN unconditional claim-and-mint
+    unconditioned on whether a REAL key already exists. Reviewer
+    demonstrated that with the lock stubbed out (the future --workers
+    scenario this whole module's CAS work exists for), three concurrent
+    first-time visits for the same email minted THREE keys, not one:
+    each one's issue_key() call read whatever the row currently held
+    (None, then whichever caller's key had landed most recently) as its
+    own valid `previous_key` baseline and happily claimed-and-overwrote
+    it, landing the untracked losers on the ACTIVE students team -- B1's
+    exact failure shape, at full original severity, through the one door
+    the B1-R/B1-A/DB-CAS work had not yet closed.
+
+    Fixed by making the existence check ITSELF the atomic claim, rather
+    than a read followed by a decision: attempts _claim_key_row(email,
+    None) FIRST. Winning it is, atomically, proof that no real key (and
+    no live claim) existed a moment ago (or that a stale claim was just
+    reclaimed -- see _claim_key_row()'s own TTL logic) -- only the
+    winner ever determines team_id or mints, via the SAME
+    _mint_and_finalize_claim() back-half issue_key() uses, so exactly
+    one key is ever minted for a given email's first issuance, cross-
+    process, lock or no lock. Losing the claim means a real key already
+    existed (return it) or a live claim is genuinely in progress (the
+    same bounded retry-then-raise issue_key() uses for the identical
+    situation). The in-process lock above is kept -- it is still the
+    fast, uncontended path, skipping the read-and-possibly-retry
+    sequence entirely -- but is no longer the only thing standing
+    between this function and B1's original failure shape.
+
+    Deliberate choice, unchanged from round 3: a real key found via the
+    losing path, or a failure inside _mint_and_finalize_claim() after
+    winning the claim, is never "released" back to a re-triable pending
+    slot for THIS email's first-issue attempt -- see
+    _mint_and_finalize_claim()'s own failure handling, which cleans up a
+    minted-but-untracked key and restores the row to whatever this
+    function's own claim overwrote (None in the fresh-row case), rather
+    than reopening a THIRD concurrent request's chance at the same slot.
     """
     with _lock_for_email(email):
+        token = _claim_key_row(config, email, None)
+        if token is not None:
+            # Won the claim -- atomically confirmed no real/live key
+            # existed a moment ago. Safe to decide team_id and mint;
+            # nothing else can be racing this exact row until we finish.
+            if mark_preauthorized_redeemed(config, email):
+                team_id = getattr(config, _PREAUTHORIZE_TARGET_TEAM_ATTR)
+            else:
+                team_id = config.pending_team_id
+            return _mint_and_finalize_claim(config, email, team_id, token, None)
+
+        # Someone else already holds (or has finished with) this row --
+        # within one process, with the lock held, this branch is only
+        # reachable at all if that "someone else" is a DIFFERENT process
+        # (the lock already serializes same-process callers before they
+        # ever reach _claim_key_row above).
         existing = get_cached_key(config.db_path, email)
         if existing is not None:
             return existing
-        if mark_preauthorized_redeemed(config, email):
-            team_id = getattr(config, _PREAUTHORIZE_TARGET_TEAM_ATTR)
-            return issue_key(config, email, team_id)
-        return issue_key(config, email, config.pending_team_id)
+        # A live (non-stale) claim -- genuinely contested by a
+        # concurrent first-time visit. Same bounded retry issue_key()
+        # uses for the identical situation.
+        time.sleep(0.3)
+        existing = get_cached_key(config.db_path, email)
+        if existing is not None:
+            return existing
+        raise RuntimeError(
+            f"Another request is already issuing a key for {email} -- "
+            f"please reload in a moment."
+        )
 
 
 def remove_preauthorized_email(config: Config, email: str) -> None:
@@ -1779,6 +1953,43 @@ async def _add_referrer_policy_header(request: Request, call_next):
     return response
 
 
+def _team_id_for_key_or_reissue(config: Config, email: str, key: str) -> tuple:
+    """Security review round 4, B5 fix 3 -- THE blocker fix (2026-09-30):
+    get_current_team_id() raises (httpx.HTTPStatusError) when LiteLLM
+    does not recognize `key`. Before this fix, both call sites of
+    get_current_team_id() in the student-facing routes (index(),
+    regenerate()) let that propagate straight into an unhandled 500 --
+    forever, on EVERY reload, since nothing about the row changes on its
+    own. Reachable multiple ways, none of them exotic: a key LiteLLM
+    deleted out-of-band, one that hit its 365-day expiry, a stuck claim
+    token (partially closed by fixes 1/2 above, but out-of-band deletion
+    and expiry are pre-existing doors those two do not touch), or the
+    revoke_and_reissue() window where /key/delete succeeds and issue_key
+    then fails, leaving the row restored to an old_key LiteLLM has
+    already deleted.
+
+    Catches specifically httpx.HTTPStatusError -- LiteLLM answered
+    clearly that this key does not exist -- and re-issues via
+    issue_key() directly onto PENDING, reusing its own claim-before-mint
+    CAS unconditionally rather than guessing at a team we have no way to
+    verify (the whole reason we are here is that LiteLLM will not tell
+    us anything about the old key). This is the same "a race silently
+    falls through to pending instead of an uncontrolled active key"
+    tradeoff issue_initial_key() already accepts -- it costs the student
+    one Promote click from an admin, not a second, unverifiable active
+    key. Deliberately does NOT catch httpx.RequestError/TimeoutException:
+    an actual LiteLLM outage would make the re-issue attempt fail too,
+    and that failure is transient and self-healing on the next reload,
+    not the permanent-until-manual-intervention failure this fix exists
+    to remove.
+    """
+    try:
+        return key, get_current_team_id(config, key)
+    except httpx.HTTPStatusError:
+        key = issue_key(config, email, config.pending_team_id)
+        return key, get_current_team_id(config, key)
+
+
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request) -> str:
     email = verify_access_jwt(request, CONFIG, JWKS_CLIENT)
@@ -1790,7 +2001,7 @@ def index(request: Request) -> str:
         # site, so pre-authorization can never affect a returning
         # visitor's already-issued key.
         key = issue_initial_key(CONFIG, email)
-    team_id = get_current_team_id(CONFIG, key)
+    key, team_id = _team_id_for_key_or_reissue(CONFIG, email, key)
     active = team_grants_access(CONFIG, team_id)
     return render_page(email, key, active, CONFIG)
 
@@ -1822,7 +2033,12 @@ def regenerate(request: Request) -> str:
         )
     email = verify_access_jwt(request, CONFIG, JWKS_CLIENT)
     key = revoke_and_reissue(CONFIG, email)
-    team_id = get_current_team_id(CONFIG, key)
+    # Security review round 4, B5 fix 3 (2026-09-30): revoke_and_reissue()
+    # should always hand back a key LiteLLM just minted, but Door 2 of
+    # B5 (the delete-succeeds-then-issue_key-fails window restoring the
+    # row to an old_key LiteLLM has already deleted) means that is not
+    # guaranteed. Same defensive wrap as index(), for the same reason.
+    key, team_id = _team_id_for_key_or_reissue(CONFIG, email, key)
     active = team_grants_access(CONFIG, team_id)
     return render_page(email, key, active, CONFIG)
 

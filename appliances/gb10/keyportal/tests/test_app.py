@@ -181,6 +181,29 @@ def test_get_cached_key_returns_none_when_absent(app_module):
     )
 
 
+def test_get_cached_key_treats_a_claim_token_as_no_key(app_module):
+    """Security review round 4, B5 fix 1 (2026-09-30): a claim token
+    left in litellm_key by a crashed process is NOT a usable key --
+    before this fix, every caller (index(), regenerate(),
+    get_current_team_id()) treated it as a real one and 500'd forever,
+    on every reload, with no self-service recovery. Filtering it out
+    here is what lets issue_initial_key() (and every route) correctly
+    see "no key yet" instead."""
+    import sqlite3
+    from contextlib import closing
+
+    config = app_module.CONFIG
+    email = "stuck-claim-row@crimson.ua.edu"
+    with closing(sqlite3.connect(config.db_path)) as conn:
+        conn.execute(
+            "INSERT INTO keys (email, litellm_key, key_id, created_at) "
+            "VALUES (?, ?, 'claiming', ?)",
+            (email, f"{app_module._CLAIM_PREFIX}deadbeef", 0.0),
+        )
+        conn.commit()
+    assert app_module.get_cached_key(config.db_path, email) is None
+
+
 def test_init_db_locks_down_file_permissions(app_module, tmp_path):
     """The db holds raw LiteLLM keys in the clear -- it must be
     owner-only (0600), and its parent directory owner-only (0700)."""
@@ -341,6 +364,68 @@ def test_issue_key_claim_lost_and_never_resolves_raises(app_module, mocker):
     generate_mock.assert_not_called()
 
 
+def test_claim_key_row_reclaims_a_stale_abandoned_claim(app_module):
+    """Security review round 4, B5 fix 2 (2026-09-30): a claim token
+    left behind by a process that crashed between claiming and
+    finalizing used to sit there FOREVER -- nothing ever cleared it.
+    _claim_key_row() now treats a claim older than _CLAIM_TTL_SECONDS as
+    abandoned and reclaims it directly, rather than making every future
+    caller lose to a claim that will never resolve."""
+    import sqlite3
+    import time as time_module
+    from contextlib import closing
+
+    config = app_module.CONFIG
+    email = "old-stuck-claim@crimson.ua.edu"
+    stale_at = time_module.time() - app_module._CLAIM_TTL_SECONDS - 5
+    with closing(sqlite3.connect(config.db_path)) as conn:
+        conn.execute(
+            "INSERT INTO keys (email, litellm_key, key_id, created_at) "
+            "VALUES (?, ?, 'claiming', ?)",
+            (email, f"{app_module._CLAIM_PREFIX}abandoned", stale_at),
+        )
+        conn.commit()
+
+    token = app_module._claim_key_row(config, email, None)
+    assert token is not None
+    assert token.startswith(app_module._CLAIM_PREFIX)
+    assert token != f"{app_module._CLAIM_PREFIX}abandoned"
+    with closing(sqlite3.connect(config.db_path)) as conn:
+        row = conn.execute(
+            "SELECT litellm_key FROM keys WHERE email = ?", (email,)
+        ).fetchone()
+    assert row[0] == token
+
+
+def test_claim_key_row_does_not_reclaim_a_fresh_live_claim(app_module):
+    """The other half of the same fix: a claim younger than the TTL is a
+    GENUINE contest (another request is actively minting right now), not
+    an abandoned one -- reclaiming it too eagerly would let a second
+    caller steal the row out from under a winner that is still working,
+    reopening exactly the race the claim exists to prevent."""
+    import sqlite3
+    import time as time_module
+    from contextlib import closing
+
+    config = app_module.CONFIG
+    email = "fresh-live-claim@crimson.ua.edu"
+    with closing(sqlite3.connect(config.db_path)) as conn:
+        conn.execute(
+            "INSERT INTO keys (email, litellm_key, key_id, created_at) "
+            "VALUES (?, ?, 'claiming', ?)",
+            (email, f"{app_module._CLAIM_PREFIX}stillworking", time_module.time()),
+        )
+        conn.commit()
+
+    token = app_module._claim_key_row(config, email, None)
+    assert token is None
+    with closing(sqlite3.connect(config.db_path)) as conn:
+        row = conn.execute(
+            "SELECT litellm_key FROM keys WHERE email = ?", (email,)
+        ).fetchone()
+    assert row[0] == f"{app_module._CLAIM_PREFIX}stillworking"
+
+
 def test_issue_key_releases_claim_when_litellm_call_fails_existing_row(
     app_module, mocker, fake_response
 ):
@@ -423,6 +508,58 @@ def test_issue_key_cleans_up_minted_key_if_finalize_write_fails(
         app_module.issue_key(config, email, config.students_team_id)
 
     assert "sk-finalizeminted" in delete_calls
+
+
+def test_issue_key_finalize_loses_race_cleans_up_and_raises(
+    app_module, mocker, fake_response
+):
+    """Security review round 4, finding 1 (2026-09-30): the finalize
+    UPDATE used to assume it was "guaranteed to succeed -- nothing else
+    can hold this specific token", which is false -- _claim_key_row()
+    treats a claim token as an ordinary previous_key that a SECOND
+    caller can legitimately CAS from (a stray revoke_and_reissue()
+    racing the same row, once --workers exists). Simulates that second
+    caller acting in the exact window between our own successful
+    /key/generate call and our own finalize write. Confirms our
+    finalize now detects it affected zero rows, cleans up our own
+    freshly-minted (but now untrackable) key rather than returning it as
+    if safely tracked, and does not clobber what the other caller
+    wrote."""
+    import sqlite3
+    from contextlib import closing
+
+    config = app_module.CONFIG
+    email = "finalize-race@crimson.ua.edu"
+    delete_calls = []
+
+    def post_side_effect(url, **kwargs):
+        if url.endswith("/key/generate"):
+            # A second caller claims FROM our token in the exact window
+            # between our mint and our own finalize.
+            with closing(sqlite3.connect(config.db_path)) as conn:
+                conn.execute(
+                    "UPDATE keys SET litellm_key = ? WHERE email = ?",
+                    ("sk-stolenrace", email),
+                )
+                conn.commit()
+            return fake_response({"key": "sk-orphanedmint"})
+        if url.endswith("/key/delete"):
+            delete_calls.append(kwargs["json"]["keys"])
+            return fake_response({})
+        raise AssertionError(f"unexpected POST {url}")
+
+    mocker.patch("app.httpx.post", side_effect=post_side_effect)
+
+    with pytest.raises(RuntimeError, match="Finalize lost its own claim token"):
+        app_module.issue_key(config, email, config.students_team_id)
+
+    # The just-minted (now untrackable) key was cleaned up, not left as
+    # a live orphan in LiteLLM.
+    assert delete_calls == [["sk-orphanedmint"]]
+    # The other caller's write is untouched by our failed attempt -- our
+    # own release has nothing of ours left to restore (previous_key was
+    # None here) and must not clobber what it wrote.
+    assert app_module.get_cached_key(config.db_path, email) == "sk-stolenrace"
 
 
 def test_issue_key_first_time_issuance_still_wins_normally(
@@ -903,6 +1040,90 @@ def test_index_active_user_sees_key_and_config(
     assert resp.status_code == 200
     assert "sk-active-key" in resp.text
     assert "roles: [chat, edit, apply, agent]" in resp.text
+
+
+def test_index_unrecognized_cached_key_reissues_instead_of_500(
+    app_module, client, mocker, fake_response
+):
+    """Security review round 4, B5 -- THE blocker fix (2026-09-30): a
+    key LiteLLM no longer recognizes (deleted out-of-band, 365-day
+    expiry, or left over from a revoke_and_reissue Door-2 race) used to
+    turn get_current_team_id()'s HTTPStatusError into an unhandled 500
+    -- on EVERY reload, forever, since nothing about the row changes on
+    its own. Must re-issue a fresh key instead, landing safely on
+    pending rather than guessing at a team LiteLLM will not tell us
+    anything about."""
+    import hashlib
+
+    config = app_module.CONFIG
+    email = "dead-key-index@crimson.ua.edu"
+    with mocker_seed_cache(app_module, config, email, "sk-deadkey"):
+        pass
+    dead_hash = hashlib.sha256(b"sk-deadkey").hexdigest()
+    mocker.patch.object(app_module, "verify_access_jwt", return_value=email)
+
+    def get_side_effect(url, **kwargs):
+        if url.endswith("/key/info"):
+            if kwargs["params"]["key"] == dead_hash:
+                return fake_response({"error": "key not found"}, status_code=404)
+            # The freshly re-issued key resolves fine.
+            return fake_response({"info": {"team_id": config.pending_team_id}})
+        raise AssertionError(f"unexpected GET {url}")
+
+    post_mock = mocker.patch(
+        "app.httpx.post", return_value=fake_response({"key": "sk-reissued"})
+    )
+    mocker.patch("app.httpx.get", side_effect=get_side_effect)
+
+    resp = client.get("/", headers={"Cf-Access-Jwt-Assertion": "irrelevant-mocked"})
+    assert resp.status_code == 200
+    assert "not yet activated" in resp.text  # pending page, NOT a 500
+    post_mock.assert_called_once()
+    assert post_mock.call_args.kwargs["json"]["team_id"] == config.pending_team_id
+    assert app_module.get_cached_key(config.db_path, email) == "sk-reissued"
+
+
+def test_regenerate_unrecognized_key_from_revoke_reissues_instead_of_500(
+    app_module, client, mocker, fake_response
+):
+    """Same B5 wrap, the other call site: revoke_and_reissue() should
+    always hand back a key LiteLLM just minted, but Door 2 of B5 (delete
+    succeeds, issue_key then fails, the claim is released back to an
+    old_key LiteLLM has already deleted) means that is not guaranteed.
+    Simulates the end result directly -- revoke_and_reissue() handing
+    back a key that turns out to be unrecognized -- since it is the WRAP
+    in regenerate() under test here, not revoke_and_reissue() itself."""
+    import hashlib
+
+    config = app_module.CONFIG
+    email = "door2-regen@crimson.ua.edu"
+    mocker.patch.object(app_module, "verify_access_jwt", return_value=email)
+    mocker.patch.object(app_module, "revoke_and_reissue", return_value="sk-doomedkey")
+    dead_hash = hashlib.sha256(b"sk-doomedkey").hexdigest()
+
+    def get_side_effect(url, **kwargs):
+        if url.endswith("/key/info"):
+            if kwargs["params"]["key"] == dead_hash:
+                return fake_response({"error": "key not found"}, status_code=404)
+            return fake_response({"info": {"team_id": config.pending_team_id}})
+        raise AssertionError(f"unexpected GET {url}")
+
+    post_mock = mocker.patch(
+        "app.httpx.post", return_value=fake_response({"key": "sk-recovered"})
+    )
+    mocker.patch("app.httpx.get", side_effect=get_side_effect)
+
+    resp = client.post(
+        "/regenerate",
+        headers={
+            "Cf-Access-Jwt-Assertion": "irrelevant-mocked",
+            **VALID_ORIGIN_HEADER,
+        },
+    )
+    assert resp.status_code == 200
+    assert "not yet activated" in resp.text
+    post_mock.assert_called_once()
+    assert app_module.get_cached_key(config.db_path, email) == "sk-recovered"
 
 
 # ---------------------------------------------------------------------------
@@ -2437,6 +2658,92 @@ def test_issue_initial_key_concurrent_first_logins_only_one_lands_active(
     # never a different, untracked one sitting live in LiteLLM.
     assert app_module.get_cached_key(config.db_path, email) == results[0]
     # The roster entry is claimed exactly once.
+    entry = next(e for e in app_module.list_preauthorized(config) if e.email == email)
+    assert entry.redeemed is True
+
+
+class _NoOpLock:
+    """A lock-shaped object that never actually serializes anything --
+    stands in for _lock_for_email() to prove a property holds from the
+    DB-level CAS alone, independent of the in-process lock (the future
+    `--workers` scenario security review round 4, finding 2 exists
+    for)."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def locked(self):
+        return False
+
+
+def test_issue_initial_key_atomic_without_lock_only_one_mint(
+    app_module, mocker, fake_response
+):
+    """Security review round 4, finding 2 (2026-09-30): the round-3
+    B1-R fix closed the WITHIN-process race but issue_initial_key()'s
+    existence check (get_cached_key()) was still a plain READ, separate
+    from issue_key()'s own claim -- which does its own unconditional
+    claim-and-mint regardless of whether a REAL key already exists.
+    Reviewer demonstrated that with _lock_for_email() stubbed out (this
+    test's setup), THREE concurrent first-time visits for the same
+    preauthorized email minted THREE keys, with the untracked losers
+    landing on the ACTIVE students team -- B1's exact failure shape at
+    full original severity, through the one door B1-R/B1-A/the DB-CAS
+    work had not yet closed.
+
+    Proves the fix -- the existence check IS the claim, via
+    _claim_key_row(email, None) directly, before any decision about
+    team_id is even made -- holds with the lock COMPLETELY REMOVED: the
+    DB-level CAS is what protects this now, not the lock. Three real
+    threads, no lock at all, and a delay inside the mocked LiteLLM call
+    to widen the race window as far as possible."""
+    import threading
+    import time as time_module
+
+    config = app_module.CONFIG
+    email = "no-lock-race@crimson.ua.edu"
+    app_module.add_preauthorized_emails(config, email)
+    mocker.patch.object(app_module, "_lock_for_email", return_value=_NoOpLock())
+
+    generate_team_ids = []
+    calls_lock = threading.Lock()
+
+    def post_side_effect(url, **kwargs):
+        if url.endswith("/key/generate"):
+            with calls_lock:
+                generate_team_ids.append(kwargs["json"]["team_id"])
+                n = len(generate_team_ids)
+            time_module.sleep(0.05)  # widen the race window
+            return fake_response({"key": f"sk-nolock{n}"})
+        raise AssertionError(f"unexpected POST to {url}")
+
+    mocker.patch("app.httpx.post", side_effect=post_side_effect)
+
+    results = []
+    results_lock = threading.Lock()
+
+    def worker():
+        key = app_module.issue_initial_key(config, email)
+        with results_lock:
+            results.append(key)
+
+    threads = [threading.Thread(target=worker) for _ in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(results) == 3
+    # All three callers get back the SAME key -- not three, not two.
+    assert len(set(results)) == 1
+    # Exactly ONE /key/generate call total, ever, with NO lock serializing
+    # anything -- the DB-level CAS alone is what prevents this.
+    assert len(generate_team_ids) == 1
+    assert generate_team_ids[0] == config.students_team_id
+    assert app_module.get_cached_key(config.db_path, email) == results[0]
     entry = next(e for e in app_module.list_preauthorized(config) if e.email == email)
     assert entry.redeemed is True
 
