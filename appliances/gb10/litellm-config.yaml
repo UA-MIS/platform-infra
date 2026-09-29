@@ -16,21 +16,38 @@ model_list:
       max_input_tokens: 24576
       max_output_tokens: 8192
 
-  # The public alias students/Continue actually call. Every request flows
-  # through the heuristic complexity scorer (D8) so it gets logged, but
-  # every tier resolves to the SAME base model — this is shadow mode:
-  # log-don't-route. There is no second model to route to.
+  # The public alias students/Continue actually call. Round-3 decision
+  # (2026-09-30): this used to route through auto_router/complexity_router
+  # in shadow mode (log-don't-route -- every tier resolved to the SAME
+  # base model, so there was never a second model to actually route to,
+  # only a heuristic score (D8) getting logged). Removed: confirmed live,
+  # by direct A/B against vLLM, that the router silently dropped
+  # max_tokens/max_completion_tokens specifically through this alias --
+  # a `stop` sequence passed through the identical alias correctly,
+  # which isolates this to the router, not a general parameter-
+  # forwarding bug. That defeated per-role Continue maxTokens
+  # (appliances/gb10/onboarding/) entirely: the config looked correct
+  # but had zero effect on student-visible latency. The router's own
+  # motivating premise didn't hold up under measurement either --
+  # reasoning off beat reasoning xhigh on both pass rate and speed, and
+  # the apparent case for model-switching turned out to be a prompt-
+  # context artifact -- so it was already a feature looking for a
+  # justification before it turned out to actively break the one
+  # control that matters for student latency. Points directly at the
+  # base model now, identically to qwen3.8-27b-base above (same
+  # backend, same model_info) -- there is no router to lose D8's
+  # heuristic scorer or its logging FROM; both are simply gone.
   - model_name: qwen3.8-27b
     litellm_params:
-      model: auto_router/complexity_router
-      complexity_router_config:
-        tiers:
-          SIMPLE: qwen3.8-27b-base
-          MEDIUM: qwen3.8-27b-base
-          COMPLEX: qwen3.8-27b-base
-          REASONING: qwen3.8-27b-base
-        classifier_type: heuristic   # never an LLM classifier — see D8
-      complexity_router_default_model: qwen3.8-27b-base
+      model: openai/Inferact/Qwen3.8-27B-NVFP4
+      api_base: http://vllm:8000/v1
+      api_key: "not-needed"
+    model_info:
+      mode: chat
+      # Same split as qwen3.8-27b-base above, same reason: max_tokens in
+      # model_info is max OUTPUT tokens, not the context window.
+      max_input_tokens: 24576
+      max_output_tokens: 8192
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
