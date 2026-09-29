@@ -1,0 +1,45 @@
+model_list:
+  # The raw backend model, talking to vLLM directly over the shared
+  # network namespace with litellm. ungraded's key is pinned to exactly
+  # this name — see Task 8 — and it never resolves through the router.
+  - model_name: qwen3.8-27b-base
+    litellm_params:
+      model: openai/Inferact/Qwen3.8-27B-NVFP4
+      api_base: http://localhost:8000/v1
+      api_key: "not-needed"
+    model_info:
+      mode: chat
+      max_tokens: 32768
+
+  # The public alias students/Continue actually call. Every request flows
+  # through the heuristic complexity scorer (D8) so it gets logged, but
+  # every tier resolves to the SAME base model — this is shadow mode:
+  # log-don't-route. There is no second model to route to.
+  - model_name: qwen3.8-27b
+    litellm_params:
+      model: auto_router/complexity_router
+      complexity_router_config:
+        tiers:
+          SIMPLE: qwen3.8-27b-base
+          MEDIUM: qwen3.8-27b-base
+          COMPLEX: qwen3.8-27b-base
+          REASONING: qwen3.8-27b-base
+        classifier_type: heuristic   # never an LLM classifier — see D8
+      complexity_router_default_model: qwen3.8-27b-base
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+  disable_spend_logs: false
+  store_prompts_in_spend_logs: false   # safe default for everyone; ungraded's
+                                        # key additionally sets disable_logging
+                                        # in its own metadata (Task 8) as a
+                                        # second, key-specific guarantee.
+
+litellm_settings:
+  callbacks: ["prometheus"]
+  require_auth_for_metrics_endpoint: false   # /metrics is only reachable via
+                                              # the docker network + loopback
+                                              # publish, never public — see
+                                              # Task 13's scrape config.
+  drop_params: true
