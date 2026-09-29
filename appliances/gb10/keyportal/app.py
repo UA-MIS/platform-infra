@@ -15,6 +15,7 @@ See also: artifacts/planning/2026-09-28-gb10-local-llm-plan-a.md Task 12.
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import time
 from contextlib import closing
@@ -167,6 +168,19 @@ def init_db(db_path: str) -> None:
                 litellm_key TEXT NOT NULL,
                 key_id TEXT NOT NULL,
                 created_at REAL NOT NULL
+            )"""
+        )
+        # Roster pre-authorization (team-lead brief, 2026-09-30): an admin
+        # pastes a class roster before anyone has signed in. redeemed_at
+        # is NULL until that email's first real login -- see
+        # is_preauthorized()/issue_initial_key(). No litellm_key column
+        # here on purpose: this table only ever holds emails an admin
+        # typed in, never a credential.
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS preauthorized (
+                email TEXT PRIMARY KEY,
+                added_at REAL NOT NULL,
+                redeemed_at REAL
             )"""
         )
         conn.commit()
@@ -503,6 +517,208 @@ def demote_user(config: Config, email: str) -> None:
     _litellm_set_team(config, key, config.pending_team_id)
 
 
+# ---------------------------------------------------------------------------
+# Pre-authorization: an admin pastes a class roster BEFORE anyone has
+# signed in (team-lead brief, 2026-09-30). "Manually adding people by
+# email" turned out to mean two different things -- promote_user/
+# demote_user above cover promoting someone already sitting in
+# `pending`; this covers authorizing someone who hasn't visited yet, so
+# their FIRST login lands them directly on the students team instead of
+# pending. One mechanism, both flows: pasting 60 emails before the first
+# lab is just this with a big textarea.
+# ---------------------------------------------------------------------------
+
+# Deliberately targets the students team only -- the described use case
+# (team-lead brief) is "paste a class roster before the first lab."
+# Pre-authorizing a faculty member ahead of time is not a use case
+# anyone has asked for; if it comes up, this is the one constant to
+# extend into a form field, not a design that needs restructuring.
+_PREAUTHORIZE_TARGET_TEAM_ATTR = "students_team_id"
+
+
+@dataclass(frozen=True)
+class PreauthorizedEntry:
+    """One roster row for the admin view. `redeemed_at` is None until
+    that email's first real login (see issue_initial_key())."""
+
+    email: str
+    added_at: float
+    redeemed_at: Optional[float]
+
+    @property
+    def redeemed(self) -> bool:
+        return self.redeemed_at is not None
+
+
+@dataclass(frozen=True)
+class PreauthorizeResult:
+    """What happened to one textarea paste -- shown back to the admin so
+    a typo in a 60-line paste is never silently dropped."""
+
+    added: tuple
+    already_present: tuple
+    rejected: tuple  # tuple of (email, reason) pairs
+
+
+def _split_pasted_emails(raw_text: str) -> list:
+    """Newline AND/OR comma separated -- people paste out of Excel and
+    Canvas and the separators are never consistent. Trim, lowercase,
+    drop blanks; does NOT dedupe (add_preauthorized_emails() does that
+    against both this paste and the existing table in one pass)."""
+    return [e.strip().lower() for e in re.split(r"[,\n]+", raw_text) if e.strip()]
+
+
+def add_preauthorized_emails(config: Config, raw_text: str) -> PreauthorizeResult:
+    """Parse, normalize, validate, and store a pasted roster.
+
+    Order of operations matters for correct reporting: reject invalid
+    domains BEFORE checking "already stored", so a re-pasted invalid
+    address is reported as rejected (actionable: "this is a typo"), not
+    silently swallowed as "already present". Dedupes both within THIS
+    paste (a roster copy/pasted twice) and against rows already in the
+    table (redeemed or not -- either way there is nothing new to do).
+    """
+    candidates = _split_pasted_emails(raw_text)
+    seen_this_paste = set()
+    to_insert = []
+    rejected = []
+    for email in candidates:
+        if email in seen_this_paste:
+            continue
+        seen_this_paste.add(email)
+        if not email.endswith(config.allowed_email_suffixes):
+            rejected.append((email, "not a crimson.ua.edu or ua.edu address"))
+            continue
+        to_insert.append(email)
+
+    added = []
+    already_present = []
+    with closing(sqlite3.connect(config.db_path)) as conn:
+        for email in to_insert:
+            existing = conn.execute(
+                "SELECT 1 FROM preauthorized WHERE email = ?", (email,)
+            ).fetchone()
+            if existing:
+                already_present.append(email)
+                continue
+            conn.execute(
+                "INSERT INTO preauthorized (email, added_at, redeemed_at) "
+                "VALUES (?, ?, NULL)",
+                (email, time.time()),
+            )
+            added.append(email)
+        conn.commit()
+    return PreauthorizeResult(
+        added=tuple(added),
+        already_present=tuple(already_present),
+        rejected=tuple(rejected),
+    )
+
+
+def list_preauthorized(config: Config) -> list:
+    with closing(sqlite3.connect(config.db_path)) as conn:
+        rows = conn.execute(
+            "SELECT email, added_at, redeemed_at FROM preauthorized "
+            "ORDER BY added_at DESC"
+        ).fetchall()
+    return [PreauthorizedEntry(email=e, added_at=a, redeemed_at=r) for e, a, r in rows]
+
+
+def is_preauthorized(config: Config, email: str) -> bool:
+    """True only for an email on the list that has NOT redeemed it yet.
+    A redeemed entry answers False here -- it has already done its one
+    job (see issue_initial_key()); is_preauthorized() is never consulted
+    again for a returning visitor, since index() only calls it when
+    get_cached_key() found nothing.
+    """
+    with closing(sqlite3.connect(config.db_path)) as conn:
+        row = conn.execute(
+            "SELECT redeemed_at FROM preauthorized WHERE email = ?",
+            (email.strip().lower(),),
+        ).fetchone()
+    return row is not None and row[0] is None
+
+
+def mark_preauthorized_redeemed(config: Config, email: str) -> None:
+    with closing(sqlite3.connect(config.db_path)) as conn:
+        conn.execute(
+            "UPDATE preauthorized SET redeemed_at = ? WHERE email = ? "
+            "AND redeemed_at IS NULL",
+            (time.time(), email.strip().lower()),
+        )
+        conn.commit()
+
+
+def issue_initial_key(config: Config, email: str) -> str:
+    """Issue a brand-new visitor's first key. This is the ONLY place
+    pre-authorization has any effect: index() only calls this when
+    get_cached_key() found nothing, so a returning visitor's existing
+    key (and its current team, whatever an admin has since set it to)
+    is never touched by this function.
+
+    Pending by default -- unless `email` is on the pre-authorized list
+    and hasn't redeemed it yet, in which case they get an ACTIVE
+    students-team key immediately and the entry is marked redeemed in
+    the same call. No separate "reissue" step, ever: this is the one
+    and only issue_key() call for this visitor, straight onto the
+    right team from the start.
+    """
+    if is_preauthorized(config, email):
+        team_id = getattr(config, _PREAUTHORIZE_TARGET_TEAM_ATTR)
+        key = issue_key(config, email, team_id)
+        mark_preauthorized_redeemed(config, email)
+        return key
+    return issue_key(config, email, config.pending_team_id)
+
+
+def remove_preauthorized_email(config: Config, email: str) -> None:
+    """Take an email back off the pre-authorized list.
+
+    Design decision (team-lead brief explicitly asked for one, with a
+    reason): an UNREDEEMED entry is just deleted -- nothing else has
+    happened yet, so there is nothing else to undo. A REDEEMED entry is
+    REFUSED (409) rather than silently auto-demoted, on purpose:
+
+    - "Remove from the roster list" and "revoke someone's live,
+      currently-working key" are two different admin intentions that
+      happen to share a button if we let this one silently cascade.
+      An admin cleaning up a stale roster paste (e.g. removing a
+      preauthorized-but-never-used duplicate) should never have that
+      accidentally cut off a *different* student's live session just
+      because their email happened to already be marked redeemed.
+    - This mirrors the rest of this file's "fail loudly, never
+      silently" contract (_require_env, require_admin's fail-closed
+      startup check, D11's "never assume issued means working"): an
+      action with a real side effect on a live key gets its own
+      explicit, named button (Demote, already in the issued-users
+      table above), not a side door.
+    - The 409 message says exactly what to do instead, so this is a
+      one-extra-click cost for the admin, not a dead end.
+    """
+    email = email.strip().lower()
+    with closing(sqlite3.connect(config.db_path)) as conn:
+        row = conn.execute(
+            "SELECT redeemed_at FROM preauthorized WHERE email = ?", (email,)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"{email} is not on the pre-authorized list.",
+            )
+        redeemed_at = row[0]
+        if redeemed_at is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"{email} already redeemed this pre-authorization and has "
+                    f"a live key. Removing it here would not revoke that key -- "
+                    f"use Demote (in the issued-users table above) instead."
+                ),
+            )
+        conn.execute("DELETE FROM preauthorized WHERE email = ?", (email,))
+        conn.commit()
+
+
 # Shared, plain, dependency-free CSS -- no framework, no CDN, no build
 # step. UA crimson used sparingly as an accent (headings, links, the
 # course-policy rule, button outline) -- not an attempt to reproduce an
@@ -672,13 +888,66 @@ def _admin_row(user: "IssuedUser") -> str:
 </tr>"""
 
 
-def render_admin_page(admin_email: str, users: list, config: Config) -> str:
-    """The admin access-management view (team-lead brief, 2026-09-29):
-    lists every user the portal has issued a key to, with one-click
-    promote/demote driven straight from this table. Deliberately takes
-    `users: list[IssuedUser]`, never raw rows from the keys table or a
-    raw key string -- see IssuedUser's docstring for why that is the
-    actual mechanism that keeps a key from ever reaching this page.
+def _preauth_row(entry: "PreauthorizedEntry") -> str:
+    email = escape(entry.email)
+    if entry.redeemed:
+        status = '<span class="state-active">Redeemed</span>'
+        action = '<span class="hint">Use Demote above to revoke</span>'
+    else:
+        status = '<span class="state-pending">Waiting</span>'
+        action = f"""<form method="post" action="/admin/preauthorize/remove">
+<input type="hidden" name="target_email" value="{email}">
+<button type="submit" class="demote">Remove</button>
+</form>"""
+    return f"""<tr>
+<td data-label="Email">{email}</td>
+<td data-label="Added">{_fmt_issued_at(entry.added_at)}</td>
+<td data-label="Status">{status}</td>
+<td data-label="Actions" class="actions">{action}</td>
+</tr>"""
+
+
+def _preauth_result_banner(result: "PreauthorizeResult") -> str:
+    parts = []
+    if result.added:
+        parts.append(
+            f"<p><strong>Added ({len(result.added)}):</strong> "
+            f"{escape(', '.join(result.added))}</p>"
+        )
+    if result.already_present:
+        parts.append(
+            f"<p><strong>Already on the list ({len(result.already_present)}):"
+            f"</strong> {escape(', '.join(result.already_present))}</p>"
+        )
+    if result.rejected:
+        rejected_str = ", ".join(f"{e} ({reason})" for e, reason in result.rejected)
+        parts.append(
+            f'<p class="policy"><strong>Rejected -- not a UA address '
+            f"({len(result.rejected)}):</strong> {escape(rejected_str)}</p>"
+        )
+    if not parts:
+        return ""
+    return f'<div class="preauth-result">{"".join(parts)}</div>'
+
+
+def render_admin_page(
+    admin_email: str,
+    users: list,
+    preauthorized: list,
+    config: Config,
+    preauthorize_result: Optional["PreauthorizeResult"] = None,
+) -> str:
+    """The admin access-management view (team-lead brief, 2026-09-29 and
+    2026-09-30): every user the portal has issued a key to (one-click
+    promote/demote), plus the pre-authorized roster (one-click remove,
+    or a "use Demote" hint for an already-redeemed entry -- see
+    remove_preauthorized_email()'s docstring for why that's a refusal,
+    not a silent auto-demote). Deliberately takes `users:
+    list[IssuedUser]` and `preauthorized: list[PreauthorizedEntry]`,
+    never raw rows or a raw key string -- see IssuedUser's docstring for
+    why that is the actual mechanism that keeps a key from ever reaching
+    this page. `preauthorize_result` is only set right after a POST
+    /admin/preauthorize, to report exactly what happened to that paste.
     """
     head = _PAGE_HEAD.format(style=_STYLE + _ADMIN_STYLE)
     if users:
@@ -691,6 +960,22 @@ def render_admin_page(admin_email: str, users: list, config: Config) -> str:
 </table>"""
     else:
         table = "<p>No one has visited the portal yet.</p>"
+
+    if preauthorized:
+        preauth_rows = "\n".join(_preauth_row(e) for e in preauthorized)
+        preauth_table = f"""<table>
+<thead><tr><th>Email</th><th>Added</th><th>Status</th><th>Actions</th></tr></thead>
+<tbody>
+{preauth_rows}
+</tbody>
+</table>"""
+    else:
+        preauth_table = "<p>No one is pre-authorized yet.</p>"
+
+    result_banner = (
+        _preauth_result_banner(preauthorize_result) if preauthorize_result else ""
+    )
+
     return f"""<!doctype html>
 <html><head>{head}</head>
 <body>
@@ -700,6 +985,19 @@ def render_admin_page(admin_email: str, users: list, config: Config) -> str:
 The key itself is never shown here -- it's a bearer credential, and
 promote/demote never need it.</p>
 {table}
+
+<h2>Pre-authorize a roster</h2>
+<p>Paste emails below -- one per line, or comma-separated, mixed
+separators are fine. Anyone on this list gets an <strong>active</strong>
+key the moment they first sign in, skipping the pending step entirely.
+Only @crimson.ua.edu / @ua.edu addresses are accepted; anything else is
+rejected and reported below, not silently dropped.</p>
+{result_banner}
+<form method="post" action="/admin/preauthorize">
+<textarea name="emails" rows="6" placeholder="student1@crimson.ua.edu, student2@crimson.ua.edu&#10;student3@ua.edu"></textarea>
+<button type="submit">Add to pre-authorized list</button>
+</form>
+{preauth_table}
 </body></html>"""
 
 
@@ -714,6 +1012,9 @@ td.actions form { margin: 0; }
 td.actions button { padding: 6px 10px; font-size: 0.85rem; }
 td.actions button.demote { border-color: #6b6b6b; color: #6b6b6b; }
 td.actions button.demote:hover { background: #6b6b6b; color: #ffffff; }
+.hint { color: #6b6b6b; font-size: 0.85rem; font-style: italic; }
+textarea { width: 100%; box-sizing: border-box; font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 0.9rem; padding: 10px; border: 1px solid #e6e1da; border-radius: 6px; resize: vertical; }
+.preauth-result { background: #f4f4f4; border-radius: 6px; padding: 4px 16px; margin: 12px 0; }
 @media (max-width: 480px) {
   table, thead, tbody, th, td, tr { display: block; }
   thead { display: none; }
@@ -736,7 +1037,12 @@ def index(request: Request) -> str:
     email = verify_access_jwt(request, CONFIG, JWKS_CLIENT)
     key = get_cached_key(CONFIG.db_path, email)
     if key is None:
-        key = issue_key(CONFIG, email, CONFIG.pending_team_id)
+        # issue_initial_key() -- not a bare issue_key() -- so a
+        # pre-authorized first-time visitor lands active immediately
+        # instead of pending. See its docstring: this is the only call
+        # site, so pre-authorization can never affect a returning
+        # visitor's already-issued key.
+        key = issue_initial_key(CONFIG, email)
     team_id = get_current_team_id(CONFIG, key)
     active = team_grants_access(CONFIG, team_id)
     return render_page(email, key, active, CONFIG)
@@ -756,7 +1062,8 @@ def admin_index(request: Request) -> str:
     email = verify_access_jwt(request, CONFIG, JWKS_CLIENT)
     require_admin(email, CONFIG)
     users = list_issued_users(CONFIG)
-    return render_admin_page(email, users, CONFIG)
+    preauthorized = list_preauthorized(CONFIG)
+    return render_admin_page(email, users, preauthorized, CONFIG)
 
 
 @app.post("/admin/promote", response_class=HTMLResponse)
@@ -772,7 +1079,8 @@ def admin_promote(
     require_admin(admin_email, CONFIG)
     promote_user(CONFIG, target_email, target_team)
     users = list_issued_users(CONFIG)
-    return render_admin_page(admin_email, users, CONFIG)
+    preauthorized = list_preauthorized(CONFIG)
+    return render_admin_page(admin_email, users, preauthorized, CONFIG)
 
 
 @app.post("/admin/demote", response_class=HTMLResponse)
@@ -781,7 +1089,30 @@ def admin_demote(request: Request, target_email: str = Form(...)) -> str:
     require_admin(admin_email, CONFIG)
     demote_user(CONFIG, target_email)
     users = list_issued_users(CONFIG)
-    return render_admin_page(admin_email, users, CONFIG)
+    preauthorized = list_preauthorized(CONFIG)
+    return render_admin_page(admin_email, users, preauthorized, CONFIG)
+
+
+@app.post("/admin/preauthorize", response_class=HTMLResponse)
+def admin_preauthorize(request: Request, emails: str = Form(...)) -> str:
+    admin_email = verify_access_jwt(request, CONFIG, JWKS_CLIENT)
+    require_admin(admin_email, CONFIG)
+    result = add_preauthorized_emails(CONFIG, emails)
+    users = list_issued_users(CONFIG)
+    preauthorized = list_preauthorized(CONFIG)
+    return render_admin_page(
+        admin_email, users, preauthorized, CONFIG, preauthorize_result=result
+    )
+
+
+@app.post("/admin/preauthorize/remove", response_class=HTMLResponse)
+def admin_preauthorize_remove(request: Request, target_email: str = Form(...)) -> str:
+    admin_email = verify_access_jwt(request, CONFIG, JWKS_CLIENT)
+    require_admin(admin_email, CONFIG)
+    remove_preauthorized_email(CONFIG, target_email)
+    users = list_issued_users(CONFIG)
+    preauthorized = list_preauthorized(CONFIG)
+    return render_admin_page(admin_email, users, preauthorized, CONFIG)
 
 
 @app.get("/healthz")

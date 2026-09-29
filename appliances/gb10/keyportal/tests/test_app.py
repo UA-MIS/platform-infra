@@ -730,7 +730,7 @@ def test_render_admin_page_never_includes_any_key(app_module):
             created_at=1_700_000_100.0,
         ),
     ]
-    html = app_module.render_admin_page(ADMIN_EMAIL, users, config)
+    html = app_module.render_admin_page(ADMIN_EMAIL, users, [], config)
     assert "a@crimson.ua.edu" in html
     assert "b@ua.edu" in html
     assert "pending" in html
@@ -746,8 +746,45 @@ def test_render_admin_page_never_includes_any_key(app_module):
 
 
 def test_render_admin_page_empty_state(app_module):
-    html = app_module.render_admin_page(ADMIN_EMAIL, [], app_module.CONFIG)
+    html = app_module.render_admin_page(ADMIN_EMAIL, [], [], app_module.CONFIG)
     assert "No one has visited" in html
+    assert "No one is pre-authorized" in html
+
+
+def test_render_admin_page_shows_preauthorized_list_with_redeemed_flag(app_module):
+    config = app_module.CONFIG
+    preauthorized = [
+        app_module.PreauthorizedEntry(
+            email="waiting@crimson.ua.edu", added_at=1_700_000_000.0, redeemed_at=None
+        ),
+        app_module.PreauthorizedEntry(
+            email="done@ua.edu", added_at=1_700_000_100.0, redeemed_at=1_700_000_200.0
+        ),
+    ]
+    html = app_module.render_admin_page(ADMIN_EMAIL, [], preauthorized, config)
+    assert "waiting@crimson.ua.edu" in html
+    assert "done@ua.edu" in html
+    assert "Waiting" in html
+    assert "Redeemed" in html
+    # The redeemed entry must not offer a "Remove" button that would
+    # just 409 -- it should point at Demote instead.
+    assert "Use Demote above" in html
+
+
+def test_render_admin_page_shows_preauthorize_result_banner(app_module):
+    config = app_module.CONFIG
+    result = app_module.PreauthorizeResult(
+        added=("new@crimson.ua.edu",),
+        already_present=("old@ua.edu",),
+        rejected=(("bad@gmail.com", "not a crimson.ua.edu or ua.edu address"),),
+    )
+    html = app_module.render_admin_page(
+        ADMIN_EMAIL, [], [], config, preauthorize_result=result
+    )
+    assert "new@crimson.ua.edu" in html
+    assert "old@ua.edu" in html
+    assert "bad@gmail.com" in html
+    assert "Rejected" in html
 
 
 # ---------------------------------------------------------------------------
@@ -974,3 +1011,283 @@ def test_admin_demote_route_happy_path(app_module, client, mocker, fake_response
     assert resp.status_code == 200
     team_call = post_mock.call_args_list[1]
     assert team_call.kwargs["json"]["team_id"] == config.pending_team_id
+
+
+# ---------------------------------------------------------------------------
+# Pre-authorization: an admin pastes a class roster BEFORE anyone has
+# signed in (team-lead brief, 2026-09-30).
+# ---------------------------------------------------------------------------
+
+
+def test_add_preauthorized_emails_accepts_valid_ua_emails(app_module):
+    config = app_module.CONFIG
+    result = app_module.add_preauthorized_emails(
+        config, "one@crimson.ua.edu,two@ua.edu"
+    )
+    assert result.added == ("one@crimson.ua.edu", "two@ua.edu")
+    assert result.already_present == ()
+    assert result.rejected == ()
+    entries = {e.email: e for e in app_module.list_preauthorized(config)}
+    assert set(entries) == {"one@crimson.ua.edu", "two@ua.edu"}
+    assert all(not e.redeemed for e in entries.values())
+
+
+def test_add_preauthorized_emails_normalizes_messy_paste(app_module):
+    """Mixed separators (comma AND newline), stray whitespace, mixed
+    case, and an internal duplicate -- exactly what a Canvas/Excel paste
+    looks like in practice."""
+    config = app_module.CONFIG
+    raw = "  Alice@Crimson.UA.EDU \n bob@ua.edu, ALICE@crimson.ua.edu\n\ncarol@ua.edu ,"
+    result = app_module.add_preauthorized_emails(config, raw)
+    # alice appears twice (different case) but must be added only once.
+    assert result.added == ("alice@crimson.ua.edu", "bob@ua.edu", "carol@ua.edu")
+    assert result.already_present == ()
+    assert result.rejected == ()
+    emails = {e.email for e in app_module.list_preauthorized(config)}
+    assert emails == {"alice@crimson.ua.edu", "bob@ua.edu", "carol@ua.edu"}
+
+
+def test_add_preauthorized_emails_rejects_non_ua_domain_and_reports_it(app_module):
+    config = app_module.CONFIG
+    result = app_module.add_preauthorized_emails(
+        config, "good@crimson.ua.edu, bad@gmail.com, also-bad@outlook.com"
+    )
+    assert result.added == ("good@crimson.ua.edu",)
+    assert len(result.rejected) == 2
+    rejected_emails = [e for e, _reason in result.rejected]
+    assert "bad@gmail.com" in rejected_emails
+    assert "also-bad@outlook.com" in rejected_emails
+    for _email, reason in result.rejected:
+        assert "crimson.ua.edu or ua.edu" in reason
+    # Rejected emails are never silently added.
+    stored = {e.email for e in app_module.list_preauthorized(config)}
+    assert "bad@gmail.com" not in stored
+    assert "also-bad@outlook.com" not in stored
+
+
+def test_add_preauthorized_emails_dedupes_against_already_stored(app_module):
+    config = app_module.CONFIG
+    app_module.add_preauthorized_emails(config, "repeat@crimson.ua.edu")
+    result = app_module.add_preauthorized_emails(
+        config, "repeat@crimson.ua.edu, fresh@ua.edu"
+    )
+    assert result.added == ("fresh@ua.edu",)
+    assert result.already_present == ("repeat@crimson.ua.edu",)
+    # Still exactly one row for repeat@ -- no duplicate/crash on re-paste.
+    matches = [
+        e
+        for e in app_module.list_preauthorized(config)
+        if e.email == "repeat@crimson.ua.edu"
+    ]
+    assert len(matches) == 1
+
+
+def test_add_preauthorized_emails_dedupes_against_already_redeemed(
+    app_module, mocker, fake_response
+):
+    """Re-pasting someone who already redeemed must not error or create
+    a second row -- it's a harmless no-op, correctly reported."""
+    config = app_module.CONFIG
+    email = "already-active@crimson.ua.edu"
+    app_module.add_preauthorized_emails(config, email)
+    mocker.patch(
+        "app.httpx.post", return_value=fake_response({"key": "sk-preauth-redeemed"})
+    )
+    app_module.issue_initial_key(config, email)  # redeems it
+    result = app_module.add_preauthorized_emails(config, email)
+    assert result.added == ()
+    assert result.already_present == (email,)
+
+
+def test_is_preauthorized_true_for_unredeemed_entry(app_module):
+    config = app_module.CONFIG
+    app_module.add_preauthorized_emails(config, "waiting@ua.edu")
+    assert app_module.is_preauthorized(config, "waiting@ua.edu") is True
+    # Case/whitespace on the CALLER's side must also match.
+    assert app_module.is_preauthorized(config, " Waiting@UA.EDU ") is True
+
+
+def test_is_preauthorized_false_when_never_listed(app_module):
+    config = app_module.CONFIG
+    assert app_module.is_preauthorized(config, "nobody@ua.edu") is False
+
+
+def test_is_preauthorized_false_once_redeemed(app_module, mocker, fake_response):
+    config = app_module.CONFIG
+    email = "redeem-once@crimson.ua.edu"
+    app_module.add_preauthorized_emails(config, email)
+    mocker.patch(
+        "app.httpx.post", return_value=fake_response({"key": "sk-redeem-once"})
+    )
+    app_module.issue_initial_key(config, email)
+    assert app_module.is_preauthorized(config, email) is False
+
+
+def test_issue_initial_key_preauthorized_email_gets_active_students_key(
+    app_module, mocker, fake_response
+):
+    config = app_module.CONFIG
+    email = "roster-student@crimson.ua.edu"
+    app_module.add_preauthorized_emails(config, email)
+    post_mock = mocker.patch(
+        "app.httpx.post", return_value=fake_response({"key": "sk-roster-student"})
+    )
+    key = app_module.issue_initial_key(config, email)
+    assert key == "sk-roster-student"
+    assert post_mock.call_args.kwargs["json"]["team_id"] == config.students_team_id
+    # Redeemed immediately, in the same call.
+    entry = next(e for e in app_module.list_preauthorized(config) if e.email == email)
+    assert entry.redeemed is True
+
+
+def test_issue_initial_key_non_preauthorized_email_gets_pending(
+    app_module, mocker, fake_response
+):
+    config = app_module.CONFIG
+    post_mock = mocker.patch(
+        "app.httpx.post", return_value=fake_response({"key": "sk-not-on-roster"})
+    )
+    key = app_module.issue_initial_key(config, "walk-in@crimson.ua.edu")
+    assert key == "sk-not-on-roster"
+    assert post_mock.call_args.kwargs["json"]["team_id"] == config.pending_team_id
+
+
+def test_index_preauthorized_first_login_is_active(
+    app_module, client, mocker, fake_response
+):
+    config = app_module.CONFIG
+    email = "http-roster@crimson.ua.edu"
+    app_module.add_preauthorized_emails(config, email)
+    mocker.patch.object(app_module, "verify_access_jwt", return_value=email)
+    mocker.patch(
+        "app.httpx.post", return_value=fake_response({"key": "sk-http-roster"})
+    )
+    mocker.patch(
+        "app.httpx.get",
+        return_value=fake_response(
+            {
+                "info": {"team_id": config.students_team_id},
+                "team_info": {"models": ["qwen3.8-27b"]},
+            }
+        ),
+    )
+    resp = client.get("/", headers={"Cf-Access-Jwt-Assertion": "irrelevant-mocked"})
+    assert resp.status_code == 200
+    assert "sk-http-roster" in resp.text
+    assert "not yet activated" not in resp.text
+
+
+def test_remove_preauthorized_unredeemed_deletes_row(app_module):
+    config = app_module.CONFIG
+    app_module.add_preauthorized_emails(config, "remove-me@ua.edu")
+    app_module.remove_preauthorized_email(config, "remove-me@ua.edu")
+    assert app_module.list_preauthorized(config) == []
+
+
+def test_remove_preauthorized_unknown_email_404(app_module):
+    config = app_module.CONFIG
+    with pytest.raises(HTTPException) as exc_info:
+        app_module.remove_preauthorized_email(config, "never-added@ua.edu")
+    assert exc_info.value.status_code == 404
+
+
+def test_remove_preauthorized_redeemed_refuses_with_409(
+    app_module, mocker, fake_response
+):
+    """Design decision (team-lead asked for one, deliberately): removing
+    an already-redeemed entry is REFUSED, not auto-demoted -- see
+    remove_preauthorized_email()'s docstring for the full rationale.
+    The entry must still be there afterward, untouched, and no LiteLLM
+    call may have been made."""
+    config = app_module.CONFIG
+    email = "already-live@crimson.ua.edu"
+    app_module.add_preauthorized_emails(config, email)
+    mocker.patch(
+        "app.httpx.post", return_value=fake_response({"key": "sk-already-live"})
+    )
+    app_module.issue_initial_key(config, email)  # redeems it
+
+    post_mock = mocker.patch("app.httpx.post")  # re-patch: must NOT be called below
+    with pytest.raises(HTTPException) as exc_info:
+        app_module.remove_preauthorized_email(config, email)
+    assert exc_info.value.status_code == 409
+    assert "Demote" in exc_info.value.detail
+    post_mock.assert_not_called()
+    # Still there, still redeemed -- refusal did not mutate anything.
+    entry = next(e for e in app_module.list_preauthorized(config) if e.email == email)
+    assert entry.redeemed is True
+
+
+# ---------------------------------------------------------------------------
+# HTTP-level /admin/preauthorize* routes
+# ---------------------------------------------------------------------------
+
+
+def test_admin_preauthorize_no_jwt_returns_401(client):
+    resp = client.post("/admin/preauthorize", data={"emails": "x@ua.edu"})
+    assert resp.status_code == 401
+
+
+def test_admin_preauthorize_remove_no_jwt_returns_401(client):
+    resp = client.post("/admin/preauthorize/remove", data={"target_email": "x@ua.edu"})
+    assert resp.status_code == 401
+
+
+def test_admin_preauthorize_non_admin_returns_403(app_module, client, mocker):
+    mocker.patch.object(app_module, "verify_access_jwt", return_value=NON_ADMIN_EMAIL)
+    resp = client.post(
+        "/admin/preauthorize",
+        data={"emails": "x@crimson.ua.edu"},
+        headers={"Cf-Access-Jwt-Assertion": "irrelevant"},
+    )
+    assert resp.status_code == 403
+    assert app_module.is_preauthorized(app_module.CONFIG, "x@crimson.ua.edu") is False
+
+
+def test_admin_preauthorize_remove_non_admin_returns_403(app_module, client, mocker):
+    mocker.patch.object(app_module, "verify_access_jwt", return_value=NON_ADMIN_EMAIL)
+    resp = client.post(
+        "/admin/preauthorize/remove",
+        data={"target_email": "x@crimson.ua.edu"},
+        headers={"Cf-Access-Jwt-Assertion": "irrelevant"},
+    )
+    assert resp.status_code == 403
+
+
+def test_admin_preauthorize_route_happy_path_reports_rejections(
+    app_module, client, mocker
+):
+    mocker.patch.object(app_module, "verify_access_jwt", return_value=ADMIN_EMAIL)
+    resp = client.post(
+        "/admin/preauthorize",
+        data={"emails": "good@crimson.ua.edu\nbad@gmail.com"},
+        headers={"Cf-Access-Jwt-Assertion": "irrelevant"},
+    )
+    assert resp.status_code == 200
+    assert "good@crimson.ua.edu" in resp.text
+    assert "bad@gmail.com" in resp.text
+    assert "Rejected" in resp.text
+    assert app_module.is_preauthorized(app_module.CONFIG, "good@crimson.ua.edu") is True
+
+
+def test_admin_preauthorize_remove_route_happy_path(app_module, client, mocker):
+    config = app_module.CONFIG
+    mocker.patch.object(app_module, "verify_access_jwt", return_value=ADMIN_EMAIL)
+    app_module.add_preauthorized_emails(config, "route-remove@ua.edu")
+    resp = client.post(
+        "/admin/preauthorize/remove",
+        data={"target_email": "route-remove@ua.edu"},
+        headers={"Cf-Access-Jwt-Assertion": "irrelevant"},
+    )
+    assert resp.status_code == 200
+    assert app_module.list_preauthorized(config) == []
+
+
+def test_admin_index_shows_preauthorized_section(app_module, client, mocker):
+    config = app_module.CONFIG
+    mocker.patch.object(app_module, "verify_access_jwt", return_value=ADMIN_EMAIL)
+    app_module.add_preauthorized_emails(config, "listed-roster@ua.edu")
+    resp = client.get("/admin", headers={"Cf-Access-Jwt-Assertion": "irrelevant"})
+    assert resp.status_code == 200
+    assert "listed-roster@ua.edu" in resp.text
+    assert "Waiting" in resp.text

@@ -45,6 +45,7 @@ def app_module(_required_env):
 def _clean_db(app_module):
     with sqlite3.connect(app_module.CONFIG.db_path) as conn:
         conn.execute("DELETE FROM keys")
+        conn.execute("DELETE FROM preauthorized")
         conn.commit()
     yield
 
