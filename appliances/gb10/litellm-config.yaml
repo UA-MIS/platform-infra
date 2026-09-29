@@ -5,11 +5,16 @@ model_list:
   - model_name: qwen3.8-27b-base
     litellm_params:
       model: openai/Inferact/Qwen3.8-27B-NVFP4
-      api_base: http://localhost:8000/v1
+      api_base: http://vllm:8000/v1
       api_key: "not-needed"
     model_info:
       mode: chat
-      max_tokens: 32768
+      # max_tokens in model_info is the max OUTPUT tokens, NOT the context
+      # window. Setting it to the full 32768 (= vLLM --max-model-len) made
+      # LiteLLM compute available input as 32768-32768=0 and reject every
+      # request with ContextWindowExceededError. Split it explicitly.
+      max_input_tokens: 24576
+      max_output_tokens: 8192
 
   # The public alias students/Continue actually call. Every request flows
   # through the heuristic complexity scorer (D8) so it gets logged, but
