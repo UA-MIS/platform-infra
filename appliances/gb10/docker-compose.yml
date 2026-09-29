@@ -44,7 +44,10 @@ services:
       - "--kv-cache-dtype=fp8"
       - "--gpu-memory-utilization=0.75"
       - "--reasoning-parser=qwen3"
-      - "--speculative-config={\"method\":\"mtp\",\"num_speculative_tokens\":2}"
+      # DFlash2: block-diffusion drafter, LOSSLESS (greedy output matches the
+      # target model exactly). Upstream vLLM since PR #52816 (merged 2026-08-21).
+      # Published vs MTP on coding: HumanEval 3.11x vs 2.20x, MBPP 3.29x vs 2.22x.
+      - "--speculative-config={\"method\":\"dflash\",\"model\":\"incoai/Qwen3.8-27B-DFlash2\",\"num_speculative_tokens\":7}"
       # Required for Continue Agent mode / any tool-calling client.
       # Without these vLLM returns tool calls as prose, the client fails
       # to parse them, and it retry-loops. Per the vLLM recipe for this model.
@@ -121,6 +124,85 @@ services:
       - litellm
     restart: unless-stopped
 
+  node-exporter:
+    image: ${NODE_EXPORTER_DIGEST}
+    container_name: gb10-node-exporter
+    command:
+      - "--path.procfs=/host/proc"
+      - "--path.sysfs=/host/sys"
+      - "--path.rootfs=/host/root"
+      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/host/root:ro
+    ports:
+      - "127.0.0.1:9100:9100"
+    restart: unless-stopped
+
+  nvidia-gpu-exporter:
+    image: ${NVIDIA_GPU_EXPORTER_DIGEST}
+    container_name: gb10-nvidia-gpu-exporter
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    ports:
+      - "127.0.0.1:9835:9835"
+    restart: unless-stopped
+
+  prometheus:
+    image: ${PROMETHEUS_DIGEST}
+    container_name: gb10-prometheus
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro
+      - prom-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+    ports:
+      - "127.0.0.1:9090:9090"
+    restart: unless-stopped
+
+  alertmanager:
+    image: ${ALERTMANAGER_DIGEST}
+    container_name: gb10-alertmanager
+    volumes:
+      # NOTE: alertmanager.yml (no .template suffix) is the file
+      # render-config.sh generates from alertmanager.yml.template + .env on
+      # the host at ExecStartPre time. It is gitignored — do not create it by
+      # hand and do not commit it if you do.
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+    ports:
+      - "127.0.0.1:9093:9093"
+    restart: unless-stopped
+
+  grafana:
+    image: ${GRAFANA_DIGEST}
+    container_name: gb10-grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
+      - GF_SERVER_ROOT_URL=https://promaxgb10-d62a.taile5d412.ts.net:3001/
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "127.0.0.1:3000:3000"
+    restart: unless-stopped
+
 volumes:
   pg-data:
   keyportal-data:
+  prom-data:
+  grafana-data:
