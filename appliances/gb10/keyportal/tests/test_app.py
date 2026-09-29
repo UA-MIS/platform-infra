@@ -1642,6 +1642,37 @@ def test_admin_promote_route_happy_path_updates_and_redisplays(
     assert team_call.kwargs["json"]["team_id"] == config.students_team_id
 
 
+def test_admin_promote_reads_roster_before_key_list(app_module, client, mocker):
+    """Security review round 3, same-pass item (2026-09-30): same
+    ordering guarantee as admin_index (see that test's docstring), pinned
+    here too since admin_promote's own B3 comment makes the identical
+    claim independently for the POST routes -- "a stale key elsewhere
+    must not turn a SUCCESSFUL promote into a 500 with no way to tell it
+    worked" only holds if the roster read happens (and therefore is
+    already captured/rendered) before the key list read is given the
+    chance to fail."""
+    mocker.patch.object(app_module, "verify_access_jwt", return_value=ADMIN_EMAIL)
+    mocker.patch.object(app_module, "promote_user", return_value=None)
+    call_order = []
+    mocker.patch.object(
+        app_module,
+        "list_preauthorized",
+        side_effect=lambda cfg: call_order.append("roster") or [],
+    )
+    mocker.patch.object(
+        app_module,
+        "_list_issued_users_or_none",
+        side_effect=lambda cfg: call_order.append("keys") or [],
+    )
+    resp = client.post(
+        "/admin/promote",
+        data={"target_email": "order-check@crimson.ua.edu", "target_team": "students"},
+        headers={"Cf-Access-Jwt-Assertion": "irrelevant", **VALID_ORIGIN_HEADER},
+    )
+    assert resp.status_code == 200
+    assert call_order == ["roster", "keys"]
+
+
 def test_admin_demote_route_happy_path(app_module, client, mocker, fake_response):
     config = app_module.CONFIG
     email = "route-demote@crimson.ua.edu"
@@ -2714,3 +2745,32 @@ def test_admin_index_shows_roster_even_if_key_list_fails(app_module, client, moc
     assert resp.status_code == 200
     assert "roster-visible@ua.edu" in resp.text
     assert "unavailable" in resp.text.lower()
+
+
+def test_admin_index_reads_roster_before_key_list(app_module, client, mocker):
+    """Security review round 3, same-pass item (2026-09-30): the B3 fix
+    (see admin_index()'s own comment) is an ORDERING guarantee -- roster
+    read before key list -- not just "both eventually get read." Nothing
+    before this test actually pinned the order; a change that swapped
+    the two calls (e.g. during a future refactor) would pass every other
+    test here while quietly reintroducing the exact problem B3 fixed:
+    if the key-list read hangs or crashes first, the roster read after
+    it never happens, and render_admin_page() never gets a roster at
+    all -- not even the degraded-but-correct "roster shown, keys
+    unavailable" state the other B3 test above checks for."""
+    config = app_module.CONFIG
+    mocker.patch.object(app_module, "verify_access_jwt", return_value=ADMIN_EMAIL)
+    call_order = []
+    mocker.patch.object(
+        app_module,
+        "list_preauthorized",
+        side_effect=lambda cfg: call_order.append("roster") or [],
+    )
+    mocker.patch.object(
+        app_module,
+        "_list_issued_users_or_none",
+        side_effect=lambda cfg: call_order.append("keys") or [],
+    )
+    resp = client.get("/admin", headers={"Cf-Access-Jwt-Assertion": "irrelevant"})
+    assert resp.status_code == 200
+    assert call_order == ["roster", "keys"]
