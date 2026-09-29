@@ -271,6 +271,29 @@ def test_get_current_team_id_flat_shape_fallback(app_module, mocker, fake_respon
     assert app_module.get_current_team_id(config, "sk-x") == "faculty-team"
 
 
+def test_get_current_team_id_sends_sha256_hash_not_raw_key(
+    app_module, mocker, fake_response
+):
+    """Security review F2/F4 (2026-09-30): LiteLLM's own /key/info docs
+    say a raw key in the `key` query parameter is recorded verbatim by
+    any HTTP access log in front of the proxy -- pass the SHA256 hash
+    instead (verified live to return identical info). This is the only
+    place in the file that ever put a key in a query string; every
+    other LiteLLM call already uses a JSON body."""
+    import hashlib
+
+    config = app_module.CONFIG
+    get_mock = mocker.patch(
+        "app.httpx.get",
+        return_value=fake_response({"info": {"team_id": "students-team"}}),
+    )
+    raw_key = "sk-fake-raw"
+    app_module.get_current_team_id(config, raw_key)
+    sent_key = get_mock.call_args.kwargs["params"]["key"]
+    assert sent_key != raw_key
+    assert sent_key == hashlib.sha256(raw_key.encode()).hexdigest()
+
+
 def test_team_grants_access_false_for_pending_team_without_http_call(
     app_module, mocker
 ):
@@ -414,6 +437,43 @@ def test_regenerate_still_pending_stays_pending(app_module, mocker, fake_respons
 
     new_key = app_module.revoke_and_reissue(config, email)
     assert new_key == "sk-new-pending-key"
+
+
+def test_regenerate_raises_when_delete_fails(app_module, mocker, fake_response):
+    """Security review F2 (2026-09-30): a silently-failed /key/delete
+    used to let revoke_and_reissue() sail on to issue a SECOND key
+    anyway, leaving a dangling old key in LiteLLM that would later 500
+    list_issued_users() the moment someone looked it up. The delete
+    response is now checked with raise_for_status() -- a failed delete
+    must stop the regenerate, not be swallowed."""
+    config = app_module.CONFIG
+    email = "delete-fails@crimson.ua.edu"
+    with mocker_seed_cache(app_module, config, email, "sk-delfail"):
+        pass
+    mocker.patch(
+        "app.httpx.get",
+        return_value=fake_response({"info": {"team_id": config.pending_team_id}}),
+    )
+
+    # Isolate the failure to /key/delete specifically -- /key/generate
+    # must succeed here, so a passing test can only mean the DELETE's
+    # own raise_for_status caught it, not issue_key()'s.
+    def post_side_effect(url, **kwargs):
+        if url.endswith("/key/delete"):
+            return fake_response({"error": "boom"}, status_code=500)
+        if url.endswith("/key/generate"):
+            return fake_response({"key": "sk-unreached"})
+        raise AssertionError(f"unexpected POST to {url}")
+
+    generate_mock = mocker.patch("app.httpx.post", side_effect=post_side_effect)
+    with pytest.raises(Exception):
+        app_module.revoke_and_reissue(config, email)
+    # And /key/generate must never even have been called -- the whole
+    # point is to stop BEFORE issuing a second key on top of an old one
+    # whose deletion status is unknown.
+    assert not any(
+        c.args[0].endswith("/key/generate") for c in generate_mock.call_args_list
+    )
 
 
 class mocker_seed_cache:
@@ -650,14 +710,48 @@ def test_require_admin_allows_exact_match(app_module):
 
 def test_require_admin_matches_case_insensitively_and_strips_whitespace(app_module):
     # conftest.py's ADMIN_EMAILS includes " Faculty-Admin@Crimson.UA.EDU "
+    # -- exercise whitespace-stripping with an ALREADY-lowercase value.
     app_module.require_admin(
         "  faculty-admin@crimson.ua.edu  ", app_module.CONFIG
     )  # must not raise
 
 
+def test_require_admin_matches_when_caller_supplies_uppercase(app_module):
+    """Security review (2026-09-30): a surviving mutant showed the
+    previous case-insensitivity test passed only ALREADY-lowercase
+    input, so it never actually exercised require_admin() lower-casing
+    the CALLER's value before comparing. conftest.py's ADMIN_EMAILS
+    stores "admin@ua.edu" (already lowercase); this asserts an
+    uppercase claim from Entra still matches it. Real-world stakes: if
+    this regressed, an admin whose Entra UPN comes back mixed-case would
+    be 403'd out of their own panel."""
+    app_module.require_admin("ADMIN@UA.EDU", app_module.CONFIG)  # must not raise
+
+
 def test_require_admin_rejects_non_admin(app_module):
     with pytest.raises(HTTPException) as exc_info:
         app_module.require_admin(NON_ADMIN_EMAIL, app_module.CONFIG)
+    assert exc_info.value.status_code == 403
+
+
+@pytest.mark.parametrize(
+    "lookalike_email",
+    [
+        "xadmin@ua.edu",  # superstring of "admin@ua.edu" -- substring match would wrongly allow
+        "admin@ua.edu.attacker.example",  # allowlist entry as a PREFIX of this string
+    ],
+)
+def test_require_admin_rejects_substring_lookalikes(app_module, lookalike_email):
+    """Security review (2026-09-30): a surviving mutant showed
+    require_admin() could be changed to substring matching
+    (`any(a in email or email in a for a in config.admin_emails)`)
+    without any of the 68 existing tests noticing, because
+    NON_ADMIN_EMAIL ("student@crimson.ua.edu") happens to be neither a
+    sub- nor superstring of any allowlist entry. These two values ARE
+    related by substring to "admin@ua.edu" and must still be rejected
+    -- exact match is the entire point of this function."""
+    with pytest.raises(HTTPException) as exc_info:
+        app_module.require_admin(lookalike_email, app_module.CONFIG)
     assert exc_info.value.status_code == 403
 
 
@@ -712,6 +806,113 @@ def test_list_issued_users_reports_email_team_state_and_issued_at(
     assert not hasattr(user, "key")
 
 
+def test_list_issued_users_stale_row_is_explicit_not_fatal(
+    app_module, mocker, fake_response
+):
+    """Security review F2 (2026-09-30): a key LiteLLM no longer
+    recognizes (deleted out-of-band, expired past 365d, or left behind
+    by a failed delete) used to raise unhandled and 500 the ENTIRE
+    listing -- permanently, for as long as that one row existed. It
+    must now show up as an explicit stale row instead, and every OTHER
+    row must still render correctly."""
+    import hashlib
+
+    config = app_module.CONFIG
+    good_email = "good-row@crimson.ua.edu"
+    stale_email = "stale-row@crimson.ua.edu"
+    with mocker_seed_cache(app_module, config, good_email, "sk-goodrow"):
+        pass
+    with mocker_seed_cache(app_module, config, stale_email, "sk-stalerow"):
+        pass
+    good_hash = hashlib.sha256(b"sk-goodrow").hexdigest()
+    stale_hash = hashlib.sha256(b"sk-stalerow").hexdigest()
+
+    def get_side_effect(url, **kwargs):
+        if url.endswith("/key/info"):
+            key_param = kwargs["params"]["key"]
+            if key_param == stale_hash:
+                return fake_response({"error": "key not found"}, status_code=400)
+            assert key_param == good_hash
+            return fake_response({"info": {"team_id": config.students_team_id}})
+        if url.endswith("/team/info"):
+            return fake_response({"team_info": {"models": ["qwen3.8-27b"]}})
+        raise AssertionError(f"unexpected GET {url}")
+
+    mocker.patch("app.httpx.get", side_effect=get_side_effect)
+    users = app_module.list_issued_users(config)
+    by_email = {u.email: u for u in users}
+    assert set(by_email) == {good_email, stale_email}
+
+    good_user = by_email[good_email]
+    assert good_user.stale is False
+    assert good_user.active is True
+    assert good_user.team_label == "students"
+
+    stale_user = by_email[stale_email]
+    assert stale_user.stale is True
+    assert stale_user.active is False
+    assert stale_user.lookup_error is not None
+
+
+def test_list_issued_users_caches_team_grants_access_per_team(
+    app_module, mocker, fake_response
+):
+    """Security review F2 non-blocking note (2026-09-30): /team/info was
+    called once per USER even though there are only a handful of
+    distinct teams -- a 300-student roster meant 300 redundant calls on
+    top of the 300 unavoidable /key/info calls. Now cached per team_id
+    within one call."""
+    config = app_module.CONFIG
+    for i in range(5):
+        with mocker_seed_cache(
+            app_module, config, f"student{i}@crimson.ua.edu", f"sk-stu{i}"
+        ):
+            pass
+
+    team_info_calls = []
+
+    def get_side_effect(url, **kwargs):
+        if url.endswith("/key/info"):
+            return fake_response({"info": {"team_id": config.students_team_id}})
+        if url.endswith("/team/info"):
+            team_info_calls.append(kwargs["params"]["team_id"])
+            return fake_response({"team_info": {"models": ["qwen3.8-27b"]}})
+        raise AssertionError(f"unexpected GET {url}")
+
+    mocker.patch("app.httpx.get", side_effect=get_side_effect)
+    users = app_module.list_issued_users(config)
+    assert len(users) == 5
+    assert all(u.active for u in users)
+    # All 5 users are on the SAME team -- /team/info must be called
+    # once, not 5 times.
+    assert len(team_info_calls) == 1
+
+
+def test_admin_row_stale_offers_no_promote_demote_buttons(app_module):
+    """A stale row's promote/demote buttons would hit the same
+    unrecognized LiteLLM key and fail too, from a DIFFERENT code path
+    than the one that already flagged it -- don't offer actions that
+    can't work."""
+    config = app_module.CONFIG
+    users = [
+        app_module.IssuedUser(
+            email="ghost@crimson.ua.edu",
+            team_id=None,
+            team_label="(unknown -- LiteLLM does not recognize this key)",
+            active=False,
+            created_at=1_700_000_000.0,
+            lookup_error="400 Client Error",
+        )
+    ]
+    html = app_module.render_admin_page(ADMIN_EMAIL, users, [], config)
+    assert "ghost@crimson.ua.edu" in html
+    assert "Unknown" in html
+    assert (
+        '<input type="hidden" name="target_email" value="ghost@crimson.ua.edu">'
+        not in html
+    )
+
+
 def test_render_admin_page_never_includes_any_key(app_module):
     config = app_module.CONFIG
     users = [
@@ -749,6 +950,53 @@ def test_render_admin_page_empty_state(app_module):
     html = app_module.render_admin_page(ADMIN_EMAIL, [], [], app_module.CONFIG)
     assert "No one has visited" in html
     assert "No one is pre-authorized" in html
+
+
+def test_render_admin_page_escapes_user_table_values(app_module):
+    """Security review (2026-09-30): a surviving mutant showed removing
+    escape() from the issued-users table rows changed nothing observable
+    to any of the 68 existing tests, because every fixture email/team
+    value used in those tests happens to contain no HTML-significant
+    characters. Not exploitable today (both values are operator-set or
+    from the verified JWT claim), but pin the behavior down so it can't
+    silently regress into something that IS exploitable later."""
+    config = app_module.CONFIG
+    users = [
+        app_module.IssuedUser(
+            email="<script>alert(1)</script>@ua.edu",
+            team_id=config.pending_team_id,
+            team_label="<b>pending</b>",
+            active=False,
+            created_at=1_700_000_000.0,
+        )
+    ]
+    html = app_module.render_admin_page(ADMIN_EMAIL, users, [], config)
+    assert "<script>alert(1)</script>" not in html
+    assert "&lt;script&gt;" in html
+    assert "<b>pending</b>" not in html
+    assert "&lt;b&gt;pending&lt;/b&gt;" in html
+
+
+def test_render_admin_page_escapes_signed_in_as(app_module):
+    html = app_module.render_admin_page(
+        "<img src=x onerror=alert(1)>@ua.edu", [], [], app_module.CONFIG
+    )
+    assert "<img src=x onerror=alert(1)>" not in html
+    assert "&lt;img" in html
+
+
+def test_render_admin_page_escapes_preauthorized_table_values(app_module):
+    config = app_module.CONFIG
+    preauthorized = [
+        app_module.PreauthorizedEntry(
+            email="<script>alert(2)</script>@ua.edu",
+            added_at=1_700_000_000.0,
+            redeemed_at=None,
+        )
+    ]
+    html = app_module.render_admin_page(ADMIN_EMAIL, [], preauthorized, config)
+    assert "<script>alert(2)</script>" not in html
+    assert "&lt;script&gt;" in html
 
 
 def test_render_admin_page_shows_preauthorized_list_with_redeemed_flag(app_module):
@@ -946,6 +1194,122 @@ def test_admin_demote_non_admin_returns_403(app_module, client, mocker):
     )
     assert resp.status_code == 403
     post_mock.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# F3 (security review, 2026-09-30): a malformed/missing form field used
+# to trigger FastAPI's own 422 validation BEFORE verify_access_jwt/
+# require_admin ever ran (Form(...) params are resolved ahead of the
+# handler body). A non-admin must get the exact same 403 regardless of
+# what's in the body -- including an empty one -- and an admin sending a
+# genuinely malformed body should still get a clean 422, just AFTER auth.
+# ---------------------------------------------------------------------------
+
+
+def test_admin_promote_non_admin_malformed_body_still_403(app_module, client, mocker):
+    mocker.patch.object(app_module, "verify_access_jwt", return_value=NON_ADMIN_EMAIL)
+    post_mock = mocker.patch("app.httpx.post")
+    resp = client.post(
+        "/admin/promote",
+        data={},  # both required fields missing
+        headers={"Cf-Access-Jwt-Assertion": "irrelevant"},
+    )
+    assert resp.status_code == 403
+    post_mock.assert_not_called()
+
+
+def test_admin_promote_admin_malformed_body_returns_422_after_auth(
+    app_module, client, mocker
+):
+    """The fix moves WHEN validation happens (after auth), not whether
+    it happens -- an admin with a bad payload still gets a clean 422."""
+    mocker.patch.object(app_module, "verify_access_jwt", return_value=ADMIN_EMAIL)
+    resp = client.post(
+        "/admin/promote",
+        data={"target_email": "someone@ua.edu"},  # target_team missing
+        headers={"Cf-Access-Jwt-Assertion": "irrelevant"},
+    )
+    assert resp.status_code == 422
+
+
+def test_admin_demote_non_admin_malformed_body_still_403(app_module, client, mocker):
+    mocker.patch.object(app_module, "verify_access_jwt", return_value=NON_ADMIN_EMAIL)
+    post_mock = mocker.patch("app.httpx.post")
+    resp = client.post(
+        "/admin/demote", data={}, headers={"Cf-Access-Jwt-Assertion": "irrelevant"}
+    )
+    assert resp.status_code == 403
+    post_mock.assert_not_called()
+
+
+def test_admin_preauthorize_non_admin_malformed_body_still_403(
+    app_module, client, mocker
+):
+    mocker.patch.object(app_module, "verify_access_jwt", return_value=NON_ADMIN_EMAIL)
+    resp = client.post(
+        "/admin/preauthorize",
+        data={},
+        headers={"Cf-Access-Jwt-Assertion": "irrelevant"},
+    )
+    assert resp.status_code == 403
+
+
+def test_admin_preauthorize_remove_non_admin_malformed_body_still_403(
+    app_module, client, mocker
+):
+    mocker.patch.object(app_module, "verify_access_jwt", return_value=NON_ADMIN_EMAIL)
+    resp = client.post(
+        "/admin/preauthorize/remove",
+        data={},
+        headers={"Cf-Access-Jwt-Assertion": "irrelevant"},
+    )
+    assert resp.status_code == 403
+
+
+def test_admin_promote_succeeds_even_with_unrelated_stale_row(
+    app_module, client, mocker, fake_response
+):
+    """Security review F2 symptom (b) (2026-09-30): promote_user() used
+    to succeed and then the POST-mutation list_issued_users() call would
+    throw because of an UNRELATED stale row elsewhere in the table,
+    reporting the whole request as a failure even though the promotion
+    had already applied. Fixed by list_issued_users() no longer raising
+    on a per-row failure -- this exercises the exact reproduction
+    shape."""
+    import hashlib
+
+    config = app_module.CONFIG
+    mocker.patch.object(app_module, "verify_access_jwt", return_value=ADMIN_EMAIL)
+    target_email = "promote-target-amid-stale@crimson.ua.edu"
+    with mocker_seed_cache(app_module, config, target_email, "sk-targetx"):
+        pass
+    with mocker_seed_cache(
+        app_module, config, "stale-neighbor@ua.edu", "sk-staleneighbor"
+    ):
+        pass
+    stale_hash = hashlib.sha256(b"sk-staleneighbor").hexdigest()
+
+    def get_side_effect(url, **kwargs):
+        if url.endswith("/key/info"):
+            if kwargs["params"]["key"] == stale_hash:
+                return fake_response({"error": "gone"}, status_code=400)
+            return fake_response({"info": {"team_id": config.students_team_id}})
+        if url.endswith("/team/info"):
+            return fake_response({"team_info": {"models": ["qwen3.8-27b"]}})
+        raise AssertionError(f"unexpected GET {url}")
+
+    mocker.patch("app.httpx.get", side_effect=get_side_effect)
+    mocker.patch("app.httpx.post", return_value=fake_response({}))
+
+    resp = client.post(
+        "/admin/promote",
+        data={"target_email": target_email, "target_team": "students"},
+        headers={"Cf-Access-Jwt-Assertion": "irrelevant"},
+    )
+    assert resp.status_code == 200
+    assert target_email in resp.text
+    # The stale row is shown, not hidden, and did not crash this request.
+    assert "stale-neighbor@ua.edu" in resp.text
 
 
 def test_admin_index_admin_sees_users_table(app_module, client, mocker, fake_response):

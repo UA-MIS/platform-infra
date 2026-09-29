@@ -100,6 +100,17 @@ services:
       - LITELLM_BASE_URL=http://litellm:4000
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
       - PENDING_TEAM_ID=${PENDING_TEAM_ID}
+      # STUDENTS_TEAM_ID/FACULTY_TEAM_ID/ADMIN_EMAILS added by the admin
+      # UI + roster pre-authorization work (security review F1,
+      # 2026-09-30): app.py's load_config() now hard-requires all three
+      # via _require_env -- this compose file's `environment:` list is
+      # an explicit allowlist, so a value present in .env does NOT reach
+      # the container unless it is named here too. Before this fix, the
+      # container failed at import (RuntimeError, restart-loop) with
+      # ANY of the three missing, which took down GET / for every
+      # eligible student, not just /admin.
+      - STUDENTS_TEAM_ID=${STUDENTS_TEAM_ID}
+      - FACULTY_TEAM_ID=${FACULTY_TEAM_ID}
       - CF_ACCESS_TEAM_DOMAIN=${CF_ACCESS_TEAM_DOMAIN}
       # CF_ACCESS_AUD_KEYPORTAL is filled from the Cloudflare Zero Trust
       # dashboard (Access > Applications > local-llm-keys.uamishub.com).
@@ -108,6 +119,11 @@ services:
       - CF_ACCESS_AUD=${CF_ACCESS_AUD_KEYPORTAL}
       - ALLOWED_EMAIL_SUFFIXES=@crimson.ua.edu,@ua.edu
       - ADMIN_CONTACT=${ADMIN_CONTACT}
+      # Comma-separated UA emails allowed onto /admin -- same
+      # fail-loudly-if-blank contract as CF_ACCESS_AUD (see
+      # require_admin()/_load_admin_emails() in app.py). Real values are
+      # the owner's to set in .env at deploy time.
+      - ADMIN_EMAILS=${ADMIN_EMAILS}
     volumes:
       - keyportal-data:/data
     depends_on:

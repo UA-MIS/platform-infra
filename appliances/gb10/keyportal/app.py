@@ -14,6 +14,7 @@ See also: artifacts/planning/2026-09-28-gb10-local-llm-plan-a.md Task 12.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import sqlite3
@@ -26,7 +27,7 @@ from typing import Optional
 
 import httpx
 import jwt
-from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from jwt import PyJWKClient
 
@@ -320,11 +321,23 @@ def get_current_team_id(config: Config, key: str) -> Optional[str]:
     (2026-09-29): GET /key/info nests key fields under "info" --
     {"info": {..., "team_id": "..."}}. Handled defensively (falls back
     to a flat shape) in case a future LiteLLM version changes this.
+
+    Passes the key's SHA256 hash, never the raw key, as the `key` query
+    parameter -- security review finding F4 (2026-09-30). LiteLLM's own
+    /key/info docs say exactly this: "Pass the key's sha256 hash so the
+    raw key stays out of URLs and access logs" (a query parameter is
+    recorded verbatim by any HTTP access log in front of the proxy,
+    unlike a POST body). Verified live: a hash lookup returns the
+    identical `info` as a raw-key lookup for the same key. This is the
+    ONLY place in this file that ever put a raw key in a URL -- every
+    other LiteLLM call (/key/generate, /key/update, /key/delete) already
+    sends the key in a JSON body, not a query string.
     """
+    key_hash = hashlib.sha256(key.encode()).hexdigest()
     resp = httpx.get(
         f"{config.litellm_base_url}/key/info",
         headers={"Authorization": f"Bearer {config.litellm_master_key}"},
-        params={"key": key},
+        params={"key": key_hash},
         timeout=15.0,
     )
     resp.raise_for_status()
@@ -372,12 +385,21 @@ def revoke_and_reissue(config: Config, email: str) -> str:
     team_id = config.pending_team_id
     if old_key:
         team_id = get_current_team_id(config, old_key) or config.pending_team_id
-        httpx.post(
+        delete_resp = httpx.post(
             f"{config.litellm_base_url}/key/delete",
             headers={"Authorization": f"Bearer {config.litellm_master_key}"},
             json={"keys": [old_key]},
             timeout=15.0,
         )
+        # Security review F2 (2026-09-30): a silently-failed delete here
+        # is exactly how a stale row that no longer matches a live
+        # LiteLLM key ends up sitting in `keys` -- the old key would
+        # still exist in LiteLLM (never actually deleted) while a NEW
+        # key also gets issued and cached below, or worse, the delete
+        # partially succeeds server-side but reports failure. Fail
+        # loudly here instead of proceeding to issue a second key on
+        # top of an old one whose deletion status is unknown.
+        delete_resp.raise_for_status()
     return issue_key(config, email, team_id)
 
 
@@ -396,13 +418,27 @@ class IssuedUser:
     deliberately has NO field for the raw key itself. render_admin_page()
     only ever receives IssuedUser instances, never a raw key string, so
     there is no code path in the admin view that could leak one, not even
-    by accident."""
+    by accident.
+
+    `lookup_error` is set (security review F2, 2026-09-30) when LiteLLM
+    no longer recognizes this row's key -- deleted out-of-band through
+    LiteLLM's own UI, expired past issue_key()'s 365d duration, or left
+    behind by a delete that failed partway. Such a row is shown, not
+    hidden: an admin needs to SEE a broken row to clean it up, and a
+    silently-dropped row is how someone concludes a student "isn't in
+    the system" instead of "is stuck."
+    """
 
     email: str
     team_id: Optional[str]
     team_label: str
     active: bool
     created_at: float
+    lookup_error: Optional[str] = None
+
+    @property
+    def stale(self) -> bool:
+        return self.lookup_error is not None
 
 
 def _team_label(team_id: Optional[str], config: Config) -> str:
@@ -423,15 +459,50 @@ def list_issued_users(config: Config) -> list:
     issued means working" rule as index() -- an admin viewing a stale
     cached state would be worse than an admin viewing nothing). The raw
     `litellm_key` from the keys table never leaves this function.
+
+    Security review F2 (2026-09-30): a per-row LiteLLM lookup failure
+    (a key LiteLLM no longer recognizes -- deleted out-of-band, expired
+    past 365d, or left dangling by a failed delete) used to raise
+    unhandled, which 500'd this ENTIRE function -- permanently, for as
+    long as that one row existed. Concretely that meant (a) GET /admin
+    was unusable for EVERY admin, and (b) inside admin_promote(),
+    promote_user() would run and SUCCEED and then this call would still
+    throw, so a successful promotion was reported as a failure with no
+    way to tell what state the student was actually left in. A per-row
+    failure is now caught and rendered as an explicit stale row (see
+    IssuedUser.lookup_error) instead of aborting the whole listing.
+
+    Also caches team_grants_access() per team_id within one call --
+    there are only a handful of distinct teams (pending/students/
+    faculty) no matter how many rows are in `keys`, so a 300-row roster
+    now costs at most 300 /key/info calls plus a few /team/info calls,
+    not 300 of each, repeated on every /admin load and every promote/
+    demote.
     """
     with closing(sqlite3.connect(config.db_path)) as conn:
         rows = conn.execute(
             "SELECT email, litellm_key, created_at FROM keys ORDER BY created_at DESC"
         ).fetchall()
+    team_active_cache: dict = {}
     users = []
     for email, key, created_at in rows:
-        team_id = get_current_team_id(config, key)
-        active = team_grants_access(config, team_id)
+        try:
+            team_id = get_current_team_id(config, key)
+            if team_id not in team_active_cache:
+                team_active_cache[team_id] = team_grants_access(config, team_id)
+            active = team_active_cache[team_id]
+        except httpx.HTTPError as exc:
+            users.append(
+                IssuedUser(
+                    email=email,
+                    team_id=None,
+                    team_label="(unknown -- LiteLLM does not recognize this key)",
+                    active=False,
+                    created_at=created_at,
+                    lookup_error=str(exc),
+                )
+            )
+            continue
         users.append(
             IssuedUser(
                 email=email,
@@ -862,15 +933,24 @@ def _admin_row(user: "IssuedUser") -> str:
     # admin acts on OTHER people's data, so it gets the same treatment a
     # public-facing admin panel would.
     email = escape(user.email)
-    state = "Active" if user.active else "Pending"
-    state_class = "state-active" if user.active else "state-pending"
-    return f"""<tr>
-<td data-label="Email">{email}</td>
-<td data-label="Team">{escape(user.team_label)}</td>
-<td data-label="State"><span class="{state_class}">{state}</span></td>
-<td data-label="Issued">{_fmt_issued_at(user.created_at)}</td>
-<td data-label="Actions" class="actions">
-<form method="post" action="/admin/promote">
+    if user.stale:
+        # Security review F2 (2026-09-30): promote/demote on a row like
+        # this would just fail too (they hit the same LiteLLM key that
+        # /key/info already couldn't find), producing a confusing error
+        # from a DIFFERENT code path than this one. Say so plainly and
+        # don't offer buttons that can't work, rather than let an admin
+        # discover that by clicking.
+        state = "Unknown"
+        state_class = "state-stale"
+        actions = (
+            '<span class="hint">Not recognized by LiteLLM -- promote/'
+            "demote won't work on this row. Check LiteLLM's key "
+            "list directly to clean it up.</span>"
+        )
+    else:
+        state = "Active" if user.active else "Pending"
+        state_class = "state-active" if user.active else "state-pending"
+        actions = f"""<form method="post" action="/admin/promote">
 <input type="hidden" name="target_email" value="{email}">
 <input type="hidden" name="target_team" value="students">
 <button type="submit">Promote: Students</button>
@@ -883,7 +963,14 @@ def _admin_row(user: "IssuedUser") -> str:
 <form method="post" action="/admin/demote">
 <input type="hidden" name="target_email" value="{email}">
 <button type="submit" class="demote">Demote to pending</button>
-</form>
+</form>"""
+    return f"""<tr>
+<td data-label="Email">{email}</td>
+<td data-label="Team">{escape(user.team_label)}</td>
+<td data-label="State"><span class="{state_class}">{state}</span></td>
+<td data-label="Issued">{_fmt_issued_at(user.created_at)}</td>
+<td data-label="Actions" class="actions">
+{actions}
 </td>
 </tr>"""
 
@@ -1007,6 +1094,7 @@ th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #e6e1da; 
 th { color: #6b6b6b; font-weight: 600; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.03em; }
 .state-active { color: #1a7a3c; font-weight: 600; }
 .state-pending { color: #9a7b00; font-weight: 600; }
+.state-stale { color: #9E1B32; font-weight: 600; }
 td.actions { display: flex; flex-wrap: wrap; gap: 6px; }
 td.actions form { margin: 0; }
 td.actions button { padding: 6px 10px; font-size: 0.85rem; }
@@ -1023,6 +1111,22 @@ textarea { width: 100%; box-sizing: border-box; font-family: ui-monospace, "SF M
   td::before { content: attr(data-label); display: block; color: #6b6b6b; font-size: 0.75rem; text-transform: uppercase; }
 }
 """
+
+
+def _required_form_field(form, name: str) -> str:
+    """Read one required field from an already-parsed form body.
+
+    Deliberately NOT a FastAPI `Form(...)` parameter -- see F3's note on
+    the /admin* routes below for why. `form.get(name)` can return
+    anything a multipart body puts under that name (e.g. an
+    UploadFile), so this only accepts a plain string; anything else is
+    treated the same as missing.
+    """
+    value = form.get(name)
+    value = value.strip() if isinstance(value, str) else ""
+    if not value:
+        raise HTTPException(status_code=422, detail=f"{name} is required")
+    return value
 
 
 CONFIG = load_config()
@@ -1067,16 +1171,26 @@ def admin_index(request: Request) -> str:
 
 
 @app.post("/admin/promote", response_class=HTMLResponse)
-def admin_promote(
-    request: Request,
-    target_email: str = Form(...),
-    target_team: str = Form(...),
-) -> str:
+async def admin_promote(request: Request) -> str:
     # Re-verify and re-check the allowlist here too -- never assume the
     # GET that rendered the form already gated this POST. Every /admin*
     # route is independently authorized.
+    #
+    # Security review F3 (2026-09-30): target_email/target_team used to
+    # be Form(...) parameters, which FastAPI resolves and validates
+    # BEFORE this function body runs -- a malformed body got a 422 with
+    # field names in it before verify_access_jwt/require_admin ever
+    # executed, so a non-admin sending a bad payload got a DIFFERENT
+    # failure mode (422) than one sending a good payload (403), and
+    # require_admin's own docstring claim of an identical response
+    # regardless of payload didn't actually hold. Form data is now read
+    # manually, strictly AFTER both auth checks below, so authorization
+    # is the first thing that can fail on this route, for any request.
     admin_email = verify_access_jwt(request, CONFIG, JWKS_CLIENT)
     require_admin(admin_email, CONFIG)
+    form = await request.form()
+    target_email = _required_form_field(form, "target_email")
+    target_team = _required_form_field(form, "target_team")
     promote_user(CONFIG, target_email, target_team)
     users = list_issued_users(CONFIG)
     preauthorized = list_preauthorized(CONFIG)
@@ -1084,9 +1198,11 @@ def admin_promote(
 
 
 @app.post("/admin/demote", response_class=HTMLResponse)
-def admin_demote(request: Request, target_email: str = Form(...)) -> str:
+async def admin_demote(request: Request) -> str:
     admin_email = verify_access_jwt(request, CONFIG, JWKS_CLIENT)
     require_admin(admin_email, CONFIG)
+    form = await request.form()
+    target_email = _required_form_field(form, "target_email")
     demote_user(CONFIG, target_email)
     users = list_issued_users(CONFIG)
     preauthorized = list_preauthorized(CONFIG)
@@ -1094,9 +1210,11 @@ def admin_demote(request: Request, target_email: str = Form(...)) -> str:
 
 
 @app.post("/admin/preauthorize", response_class=HTMLResponse)
-def admin_preauthorize(request: Request, emails: str = Form(...)) -> str:
+async def admin_preauthorize(request: Request) -> str:
     admin_email = verify_access_jwt(request, CONFIG, JWKS_CLIENT)
     require_admin(admin_email, CONFIG)
+    form = await request.form()
+    emails = _required_form_field(form, "emails")
     result = add_preauthorized_emails(CONFIG, emails)
     users = list_issued_users(CONFIG)
     preauthorized = list_preauthorized(CONFIG)
@@ -1106,9 +1224,11 @@ def admin_preauthorize(request: Request, emails: str = Form(...)) -> str:
 
 
 @app.post("/admin/preauthorize/remove", response_class=HTMLResponse)
-def admin_preauthorize_remove(request: Request, target_email: str = Form(...)) -> str:
+async def admin_preauthorize_remove(request: Request) -> str:
     admin_email = verify_access_jwt(request, CONFIG, JWKS_CLIENT)
     require_admin(admin_email, CONFIG)
+    form = await request.form()
+    target_email = _required_form_field(form, "target_email")
     remove_preauthorized_email(CONFIG, target_email)
     users = list_issued_users(CONFIG)
     preauthorized = list_preauthorized(CONFIG)
