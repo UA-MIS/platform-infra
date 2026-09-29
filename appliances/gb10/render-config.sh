@@ -72,7 +72,18 @@ if [ -z "${ALERTMANAGER_SLACK_WEBHOOK_URL}" ]; then
        "will be evaluated but NOT delivered anywhere (routed to the" \
        "'null' receiver). Set it in .env and re-run this script (or" \
        "reboot) to enable Slack delivery." >&2
-elif [[ "${ALERTMANAGER_SLACK_WEBHOOK_URL}" =~ ^https:// ]]; then
+elif [[ "${ALERTMANAGER_SLACK_WEBHOOK_URL}" =~ ^https://[A-Za-z0-9._~:/?#@!\$\&\'\(\)\*+,\;=%-]+$ ]]; then
+  # Security review round 4, finding-3-followup (2026-09-30): `^https://`
+  # alone was not enough -- a value that PASSED it (it still starts with
+  # https://) but contained a character with special meaning to the
+  # substitution step below (a literal `|`, matching sed's own
+  # delimiter; a newline; a raw `&`, which sed's replacement text reads
+  # as "insert the whole match") could still break the render, one
+  # layer past this check. Requiring the ENTIRE value to be built only
+  # from characters that are both legal in a URL and inert to whatever
+  # renders it closes that regardless of which substitution mechanism
+  # is used below. Explicitly excludes whitespace of any kind (a space
+  # or an embedded newline both fail this class) and `|`.
   receiver="slack"
   webhook_url="${ALERTMANAGER_SLACK_WEBHOOK_URL}"
   echo "ALERTMANAGER_SLACK_WEBHOOK_URL is set -- routing alerts to Slack."
@@ -86,14 +97,27 @@ else
   # the exact fatal-appliance-wide failure this script exists to remove
   # one layer further down, into a place with far worse visibility (a
   # crash-looping container, not a non-zero ExecStartPre systemd already
-  # reports clearly). Fall back to the same null-receiver degradation as
-  # a genuinely blank value, but with a LOUD warning naming the actual
-  # problem, since this case means someone tried to configure Slack and
-  # got it wrong, not that Slack was deliberately skipped.
+  # reports clearly).
+  #
+  # Security review round 4, finding-3-followup (2026-09-30): this
+  # branch is now ALSO where a value that merely LOOKS unsafe (a `|`, a
+  # space, an embedded newline) lands, not just a value with no scheme
+  # at all -- see the elif's own comment. Whatever the specific reason,
+  # the response is identical: fall back to the same null-receiver
+  # degradation as a genuinely blank value, with a LOUD warning naming
+  # the actual problem, and -- the point of this whole followup --
+  # NEVER a non-zero exit. render-config.sh is this appliance's
+  # ExecStartPre; a non-zero exit here blocks the ENTIRE stack at boot,
+  # not just alert delivery. The appliance's ability to serve students
+  # must never depend on a notification channel's config being well-
+  # formed. (Contrast the two genuinely fatal checks earlier in this
+  # script -- a missing .env or a missing template -- where nothing
+  # would work anyway regardless of the webhook, so failing loudly is
+  # correct there.)
   receiver="null"
   webhook_url="https://unused.invalid/no-webhook-configured"
   echo "WARNING: ALERTMANAGER_SLACK_WEBHOOK_URL is set but does not look" \
-       "like a valid https:// URL (got: ${ALERTMANAGER_SLACK_WEBHOOK_URL@Q})." \
+       "like a safe https:// URL (got: ${ALERTMANAGER_SLACK_WEBHOOK_URL@Q})." \
        "Falling back to the 'null' receiver -- alerts will be evaluated" \
        "but NOT delivered anywhere -- rather than shipping a broken" \
        "Slack config that would crash-loop Alertmanager after the" \
@@ -101,9 +125,30 @@ else
        "this script (or reboot)." >&2
 fi
 
-sed \
-  -e "s|ROUTE_RECEIVER_PLACEHOLDER|${receiver}|g" \
-  -e "s|SLACK_WEBHOOK_URL_PLACEHOLDER|${webhook_url}|g" \
-  alertmanager/alertmanager.yml.template > alertmanager/alertmanager.yml
+# Security review round 4, finding-3-followup (2026-09-30): renders via
+# bash's own literal string substitution instead of sed, so the render
+# step is completely insensitive to whatever characters end up in
+# `receiver`/`webhook_url` -- belt-and-suspenders alongside the
+# character allowlist above, not a replacement for it. Bash's
+# `${var//pattern/replacement}` treats the replacement side as a plain
+# literal string with no special meaning for `|`, `&`, backslashes, or
+# anything else (unlike sed's `s///`, where `|` collides with the
+# delimiter chosen here and `&` means "the whole match" in the
+# replacement text) -- there is no character this step can choke on,
+# so the ONLY two ways this script can now fail are the two explicit,
+# deliberate, always-appropriate exits above (missing .env) and below
+# (missing template) -- checked explicitly here, rather than left to
+# whatever exit code happens to read the missing file, because that
+# switched silently when the read moved from sed (exit 2 on a missing
+# input file) to `cat` (exit 1) -- an already-verified exit code is a
+# real regression if it moves without anyone deciding to move it.
+if [ ! -f alertmanager/alertmanager.yml.template ]; then
+  echo "alertmanager/alertmanager.yml.template not found in $(pwd) -- render-config.sh cannot proceed without it." >&2
+  exit 2
+fi
+template_content="$(cat alertmanager/alertmanager.yml.template)"
+rendered="${template_content//ROUTE_RECEIVER_PLACEHOLDER/${receiver}}"
+rendered="${rendered//SLACK_WEBHOOK_URL_PLACEHOLDER/${webhook_url}}"
+printf '%s\n' "${rendered}" > alertmanager/alertmanager.yml
 
 echo "Rendered alertmanager/alertmanager.yml from template (receiver: ${receiver})."
