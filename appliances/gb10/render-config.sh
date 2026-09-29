@@ -30,15 +30,32 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-set -a
-source .env
-set +a
+# Security review round 4, finding 4 (2026-09-30): `source .env` under
+# `set -e` EXECUTES the file as shell, not just reads it as key=value
+# pairs. An unquoted .env value containing shell metacharacters --
+# ALERTMANAGER_SLACK_WEBHOOK_URL=https://h.example/a|b, say -- parses as
+# an assignment PIPED INTO a command named `b`, which does not exist:
+# exit 127, `set -e` kills this script, ExecStartPre fails, and the
+# WHOLE appliance unit is blocked at boot with a stale (or absent)
+# alertmanager.yml on disk. That is precisely the "one bad value blocks
+# the entire appliance" failure class the null-receiver fix above
+# exists to remove -- reached through the .env LOADER instead of the
+# fatal guard this script used to have. `docker compose` itself parses
+# .env without shell semantics (plain KEY=VALUE, no expansion, no
+# execution) -- sourcing the file was the ONLY thing in this whole
+# appliance that ever gave .env content the power to run as code.
+# Parse just the one variable this script actually needs, with a plain
+# grep/cut, instead. A missing .env file itself is still a distinct,
+# fatal, loud error (exit 1) -- unlike a bad VALUE inside it, a missing
+# .env is a deployment problem well beyond alerting, and this script has
+# no basis to guess what else might be wrong.
+if [ ! -f .env ]; then
+  echo ".env not found in $(pwd) -- render-config.sh cannot proceed without it." >&2
+  exit 1
+fi
+ALERTMANAGER_SLACK_WEBHOOK_URL="$(grep -m1 '^ALERTMANAGER_SLACK_WEBHOOK_URL=' .env | cut -d= -f2- || true)"
 
-if [ -n "${ALERTMANAGER_SLACK_WEBHOOK_URL:-}" ]; then
-  receiver="slack"
-  webhook_url="${ALERTMANAGER_SLACK_WEBHOOK_URL}"
-  echo "ALERTMANAGER_SLACK_WEBHOOK_URL is set -- routing alerts to Slack."
-else
+if [ -z "${ALERTMANAGER_SLACK_WEBHOOK_URL}" ]; then
   receiver="null"
   # Never actually dialed -- route.receiver is 'null', not 'slack', so
   # this api_url is never used to send anything. But it still has to be
@@ -55,6 +72,33 @@ else
        "will be evaluated but NOT delivered anywhere (routed to the" \
        "'null' receiver). Set it in .env and re-run this script (or" \
        "reboot) to enable Slack delivery." >&2
+elif [[ "${ALERTMANAGER_SLACK_WEBHOOK_URL}" =~ ^https:// ]]; then
+  receiver="slack"
+  webhook_url="${ALERTMANAGER_SLACK_WEBHOOK_URL}"
+  echo "ALERTMANAGER_SLACK_WEBHOOK_URL is set -- routing alerts to Slack."
+else
+  # Security review round 4, finding 3 (2026-09-30): the earlier version
+  # of this fix validated only PRESENCE, not SHAPE -- a malformed value
+  # (missing scheme, a typo, a copy-paste that dropped characters) still
+  # rendered `receiver: 'slack'` with an invalid api_url and exited 0.
+  # The appliance would boot -- ExecStartPre "succeeded" -- but
+  # Alertmanager itself would then crash-loop on that config, pushing
+  # the exact fatal-appliance-wide failure this script exists to remove
+  # one layer further down, into a place with far worse visibility (a
+  # crash-looping container, not a non-zero ExecStartPre systemd already
+  # reports clearly). Fall back to the same null-receiver degradation as
+  # a genuinely blank value, but with a LOUD warning naming the actual
+  # problem, since this case means someone tried to configure Slack and
+  # got it wrong, not that Slack was deliberately skipped.
+  receiver="null"
+  webhook_url="https://unused.invalid/no-webhook-configured"
+  echo "WARNING: ALERTMANAGER_SLACK_WEBHOOK_URL is set but does not look" \
+       "like a valid https:// URL (got: ${ALERTMANAGER_SLACK_WEBHOOK_URL@Q})." \
+       "Falling back to the 'null' receiver -- alerts will be evaluated" \
+       "but NOT delivered anywhere -- rather than shipping a broken" \
+       "Slack config that would crash-loop Alertmanager after the" \
+       "appliance has already booted. Fix the value in .env and re-run" \
+       "this script (or reboot)." >&2
 fi
 
 sed \
