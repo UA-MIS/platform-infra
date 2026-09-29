@@ -95,24 +95,98 @@ if ((Test-Path $ConfigJson) -and -not (Test-Path $ConfigYaml)) {
 # ---------------------------------------------------------------------------
 
 function Build-Block {
+    # Three separate model entries, not one, because Continue's
+    # defaultCompletionOptions/requestOptions apply per MODEL block, not
+    # per role within a shared block -- there is no way to give chat,
+    # edit, apply, and agent different maxTokens values on a single
+    # entry (see https://docs.continue.dev/reference, 2026-09-30). All
+    # three point at the exact same backend model; only the role
+    # assignment and completion options differ. Continue only offers
+    # each role a choice among the models that declare it, so a student
+    # sees one candidate per role, not three confusing "chat" options.
+    #
+    # Per-role token caps, measured against the real endpoint on this
+    # box (DFlash2 config), 2026-09-30. This model is a REASONING model:
+    # it emits a hidden "thinking" block BEFORE its real answer, and
+    # that thinking consumes the SAME token budget as the answer
+    # (measured: a short code-completion prompt used 99 of 120 total
+    # tokens on thinking alone, with reasoning left on). A small
+    # maxTokens cap on a role that still has thinking enabled truncates
+    # the model mid-thought, before it ever writes the real answer --
+    # worse than slow, actively broken. So:
+    #   - edit/apply turn thinking OFF (chat_template_kwargs.
+    #     enable_thinking: false) and get a small, fast cap -- these are
+    #     the roles where waiting is most noticeable, and a code change
+    #     does not need deliberation to get right.
+    #   - chat and agent keep thinking ON and get a generous cap, sized
+    #     above the longest real answer observed, because truncating a
+    #     good explanation or a good multi-file plan is worse than
+    #     making someone wait for it.
     param(
         [string]$DashIndent,
         [string]$KeyToPrint = $ApiKey
     )
     $contIndent = "$DashIndent  "
     $lines = @()
-    $lines += "$DashIndent- name: UA MIS Local"
+
+    $lines += "$DashIndent- name: UA MIS Local (Chat)"
     $lines += "$contIndent" + 'provider: openai  # "openai" here means the OpenAI-compatible API protocol,'
     $lines += "$contIndent" + '                  # NOT the OpenAI company. This talks only to our own'
     $lines += "$contIndent" + '                  # local box, never to openai.com.'
     $lines += "$contIndent" + "model: $ModelId"
     $lines += "$contIndent" + "apiBase: $ModelEndpoint"
     $lines += "$contIndent" + "apiKey: $KeyToPrint"
-    $lines += "$contIndent" + "roles: [chat, edit, apply]"
-    $lines += "$contIndent" + '# Deliberately no "autocomplete" role here on purpose: GitHub Copilot'
-    $lines += "$contIndent" + '# Free already handles inline completions well, and this shared GPU'
-    $lines += "$contIndent" + '# box should not spend capacity on every keystroke. Please do not add'
-    $lines += "$contIndent" + '# it back in.'
+    $lines += "$contIndent" + "roles: [chat]"
+    $lines += "$contIndent" + '# Generous on purpose: measured a real MIS 321-level question'
+    $lines += "$contIndent" + '# (write a C# method with a parameterized query) at ~1900'
+    $lines += "$contIndent" + '# tokens end to end, a good and correct answer, finishing on'
+    $lines += "$contIndent" + '# its own well under this cap. A beginner question runs much'
+    $lines += "$contIndent" + '# shorter but deserves the same room. Do not lower this to'
+    $lines += "$contIndent" + '# "speed things up" -- it truncates good answers, not slow ones.'
+    $lines += "$contIndent" + "defaultCompletionOptions:"
+    $lines += "$contIndent" + "  maxTokens: 4000"
+    $lines += ""
+
+    $lines += "$DashIndent- name: UA MIS Local (Edit)"
+    $lines += "$contIndent" + "provider: openai"
+    $lines += "$contIndent" + "model: $ModelId"
+    $lines += "$contIndent" + "apiBase: $ModelEndpoint"
+    $lines += "$contIndent" + "apiKey: $KeyToPrint"
+    $lines += "$contIndent" + "roles: [edit, apply]"
+    $lines += "$contIndent" + '# Small and fast on purpose: a changed line or block, not a'
+    $lines += "$contIndent" + '# tutorial. Thinking is turned OFF for this role (see'
+    $lines += "$contIndent" + "# requestOptions below) specifically so a small maxTokens cap"
+    $lines += "$contIndent" + "# lands on the actual rewritten code, not on the model's"
+    $lines += "$contIndent" + "# hidden reasoning about the code. Measured real edit/apply"
+    $lines += "$contIndent" + "# tasks (rename variables, add error handling) at 37-90"
+    $lines += "$contIndent" + "# tokens with thinking off; 400 leaves real headroom for a"
+    $lines += "$contIndent" + "# larger function."
+    $lines += "$contIndent" + "defaultCompletionOptions:"
+    $lines += "$contIndent" + "  maxTokens: 400"
+    $lines += "$contIndent" + "requestOptions:"
+    $lines += "$contIndent" + "  extraBodyProperties:"
+    $lines += "$contIndent" + "    chat_template_kwargs:"
+    $lines += "$contIndent" + "      enable_thinking: false"
+    $lines += ""
+
+    $lines += "$DashIndent- name: UA MIS Local (Agent)"
+    $lines += "$contIndent" + "provider: openai"
+    $lines += "$contIndent" + "model: $ModelId"
+    $lines += "$contIndent" + "apiBase: $ModelEndpoint"
+    $lines += "$contIndent" + "apiKey: $KeyToPrint"
+    $lines += "$contIndent" + "roles: [agent]"
+    $lines += "$contIndent" + '# Largest cap of the four: multi-step, tool-calling agent work'
+    $lines += "$contIndent" + '# (MIS 421/521) legitimately needs the most room. Measured a'
+    $lines += "$contIndent" + '# real multi-file scaffold task at ~3700 tokens, finishing on'
+    $lines += "$contIndent" + "# its own well under this cap. 8000 sits just under this"
+    $lines += "$contIndent" + "# deployment's own hard backend ceiling (8192)."
+    $lines += "$contIndent" + "defaultCompletionOptions:"
+    $lines += "$contIndent" + "  maxTokens: 8000"
+    $lines += "$contIndent" + '# Deliberately no "autocomplete" role on any of the three'
+    $lines += "$contIndent" + '# entries above: GitHub Copilot Free already handles inline'
+    $lines += "$contIndent" + '# completions well, and this shared GPU box should not spend'
+    $lines += "$contIndent" + '# capacity on every keystroke. Please do not add it back in.'
+
     return $lines
 }
 

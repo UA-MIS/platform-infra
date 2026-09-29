@@ -69,34 +69,71 @@ guessing when your setup looks unusual — see
    step — it will have migrated you to `config.yaml`.
 
 3. **Add this to the `models:` list.** If your file already has a
-   `models:` section with other entries, add this as one more item in
+   `models:` section with other entries, add these as more items in
    that same list (don't delete what's already there). If there's no
    `models:` section at all, add one:
 
    ```yaml
    models:
-     - name: UA MIS Local
+     - name: UA MIS Local (Chat)
        provider: openai  # "openai" here means the OpenAI-compatible API
                          # protocol, NOT the OpenAI company. This talks
                          # only to our own local box, never to openai.com.
        model: qwen3.8-27b
        apiBase: https://local-llm.uamishub.com/v1
        apiKey: <your key>
-       roles: [chat, edit, apply]
-       # Deliberately no "autocomplete" role: GitHub Copilot Free already
-       # handles inline completions well, and this shared GPU box
-       # shouldn't spend capacity on every keystroke.
+       roles: [chat]
+       defaultCompletionOptions:
+         maxTokens: 4000
+
+     - name: UA MIS Local (Edit)
+       provider: openai
+       model: qwen3.8-27b
+       apiBase: https://local-llm.uamishub.com/v1
+       apiKey: <your key>
+       roles: [edit, apply]
+       defaultCompletionOptions:
+         maxTokens: 400
+       requestOptions:
+         extraBodyProperties:
+           chat_template_kwargs:
+             enable_thinking: false
+
+     - name: UA MIS Local (Agent)
+       provider: openai
+       model: qwen3.8-27b
+       apiBase: https://local-llm.uamishub.com/v1
+       apiKey: <your key>
+       roles: [agent]
+       defaultCompletionOptions:
+         maxTokens: 8000
    ```
 
-   Replace `<your key>` with the key `<ADMIN>` gave you. Watch your
-   indentation — YAML cares about it. Every item in the `models:` list
-   needs the same indentation as the others.
+   That's **three separate entries pointing at the same model** — not a
+   typo. Continue lets each model declare different response-length
+   limits, but only per whole model entry, not per role within one
+   entry — so chat (which should give you a full explanation), edit/apply
+   (which should just make the change, fast), and agent (which needs the
+   most room for multi-step work) each get their own entry with a limit
+   sized for that job. You'll still only see one option in each place you
+   pick a model (the chat panel, an inline edit, agent mode) — Continue
+   only offers the models that declare that role.
+
+   Deliberately no `autocomplete` role on any of the three: GitHub
+   Copilot Free already handles inline completions well, and this
+   shared GPU box shouldn't spend capacity on every keystroke.
+
+   Replace `<your key>` (all three places) with the key `<ADMIN>` gave
+   you. Watch your indentation — YAML cares about it. Every item in the
+   `models:` list needs the same indentation as the others.
 
 4. **Save the file and restart VS Code completely** (not just reload the
    window — fully quit and reopen it).
 
 5. **Open the Continue sidebar** (the Continue icon in the left activity
-   bar). You should see "UA MIS Local" available as a model.
+   bar). You should see "UA MIS Local (Chat)" available in the chat
+   model picker — the (Edit)/(Agent) entries show up in their own
+   places (an inline edit, agent mode) rather than in the chat picker.
 
 6. **Sanity-check your key works** by opening a terminal and running:
 
@@ -160,18 +197,29 @@ only reads `config.yaml` on startup.
 If it still doesn't show up, open `config.yaml` (see paths above) and
 check:
 - The file is valid YAML (consistent indentation, no stray tabs).
-- The `UA MIS Local` block is actually inside the `models:` list, not
-  floating outside it.
+- All three `UA MIS Local (...)` blocks are actually inside the
+  `models:` list, not floating outside it.
+- You're looking in the right place: "(Chat)" is in the chat panel's
+  model picker; "(Edit)" only shows up when you trigger an inline edit;
+  "(Agent)" only shows up in agent mode. None of them appear in all
+  three places — that's expected, not a bug.
 
 ### Responses are slow
 
 This is a **shared** box serving the whole class, not a dedicated GPU
-just for you. A full answer typically takes **roughly 30–60 seconds**.
-Text streams in as it's generated (you'll see it appear progressively,
-not all at once), so it won't feel "hung" — but a complete response
-genuinely does take that long, especially if other students are using
-it at the same time. That is expected behavior, not a sign something is
-broken.
+just for you. A full chat answer typically takes **roughly 30–60
+seconds**. Text streams in as it's generated (you'll see it appear
+progressively, not all at once), so it won't feel "hung" — but a
+complete response genuinely does take that long, especially if other
+students are using it at the same time. That is expected behavior, not
+a sign something is broken.
+
+**Agent mode runs longer than chat.** A real multi-step agent task
+(e.g. scaffolding several files) can take **a couple of minutes**, not
+30–60 seconds — it's doing more work, including its own internal
+reasoning before it writes anything. That's expected for agent mode
+specifically; if an ordinary chat question is taking that long, see
+below.
 
 ### Something else is wrong
 

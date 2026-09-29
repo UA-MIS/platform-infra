@@ -104,21 +104,96 @@ build_block() {
   #      about to write the file ourselves). Callers that are printing this
   #      block back to the terminal for the user to paste by hand MUST pass
   #      a placeholder here instead — we never echo the real key back.
+  #
+  # Three separate model entries, not one, because Continue's
+  # defaultCompletionOptions/requestOptions apply per MODEL block, not
+  # per role within a shared block — there is no way to give chat, edit,
+  # apply, and agent different maxTokens values on a single entry (see
+  # https://docs.continue.dev/reference, 2026-09-30). All three point at
+  # the exact same backend model; only the role assignment and
+  # completion options differ. Continue only offers each role a choice
+  # among the models that declare it, so a student sees one candidate
+  # per role, not three confusing "chat" options.
+  #
+  # Per-role token caps, measured against the real endpoint on this box
+  # (DFlash2 config), 2026-09-30 — see the team's own measurement
+  # methodology if you need to re-derive these after a model change.
+  # This model is a REASONING model: it emits a hidden "thinking" block
+  # BEFORE its real answer, and that thinking consumes the SAME token
+  # budget as the answer (measured: a short code-completion prompt used
+  # 99 of 120 total tokens on thinking alone, with reasoning left on).
+  # A small maxTokens cap on a role that still has thinking enabled
+  # truncates the model mid-thought, before it ever writes the real
+  # answer — worse than slow, actively broken. So:
+  #   - edit/apply turn thinking OFF (chat_template_kwargs.
+  #     enable_thinking: false) and get a small, fast cap — these are
+  #     the roles where waiting is most noticeable, and a code change
+  #     does not need deliberation to get right.
+  #   - chat and agent keep thinking ON and get a generous cap, sized
+  #     above the longest real answer observed, because truncating a
+  #     good explanation or a good multi-file plan is worse than making
+  #     someone wait for it.
   dash_indent="$1"
   key_to_print="${2:-${API_KEY}}"
   cont_indent="${dash_indent}  "
-  printf '%s- name: UA MIS Local\n' "${dash_indent}"
+
+  printf '%s- name: UA MIS Local (Chat)\n' "${dash_indent}"
   printf '%sprovider: openai  # "openai" here means the OpenAI-compatible API protocol,\n' "${cont_indent}"
   printf '%s                  # NOT the OpenAI company. This talks only to our own\n' "${cont_indent}"
   printf '%s                  # local box, never to openai.com.\n' "${cont_indent}"
   printf '%smodel: %s\n' "${cont_indent}" "${MODEL_ID}"
   printf '%sapiBase: %s\n' "${cont_indent}" "${MODEL_ENDPOINT}"
   printf '%sapiKey: %s\n' "${cont_indent}" "${key_to_print}"
-  printf '%sroles: [chat, edit, apply]\n' "${cont_indent}"
-  printf '%s# Deliberately no "autocomplete" role here on purpose: GitHub Copilot\n' "${cont_indent}"
-  printf '%s# Free already handles inline completions well, and this shared GPU\n' "${cont_indent}"
-  printf '%s# box should not spend capacity on every keystroke. Please do not add\n' "${cont_indent}"
-  printf '%s# it back in.\n' "${cont_indent}"
+  printf '%sroles: [chat]\n' "${cont_indent}"
+  printf '%s# Generous on purpose: measured a real MIS 321-level question\n' "${cont_indent}"
+  printf '%s# (write a C# method with a parameterized query) at ~1900\n' "${cont_indent}"
+  printf '%s# tokens end to end, a good and correct answer, finishing on\n' "${cont_indent}"
+  printf '%s# its own well under this cap. A beginner question runs much\n' "${cont_indent}"
+  printf '%s# shorter but deserves the same room. Do not lower this to\n' "${cont_indent}"
+  printf '%s# "speed things up" -- it truncates good answers, not slow ones.\n' "${cont_indent}"
+  printf '%sdefaultCompletionOptions:\n' "${cont_indent}"
+  printf '%s  maxTokens: 4000\n' "${cont_indent}"
+  printf '\n'
+
+  printf '%s- name: UA MIS Local (Edit)\n' "${dash_indent}"
+  printf '%sprovider: openai\n' "${cont_indent}"
+  printf '%smodel: %s\n' "${cont_indent}" "${MODEL_ID}"
+  printf '%sapiBase: %s\n' "${cont_indent}" "${MODEL_ENDPOINT}"
+  printf '%sapiKey: %s\n' "${cont_indent}" "${key_to_print}"
+  printf '%sroles: [edit, apply]\n' "${cont_indent}"
+  printf '%s# Small and fast on purpose: a changed line or block, not a\n' "${cont_indent}"
+  printf '%s# tutorial. Thinking is turned OFF for this role (see\n' "${cont_indent}"
+  printf '%s# requestOptions below) specifically so a small maxTokens cap\n' "${cont_indent}"
+  printf '%s# lands on the actual rewritten code, not on the model'"'"'s\n' "${cont_indent}"
+  printf '%s# hidden reasoning about the code. Measured real edit/apply\n' "${cont_indent}"
+  printf '%s# tasks (rename variables, add error handling) at 37-90\n' "${cont_indent}"
+  printf '%s# tokens with thinking off; 400 leaves real headroom for a\n' "${cont_indent}"
+  printf '%s# larger function.\n' "${cont_indent}"
+  printf '%sdefaultCompletionOptions:\n' "${cont_indent}"
+  printf '%s  maxTokens: 400\n' "${cont_indent}"
+  printf '%srequestOptions:\n' "${cont_indent}"
+  printf '%s  extraBodyProperties:\n' "${cont_indent}"
+  printf '%s    chat_template_kwargs:\n' "${cont_indent}"
+  printf '%s      enable_thinking: false\n' "${cont_indent}"
+  printf '\n'
+
+  printf '%s- name: UA MIS Local (Agent)\n' "${dash_indent}"
+  printf '%sprovider: openai\n' "${cont_indent}"
+  printf '%smodel: %s\n' "${cont_indent}" "${MODEL_ID}"
+  printf '%sapiBase: %s\n' "${cont_indent}" "${MODEL_ENDPOINT}"
+  printf '%sapiKey: %s\n' "${cont_indent}" "${key_to_print}"
+  printf '%sroles: [agent]\n' "${cont_indent}"
+  printf '%s# Largest cap of the four: multi-step, tool-calling agent work\n' "${cont_indent}"
+  printf '%s# (MIS 421/521) legitimately needs the most room. Measured a\n' "${cont_indent}"
+  printf '%s# real multi-file scaffold task at ~3700 tokens, finishing on\n' "${cont_indent}"
+  printf '%s# its own well under this cap. 8000 sits just under this\n' "${cont_indent}"
+  printf '%s# deployment'"'"'s own hard backend ceiling (8192).\n' "${cont_indent}"
+  printf '%sdefaultCompletionOptions:\n' "${cont_indent}"
+  printf '%s  maxTokens: 8000\n' "${cont_indent}"
+  printf '%s# Deliberately no "autocomplete" role on any of the three\n' "${cont_indent}"
+  printf '%s# entries above: GitHub Copilot Free already handles inline\n' "${cont_indent}"
+  printf '%s# completions well, and this shared GPU box should not spend\n' "${cont_indent}"
+  printf '%s# capacity on every keystroke. Please do not add it back in.\n' "${cont_indent}"
 }
 
 # ---------------------------------------------------------------------------
