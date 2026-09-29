@@ -1,0 +1,93 @@
+name: gb10-appliance
+
+services:
+  postgres:
+    image: ${POSTGRES_DIGEST}
+    container_name: gb10-postgres
+    environment:
+      - POSTGRES_USER=litellm
+      - POSTGRES_PASSWORD=${PG_PASSWORD}
+      - POSTGRES_DB=litellm
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litellm -d litellm"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  vllm:
+    image: ${VLLM_DIGEST}
+    container_name: gb10-vllm
+    # NOT network_mode: service:litellm. vLLM takes ~9 minutes to cold start
+    # (CUDA graph capture); litellm restarts in seconds. Sharing litellm's
+    # netns made the expensive container a dependent of the cheap one, so a
+    # litellm config change orphaned vLLM networking and cost a 9-minute
+    # outage to recover. They talk over compose service DNS instead.
+    ports:
+      - "127.0.0.1:8000:8000"   # loopback only; bench harness + local debug
+    ipc: host
+    volumes:
+      - /home/uamis/.cache/huggingface:/root/.cache/huggingface
+    command:
+      - "--model=Inferact/Qwen3.8-27B-NVFP4"
+      - "--tensor-parallel-size=1"
+      # 262144 is the model's native context window. max-model-len is a
+      # CEILING, not a reservation: vLLM (PagedAttention) allocates KV
+      # blocks on demand, so a small request costs the same whether this
+      # is 32k or 262k. Raising it does NOT reduce concurrency for normal
+      # requests — it only lets one large request grow bigger. Primary
+      # workload is real in-project coding help, where 32k truncated on
+      # realistic multi-file context.
+      - "--max-model-len=262144"
+      - "--kv-cache-dtype=fp8"
+      - "--gpu-memory-utilization=0.75"
+      - "--reasoning-parser=qwen3"
+      - "--speculative-config={\"method\":\"mtp\",\"num_speculative_tokens\":2}"
+      # Required for Continue Agent mode / any tool-calling client.
+      # Without these vLLM returns tool calls as prose, the client fails
+      # to parse them, and it retry-loops. Per the vLLM recipe for this model.
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser=qwen3_xml"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    # No Docker healthcheck: cold start is ~7 minutes (CUDA graph capture).
+    # A healthcheck with any sane interval/retries would restart-loop the
+    # container before it ever finishes booting. Readiness is verified by
+    # Task 16/17's own curl-based checks, not by Docker's own restart logic.
+
+  litellm:
+    image: ${LITELLM_DIGEST}
+    container_name: gb10-litellm
+    ports:
+      - "127.0.0.1:4000:4000"
+    environment:
+      - DATABASE_URL=postgresql://litellm:${PG_PASSWORD}@postgres:5432/litellm
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+    volumes:
+      - ./litellm-config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  cloudflared:
+    image: ${CLOUDFLARED_DIGEST}
+    container_name: gb10-cloudflared
+    command: ["tunnel", "--no-autoupdate", "run"]
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - litellm
+    restart: unless-stopped
+
+volumes:
+  pg-data:
