@@ -1674,6 +1674,60 @@ def test_verify_same_origin_both_absent_rejected(app_module, make_request):
     assert exc_info.value.status_code == 403
 
 
+def test_verify_same_origin_uppercase_origin_host_accepted(app_module, make_request):
+    """Security review round 3, same-pass item (2026-09-30): host names
+    are case-insensitive (RFC 3986 3.2.2). Real browsers always send a
+    lowercase Origin, so this specific direction is mostly theoretical
+    defense-in-depth -- but a CDN/proxy header rewrite, or some other
+    intermediary, could plausibly emit a differently-cased host, and the
+    comparison must not spuriously reject a legitimate same-origin
+    request just because of letter case."""
+    request = make_request(headers={"Origin": "https://Local-LLM-Keys.UAMISHub.com"})
+    app_module.verify_same_origin(request, app_module.CONFIG)  # must not raise
+
+
+def test_verify_same_origin_case_difference_does_not_defeat_host_check(
+    app_module, make_request
+):
+    """The lowercasing must not turn into an accidental substring/prefix
+    check -- a genuinely wrong host in a different case must still be
+    rejected, not accidentally pass because both sides got lowercased."""
+    request = make_request(headers={"Origin": "https://ATTACKER.example"})
+    with pytest.raises(HTTPException) as exc_info:
+        app_module.verify_same_origin(request, app_module.CONFIG)
+    assert exc_info.value.status_code == 403
+
+
+def test_normalize_keyportal_hostname_lowercases(app_module):
+    assert (
+        app_module._normalize_keyportal_hostname("Local-LLM-Keys.UAMISHub.com")
+        == "local-llm-keys.uamishub.com"
+    )
+
+
+def test_normalize_keyportal_hostname_preserves_a_real_port(app_module):
+    """A non-default-port deployment needs the port preserved, not
+    stripped -- only case is normalized."""
+    assert (
+        app_module._normalize_keyportal_hostname("Local-Host.example:8443")
+        == "local-host.example:8443"
+    )
+
+
+def test_normalize_keyportal_hostname_rejects_embedded_scheme(app_module):
+    """A pasted-in full URL (with '://') would corrupt the same-origin
+    comparison silently -- security review round 3 same-pass item. Must
+    fail loudly at config-load time instead, naming the problem."""
+    with pytest.raises(RuntimeError) as exc_info:
+        app_module._normalize_keyportal_hostname("https://local-llm-keys.uamishub.com")
+    assert "KEYPORTAL_HOSTNAME" in str(exc_info.value)
+
+
+def test_normalize_keyportal_hostname_rejects_embedded_path(app_module):
+    with pytest.raises(RuntimeError):
+        app_module._normalize_keyportal_hostname("local-llm-keys.uamishub.com/")
+
+
 def test_admin_promote_does_not_block_the_event_loop(app_module, mocker):
     """Security review round 3, B1-A (2026-09-30): converting the four
     admin POST routes to `async def` (for F3's `await request.form()`)
@@ -1838,6 +1892,48 @@ def test_admin_preauthorize_wrong_origin_no_db_write(app_module, client, mocker)
         is False
     )
     assert app_module.list_preauthorized(app_module.CONFIG) == []
+
+
+def test_admin_demote_wrong_origin_rejected_zero_calls(app_module, client, mocker):
+    """Security review round 3, same-pass item (2026-09-30): every other
+    admin POST has an origin-rejection test, but /admin/demote did not --
+    an oversight, not a deliberate gap. Mirrors
+    test_admin_promote_wrong_origin_rejected_zero_calls exactly."""
+    mocker.patch.object(app_module, "verify_access_jwt", return_value=ADMIN_EMAIL)
+    post_mock = mocker.patch("app.httpx.post")
+    resp = client.post(
+        "/admin/demote",
+        data={"target_email": "x@crimson.ua.edu"},
+        headers={
+            "Cf-Access-Jwt-Assertion": "irrelevant",
+            "Origin": "https://attacker.example",
+        },
+    )
+    assert resp.status_code == 403
+    assert "origin mismatch" in resp.json()["detail"].lower()
+    post_mock.assert_not_called()
+
+
+def test_admin_preauthorize_remove_wrong_origin_no_db_write(app_module, client, mocker):
+    """Security review round 3, same-pass item (2026-09-30): the other
+    same-shape gap -- /admin/preauthorize/remove had no origin-rejection
+    test either. Seeds a real preauthorized entry first so a wrongly-
+    permissive check would be caught by the entry surviving, not just by
+    the status code."""
+    config = app_module.CONFIG
+    mocker.patch.object(app_module, "verify_access_jwt", return_value=ADMIN_EMAIL)
+    app_module.add_preauthorized_emails(config, "would-survive@ua.edu")
+    resp = client.post(
+        "/admin/preauthorize/remove",
+        data={"target_email": "would-survive@ua.edu"},
+        headers={
+            "Cf-Access-Jwt-Assertion": "irrelevant",
+            "Origin": "https://attacker.example",
+        },
+    )
+    assert resp.status_code == 403
+    entries = [e.email for e in app_module.list_preauthorized(config)]
+    assert "would-survive@ua.edu" in entries
 
 
 def test_regenerate_wrong_origin_rejected_key_untouched(app_module, client, mocker):

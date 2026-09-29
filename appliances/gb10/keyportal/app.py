@@ -76,6 +76,52 @@ def _require_env(name: str, *, hint: str = "") -> str:
     return value
 
 
+def _normalize_keyportal_hostname(raw: str) -> str:
+    """Normalize KEYPORTAL_HOSTNAME so verify_same_origin()'s comparison
+    is not silently defeated by operator input variance.
+
+    Security review round 3, same-pass item (2026-09-30): the origin
+    check built `expected` as `_scheme_and_netloc(f"https://{hostname}")`
+    with the raw env value spliced in verbatim. Two real gaps:
+
+    1. Case: host names are case-insensitive (RFC 3986 3.2.2) and real
+       browsers normalize Origin/Referer to lowercase, but urlsplit()
+       does NOT lowercase for you, and nothing stopped an operator from
+       typing KEYPORTAL_HOSTNAME=Local-LLM-Keys.UAMISHub.com in .env. A
+       correctly-configured browser sending a lowercase Origin would
+       then fail a byte-exact comparison against that mixed-case
+       `expected` on every single state-changing request -- CSRF
+       protection would look "on" but reject 100% of legitimate traffic.
+       Fixed by lowercasing here, once, at config-load time, and again
+       defensively on both sides of the comparison in
+       verify_same_origin() itself (in case a future caller builds
+       `expected` from something other than this field).
+
+    2. Port / scheme contamination: if an operator pastes the value with
+       a stray scheme or path, e.g. KEYPORTAL_HOSTNAME=
+       https://local-llm-keys.uamishub.com/, the old code would splice
+       it into f"https://{that}" producing a malformed URL that
+       urlsplit() parses into a netloc nobody intended (or empty) --
+       failing far from the operator's typo, as a confusing 403 on every
+       admin action, with no indication why. Fail loudly here instead,
+       at startup, with a message that names the exact problem.
+
+    Deliberately does NOT strip a port: a real deployment on a
+    non-default port needs KEYPORTAL_HOSTNAME to include it (e.g.
+    "host:8443") so `expected` matches what browsers actually send --
+    stripping it would silently break that case instead.
+    """
+    if "://" in raw or "/" in raw:
+        raise RuntimeError(
+            f"KEYPORTAL_HOSTNAME={raw!r} looks like a URL, not a bare "
+            "hostname[:port] -- keyportal refuses to start with a value "
+            "that would corrupt the CSRF same-origin check. Set it to "
+            "just the host (and port, if not 443), e.g. "
+            "KEYPORTAL_HOSTNAME=local-llm-keys.uamishub.com"
+        )
+    return raw.lower()
+
+
 @dataclass(frozen=True)
 class Config:
     litellm_base_url: str
@@ -127,14 +173,16 @@ def load_config() -> Config:
         # Deliberately NOT derived from the Host header, which an
         # attacker controls and which behind the cloudflared tunnel
         # reflects internal routing, not the portal's real identity.
-        keyportal_hostname=_require_env(
-            "KEYPORTAL_HOSTNAME",
-            hint=(
-                "Set KEYPORTAL_HOSTNAME in .env on the box to the keys "
-                "portal's real external hostname, e.g. "
-                "KEYPORTAL_HOSTNAME=local-llm-keys.uamishub.com -- then "
-                "run: docker compose up -d keyportal"
-            ),
+        keyportal_hostname=_normalize_keyportal_hostname(
+            _require_env(
+                "KEYPORTAL_HOSTNAME",
+                hint=(
+                    "Set KEYPORTAL_HOSTNAME in .env on the box to the keys "
+                    "portal's real external hostname, e.g. "
+                    "KEYPORTAL_HOSTNAME=local-llm-keys.uamishub.com -- then "
+                    "run: docker compose up -d keyportal"
+                ),
+            )
         ),
         db_path=os.environ.get("KEYPORTAL_DB_PATH", "/data/keyportal.db"),
     )
@@ -268,8 +316,15 @@ def require_admin(email: str, config: Config) -> None:
 
 
 def _scheme_and_netloc(url: str) -> str:
+    """Lowercased, for the same reason config-load normalizes
+    KEYPORTAL_HOSTNAME (see _normalize_keyportal_hostname's docstring):
+    host names are case-insensitive and real browsers send Origin/
+    Referer already lowercased, but urlsplit() does not lowercase for
+    you. Lowercasing here too (not just at config load) means this
+    comparison stays correct even if `expected` is ever built from a
+    value that did not go through that normalization."""
     parsed = urlsplit(url)
-    return f"{parsed.scheme}://{parsed.netloc}"
+    return f"{parsed.scheme}://{parsed.netloc}".lower()
 
 
 def verify_same_origin(request: Request, config: Config) -> None:
