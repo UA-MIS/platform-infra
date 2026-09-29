@@ -79,6 +79,38 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  keyportal:
+    # Task 12 (D11): student/faculty self-service key portal, served at
+    # local-llm-keys.uamishub.com via the cloudflared service above (that
+    # hostname's ingress route already points at keyportal:8080; no
+    # cloudflared config change needed here). Verifies the Cloudflare
+    # Access JWT itself (see keyportal/app.py's verify_access_jwt) rather
+    # than trusting the Cf-Access-Authenticated-User-Email header, so it
+    # stays safe even if cloudflared's ingress is ever hand-edited to add
+    # a stray public route.
+    build:
+      context: ./keyportal
+      dockerfile: Dockerfile
+    image: gb10-keyportal:local
+    container_name: gb10-keyportal
+    environment:
+      - LITELLM_BASE_URL=http://litellm:4000
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+      - PENDING_TEAM_ID=${PENDING_TEAM_ID}
+      - CF_ACCESS_TEAM_DOMAIN=${CF_ACCESS_TEAM_DOMAIN}
+      # CF_ACCESS_AUD_KEYPORTAL is filled from the Cloudflare Zero Trust
+      # dashboard (Access > Applications > local-llm-keys.uamishub.com).
+      # app.py refuses to start (fails loudly, container restart-loops)
+      # if this is blank rather than silently skipping JWT verification.
+      - CF_ACCESS_AUD=${CF_ACCESS_AUD_KEYPORTAL}
+      - ALLOWED_EMAIL_SUFFIXES=@crimson.ua.edu,@ua.edu
+      - ADMIN_CONTACT=${ADMIN_CONTACT}
+    volumes:
+      - keyportal-data:/data
+    depends_on:
+      - litellm
+    restart: unless-stopped
+
   cloudflared:
     image: ${CLOUDFLARED_DIGEST}
     container_name: gb10-cloudflared
@@ -91,3 +123,4 @@ services:
 
 volumes:
   pg-data:
+  keyportal-data:
