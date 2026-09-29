@@ -19,11 +19,13 @@ import sqlite3
 import time
 from contextlib import closing
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from html import escape
 from typing import Optional
 
 import httpx
 import jwt
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from jwt import PyJWKClient
 
@@ -72,10 +74,13 @@ class Config:
     litellm_base_url: str
     litellm_master_key: str
     pending_team_id: str
+    students_team_id: str
+    faculty_team_id: str
     cf_access_team_domain: str
     cf_access_aud: str
     allowed_email_suffixes: tuple
     admin_contact: str
+    admin_emails: tuple
     db_path: str
 
     @property
@@ -88,6 +93,8 @@ def load_config() -> Config:
         litellm_base_url=_require_env("LITELLM_BASE_URL"),
         litellm_master_key=_require_env("LITELLM_MASTER_KEY"),
         pending_team_id=_require_env("PENDING_TEAM_ID"),
+        students_team_id=_require_env("STUDENTS_TEAM_ID"),
+        faculty_team_id=_require_env("FACULTY_TEAM_ID"),
         cf_access_team_domain=_require_env("CF_ACCESS_TEAM_DOMAIN"),
         cf_access_aud=_require_env(
             "CF_ACCESS_AUD",
@@ -106,8 +113,36 @@ def load_config() -> Config:
             if s.strip()
         ),
         admin_contact=os.environ.get("ADMIN_CONTACT", "your course instructor"),
+        admin_emails=_load_admin_emails(),
         db_path=os.environ.get("KEYPORTAL_DB_PATH", "/data/keyportal.db"),
     )
+
+
+def _load_admin_emails() -> tuple:
+    """Same "fail loudly, not silently" contract as CF_ACCESS_AUD (see
+    _require_env's docstring): an admin panel that comes up with an empty
+    allowlist would be an admin panel open to every crimson.ua.edu/ua.edu
+    visitor, not a disabled one -- so this must raise, never fall back to
+    "nobody's an admin" or "everybody is." Matched case-insensitively and
+    whitespace-stripped in require_admin(), since CF Access email
+    casing/whitespace is not something this service controls.
+    """
+    hint = (
+        "Set ADMIN_EMAILS in .env on the box to a comma-separated list of "
+        "the UA identities allowed to see /admin, e.g. "
+        "ADMIN_EMAILS=labmx@ua.edu,someone@crimson.ua.edu -- then run: "
+        "docker compose up -d keyportal"
+    )
+    raw = _require_env("ADMIN_EMAILS", hint=hint)
+    emails = tuple(e.strip().lower() for e in raw.split(",") if e.strip())
+    if not emails:
+        # raw was non-blank (_require_env already checked that) but
+        # contained nothing except commas/whitespace, e.g. " , " --
+        # same failure as unset, just spelled differently.
+        raise RuntimeError(
+            f"ADMIN_EMAILS is unset or blank -- keyportal refuses to start without it. {hint}"
+        )
+    return emails
 
 
 def init_db(db_path: str) -> None:
@@ -172,6 +207,29 @@ def verify_access_jwt(
             status_code=403, detail="Not a crimson.ua.edu or ua.edu account"
         )
     return email
+
+
+_ADMIN_FORBIDDEN_DETAIL = "Not authorized"
+
+
+def require_admin(email: str, config: Config) -> None:
+    """Fail closed: only a verified email on the ADMIN_EMAILS allowlist
+    may proceed past this call. Matched case-insensitively and with
+    whitespace stripped, since CF Access's email claim casing is not
+    something this service controls and config.admin_emails is already
+    normalized the same way by _load_admin_emails().
+
+    Every /admin* route calls this immediately after verify_access_jwt
+    and before doing anything else (looking up a user, touching
+    LiteLLM, etc.) -- a non-admin gets the exact same 403 with the exact
+    same detail message regardless of which route or payload they hit,
+    so nothing about the response shape lets a non-admin distinguish
+    "you're not an admin" from "you're not an admin AND also got
+    something else wrong." Do not add route- or payload-specific detail
+    to this error.
+    """
+    if email.strip().lower() not in config.admin_emails:
+        raise HTTPException(status_code=403, detail=_ADMIN_FORBIDDEN_DETAIL)
 
 
 def get_cached_key(db_path: str, email: str) -> Optional[str]:
@@ -309,6 +367,142 @@ def revoke_and_reissue(config: Config, email: str) -> str:
     return issue_key(config, email, team_id)
 
 
+# ---------------------------------------------------------------------------
+# Admin: list issued users, promote/demote. This is a straight port of
+# promote-user.sh's verified-live logic into the portal itself (team-lead
+# brief, 2026-09-29) -- same two LiteLLM calls, same reason for two calls,
+# same idempotency. See promote-user.sh's own header comment for the full
+# postmortem on why step 1 (clearing user_id) is not optional.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class IssuedUser:
+    """Everything /admin is allowed to show about one issued key --
+    deliberately has NO field for the raw key itself. render_admin_page()
+    only ever receives IssuedUser instances, never a raw key string, so
+    there is no code path in the admin view that could leak one, not even
+    by accident."""
+
+    email: str
+    team_id: Optional[str]
+    team_label: str
+    active: bool
+    created_at: float
+
+
+def _team_label(team_id: Optional[str], config: Config) -> str:
+    if team_id == config.pending_team_id:
+        return "pending"
+    if team_id == config.students_team_id:
+        return "students"
+    if team_id == config.faculty_team_id:
+        return "faculty"
+    if not team_id:
+        return "(none)"
+    return team_id
+
+
+def list_issued_users(config: Config) -> list:
+    """Every user the portal has ever issued a key to, newest first, with
+    their CURRENT team looked up live from LiteLLM (same "never assume
+    issued means working" rule as index() -- an admin viewing a stale
+    cached state would be worse than an admin viewing nothing). The raw
+    `litellm_key` from the keys table never leaves this function.
+    """
+    with closing(sqlite3.connect(config.db_path)) as conn:
+        rows = conn.execute(
+            "SELECT email, litellm_key, created_at FROM keys ORDER BY created_at DESC"
+        ).fetchall()
+    users = []
+    for email, key, created_at in rows:
+        team_id = get_current_team_id(config, key)
+        active = team_grants_access(config, team_id)
+        users.append(
+            IssuedUser(
+                email=email,
+                team_id=team_id,
+                team_label=_team_label(team_id, config),
+                active=active,
+                created_at=created_at,
+            )
+        )
+    return users
+
+
+def _litellm_clear_legacy_user_id(config: Config, key: str) -> None:
+    """Step 1 of promote-user.sh, verbatim: POST /key/update with
+    user_id explicitly set to None. A no-op for any key issued by the
+    current issue_key() (which never sets user_id), and the fix for any
+    key issued before the 2026-09-29 postmortem in issue_key()'s
+    docstring. Always sends user_id=None here -- NEVER the email or any
+    other non-None value; that is the exact bug this exists to undo."""
+    resp = httpx.post(
+        f"{config.litellm_base_url}/key/update",
+        headers={"Authorization": f"Bearer {config.litellm_master_key}"},
+        json={"key": key, "user_id": None},
+        timeout=15.0,
+    )
+    resp.raise_for_status()
+
+
+def _litellm_set_team(config: Config, key: str, team_id: str) -> None:
+    """Step 2 of promote-user.sh, verbatim: POST /key/update with only
+    team_id -- no user_id field at all in this call's payload. No key
+    reissue, so an already-promoted user re-promoted to the same team is
+    a harmless no-op (LiteLLM just re-writes the same value)."""
+    resp = httpx.post(
+        f"{config.litellm_base_url}/key/update",
+        headers={"Authorization": f"Bearer {config.litellm_master_key}"},
+        json={"key": key, "team_id": team_id},
+        timeout=15.0,
+    )
+    resp.raise_for_status()
+
+
+def promote_user(config: Config, email: str, target: str) -> None:
+    """Move `email`'s existing key onto the students or faculty team --
+    never reissues the key (see module docstring's D11 contract).
+    Idempotent: promoting an already-promoted user re-sends the same two
+    calls with the same target team_id, which LiteLLM accepts as a no-op
+    (same key, same team, no new membership row, no new key).
+    """
+    if target not in ("students", "faculty"):
+        raise HTTPException(
+            status_code=400, detail="target must be 'students' or 'faculty'"
+        )
+    team_id = (
+        config.students_team_id if target == "students" else config.faculty_team_id
+    )
+    key = get_cached_key(config.db_path, email)
+    if not key:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No key issued for {email} -- they haven't visited the "
+                f"portal yet, so there is nothing to promote."
+            ),
+        )
+    _litellm_clear_legacy_user_id(config, key)
+    _litellm_set_team(config, key, team_id)
+
+
+def demote_user(config: Config, email: str) -> None:
+    """Move `email`'s existing key back onto the pending team -- same
+    two-call shape, same idempotency, as promote_user()."""
+    key = get_cached_key(config.db_path, email)
+    if not key:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No key issued for {email} -- they haven't visited the "
+                f"portal yet, so there is nothing to demote."
+            ),
+        )
+    _litellm_clear_legacy_user_id(config, key)
+    _litellm_set_team(config, key, config.pending_team_id)
+
+
 # Shared, plain, dependency-free CSS -- no framework, no CDN, no build
 # step. UA crimson used sparingly as an accent (headings, links, the
 # course-policy rule, button outline) -- not an attempt to reproduce an
@@ -439,6 +633,97 @@ do anything else right now, and you do not need to regenerate anything.</p>
 </body></html>"""
 
 
+def _fmt_issued_at(created_at: float) -> str:
+    return datetime.fromtimestamp(created_at, tz=timezone.utc).strftime(
+        "%Y-%m-%d %H:%M UTC"
+    )
+
+
+def _admin_row(user: "IssuedUser") -> str:
+    # escape() everywhere an email/team value lands in HTML -- these are
+    # UA identities and LiteLLM team ids, not attacker-controlled in the
+    # ordinary case, but this route is the one place on the whole site an
+    # admin acts on OTHER people's data, so it gets the same treatment a
+    # public-facing admin panel would.
+    email = escape(user.email)
+    state = "Active" if user.active else "Pending"
+    state_class = "state-active" if user.active else "state-pending"
+    return f"""<tr>
+<td data-label="Email">{email}</td>
+<td data-label="Team">{escape(user.team_label)}</td>
+<td data-label="State"><span class="{state_class}">{state}</span></td>
+<td data-label="Issued">{_fmt_issued_at(user.created_at)}</td>
+<td data-label="Actions" class="actions">
+<form method="post" action="/admin/promote">
+<input type="hidden" name="target_email" value="{email}">
+<input type="hidden" name="target_team" value="students">
+<button type="submit">Promote: Students</button>
+</form>
+<form method="post" action="/admin/promote">
+<input type="hidden" name="target_email" value="{email}">
+<input type="hidden" name="target_team" value="faculty">
+<button type="submit">Promote: Faculty</button>
+</form>
+<form method="post" action="/admin/demote">
+<input type="hidden" name="target_email" value="{email}">
+<button type="submit" class="demote">Demote to pending</button>
+</form>
+</td>
+</tr>"""
+
+
+def render_admin_page(admin_email: str, users: list, config: Config) -> str:
+    """The admin access-management view (team-lead brief, 2026-09-29):
+    lists every user the portal has issued a key to, with one-click
+    promote/demote driven straight from this table. Deliberately takes
+    `users: list[IssuedUser]`, never raw rows from the keys table or a
+    raw key string -- see IssuedUser's docstring for why that is the
+    actual mechanism that keeps a key from ever reaching this page.
+    """
+    head = _PAGE_HEAD.format(style=_STYLE + _ADMIN_STYLE)
+    if users:
+        rows = "\n".join(_admin_row(u) for u in users)
+        table = f"""<table>
+<thead><tr><th>Email</th><th>Team</th><th>State</th><th>Issued</th><th>Actions</th></tr></thead>
+<tbody>
+{rows}
+</tbody>
+</table>"""
+    else:
+        table = "<p>No one has visited the portal yet.</p>"
+    return f"""<!doctype html>
+<html><head>{head}</head>
+<body>
+<h1>UA MIS Local LLM &mdash; Admin</h1>
+<p>Signed in as <strong>{escape(admin_email)}</strong>.</p>
+<p>Every LiteLLM key ever issued by <a href="/">the student portal</a>.
+The key itself is never shown here -- it's a bearer credential, and
+promote/demote never need it.</p>
+{table}
+</body></html>"""
+
+
+_ADMIN_STYLE = """
+table { border-collapse: collapse; width: 100%; margin-top: 16px; font-size: 0.9rem; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #e6e1da; vertical-align: top; }
+th { color: #6b6b6b; font-weight: 600; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.03em; }
+.state-active { color: #1a7a3c; font-weight: 600; }
+.state-pending { color: #9a7b00; font-weight: 600; }
+td.actions { display: flex; flex-wrap: wrap; gap: 6px; }
+td.actions form { margin: 0; }
+td.actions button { padding: 6px 10px; font-size: 0.85rem; }
+td.actions button.demote { border-color: #6b6b6b; color: #6b6b6b; }
+td.actions button.demote:hover { background: #6b6b6b; color: #ffffff; }
+@media (max-width: 480px) {
+  table, thead, tbody, th, td, tr { display: block; }
+  thead { display: none; }
+  tr { border-bottom: 2px solid #e6e1da; padding-bottom: 8px; margin-bottom: 8px; }
+  td { border-bottom: none; padding: 4px 0; }
+  td::before { content: attr(data-label); display: block; color: #6b6b6b; font-size: 0.75rem; text-transform: uppercase; }
+}
+"""
+
+
 CONFIG = load_config()
 JWKS_CLIENT = PyJWKClient(CONFIG.jwks_url)
 init_db(CONFIG.db_path)
@@ -464,6 +749,39 @@ def regenerate(request: Request) -> str:
     team_id = get_current_team_id(CONFIG, key)
     active = team_grants_access(CONFIG, team_id)
     return render_page(email, key, active, CONFIG)
+
+
+@app.get("/admin", response_class=HTMLResponse)
+def admin_index(request: Request) -> str:
+    email = verify_access_jwt(request, CONFIG, JWKS_CLIENT)
+    require_admin(email, CONFIG)
+    users = list_issued_users(CONFIG)
+    return render_admin_page(email, users, CONFIG)
+
+
+@app.post("/admin/promote", response_class=HTMLResponse)
+def admin_promote(
+    request: Request,
+    target_email: str = Form(...),
+    target_team: str = Form(...),
+) -> str:
+    # Re-verify and re-check the allowlist here too -- never assume the
+    # GET that rendered the form already gated this POST. Every /admin*
+    # route is independently authorized.
+    admin_email = verify_access_jwt(request, CONFIG, JWKS_CLIENT)
+    require_admin(admin_email, CONFIG)
+    promote_user(CONFIG, target_email, target_team)
+    users = list_issued_users(CONFIG)
+    return render_admin_page(admin_email, users, CONFIG)
+
+
+@app.post("/admin/demote", response_class=HTMLResponse)
+def admin_demote(request: Request, target_email: str = Form(...)) -> str:
+    admin_email = verify_access_jwt(request, CONFIG, JWKS_CLIENT)
+    require_admin(admin_email, CONFIG)
+    demote_user(CONFIG, target_email)
+    users = list_issued_users(CONFIG)
+    return render_admin_page(admin_email, users, CONFIG)
 
 
 @app.get("/healthz")

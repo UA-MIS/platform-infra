@@ -79,10 +79,16 @@ def live_config():
         litellm_base_url=_REAL_ENV["LITELLM_BASE_URL"],
         litellm_master_key=_REAL_ENV["LITELLM_MASTER_KEY"],
         pending_team_id=_REAL_ENV["PENDING_TEAM_ID"],
+        students_team_id=_REAL_ENV["STUDENTS_TEAM_ID"],
+        # Not exercised by this test file (it only covers the D11
+        # promotion lifecycle, not the admin view) -- placeholders are
+        # fine here, same as cf_access_aud below.
+        faculty_team_id="unused-for-this-test",
         cf_access_team_domain="unused-for-this-test.cloudflareaccess.com",
         cf_access_aud="unused-for-this-test",
         allowed_email_suffixes=("@crimson.ua.edu", "@ua.edu"),
         admin_contact="Test Admin",
+        admin_emails=("unused-for-this-test@ua.edu",),
         db_path=f"/tmp/keyportal-live-test-{uuid.uuid4().hex}.db",
     )
 

@@ -48,8 +48,13 @@ def test_load_config_success_reads_all_fields(app_module):
     config = app_module.load_config()
     assert config.litellm_base_url == "http://litellm.test:4000"
     assert config.pending_team_id == "pending-team-id"
+    assert config.students_team_id == "students-team-id"
+    assert config.faculty_team_id == "faculty-team-id"
     assert config.cf_access_aud == "test-aud-tag"
     assert config.allowed_email_suffixes == ("@crimson.ua.edu", "@ua.edu")
+    # Lower-cased and whitespace-stripped -- see conftest.py's deliberately
+    # messy ADMIN_EMAILS fixture value.
+    assert config.admin_emails == ("admin@ua.edu", "faculty-admin@crimson.ua.edu")
     assert config.jwks_url == (
         "https://test-team.cloudflareaccess.com/cdn-cgi/access/certs"
     )
@@ -59,6 +64,32 @@ def test_load_config_missing_cf_access_aud_fails_loudly(app_module, monkeypatch)
     # Simulates the box's real, currently-blank CF_ACCESS_AUD_KEYPORTAL.
     monkeypatch.setenv("CF_ACCESS_AUD", "")
     with pytest.raises(RuntimeError, match="CF_ACCESS_AUD is unset or blank"):
+        app_module.load_config()
+
+
+# ---------------------------------------------------------------------------
+# ADMIN_EMAILS -- same fail-loudly contract as CF_ACCESS_AUD. This is a
+# security boundary (require_admin() below trusts config.admin_emails
+# completely), so "fails at startup" is not optional -- an admin panel
+# that came up with an empty allowlist would be open to every
+# crimson.ua.edu/ua.edu visitor.
+# ---------------------------------------------------------------------------
+
+
+def test_load_config_missing_admin_emails_fails_loudly(app_module, monkeypatch):
+    monkeypatch.setenv("ADMIN_EMAILS", "")
+    with pytest.raises(RuntimeError, match="ADMIN_EMAILS is unset or blank"):
+        app_module.load_config()
+
+
+def test_load_config_admin_emails_only_commas_and_whitespace_fails_loudly(
+    app_module, monkeypatch
+):
+    """ADMIN_EMAILS=" , " is non-blank by _require_env's own check (there
+    are non-whitespace characters), but splits into zero real emails --
+    must still fail loudly, not silently produce an empty allowlist."""
+    monkeypatch.setenv("ADMIN_EMAILS", " , , ")
+    with pytest.raises(RuntimeError, match="ADMIN_EMAILS is unset or blank"):
         app_module.load_config()
 
 
@@ -603,3 +634,343 @@ def test_index_active_user_sees_key_and_config(
     assert resp.status_code == 200
     assert "sk-active-key" in resp.text
     assert "roles: [chat, edit, apply, agent]" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# require_admin -- the authorization boundary for the whole /admin* surface.
+# ---------------------------------------------------------------------------
+
+ADMIN_EMAIL = "admin@ua.edu"  # matches conftest.py's ADMIN_EMAILS fixture
+NON_ADMIN_EMAIL = "student@crimson.ua.edu"
+
+
+def test_require_admin_allows_exact_match(app_module):
+    app_module.require_admin(ADMIN_EMAIL, app_module.CONFIG)  # must not raise
+
+
+def test_require_admin_matches_case_insensitively_and_strips_whitespace(app_module):
+    # conftest.py's ADMIN_EMAILS includes " Faculty-Admin@Crimson.UA.EDU "
+    app_module.require_admin(
+        "  faculty-admin@crimson.ua.edu  ", app_module.CONFIG
+    )  # must not raise
+
+
+def test_require_admin_rejects_non_admin(app_module):
+    with pytest.raises(HTTPException) as exc_info:
+        app_module.require_admin(NON_ADMIN_EMAIL, app_module.CONFIG)
+    assert exc_info.value.status_code == 403
+
+
+def test_require_admin_rejects_with_same_detail_regardless_of_caller(app_module):
+    """The 403 must not leak whether a route/payload was otherwise valid --
+    every non-admin rejection carries the exact same detail message."""
+    with pytest.raises(HTTPException) as exc_info:
+        app_module.require_admin(NON_ADMIN_EMAIL, app_module.CONFIG)
+    assert exc_info.value.detail == app_module._ADMIN_FORBIDDEN_DETAIL
+
+
+# ---------------------------------------------------------------------------
+# list_issued_users / render_admin_page -- the key must NEVER appear.
+# ---------------------------------------------------------------------------
+
+
+def test_list_issued_users_reports_email_team_state_and_issued_at(
+    app_module, mocker, fake_response
+):
+    config = app_module.CONFIG
+    email = "listed@crimson.ua.edu"
+    with mocker_seed_cache(app_module, config, email, "sk-listed"):
+        pass
+    mocker.patch(
+        "app.httpx.get",
+        return_value=fake_response(
+            {
+                "info": {"team_id": config.students_team_id},
+                "team_info": {"models": ["qwen3.8-27b"]},
+            }
+        ),
+    )
+
+    def get_side_effect(url, **kwargs):
+        if url.endswith("/key/info"):
+            return fake_response({"info": {"team_id": config.students_team_id}})
+        if url.endswith("/team/info"):
+            return fake_response({"team_info": {"models": ["qwen3.8-27b"]}})
+        raise AssertionError(f"unexpected GET {url}")
+
+    mocker.patch("app.httpx.get", side_effect=get_side_effect)
+    users = app_module.list_issued_users(config)
+    matching = [u for u in users if u.email == email]
+    assert len(matching) == 1
+    user = matching[0]
+    assert user.team_id == config.students_team_id
+    assert user.team_label == "students"
+    assert user.active is True
+    assert isinstance(user.created_at, float)
+    # No key field at all on the dataclass -- not just "not populated".
+    assert not hasattr(user, "litellm_key")
+    assert not hasattr(user, "key")
+
+
+def test_render_admin_page_never_includes_any_key(app_module):
+    config = app_module.CONFIG
+    users = [
+        app_module.IssuedUser(
+            email="a@crimson.ua.edu",
+            team_id=config.pending_team_id,
+            team_label="pending",
+            active=False,
+            created_at=1_700_000_000.0,
+        ),
+        app_module.IssuedUser(
+            email="b@ua.edu",
+            team_id=config.students_team_id,
+            team_label="students",
+            active=True,
+            created_at=1_700_000_100.0,
+        ),
+    ]
+    html = app_module.render_admin_page(ADMIN_EMAIL, users, config)
+    assert "a@crimson.ua.edu" in html
+    assert "b@ua.edu" in html
+    assert "pending" in html
+    assert "students" in html
+    assert "Active" in html
+    assert "Pending" in html
+    # There is no key anywhere in the fixture data above, but assert the
+    # structural guarantee too: the page never renders anything from a
+    # "litellm_key"/raw-key source -- IssuedUser has no such field, so
+    # this is enforced by render_admin_page() only ever touching
+    # IssuedUser attributes.
+    assert "sk-" not in html
+
+
+def test_render_admin_page_empty_state(app_module):
+    html = app_module.render_admin_page(ADMIN_EMAIL, [], app_module.CONFIG)
+    assert "No one has visited" in html
+
+
+# ---------------------------------------------------------------------------
+# promote_user / demote_user -- must replicate promote-user.sh exactly:
+# two /key/update calls, never a reissue, user_id only ever cleared to
+# None (never set to the email), idempotent on repeat.
+# ---------------------------------------------------------------------------
+
+
+def test_promote_user_happy_path_two_calls_no_real_user_id_sent(
+    app_module, mocker, fake_response
+):
+    config = app_module.CONFIG
+    email = "promote-target@crimson.ua.edu"
+    with mocker_seed_cache(app_module, config, email, "sk-promote-target"):
+        pass
+    post_mock = mocker.patch("app.httpx.post", return_value=fake_response({}))
+
+    app_module.promote_user(config, email, "students")
+
+    calls = post_mock.call_args_list
+    assert len(calls) == 2
+    clear_call, team_call = calls
+    assert clear_call.args[0].endswith("/key/update")
+    assert clear_call.kwargs["json"]["key"] == "sk-promote-target"
+    # Step 1 ONLY ever clears user_id to None -- never the email, never
+    # any other value. This is the exact regression issue_key() guards
+    # against, replicated here for the admin promotion path.
+    assert clear_call.kwargs["json"]["user_id"] is None
+    assert team_call.args[0].endswith("/key/update")
+    assert team_call.kwargs["json"]["key"] == "sk-promote-target"
+    assert team_call.kwargs["json"]["team_id"] == config.students_team_id
+    # Step 2's payload has no user_id key at all.
+    assert "user_id" not in team_call.kwargs["json"]
+
+
+def test_promote_user_faculty_target_uses_faculty_team_id(
+    app_module, mocker, fake_response
+):
+    config = app_module.CONFIG
+    email = "promote-faculty@ua.edu"
+    with mocker_seed_cache(app_module, config, email, "sk-promote-faculty"):
+        pass
+    post_mock = mocker.patch("app.httpx.post", return_value=fake_response({}))
+    app_module.promote_user(config, email, "faculty")
+    team_call = post_mock.call_args_list[1]
+    assert team_call.kwargs["json"]["team_id"] == config.faculty_team_id
+
+
+def test_promote_user_rejects_unknown_target(app_module):
+    config = app_module.CONFIG
+    with pytest.raises(HTTPException) as exc_info:
+        app_module.promote_user(config, "someone@ua.edu", "ungraded")
+    assert exc_info.value.status_code == 400
+
+
+def test_promote_user_no_cached_key_returns_404(app_module):
+    config = app_module.CONFIG
+    with pytest.raises(HTTPException) as exc_info:
+        app_module.promote_user(config, "never-visited@ua.edu", "students")
+    assert exc_info.value.status_code == 404
+
+
+def test_promote_user_idempotent_on_repeat(app_module, mocker, fake_response):
+    """Promoting an already-promoted user must be a no-op that succeeds --
+    never a duplicate membership, never a second key."""
+    config = app_module.CONFIG
+    email = "repeat-target@crimson.ua.edu"
+    with mocker_seed_cache(app_module, config, email, "sk-repeat-target"):
+        pass
+    post_mock = mocker.patch("app.httpx.post", return_value=fake_response({}))
+
+    app_module.promote_user(config, email, "students")
+    app_module.promote_user(config, email, "students")
+
+    # Still the same cached key -- no reissue happened on either call.
+    assert app_module.get_cached_key(config.db_path, email) == "sk-repeat-target"
+    # Every single call was a /key/update -- never a /key/generate.
+    assert len(post_mock.call_args_list) == 4
+    for call in post_mock.call_args_list:
+        assert call.args[0].endswith("/key/update")
+    # Both team-set calls landed on the same team_id.
+    team_calls = [c for c in post_mock.call_args_list if "team_id" in c.kwargs["json"]]
+    assert len(team_calls) == 2
+    assert all(
+        c.kwargs["json"]["team_id"] == config.students_team_id for c in team_calls
+    )
+
+
+def test_demote_user_moves_to_pending_team(app_module, mocker, fake_response):
+    config = app_module.CONFIG
+    email = "demote-target@crimson.ua.edu"
+    with mocker_seed_cache(app_module, config, email, "sk-demote-target"):
+        pass
+    post_mock = mocker.patch("app.httpx.post", return_value=fake_response({}))
+    app_module.demote_user(config, email)
+    team_call = post_mock.call_args_list[1]
+    assert team_call.kwargs["json"]["team_id"] == config.pending_team_id
+    assert "user_id" not in team_call.kwargs["json"]
+
+
+def test_demote_user_no_cached_key_returns_404(app_module):
+    config = app_module.CONFIG
+    with pytest.raises(HTTPException) as exc_info:
+        app_module.demote_user(config, "never-visited@ua.edu")
+    assert exc_info.value.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# HTTP-level /admin* routes -- authorization must fail closed on every
+# route, every method, before any LiteLLM call is made.
+# ---------------------------------------------------------------------------
+
+
+def test_admin_index_no_jwt_returns_401(client):
+    resp = client.get("/admin")
+    assert resp.status_code == 401
+
+
+def test_admin_promote_no_jwt_returns_401(client):
+    resp = client.post(
+        "/admin/promote",
+        data={"target_email": "x@crimson.ua.edu", "target_team": "students"},
+    )
+    assert resp.status_code == 401
+
+
+def test_admin_demote_no_jwt_returns_401(client):
+    resp = client.post("/admin/demote", data={"target_email": "x@crimson.ua.edu"})
+    assert resp.status_code == 401
+
+
+def test_admin_index_non_admin_returns_403(app_module, client, mocker):
+    mocker.patch.object(app_module, "verify_access_jwt", return_value=NON_ADMIN_EMAIL)
+    resp = client.get("/admin", headers={"Cf-Access-Jwt-Assertion": "irrelevant"})
+    assert resp.status_code == 403
+
+
+def test_admin_promote_non_admin_returns_403(app_module, client, mocker):
+    mocker.patch.object(app_module, "verify_access_jwt", return_value=NON_ADMIN_EMAIL)
+    post_mock = mocker.patch("app.httpx.post")
+    resp = client.post(
+        "/admin/promote",
+        data={"target_email": "x@crimson.ua.edu", "target_team": "students"},
+        headers={"Cf-Access-Jwt-Assertion": "irrelevant"},
+    )
+    assert resp.status_code == 403
+    # The allowlist check must happen BEFORE any LiteLLM call, not after.
+    post_mock.assert_not_called()
+
+
+def test_admin_demote_non_admin_returns_403(app_module, client, mocker):
+    mocker.patch.object(app_module, "verify_access_jwt", return_value=NON_ADMIN_EMAIL)
+    post_mock = mocker.patch("app.httpx.post")
+    resp = client.post(
+        "/admin/demote",
+        data={"target_email": "x@crimson.ua.edu"},
+        headers={"Cf-Access-Jwt-Assertion": "irrelevant"},
+    )
+    assert resp.status_code == 403
+    post_mock.assert_not_called()
+
+
+def test_admin_index_admin_sees_users_table(app_module, client, mocker, fake_response):
+    config = app_module.CONFIG
+    mocker.patch.object(app_module, "verify_access_jwt", return_value=ADMIN_EMAIL)
+    with mocker_seed_cache(app_module, config, "seen@crimson.ua.edu", "sk-seen"):
+        pass
+    mocker.patch(
+        "app.httpx.get",
+        return_value=fake_response({"info": {"team_id": config.pending_team_id}}),
+    )
+    resp = client.get("/admin", headers={"Cf-Access-Jwt-Assertion": "irrelevant"})
+    assert resp.status_code == 200
+    assert "seen@crimson.ua.edu" in resp.text
+    assert "sk-seen" not in resp.text
+    assert ADMIN_EMAIL in resp.text
+
+
+def test_admin_promote_route_happy_path_updates_and_redisplays(
+    app_module, client, mocker, fake_response
+):
+    config = app_module.CONFIG
+    email = "route-promote@crimson.ua.edu"
+    mocker.patch.object(app_module, "verify_access_jwt", return_value=ADMIN_EMAIL)
+    with mocker_seed_cache(app_module, config, email, "sk-route-promote"):
+        pass
+
+    def get_side_effect(url, **kwargs):
+        return fake_response({"info": {"team_id": config.students_team_id}})
+
+    mocker.patch("app.httpx.get", side_effect=get_side_effect)
+    post_mock = mocker.patch("app.httpx.post", return_value=fake_response({}))
+
+    resp = client.post(
+        "/admin/promote",
+        data={"target_email": email, "target_team": "students"},
+        headers={"Cf-Access-Jwt-Assertion": "irrelevant"},
+    )
+    assert resp.status_code == 200
+    assert email in resp.text
+    assert "sk-route-promote" not in resp.text
+    team_call = post_mock.call_args_list[1]
+    assert team_call.kwargs["json"]["team_id"] == config.students_team_id
+
+
+def test_admin_demote_route_happy_path(app_module, client, mocker, fake_response):
+    config = app_module.CONFIG
+    email = "route-demote@crimson.ua.edu"
+    mocker.patch.object(app_module, "verify_access_jwt", return_value=ADMIN_EMAIL)
+    with mocker_seed_cache(app_module, config, email, "sk-route-demote"):
+        pass
+    mocker.patch(
+        "app.httpx.get",
+        return_value=fake_response({"info": {"team_id": config.pending_team_id}}),
+    )
+    post_mock = mocker.patch("app.httpx.post", return_value=fake_response({}))
+
+    resp = client.post(
+        "/admin/demote",
+        data={"target_email": email},
+        headers={"Cf-Access-Jwt-Assertion": "irrelevant"},
+    )
+    assert resp.status_code == 200
+    team_call = post_mock.call_args_list[1]
+    assert team_call.kwargs["json"]["team_id"] == config.pending_team_id

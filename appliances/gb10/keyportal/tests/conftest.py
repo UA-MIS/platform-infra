@@ -19,9 +19,15 @@ def _required_env(tmp_path_factory):
             "LITELLM_BASE_URL": "http://litellm.test:4000",
             "LITELLM_MASTER_KEY": "test-master-key",
             "PENDING_TEAM_ID": "pending-team-id",
+            "STUDENTS_TEAM_ID": "students-team-id",
+            "FACULTY_TEAM_ID": "faculty-team-id",
             "CF_ACCESS_TEAM_DOMAIN": "test-team.cloudflareaccess.com",
             "CF_ACCESS_AUD": "test-aud-tag",
             "ADMIN_CONTACT": "Test Admin (admin@ua.edu)",
+            # Deliberately mixed case + stray whitespace + a duplicate --
+            # exercises the case-insensitive, whitespace-stripped matching
+            # require_admin() must do.
+            "ADMIN_EMAILS": " admin@ua.edu , Faculty-Admin@Crimson.UA.EDU ",
             "KEYPORTAL_DB_PATH": str(db_path),
         }
     )
