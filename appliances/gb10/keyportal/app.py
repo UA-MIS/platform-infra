@@ -1422,6 +1422,42 @@ do anything else right now, and you do not need to regenerate anything.</p>
 </body></html>"""
 
 
+def render_regenerate_origin_mismatch_page(config: Config) -> str:
+    """Security review round 3, student-facing item (2026-09-30): the
+    friendly counterpart to verify_same_origin()'s 403 on /regenerate.
+
+    That check is correct and must not be weakened -- a forged
+    Regenerate click would silently invalidate a student's working key.
+    But its raw response (a bare `{"detail": "..."}` JSON body, FastAPI's
+    default for an unhandled HTTPException) reads as "the service is
+    broken" to a student, not "click Regenerate again." This is reached
+    only for the narrow, real failure mode: a privacy extension or
+    hardened browser sending no Origin/Referer, or one Referrer-Policy
+    header cannot fix, on a same-origin click. GET / has no origin check
+    at all, so the student's EXISTING key still works right now -- this
+    page says so explicitly, so a student does not conclude they are
+    locked out over what is really a single broken button.
+    """
+    head = _PAGE_HEAD.format(style=_STYLE)
+    return f"""<!doctype html>
+<html><head>{head}</head>
+<body>
+<h1>UA-MIS Local LLM Key</h1>
+<div class="pending">
+<p><strong>Regenerate didn't go through -- but your existing key still works.</strong></p>
+<p>This usually means a privacy setting in your browser (or an extension)
+blocked some information this button needs to confirm the request came
+from this page. Nothing about your key changed.</p>
+<p>Your current key is unaffected and still active. If you don't
+actually need a new key, there is nothing else to do -- just go back to
+<a href="/">the main page</a>.</p>
+<p>If you do need to regenerate, try again after checking your browser
+isn't blocking "referrer" information for this site, or in a different
+browser. Still stuck? Contact <strong>{config.admin_contact}</strong>.</p>
+</div>
+</body></html>"""
+
+
 def _fmt_issued_at(created_at: float) -> str:
     return datetime.fromtimestamp(created_at, tz=timezone.utc).strftime(
         "%Y-%m-%d %H:%M UTC"
@@ -1677,6 +1713,35 @@ init_db(CONFIG.db_path)
 app = FastAPI()
 
 
+@app.middleware("http")
+async def _add_referrer_policy_header(request: Request, call_next):
+    """Security review round 3, student-facing item (2026-09-30): sets
+    `Referrer-Policy: same-origin` on every response.
+
+    The reachable failure mode this addresses: a student running a
+    privacy extension or a hardened browser configuration that forces a
+    stricter referrer policy (or sends `Origin: null` outright) hits
+    verify_same_origin()'s fail-closed check on /regenerate and gets a
+    403 -- a broken button, not a lockout, since GET / has no origin
+    check and their existing key keeps working. Explicitly declaring
+    `same-origin` here is this portal stating its own intended policy
+    (send Referer only to itself, never cross-origin) rather than
+    leaving it to each browser's default (`strict-origin-when-cross-
+    origin`), which reduces how often a hardened client disagrees with
+    what this app already requires anyway. It does NOT change, weaken,
+    or replace verify_same_origin()'s own check -- a client that still
+    sends neither Origin nor Referer, or the wrong one, is still
+    rejected. This header only ever makes the honest case (a real
+    same-origin request) more likely to look honest to a cautious
+    client; the /regenerate route's own friendly-403 page (see
+    regenerate() below) is what makes the failure survivable on the
+    clients where this header isn't enough.
+    """
+    response = await call_next(request)
+    response.headers["Referrer-Policy"] = "same-origin"
+    return response
+
+
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request) -> str:
     email = verify_access_jwt(request, CONFIG, JWKS_CLIENT)
@@ -1701,7 +1766,23 @@ def regenerate(request: Request) -> str:
     # JWT and all) would silently invalidate a student's working key.
     # Same same-origin defense as the admin routes below, first thing on
     # the route.
-    verify_same_origin(request, CONFIG)
+    #
+    # Security review round 3, student-facing item (2026-09-30): a
+    # rejection here renders a FRIENDLY HTML page instead of FastAPI's
+    # default bare `{"detail": "..."}` JSON body -- see
+    # render_regenerate_origin_mismatch_page()'s docstring for the
+    # reasoning. This changes only how the rejection is PRESENTED, never
+    # what gets rejected: verify_same_origin()'s comparison itself is
+    # untouched, and it is the only thing this try/except catches --
+    # every other failure on this route (bad/missing auth, a
+    # revoke_and_reissue() error) still surfaces normally.
+    try:
+        verify_same_origin(request, CONFIG)
+    except HTTPException:
+        return HTMLResponse(
+            content=render_regenerate_origin_mismatch_page(CONFIG),
+            status_code=403,
+        )
     email = verify_access_jwt(request, CONFIG, JWKS_CLIENT)
     key = revoke_and_reissue(CONFIG, email)
     team_id = get_current_team_id(CONFIG, key)

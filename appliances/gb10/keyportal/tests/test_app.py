@@ -836,6 +836,19 @@ def test_healthz(client):
     assert resp.json() == {"status": "ok"}
 
 
+def test_referrer_policy_header_present_on_every_response(client):
+    """Security review round 3, student-facing item (2026-09-30):
+    `Referrer-Policy: same-origin` must be set globally, via middleware
+    -- not just on the happy-path pages an admin/developer is likely to
+    look at. Checked on a 401 (no auth at all) specifically, not a 200,
+    to prove it applies even to error responses FastAPI's own exception
+    handling produces, not just ones this app's route handlers build by
+    hand."""
+    resp = client.get("/")
+    assert resp.status_code == 401
+    assert resp.headers.get("referrer-policy") == "same-origin"
+
+
 def test_index_without_jwt_assertion_returns_401(client):
     resp = client.get("/")
     assert resp.status_code == 401
@@ -2032,7 +2045,15 @@ def test_regenerate_wrong_origin_rejected_key_untouched(app_module, client, mock
     """Security review F5 (2026-09-30) explicitly calls out /regenerate:
     it is student-facing, not admin, but a forged POST here would
     silently invalidate a student's working key. Must be covered by its
-    own test, not just inferred from the admin routes."""
+    own test, not just inferred from the admin routes.
+
+    Security review round 3, student-facing item (2026-09-30): this
+    route's rejection is now a friendly HTML page (see
+    render_regenerate_origin_mismatch_page()), not the bare JSON
+    `{"detail": ...}` body FastAPI's default handler would produce --
+    updated from asserting the old JSON shape to asserting the new HTML
+    one. The security property underneath is unchanged and still
+    asserted here: 403, zero LiteLLM calls, key completely untouched."""
     config = app_module.CONFIG
     email = "regen-origin-check@crimson.ua.edu"
     with mocker_seed_cache(app_module, config, email, "sk-regenorigin"):
@@ -2041,7 +2062,10 @@ def test_regenerate_wrong_origin_rejected_key_untouched(app_module, client, mock
     post_mock = mocker.patch("app.httpx.post")
     resp = client.post("/regenerate", headers={"Origin": "https://attacker.example"})
     assert resp.status_code == 403
-    assert "origin mismatch" in resp.json()["detail"].lower()
+    assert "content-type" in resp.headers
+    assert "text/html" in resp.headers["content-type"]
+    assert "didn't go through" in resp.text
+    assert "existing key still works" in resp.text
     post_mock.assert_not_called()
     # The student's key must be completely untouched by the rejected
     # forgery attempt.
