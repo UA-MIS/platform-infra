@@ -30,6 +30,27 @@ services:
     ipc: host
     volumes:
       - /home/uamis/.cache/huggingface:/root/.cache/huggingface
+      # 2026-09-30: without this, /root/.cache/vllm (torch.compile's AOT
+      # cache and FlashInfer's autotune cache) lives only in the
+      # container's writable layer, discarded every time the container
+      # is RECREATED (not merely restarted) -- confirmed live: enabling
+      # gb10-appliance.service made `docker compose up` create fresh
+      # containers on every boot instead of starting existing stopped
+      # ones, and a boot that had to regenerate both caches measured
+      # ~145s slower (41.2s torch.compile + ~104s FlashInfer autotune,
+      # vLLM's own logs) than one that didn't. A NAMED volume, not a
+      # host bind mount like the HuggingFace cache above: this
+      # container runs as root, and a bind mount would inherit host
+      # directory ownership in a way a named volume avoids -- the
+      # HuggingFace bind is a precedent for a PRE-EXISTING host
+      # directory the owner already manages outside Docker, which this
+      # is not. Safe to keep warm across a version bump: vLLM namespaces
+      # this cache by its own version internally (the actual path
+      # includes e.g. `0.6.18.post1/...`), so upgrading vLLM does not
+      # read a stale cache from an older version -- this is not a
+      # cache-invalidation hazard, so resist the urge to delete this
+      # volume "just to be safe" on a future upgrade.
+      - vllm-cache:/root/.cache/vllm
     command:
       - "--model=Inferact/Qwen3.8-27B-NVFP4"
       - "--tensor-parallel-size=1"
@@ -229,3 +250,4 @@ volumes:
   keyportal-data:
   prom-data:
   grafana-data:
+  vllm-cache:
