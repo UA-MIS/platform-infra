@@ -1516,6 +1516,166 @@ def test_issue_initial_key_non_preauthorized_email_gets_pending(
     assert post_mock.call_args.kwargs["json"]["team_id"] == config.pending_team_id
 
 
+def test_mark_preauthorized_redeemed_is_atomic_under_concurrency(app_module):
+    """Security review B1 (2026-09-30): the actual fix. Two real threads
+    race the SAME UPDATE ... WHERE redeemed_at IS NULL for the same
+    email -- sqlite's own write locking must ensure exactly one of them
+    sees rowcount==1."""
+    import threading
+
+    config = app_module.CONFIG
+    email = "claim-race@crimson.ua.edu"
+    app_module.add_preauthorized_emails(config, email)
+
+    results = []
+    results_lock = threading.Lock()
+
+    def worker():
+        won = app_module.mark_preauthorized_redeemed(config, email)
+        with results_lock:
+            results.append(won)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(results) == 8
+    assert results.count(True) == 1
+    assert results.count(False) == 7
+
+
+def test_issue_initial_key_concurrent_first_logins_only_one_lands_active(
+    app_module, mocker, fake_response
+):
+    """Security review B1 (2026-09-30) -- THE severe finding: two
+    concurrent first logins for the SAME preauthorized email (a
+    double-click, two tabs, a browser prefetch) used to both pass a
+    check before either finished writing, each mint a real LiteLLM key,
+    and then keys.email's PRIMARY KEY + INSERT OR REPLACE silently kept
+    only the LAST one -- leaving the FIRST key ACTIVE, untracked by
+    `keys`, invisible to list_issued_users()/`/admin`, and unreachable
+    by demote_user() for its full 365-day duration. Reproduces the race
+    with two real threads and a delay inside the mocked LiteLLM call to
+    widen the window, and asserts the OUTCOME that actually matters:
+    exactly one of the two /key/generate calls landed on the active
+    (students) team, never both."""
+    import threading
+    import time as time_module
+
+    config = app_module.CONFIG
+    email = "race-condition@crimson.ua.edu"
+    app_module.add_preauthorized_emails(config, email)
+
+    generate_team_ids = []
+    calls_lock = threading.Lock()
+
+    def post_side_effect(url, **kwargs):
+        if url.endswith("/key/generate"):
+            with calls_lock:
+                generate_team_ids.append(kwargs["json"]["team_id"])
+                n = len(generate_team_ids)
+            time_module.sleep(0.05)  # widen the race window
+            return fake_response({"key": f"sk-race{n}"})
+        raise AssertionError(f"unexpected POST to {url}")
+
+    mocker.patch("app.httpx.post", side_effect=post_side_effect)
+
+    results = []
+    results_lock = threading.Lock()
+
+    def worker():
+        key = app_module.issue_initial_key(config, email)
+        with results_lock:
+            results.append(key)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(results) == 2
+    assert results[0] != results[1]
+    assert len(generate_team_ids) == 2
+    active_calls = [t for t in generate_team_ids if t == config.students_team_id]
+    pending_calls = [t for t in generate_team_ids if t == config.pending_team_id]
+    assert len(active_calls) == 1
+    assert len(pending_calls) == 1
+    # The roster entry is claimed exactly once, by whichever thread won.
+    entry = next(e for e in app_module.list_preauthorized(config) if e.email == email)
+    assert entry.redeemed is True
+
+
+def test_revoke_and_reissue_concurrent_calls_no_orphaned_active_key(
+    app_module, mocker, fake_response
+):
+    """Security review B1 (2026-09-30): the same check-then-act race
+    exists in revoke_and_reissue() -- for an ALREADY-PROMOTED student,
+    two concurrent /regenerate calls used to both read the same old
+    key's team_id, both delete it, and both issue a new key onto that
+    team, orphaning whichever one lost the `keys` table's last write.
+    With _lock_for_email() serializing the whole function, the second
+    call only starts once the first has fully committed, so every
+    /key/delete call targets a key that is genuinely still the current
+    one at the moment it runs -- never two deletes racing the same
+    stale key."""
+    import threading
+    import time as time_module
+
+    config = app_module.CONFIG
+    email = "regen-race@crimson.ua.edu"
+    with mocker_seed_cache(app_module, config, email, "sk-regenold"):
+        pass
+
+    mocker.patch(
+        "app.httpx.get",
+        return_value=fake_response({"info": {"team_id": config.students_team_id}}),
+    )
+
+    generate_count = {"n": 0}
+    count_lock = threading.Lock()
+    delete_targets = []
+
+    def post_side_effect(url, **kwargs):
+        if url.endswith("/key/delete"):
+            with count_lock:
+                delete_targets.append(kwargs["json"]["keys"][0])
+            return fake_response({"deleted_keys": kwargs["json"]["keys"]})
+        if url.endswith("/key/generate"):
+            with count_lock:
+                generate_count["n"] += 1
+                n = generate_count["n"]
+            time_module.sleep(0.05)
+            return fake_response({"key": f"sk-regennew{n}"})
+        raise AssertionError(f"unexpected POST to {url}")
+
+    mocker.patch("app.httpx.post", side_effect=post_side_effect)
+
+    results = []
+    results_lock = threading.Lock()
+
+    def worker():
+        key = app_module.revoke_and_reissue(config, email)
+        with results_lock:
+            results.append(key)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(results) == 2
+    # The two deletes must target DIFFERENT keys -- if the lock failed
+    # to serialize, both would delete the SAME original "sk-regenold".
+    assert len(set(delete_targets)) == 2
+    # Whichever key is cached at the end is one of the two issued.
+    final_cached = app_module.get_cached_key(config.db_path, email)
+    assert final_cached in results
+
+
 def test_index_preauthorized_first_login_is_active(
     app_module, client, mocker, fake_response
 ):

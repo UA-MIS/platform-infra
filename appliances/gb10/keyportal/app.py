@@ -18,6 +18,8 @@ import hashlib
 import os
 import re
 import sqlite3
+import sys
+import threading
 import time
 from contextlib import closing
 from dataclasses import dataclass
@@ -305,6 +307,30 @@ def issue_key(config: Config, email: str, team_id: str) -> str:
     key = data["key"]
     key_id = data.get("token_id") or data.get("key_name") or email
     with closing(sqlite3.connect(config.db_path)) as conn:
+        existing = conn.execute(
+            "SELECT litellm_key FROM keys WHERE email = ?", (email,)
+        ).fetchone()
+        if existing and existing[0] != key:
+            # Security review B1 (2026-09-30): INSERT OR REPLACE below
+            # would silently drop this row's OLD key from local
+            # tracking. If that old key is still active on some team in
+            # LiteLLM -- e.g. this call is racing another one for the
+            # same email, or a caller reaches issue_key() without going
+            # through _lock_for_email() first -- it becomes an ORPHAN:
+            # untracked here, invisible to list_issued_users()/`/admin`,
+            # and unreachable by demote_user() for the rest of its
+            # 365-day duration. issue_initial_key()/revoke_and_reissue()
+            # both serialize same-email calls with _lock_for_email() now
+            # specifically to keep this rare; if it fires, something is
+            # calling issue_key() outside that lock.
+            print(
+                f"WARNING: issue_key() is replacing the tracked key for "
+                f"{email} -- the previous key "
+                f"({existing[0][:12]}...) may now be an ORPHAN in "
+                f"LiteLLM: still valid there, no longer tracked locally, "
+                f"unreachable by demote_user().",
+                file=sys.stderr,
+            )
         conn.execute(
             "INSERT OR REPLACE INTO keys (email, litellm_key, key_id, created_at) "
             "VALUES (?, ?, ?, ?)",
@@ -370,6 +396,42 @@ def team_grants_access(config: Config, team_id: Optional[str]) -> bool:
     return len(team_info.get("models") or []) > 0
 
 
+# ---------------------------------------------------------------------------
+# Per-email lock guarding the "read local state -> round-trip to LiteLLM
+# -> write local state" sequence in revoke_and_reissue() and
+# issue_initial_key() below (security review B1, 2026-09-30). Two
+# concurrent requests for the SAME email -- a double-click on
+# Regenerate, two tabs, a browser prefetch of GET / -- used to both pass
+# the same "here's the old key" / "no key yet" read before either
+# finished writing, each mint a real LiteLLM key, and then
+# keys.email's PRIMARY KEY + issue_key()'s INSERT OR REPLACE silently
+# kept only the LAST one: the FIRST key is left ACTIVE and ORPHANED --
+# untracked by `keys`, invisible to list_issued_users()/`/admin`, and
+# unreachable by demote_user() for its full 365-day duration. This
+# defeats revocation entirely, which is why it is the most severe
+# finding on this branch.
+#
+# This service runs as a single uvicorn process with no --workers flag
+# (see Dockerfile); Starlette/AnyIO dispatches sync `def` route handlers
+# to that ONE process's own threadpool, so a plain in-process Lock
+# genuinely serializes same-email requests -- it does not need to be a
+# distributed lock, and it does not block DIFFERENT emails' requests
+# from proceeding concurrently.
+# ---------------------------------------------------------------------------
+_EMAIL_LOCKS_GUARD = threading.Lock()
+_EMAIL_LOCKS: dict = {}
+
+
+def _lock_for_email(email: str) -> threading.Lock:
+    normalized = email.strip().lower()
+    with _EMAIL_LOCKS_GUARD:
+        lock = _EMAIL_LOCKS.get(normalized)
+        if lock is None:
+            lock = threading.Lock()
+            _EMAIL_LOCKS[normalized] = lock
+        return lock
+
+
 def revoke_and_reissue(config: Config, email: str) -> str:
     """Regenerate a key IN PLACE ON ITS CURRENT TEAM.
 
@@ -380,27 +442,39 @@ def revoke_and_reissue(config: Config, email: str) -> str:
     be a strictly worse bug than the one the key-caching design exists
     to avoid (a support ticket that reads as "activation didn't work"
     instead of one that reads as "I lost my key").
+
+    The whole body runs under _lock_for_email() (security review B1,
+    2026-09-30): without it, two concurrent /regenerate calls for an
+    ALREADY-PROMOTED student both read the same old key's team_id, both
+    delete it, and both issue a new key onto that team -- only the last
+    survives in `keys`, orphaning the first as a live, untracked,
+    unrevokable ACTIVE key. With the lock, the second call only starts
+    once the first has fully committed, so it sees the FIRST call's new
+    key as "the old key" and proceeds from there -- never two
+    independent mutations racing the same stale state.
     """
-    old_key = get_cached_key(config.db_path, email)
-    team_id = config.pending_team_id
-    if old_key:
-        team_id = get_current_team_id(config, old_key) or config.pending_team_id
-        delete_resp = httpx.post(
-            f"{config.litellm_base_url}/key/delete",
-            headers={"Authorization": f"Bearer {config.litellm_master_key}"},
-            json={"keys": [old_key]},
-            timeout=15.0,
-        )
-        # Security review F2 (2026-09-30): a silently-failed delete here
-        # is exactly how a stale row that no longer matches a live
-        # LiteLLM key ends up sitting in `keys` -- the old key would
-        # still exist in LiteLLM (never actually deleted) while a NEW
-        # key also gets issued and cached below, or worse, the delete
-        # partially succeeds server-side but reports failure. Fail
-        # loudly here instead of proceeding to issue a second key on
-        # top of an old one whose deletion status is unknown.
-        delete_resp.raise_for_status()
-    return issue_key(config, email, team_id)
+    with _lock_for_email(email):
+        old_key = get_cached_key(config.db_path, email)
+        team_id = config.pending_team_id
+        if old_key:
+            team_id = get_current_team_id(config, old_key) or config.pending_team_id
+            delete_resp = httpx.post(
+                f"{config.litellm_base_url}/key/delete",
+                headers={"Authorization": f"Bearer {config.litellm_master_key}"},
+                json={"keys": [old_key]},
+                timeout=15.0,
+            )
+            # Security review F2 (2026-09-30): a silently-failed delete
+            # here is exactly how a stale row that no longer matches a
+            # live LiteLLM key ends up sitting in `keys` -- the old key
+            # would still exist in LiteLLM (never actually deleted)
+            # while a NEW key also gets issued and cached below, or
+            # worse, the delete partially succeeds server-side but
+            # reports failure. Fail loudly here instead of proceeding to
+            # issue a second key on top of an old one whose deletion
+            # status is unknown.
+            delete_resp.raise_for_status()
+        return issue_key(config, email, team_id)
 
 
 # ---------------------------------------------------------------------------
@@ -697,10 +771,14 @@ def list_preauthorized(config: Config) -> list:
 
 def is_preauthorized(config: Config, email: str) -> bool:
     """True only for an email on the list that has NOT redeemed it yet.
-    A redeemed entry answers False here -- it has already done its one
-    job (see issue_initial_key()); is_preauthorized() is never consulted
-    again for a returning visitor, since index() only calls it when
-    get_cached_key() found nothing.
+
+    A read-only check -- issue_initial_key() does NOT call this to
+    decide whether to grant active access (security review B1,
+    2026-09-30: that decision must be atomic, so it uses
+    mark_preauthorized_redeemed()'s own return value as the actual
+    claim, never a separate read-then-act). This remains useful on its
+    own for introspection (tests, and anywhere that just wants to know
+    current state without side effects).
     """
     with closing(sqlite3.connect(config.db_path)) as conn:
         row = conn.execute(
@@ -710,14 +788,31 @@ def is_preauthorized(config: Config, email: str) -> bool:
     return row is not None and row[0] is None
 
 
-def mark_preauthorized_redeemed(config: Config, email: str) -> None:
+def mark_preauthorized_redeemed(config: Config, email: str) -> bool:
+    """Atomically claim `email`'s pre-authorization by marking it
+    redeemed -- returns True only if THIS call won the claim.
+
+    Security review B1 (2026-09-30): this single UPDATE ... WHERE
+    redeemed_at IS NULL statement IS the fix for the double-redeem
+    race, not a bookkeeping step that runs after the fact. sqlite
+    serializes writes to one file across connections/threads, so of two
+    concurrent callers racing this statement for the SAME email, only
+    one can ever see its own write take effect while redeemed_at was
+    still NULL -- the loser's WHERE clause simply matches zero rows
+    once it runs, because the winner's commit already happened first.
+    issue_initial_key() below calls this BEFORE issuing anything, and
+    treats a losing claim as "already handled elsewhere, fall through
+    to normal pending issuance" -- never as a reason to also issue an
+    active key.
+    """
     with closing(sqlite3.connect(config.db_path)) as conn:
-        conn.execute(
+        cur = conn.execute(
             "UPDATE preauthorized SET redeemed_at = ? WHERE email = ? "
             "AND redeemed_at IS NULL",
             (time.time(), email.strip().lower()),
         )
         conn.commit()
+        return cur.rowcount == 1
 
 
 def issue_initial_key(config: Config, email: str) -> str:
@@ -729,17 +824,33 @@ def issue_initial_key(config: Config, email: str) -> str:
 
     Pending by default -- unless `email` is on the pre-authorized list
     and hasn't redeemed it yet, in which case they get an ACTIVE
-    students-team key immediately and the entry is marked redeemed in
-    the same call. No separate "reissue" step, ever: this is the one
-    and only issue_key() call for this visitor, straight onto the
-    right team from the start.
+    students-team key immediately. No separate "reissue" step, ever:
+    this is the one and only issue_key() call for this visitor, straight
+    onto the right team from the start.
+
+    Security review B1 (2026-09-30): the claim (mark_preauthorized_
+    redeemed()) now happens FIRST, atomically, BEFORE issue_key() ever
+    runs -- not after. The whole function also runs under
+    _lock_for_email(), which additionally serializes the
+    NON-preauthorized path (two concurrent brand-new visits for the same
+    un-preauthorized email used to both land in pending independently --
+    harmless since pending grants zero access, but still two untracked
+    keys instead of one).
+
+    Deliberate choice on issue_key() failure AFTER winning the claim: do
+    NOT release it. The claim is a one-time, atomic "this email gets
+    exactly one shot at auto-active" token; releasing it on failure
+    would reopen the exact race this function exists to close, against
+    a THIRD concurrent request retrying into the freed slot. Falling
+    through to a normal pending issuance instead costs the student one
+    Promote click from an admin later -- not a second, uncontrollable
+    active key.
     """
-    if is_preauthorized(config, email):
-        team_id = getattr(config, _PREAUTHORIZE_TARGET_TEAM_ATTR)
-        key = issue_key(config, email, team_id)
-        mark_preauthorized_redeemed(config, email)
-        return key
-    return issue_key(config, email, config.pending_team_id)
+    with _lock_for_email(email):
+        if mark_preauthorized_redeemed(config, email):
+            team_id = getattr(config, _PREAUTHORIZE_TARGET_TEAM_ATTR)
+            return issue_key(config, email, team_id)
+        return issue_key(config, email, config.pending_team_id)
 
 
 def remove_preauthorized_email(config: Config, email: str) -> None:
