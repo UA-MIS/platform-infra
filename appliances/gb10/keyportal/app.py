@@ -33,6 +33,7 @@ import httpx
 import jwt
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
+from starlette.concurrency import run_in_threadpool
 from jwt import PyJWKClient
 
 # The onboarding scripts already live in this same repo/branch -- link to
@@ -1096,8 +1097,33 @@ def issue_initial_key(config: Config, email: str) -> str:
     through to a normal pending issuance instead costs the student one
     Promote click from an admin later -- not a second, uncontrollable
     active key.
+
+    Security review round 3, B1-R (2026-09-30): re-reads get_cached_key()
+    INSIDE the lock, first thing, and returns it immediately if present
+    -- mirroring what revoke_and_reissue() already does correctly.
+    index() checks get_cached_key() OUTSIDE this lock (it has to -- that
+    is what decides whether to call this function at all), so two
+    concurrent first-time requests for the same email both see None and
+    both enter this function. The lock then serializes them, but without
+    this re-check the SECOND caller would still unconditionally call
+    mark_preauthorized_redeemed() (correctly losing) and then issue_key()
+    AGAIN for a pending key -- and issue_key()'s own claim-before-mint
+    CAS has no way to know that row already holds the FIRST caller's
+    freshly-issued, already-handed-to-the-student ACTIVE key rather than
+    some stale leftover; it would claim over it and overwrite it with a
+    second, pending-team key, exactly reproducing B1 (an active key that
+    is live in LiteLLM, already in the student's hands, but no longer
+    the one this database tracks -- invisible to list_issued_users()/
+    `/admin`, unreachable by demote_user()). Re-reading inside the lock
+    means the second caller, once it gets the lock, sees the first
+    caller's result already committed and simply returns it -- it never
+    calls mark_preauthorized_redeemed() or issue_key() a second time at
+    all.
     """
     with _lock_for_email(email):
+        existing = get_cached_key(config.db_path, email)
+        if existing is not None:
+            return existing
         if mark_preauthorized_redeemed(config, email):
             team_id = getattr(config, _PREAUTHORIZE_TARGET_TEAM_ATTR)
             return issue_key(config, email, team_id)
@@ -1608,12 +1634,27 @@ async def admin_promote(request: Request) -> str:
     form = await request.form()
     target_email = _required_form_field(form, "target_email")
     target_team = _required_form_field(form, "target_team")
-    promote_user(CONFIG, target_email, target_team)  # the mutation
+    # Security review round 3, B1-A (2026-09-30): making these routes
+    # `async def` (for the F3 fix's `await request.form()`) put them ON
+    # the event loop -- but promote_user()/demote_user()/
+    # add_preauthorized_emails()/remove_preauthorized_email() all do
+    # SYNCHRONOUS blocking I/O (sync httpx to LiteLLM, sync sqlite), and
+    # list_preauthorized()/_list_issued_users_or_none() do the same.
+    # With no `await` covering them, one admin POST blocked the ENTIRE
+    # process for its whole duration -- measured: a single call froze a
+    # co-running heartbeat for ~2 seconds, serving nothing else at all,
+    # not even /healthz (which a container health check depends on).
+    # run_in_threadpool() moves each blocking call to AnyIO's worker
+    # threadpool so the event loop stays free for every other request
+    # while this one is in flight -- the same threadpool
+    # Starlette/AnyIO already uses for the sync `def` routes elsewhere
+    # in this file (see _lock_for_email()'s docstring).
+    await run_in_threadpool(promote_user, CONFIG, target_email, target_team)
     # Security review B3 (2026-09-30): roster first, key list through
     # the fail-safe wrapper -- a stale key elsewhere must not turn a
     # SUCCESSFUL promote into a 500 with no way to tell it worked.
-    preauthorized = list_preauthorized(CONFIG)
-    users = _list_issued_users_or_none(CONFIG)
+    preauthorized = await run_in_threadpool(list_preauthorized, CONFIG)
+    users = await run_in_threadpool(_list_issued_users_or_none, CONFIG)
     return render_admin_page(admin_email, users, preauthorized, CONFIG)
 
 
@@ -1624,9 +1665,9 @@ async def admin_demote(request: Request) -> str:
     require_admin(admin_email, CONFIG)
     form = await request.form()
     target_email = _required_form_field(form, "target_email")
-    demote_user(CONFIG, target_email)  # the mutation
-    preauthorized = list_preauthorized(CONFIG)
-    users = _list_issued_users_or_none(CONFIG)
+    await run_in_threadpool(demote_user, CONFIG, target_email)  # the mutation
+    preauthorized = await run_in_threadpool(list_preauthorized, CONFIG)
+    users = await run_in_threadpool(_list_issued_users_or_none, CONFIG)
     return render_admin_page(admin_email, users, preauthorized, CONFIG)
 
 
@@ -1642,9 +1683,9 @@ async def admin_preauthorize(request: Request) -> str:
     # `result` is the ONLY channel telling the admin which addresses
     # were added/already-present/rejected, and it must survive even if
     # the key-list read below does not.
-    result = add_preauthorized_emails(CONFIG, emails)
-    preauthorized = list_preauthorized(CONFIG)
-    users = _list_issued_users_or_none(CONFIG)
+    result = await run_in_threadpool(add_preauthorized_emails, CONFIG, emails)
+    preauthorized = await run_in_threadpool(list_preauthorized, CONFIG)
+    users = await run_in_threadpool(_list_issued_users_or_none, CONFIG)
     return render_admin_page(
         admin_email, users, preauthorized, CONFIG, preauthorize_result=result
     )
@@ -1657,9 +1698,10 @@ async def admin_preauthorize_remove(request: Request) -> str:
     require_admin(admin_email, CONFIG)
     form = await request.form()
     target_email = _required_form_field(form, "target_email")
-    remove_preauthorized_email(CONFIG, target_email)  # the mutation
-    preauthorized = list_preauthorized(CONFIG)
-    users = _list_issued_users_or_none(CONFIG)
+    # the mutation
+    await run_in_threadpool(remove_preauthorized_email, CONFIG, target_email)
+    preauthorized = await run_in_threadpool(list_preauthorized, CONFIG)
+    users = await run_in_threadpool(_list_issued_users_or_none, CONFIG)
     return render_admin_page(admin_email, users, preauthorized, CONFIG)
 
 

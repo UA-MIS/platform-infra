@@ -1674,6 +1674,119 @@ def test_verify_same_origin_both_absent_rejected(app_module, make_request):
     assert exc_info.value.status_code == 403
 
 
+def test_admin_promote_does_not_block_the_event_loop(app_module, mocker):
+    """Security review round 3, B1-A (2026-09-30): converting the four
+    admin POST routes to `async def` (for F3's `await request.form()`)
+    put them ON the event loop -- but promote_user()/demote_user()/
+    add_preauthorized_emails()/remove_preauthorized_email() and
+    list_preauthorized()/_list_issued_users_or_none() all do
+    SYNCHRONOUS blocking I/O (sync httpx, sync sqlite). With no
+    run_in_threadpool, one admin POST froze the entire process for its
+    whole duration -- measured live: ~2s stall, nothing else served, not
+    even /healthz (which a container health check depends on).
+
+    TestClient serializes every request, so it is structurally blind to
+    this -- `client` (the fixture used everywhere else in this file)
+    cannot exercise real concurrency at all. This test drives the ASGI
+    app directly via httpx's ASGITransport with two REAL concurrent
+    requests: a slow, genuinely-blocking (mocked) promote_user()
+    alongside a concurrent /healthz. If the event loop were blocked,
+    /healthz would take as long as the slow promote's sleep; with
+    run_in_threadpool moving the blocking call off the loop, it must
+    return almost immediately regardless.
+    """
+    import asyncio
+    import time as time_module
+
+    import httpx as httpx_lib
+
+    def slow_promote_user(config, email, target):
+        time_module.sleep(0.5)  # a REAL blocking sleep, not asyncio.sleep
+
+    mocker.patch.object(app_module, "promote_user", side_effect=slow_promote_user)
+    mocker.patch.object(app_module, "verify_access_jwt", return_value=ADMIN_EMAIL)
+    mocker.patch.object(app_module, "list_preauthorized", return_value=[])
+    mocker.patch.object(app_module, "_list_issued_users_or_none", return_value=[])
+
+    async def scenario():
+        transport = httpx_lib.ASGITransport(app=app_module.app)
+        async with httpx_lib.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as async_client:
+
+            async def do_promote():
+                return await async_client.post(
+                    "/admin/promote",
+                    data={
+                        "target_email": "x@crimson.ua.edu",
+                        "target_team": "students",
+                    },
+                    headers={
+                        "Cf-Access-Jwt-Assertion": "irrelevant",
+                        **VALID_ORIGIN_HEADER,
+                    },
+                )
+
+            async def do_healthz():
+                return await async_client.get("/healthz")
+
+            # IMPORTANT, and revised TWICE while writing this test (both
+            # revisions caught only by actually mutation-testing it, not
+            # by inspection):
+            #
+            # Revision 1 set t0 inside do_healthz, after its own
+            # `await asyncio.sleep(0.05)` -- but a truly blocked event
+            # loop means do_healthz's task never gets a turn to even
+            # START that sleep until AFTER do_promote's synchronous block
+            # has already finished (a single OS thread cannot run two
+            # things at once, and a real `time.sleep()` yields to
+            # nothing). That t0 was therefore always set AFTER the freeze
+            # had already ended, so it only ever measured /healthz's own
+            # fast GET -- it passed even against the un-fixed code
+            # (confirmed: reverting run_in_threadpool did NOT make it fail).
+            #
+            # Revision 2 moved t0 before `asyncio.gather(do_promote(),
+            # do_healthz())` but still measured elapsed AFTER gather
+            # returned -- and gather does not return until BOTH finish,
+            # so elapsed was bounded by the slower one (the 0.5s promote)
+            # regardless of whether /healthz itself was fast. This failed
+            # even against the FIXED code (confirmed: 0.50s elapsed with
+            # run_in_threadpool correctly in place) -- a test that fails
+            # on correct code is exactly as useless as one that passes on
+            # broken code.
+            #
+            # This version creates both as Tasks (so both are scheduled
+            # immediately, promote first) but times ONLY how long until
+            # healthz_task specifically completes, independent of when
+            # promote_task finishes. If the loop is blocked, healthz_task
+            # cannot even be dispatched until promote's sync block
+            # releases the thread, so its own elapsed is ~0.5s; with
+            # run_in_threadpool, promote's blocking call is handed to a
+            # worker thread almost immediately, healthz_task runs and
+            # completes in milliseconds, and we still await promote_task
+            # afterward so nothing is left dangling.
+            t0 = time_module.monotonic()
+            promote_task = asyncio.create_task(do_promote())
+            healthz_task = asyncio.create_task(do_healthz())
+            healthz_resp = await healthz_task
+            healthz_elapsed = time_module.monotonic() - t0
+            promote_resp = await promote_task
+            return promote_resp, healthz_resp, healthz_elapsed
+
+    promote_resp, healthz_resp, healthz_elapsed = asyncio.run(scenario())
+
+    assert promote_resp.status_code == 200
+    assert healthz_resp.status_code == 200
+    # The slow promote blocks for 0.5s. If the event loop were blocked,
+    # /healthz could not even be dispatched until that 0.5s elapsed, so
+    # total elapsed-since-t0 would be close to 0.5s too. It must not be.
+    assert healthz_elapsed < 0.3, (
+        f"/healthz (via gather, timed from before either request started) "
+        f"took {healthz_elapsed:.2f}s while a 0.5s admin POST was in "
+        f"flight -- the event loop is blocked"
+    )
+
+
 def test_admin_promote_wrong_origin_rejected_zero_calls(app_module, client, mocker):
     mocker.patch.object(app_module, "verify_access_jwt", return_value=ADMIN_EMAIL)
     post_mock = mocker.patch("app.httpx.post")
@@ -2045,11 +2158,22 @@ def test_issue_initial_key_concurrent_first_logins_only_one_lands_active(
     and then keys.email's PRIMARY KEY + INSERT OR REPLACE silently kept
     only the LAST one -- leaving the FIRST key ACTIVE, untracked by
     `keys`, invisible to list_issued_users()/`/admin`, and unreachable
-    by demote_user() for its full 365-day duration. Reproduces the race
-    with two real threads and a delay inside the mocked LiteLLM call to
-    widen the window, and asserts the OUTCOME that actually matters:
-    exactly one of the two /key/generate calls landed on the active
-    (students) team, never both."""
+    by demote_user() for its full 365-day duration.
+
+    Round 3 correction (2026-09-30): this test's PREVIOUS version
+    asserted `len(generate_team_ids) == 2` -- two keys minted -- as the
+    EXPECTED outcome, even though its own docstring described that
+    exact shape as the harm. That encoded the defect as a pass
+    condition: a mutant that moved the claim back to AFTER issue_key()
+    (the literal pre-fix shape) satisfied it and survived all 129
+    tests, because mutation testing only proves a test is sensitive to
+    change -- it cannot catch an assertion that states the wrong
+    property. The property the report requires is exactly ONE key ever
+    minted, and the tracked key equal to the key BOTH callers are
+    handed -- not "one of the two calls happens to land on students."
+    Reproduces the race with two real threads and a delay inside the
+    mocked LiteLLM call to widen the window.
+    """
     import threading
     import time as time_module
 
@@ -2086,13 +2210,21 @@ def test_issue_initial_key_concurrent_first_logins_only_one_lands_active(
         t.join()
 
     assert len(results) == 2
-    assert results[0] != results[1]
-    assert len(generate_team_ids) == 2
-    active_calls = [t for t in generate_team_ids if t == config.students_team_id]
-    pending_calls = [t for t in generate_team_ids if t == config.pending_team_id]
-    assert len(active_calls) == 1
-    assert len(pending_calls) == 1
-    # The roster entry is claimed exactly once, by whichever thread won.
+    # Both callers get back the SAME key -- the second caller never
+    # mints its own, it just sees the first caller's already-committed
+    # result once it gets the lock.
+    assert results[0] == results[1]
+    # Exactly ONE /key/generate call total, ever -- not "one on the
+    # active team", ONE, period. A second call, regardless of which
+    # team it targets, IS the defect: it means a key was minted that
+    # the loser then either orphans or (worse, pre-B1-R) overwrites the
+    # tracked row with.
+    assert len(generate_team_ids) == 1
+    assert generate_team_ids[0] == config.students_team_id
+    # The tracked key is the SAME key both callers were handed --
+    # never a different, untracked one sitting live in LiteLLM.
+    assert app_module.get_cached_key(config.db_path, email) == results[0]
+    # The roster entry is claimed exactly once.
     entry = next(e for e in app_module.list_preauthorized(config) if e.email == email)
     assert entry.redeemed is True
 
