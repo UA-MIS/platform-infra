@@ -370,6 +370,23 @@ def issue_key(config: Config, email: str, team_id: str) -> str:
     {"team_id": ...}` 403s; without it, the same call succeeds in one
     step, same key string, team_id flips immediately.
     """
+    # Security review B1 hardening (2026-09-30): read the row's CURRENT
+    # key BEFORE calling LiteLLM, as the baseline for a compare-and-swap
+    # write below. This is the guard that stays correct even if
+    # _lock_for_email() is ever bypassed or stops mattering (a future
+    # --workers deployment, a second replica) -- sqlite arbitrates the
+    # CAS across ANY number of processes, the same way
+    # mark_preauthorized_redeemed()'s atomic claim does. The in-process
+    # lock remains the FIRST line of defense (it also avoids wasting a
+    # LiteLLM call on the side that's going to lose), but correctness no
+    # longer depends on it being read and respected by every future
+    # caller.
+    with closing(sqlite3.connect(config.db_path)) as conn:
+        row = conn.execute(
+            "SELECT litellm_key FROM keys WHERE email = ?", (email,)
+        ).fetchone()
+    previous_key = row[0] if row else None
+
     resp = httpx.post(
         f"{config.litellm_base_url}/key/generate",
         headers={"Authorization": f"Bearer {config.litellm_master_key}"},
@@ -385,38 +402,57 @@ def issue_key(config: Config, email: str, team_id: str) -> str:
     data = resp.json()
     key = data["key"]
     key_id = data.get("token_id") or data.get("key_name") or email
+
     with closing(sqlite3.connect(config.db_path)) as conn:
-        existing = conn.execute(
+        if previous_key is None:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO keys (email, litellm_key, key_id, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (email, key, key_id, time.time()),
+            )
+        else:
+            cur = conn.execute(
+                "UPDATE keys SET litellm_key = ?, key_id = ?, created_at = ? "
+                "WHERE email = ? AND litellm_key = ?",
+                (key, key_id, time.time(), email, previous_key),
+            )
+        conn.commit()
+        won = cur.rowcount == 1
+
+    if won:
+        return key
+
+    # LOST the race: some other caller's write landed between our read
+    # of `previous_key` above and this write -- normally impossible
+    # within one process (that's what _lock_for_email() is for), but
+    # this branch is what makes it impossible ACROSS processes too.
+    # Self-clean the key we just minted (it would otherwise be a real,
+    # live, ACTIVE-team, completely untracked orphan -- exactly the B1
+    # failure shape) rather than either silently clobbering the
+    # winner's row or leaving our own key dangling in LiteLLM. Best
+    # effort: a failure to delete here is logged, not raised -- the
+    # caller still gets a real, working, TRACKED key back either way.
+    try:
+        delete_resp = httpx.post(
+            f"{config.litellm_base_url}/key/delete",
+            headers={"Authorization": f"Bearer {config.litellm_master_key}"},
+            json={"keys": [key]},
+            timeout=15.0,
+        )
+        delete_resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        print(
+            f"WARNING: issue_key() lost a compare-and-swap race for "
+            f"{email} and failed to clean up the losing key: {exc}. "
+            f"That key may now be an ORPHAN in LiteLLM.",
+            file=sys.stderr,
+        )
+    with closing(sqlite3.connect(config.db_path)) as conn:
+        winner_row = conn.execute(
             "SELECT litellm_key FROM keys WHERE email = ?", (email,)
         ).fetchone()
-        if existing and existing[0] != key:
-            # Security review B1 (2026-09-30): INSERT OR REPLACE below
-            # would silently drop this row's OLD key from local
-            # tracking. If that old key is still active on some team in
-            # LiteLLM -- e.g. this call is racing another one for the
-            # same email, or a caller reaches issue_key() without going
-            # through _lock_for_email() first -- it becomes an ORPHAN:
-            # untracked here, invisible to list_issued_users()/`/admin`,
-            # and unreachable by demote_user() for the rest of its
-            # 365-day duration. issue_initial_key()/revoke_and_reissue()
-            # both serialize same-email calls with _lock_for_email() now
-            # specifically to keep this rare; if it fires, something is
-            # calling issue_key() outside that lock.
-            print(
-                f"WARNING: issue_key() is replacing the tracked key for "
-                f"{email} -- the previous key "
-                f"({existing[0][:12]}...) may now be an ORPHAN in "
-                f"LiteLLM: still valid there, no longer tracked locally, "
-                f"unreachable by demote_user().",
-                file=sys.stderr,
-            )
-        conn.execute(
-            "INSERT OR REPLACE INTO keys (email, litellm_key, key_id, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            (email, key, key_id, time.time()),
-        )
-        conn.commit()
-    return key
+    # winner_row must exist -- something won the write we just lost.
+    return winner_row[0]
 
 
 def get_current_team_id(config: Config, key: str) -> Optional[str]:
@@ -491,11 +527,25 @@ def team_grants_access(config: Config, team_id: Optional[str]) -> bool:
 # finding on this branch.
 #
 # This service runs as a single uvicorn process with no --workers flag
-# (see Dockerfile); Starlette/AnyIO dispatches sync `def` route handlers
-# to that ONE process's own threadpool, so a plain in-process Lock
-# genuinely serializes same-email requests -- it does not need to be a
+# (see the Dockerfile, which now says so explicitly above CMD);
+# Starlette/AnyIO dispatches sync `def` route handlers to that ONE
+# process's own threadpool, so a plain in-process Lock genuinely
+# serializes same-email requests -- it does not need to be a
 # distributed lock, and it does not block DIFFERENT emails' requests
 # from proceeding concurrently.
+#
+# Hardening (2026-09-30, same review, follow-up round): this lock is
+# NOT the only thing standing between a race and an orphaned key
+# anymore. issue_key()'s own write is now a compare-and-swap against
+# the row it read before calling LiteLLM -- that guard is arbitrated by
+# sqlite itself and stays correct across ANY number of processes, not
+# just within one. This lock remains valuable as the FIRST line of
+# defense (it also avoids wasting a LiteLLM call on the side that's
+# going to lose the race), and as the thing that makes the CAS's
+# losing branch vanishingly rare in normal operation -- but if someone
+# adds --workers or a second replica later without reading the
+# Dockerfile's warning, issue_key()'s CAS is what actually keeps this
+# correct, not this lock.
 # ---------------------------------------------------------------------------
 _EMAIL_LOCKS_GUARD = threading.Lock()
 _EMAIL_LOCKS: dict = {}

@@ -246,6 +246,73 @@ def test_issue_key_overwrites_existing_row_for_same_email(
     )
 
 
+def test_issue_key_cas_prevents_orphan_when_row_changes_mid_flight(
+    app_module, mocker, fake_response
+):
+    """Security review B1 hardening (2026-09-30): issue_key()'s final
+    write is a compare-and-swap against the row it read BEFORE calling
+    LiteLLM, arbitrated by sqlite itself -- a guard that stays correct
+    independent of _lock_for_email(), specifically so this doesn't
+    silently reopen if a future deployment ever runs more than one
+    process. Simulates that exact scenario directly, bypassing the
+    in-process lock entirely: the DB row changes to a DIFFERENT key
+    WHILE issue_key() is "waiting" on LiteLLM, as if a second process
+    had already won the race."""
+    import sqlite3
+    from contextlib import closing
+
+    config = app_module.CONFIG
+    email = "cas-race@crimson.ua.edu"
+    with mocker_seed_cache(app_module, config, email, "sk-casold"):
+        pass
+
+    delete_calls = []
+
+    def post_side_effect(url, **kwargs):
+        if url.endswith("/key/generate"):
+            # A "concurrent other process" wins the race and updates
+            # the row while THIS call is still "waiting" on LiteLLM.
+            with closing(sqlite3.connect(config.db_path)) as conn:
+                conn.execute(
+                    "UPDATE keys SET litellm_key = ? WHERE email = ?",
+                    ("sk-caswinner", email),
+                )
+                conn.commit()
+            return fake_response({"key": "sk-casloser"})
+        if url.endswith("/key/delete"):
+            delete_calls.append(kwargs["json"]["keys"][0])
+            return fake_response({"deleted_keys": kwargs["json"]["keys"]})
+        raise AssertionError(f"unexpected POST to {url}")
+
+    mocker.patch("app.httpx.post", side_effect=post_side_effect)
+    result = app_module.issue_key(config, email, config.students_team_id)
+
+    # The loser's freshly-minted key must be cleaned up, not left as a
+    # live, untracked orphan in LiteLLM.
+    assert "sk-casloser" in delete_calls
+    # The caller still gets back a real, TRACKED key -- the winner's,
+    # not the orphan -- so nobody is left without a working key.
+    assert result == "sk-caswinner"
+    assert app_module.get_cached_key(config.db_path, email) == "sk-caswinner"
+
+
+def test_issue_key_cas_first_time_issuance_still_wins_normally(
+    app_module, mocker, fake_response
+):
+    """Sanity check that the CAS logic doesn't break the ordinary,
+    non-racing first-issuance path (previous_key=None -> INSERT OR
+    IGNORE)."""
+    config = app_module.CONFIG
+    mocker.patch("app.httpx.post", return_value=fake_response({"key": "sk-casfirst"}))
+    key = app_module.issue_key(
+        config, "cas-first@crimson.ua.edu", config.pending_team_id
+    )
+    assert key == "sk-casfirst"
+    assert app_module.get_cached_key(config.db_path, "cas-first@crimson.ua.edu") == (
+        "sk-casfirst"
+    )
+
+
 # ---------------------------------------------------------------------------
 # get_current_team_id / team_grants_access -- verified against real
 # LiteLLM response shapes recorded live on the box, 2026-09-29:
@@ -1967,6 +2034,56 @@ def test_revoke_and_reissue_concurrent_calls_no_orphaned_active_key(
     # Whichever key is cached at the end is one of the two issued.
     final_cached = app_module.get_cached_key(config.db_path, email)
     assert final_cached in results
+
+
+def test_issue_initial_key_holds_lock_across_entire_body(
+    app_module, mocker, fake_response
+):
+    """Security review B1 hardening (2026-09-30): a refactor that
+    narrowed _lock_for_email()'s scope -- e.g. releasing it before the
+    LiteLLM call -- would silently reopen the race with no other test
+    failing, since the concurrency tests above only check the OUTCOME.
+    Assert the lock is actually HELD while the LiteLLM call happens, not
+    just that concurrent calls happen to produce the right result."""
+    config = app_module.CONFIG
+    email = "lock-scope-initial@crimson.ua.edu"
+    app_module.add_preauthorized_emails(config, email)
+    lock = app_module._lock_for_email(email)
+
+    def post_side_effect(url, **kwargs):
+        assert lock.locked(), "LiteLLM call happened OUTSIDE the per-email lock"
+        return fake_response({"key": "sk-lockscope"})
+
+    mocker.patch("app.httpx.post", side_effect=post_side_effect)
+    assert not lock.locked()
+    app_module.issue_initial_key(config, email)
+    assert not lock.locked()  # released afterward
+
+
+def test_revoke_and_reissue_holds_lock_across_entire_body(
+    app_module, mocker, fake_response
+):
+    config = app_module.CONFIG
+    email = "lock-scope-regen@crimson.ua.edu"
+    with mocker_seed_cache(app_module, config, email, "sk-lockold"):
+        pass
+    lock = app_module._lock_for_email(email)
+
+    def get_side_effect(url, **kwargs):
+        assert lock.locked(), "LiteLLM GET happened OUTSIDE the per-email lock"
+        return fake_response({"info": {"team_id": config.pending_team_id}})
+
+    def post_side_effect(url, **kwargs):
+        assert lock.locked(), "LiteLLM POST happened OUTSIDE the per-email lock"
+        if url.endswith("/key/delete"):
+            return fake_response({"deleted_keys": kwargs["json"]["keys"]})
+        return fake_response({"key": "sk-locknew"})
+
+    mocker.patch("app.httpx.get", side_effect=get_side_effect)
+    mocker.patch("app.httpx.post", side_effect=post_side_effect)
+    assert not lock.locked()
+    app_module.revoke_and_reissue(config, email)
+    assert not lock.locked()  # released afterward
 
 
 def test_index_preauthorized_first_login_is_active(
