@@ -301,11 +301,28 @@ else {
         }
         else {
             # Detect indentation of the first existing sequence item, if any.
+            #
+            # The capture group is '\s*', NOT '\s+': a sequence item under a
+            # mapping key may legitimately sit at ZERO indentation --
+            #
+            #   models:
+            #   - name: Something
+            #
+            # -- which is ordinary valid YAML and is what `yq` emits by
+            # default. With '\s+' that line did not match, $itemIndent kept
+            # its "  " default, and our entries went in at 2-space indent
+            # directly above the student's 0-space ones. A YAML block
+            # sequence cannot mix indentation, so the merged file DID NOT
+            # PARSE -- and this script still printed "Added the 'UA MIS
+            # Local' model..." and exited 0. The student lost their whole
+            # Continue config, not just our model, and had no reason to go
+            # looking for the .bak file. Silent, common, catastrophic.
+            # Pinned by test-setup-windows.ps1, scenario S3-merge-0space.
             $itemIndent = "  "
             for ($j = $modelsLineIdx + 1; $j -lt $lines.Count; $j++) {
                 $cl = $lines[$j]
                 if ($cl -match '^\s*$' -or $cl -match '^\s*#') { continue }
-                if ($cl -match '^(\s+)-\s') { $itemIndent = $Matches[1] }
+                if ($cl -match '^(\s*)-\s') { $itemIndent = $Matches[1] }
                 break
             }
 
