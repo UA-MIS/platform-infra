@@ -124,15 +124,18 @@ build_block() {
   # 99 of 120 total tokens on thinking alone, with reasoning left on).
   # A small maxTokens cap on a role that still has thinking enabled
   # truncates the model mid-thought, before it ever writes the real
-  # answer — worse than slow, actively broken. So:
-  #   - edit/apply turn thinking OFF (chat_template_kwargs.
-  #     enable_thinking: false) and get a small, fast cap — these are
-  #     the roles where waiting is most noticeable, and a code change
-  #     does not need deliberation to get right.
-  #   - chat and agent keep thinking ON and get a generous cap, sized
-  #     above the longest real answer observed, because truncating a
-  #     good explanation or a good multi-file plan is worse than making
-  #     someone wait for it.
+  # answer — worse than slow, actively broken. So every role below turns
+  # thinking OFF (chat_template_kwargs.enable_thinking: false).
+  #
+  # 2026-09-30 correction: thinking used to stay ON for chat/agent,
+  # reasoning that a good explanation or a good multi-file plan is
+  # worse to truncate than to wait for. That was inheriting the model's
+  # default and calling it a decision. The single-turn benchmark shows
+  # no quality difference worth the wait: off scored 41/54 versus
+  # xhigh's 39/54 (within noise), and low tracked off. Off is now the
+  # evidence-based default for every role; turning it back ON for a
+  # specific role is what would need new evidence, not the other way
+  # around.
   dash_indent="$1"
   key_to_print="${2:-${API_KEY}}"
   cont_indent="${dash_indent}  "
@@ -153,6 +156,10 @@ build_block() {
   printf '%s# "speed things up" -- it truncates good answers, not slow ones.\n' "${cont_indent}"
   printf '%sdefaultCompletionOptions:\n' "${cont_indent}"
   printf '%s  maxTokens: 4000\n' "${cont_indent}"
+  printf '%srequestOptions:\n' "${cont_indent}"
+  printf '%s  extraBodyProperties:\n' "${cont_indent}"
+  printf '%s    chat_template_kwargs:\n' "${cont_indent}"
+  printf '%s      enable_thinking: false\n' "${cont_indent}"
   printf '\n'
 
   printf '%s- name: UA MIS Local (Edit)\n' "${dash_indent}"
@@ -162,7 +169,7 @@ build_block() {
   printf '%sapiKey: %s\n' "${cont_indent}" "${key_to_print}"
   printf '%sroles: [edit, apply]\n' "${cont_indent}"
   printf '%s# Small and fast on purpose: a changed line or block, not a\n' "${cont_indent}"
-  printf '%s# tutorial. Thinking is turned OFF for this role (see\n' "${cont_indent}"
+  printf '%s# tutorial. Thinking is turned OFF for this role too (see\n' "${cont_indent}"
   printf '%s# requestOptions below) specifically so a small maxTokens cap\n' "${cont_indent}"
   printf '%s# lands on the actual rewritten code, not on the model'"'"'s\n' "${cont_indent}"
   printf '%s# hidden reasoning about the code. Measured real edit/apply\n' "${cont_indent}"
@@ -190,6 +197,10 @@ build_block() {
   printf '%s# deployment'"'"'s own hard backend ceiling (8192).\n' "${cont_indent}"
   printf '%sdefaultCompletionOptions:\n' "${cont_indent}"
   printf '%s  maxTokens: 8000\n' "${cont_indent}"
+  printf '%srequestOptions:\n' "${cont_indent}"
+  printf '%s  extraBodyProperties:\n' "${cont_indent}"
+  printf '%s    chat_template_kwargs:\n' "${cont_indent}"
+  printf '%s      enable_thinking: false\n' "${cont_indent}"
   printf '%s# Deliberately no "autocomplete" role on any of the three\n' "${cont_indent}"
   printf '%s# entries above: GitHub Copilot Free already handles inline\n' "${cont_indent}"
   printf '%s# completions well, and this shared GPU box should not spend\n' "${cont_indent}"

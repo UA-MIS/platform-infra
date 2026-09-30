@@ -85,6 +85,10 @@ guessing when your setup looks unusual — see
        roles: [chat]
        defaultCompletionOptions:
          maxTokens: 4000
+       requestOptions:
+         extraBodyProperties:
+           chat_template_kwargs:
+             enable_thinking: false
 
      - name: UA MIS Local (Edit)
        provider: openai
@@ -107,6 +111,10 @@ guessing when your setup looks unusual — see
        roles: [agent]
        defaultCompletionOptions:
          maxTokens: 8000
+       requestOptions:
+         extraBodyProperties:
+           chat_template_kwargs:
+             enable_thinking: false
    ```
 
    That's **three separate entries pointing at the same model** — not a
@@ -118,6 +126,12 @@ guessing when your setup looks unusual — see
    sized for that job. You'll still only see one option in each place you
    pick a model (the chat panel, an inline edit, agent mode) — Continue
    only offers the models that declare that role.
+
+   All three also turn the model's internal "thinking" off
+   (`chat_template_kwargs.enable_thinking: false`) — a measured
+   single-turn comparison found no quality difference worth the wait
+   (reasoning on scored about the same as reasoning off), so off is the
+   default for every role now, not just edit/apply.
 
    Deliberately no `autocomplete` role on any of the three: GitHub
    Copilot Free already handles inline completions well, and this

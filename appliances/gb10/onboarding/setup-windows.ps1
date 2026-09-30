@@ -113,15 +113,18 @@ function Build-Block {
     # tokens on thinking alone, with reasoning left on). A small
     # maxTokens cap on a role that still has thinking enabled truncates
     # the model mid-thought, before it ever writes the real answer --
-    # worse than slow, actively broken. So:
-    #   - edit/apply turn thinking OFF (chat_template_kwargs.
-    #     enable_thinking: false) and get a small, fast cap -- these are
-    #     the roles where waiting is most noticeable, and a code change
-    #     does not need deliberation to get right.
-    #   - chat and agent keep thinking ON and get a generous cap, sized
-    #     above the longest real answer observed, because truncating a
-    #     good explanation or a good multi-file plan is worse than
-    #     making someone wait for it.
+    # worse than slow, actively broken. So every role below turns
+    # thinking OFF (chat_template_kwargs.enable_thinking: false).
+    #
+    # 2026-09-30 correction: thinking used to stay ON for chat/agent,
+    # reasoning that a good explanation or a good multi-file plan is
+    # worse to truncate than to wait for. That was inheriting the
+    # model's default and calling it a decision. The single-turn
+    # benchmark shows no quality difference worth the wait: off scored
+    # 41/54 versus xhigh's 39/54 (within noise), and low tracked off.
+    # Off is now the evidence-based default for every role; turning it
+    # back ON for a specific role is what would need new evidence, not
+    # the other way around.
     param(
         [string]$DashIndent,
         [string]$KeyToPrint = $ApiKey
@@ -145,6 +148,10 @@ function Build-Block {
     $lines += "$contIndent" + '# "speed things up" -- it truncates good answers, not slow ones.'
     $lines += "$contIndent" + "defaultCompletionOptions:"
     $lines += "$contIndent" + "  maxTokens: 4000"
+    $lines += "$contIndent" + "requestOptions:"
+    $lines += "$contIndent" + "  extraBodyProperties:"
+    $lines += "$contIndent" + "    chat_template_kwargs:"
+    $lines += "$contIndent" + "      enable_thinking: false"
     $lines += ""
 
     $lines += "$DashIndent- name: UA MIS Local (Edit)"
@@ -154,7 +161,7 @@ function Build-Block {
     $lines += "$contIndent" + "apiKey: $KeyToPrint"
     $lines += "$contIndent" + "roles: [edit, apply]"
     $lines += "$contIndent" + '# Small and fast on purpose: a changed line or block, not a'
-    $lines += "$contIndent" + '# tutorial. Thinking is turned OFF for this role (see'
+    $lines += "$contIndent" + '# tutorial. Thinking is turned OFF for this role too (see'
     $lines += "$contIndent" + "# requestOptions below) specifically so a small maxTokens cap"
     $lines += "$contIndent" + "# lands on the actual rewritten code, not on the model's"
     $lines += "$contIndent" + "# hidden reasoning about the code. Measured real edit/apply"
@@ -182,6 +189,10 @@ function Build-Block {
     $lines += "$contIndent" + "# deployment's own hard backend ceiling (8192)."
     $lines += "$contIndent" + "defaultCompletionOptions:"
     $lines += "$contIndent" + "  maxTokens: 8000"
+    $lines += "$contIndent" + "requestOptions:"
+    $lines += "$contIndent" + "  extraBodyProperties:"
+    $lines += "$contIndent" + "    chat_template_kwargs:"
+    $lines += "$contIndent" + "      enable_thinking: false"
     $lines += "$contIndent" + '# Deliberately no "autocomplete" role on any of the three'
     $lines += "$contIndent" + '# entries above: GitHub Copilot Free already handles inline'
     $lines += "$contIndent" + '# completions well, and this shared GPU box should not spend'
