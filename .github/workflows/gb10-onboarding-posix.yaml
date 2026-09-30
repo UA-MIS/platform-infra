@@ -1,0 +1,158 @@
+# ============================================================================
+# gb10-onboarding-posix.yaml — EXECUTE appliances/gb10/onboarding/setup-macos-linux.sh
+#
+# ── WHAT THIS IS ────────────────────────────────────────────────────────────
+# The companion to gb10-onboarding-windows.yaml, for the other half of the
+# class. Same reason for existing, and the same result on its first run:
+# setup-macos-linux.sh had never been executed anywhere either, and it
+# carried the IDENTICAL defect the Windows script did.
+#
+# The item-indent detector used `[[:space:]]+`, which cannot match a
+# ZERO-indented sequence item -- ordinary valid YAML, and what `yq` emits
+# by default. Our entries went in at 2-space indent above the student's
+# 0-space ones, a YAML block sequence cannot mix indentation, and the
+# merged config.yaml DID NOT PARSE. The script printed "Added the 'UA MIS
+# Local' model to your existing 'models:' list" and exited 0 anyway, so a
+# student who already used Continue with another provider lost their whole
+# config with no reason to look for the .bak file. Fixed; pinned by
+# scenario S3-merge-0space.
+#
+# That is the argument for this job in one sentence: the same bug was in
+# both scripts, and eyes found it in neither.
+#
+# ── WHAT IT ACTUALLY DOES (not a lint) ──────────────────────────────────────
+# Runs the real script non-interactively (it takes the key positionally,
+# so no prompt is involved) and then PARSES the config.yaml it wrote,
+# asserting the three model entries, their roles, their per-role maxTokens,
+# `enable_thinking: false` as a real YAML boolean on all three, and the key
+# and endpoint landing in the right fields. Structural assertions are
+# shared with the Windows suite via assert-continue-config.py.
+#
+# A test checking only `exit 0` would pass against a script that destroyed
+# the file, which matters here more than usual because BOTH of this
+# script's real failure modes are silent.
+#
+# ── WHAT THIS JOB DOES NOT COVER (read before trusting it) ──────────────────
+# macOS ships **bash 3.2.57** as /bin/bash, and the README tells students
+# to run `bash setup-macos-linux.sh`. This job runs on ubuntu-latest, which
+# is bash 5.x. So it validates the Linux half of "macos-linux" and ASSUMES
+# the Mac half -- on the script whose primary audience is Mac students.
+#
+# The specific known exposure: the script runs under `set -u`, and bash 3.2
+# errors `unbound variable` on "${lines[@]}" for an empty array where 4.4+
+# expands it to nothing. Reachable via an empty existing config.yaml.
+# Unverified -- there is no bash 3.2 on the dev VM to check against.
+#
+# Closing that means a `macos-latest` matrix leg, which is free on a public
+# repo. Deliberately not added here: it is a scope decision, not a
+# technical one, and it is recorded so the next person does not mistake
+# this job's green for macOS coverage.
+#
+# ── WHY THERE IS NO NETWORK ─────────────────────────────────────────────────
+# The script's step 4 verifies the key against the real endpoint, and the
+# endpoint is HARDCODED -- no parameter, no env override. Rather than have
+# every PR fire a bogus-key request at production (and make this job's
+# result depend on production being up), the job points
+# local-llm.uamishub.com at 127.0.0.1 in /etc/hosts. Nothing listens there,
+# so the script takes its "could not reach the endpoint" branch, which it
+# treats as non-fatal and which the suite asserts on explicitly.
+#
+# Consequence, stated rather than hidden: the 200/401/403 key-verification
+# branches are NOT covered. Covering them needs an endpoint override in the
+# script, which is a behaviour change and somebody's decision.
+#
+# ── WHY THE MUTATION-CHECK JOB ──────────────────────────────────────────────
+# A CI job that passes against a broken script is worse than no job,
+# because it manufactures confidence. The second job deliberately breaks
+# the script five ways and verifies the suite catches each by tripping a
+# SPECIFIC named assertion, judged by the failures it ADDS over the
+# unmodified script's baseline so a real open defect cannot mask one.
+# ============================================================================
+name: gb10 onboarding (macOS/Linux)
+
+on:
+  pull_request:
+    paths:
+      - 'appliances/gb10/onboarding/**'
+      - '.github/workflows/gb10-onboarding-posix.yaml'
+  push:
+    branches: [main]
+    paths:
+      - 'appliances/gb10/onboarding/**'
+      - '.github/workflows/gb10-onboarding-posix.yaml'
+  workflow_dispatch:
+
+concurrency:
+  group: gb10-onboarding-posix-${{ github.ref }}
+  # Superseded PR pushes are worth cancelling; main history is not.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  execute:
+    name: execute setup-macos-linux.sh
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install the YAML parser the assertions use
+        run: |
+          # Pinned: this is the thing deciding whether a student's config
+          # parses, so it must not drift underneath the assertions.
+          python3 -m pip install --disable-pip-version-check --quiet pyyaml==6.0.2
+          python3 -c "import yaml; print('pyyaml', yaml.__version__)"
+          bash --version | head -n1
+
+      - name: Point the LLM endpoint at nowhere (keep CI off production)
+        run: |
+          # See the header: the endpoint is hardcoded in the script, so the
+          # only way to give it a dummy hostname without editing it is to
+          # resolve the real name locally. Nothing listens on 127.0.0.1:443,
+          # so the script takes its non-fatal "could not reach" branch.
+          echo '127.0.0.1 local-llm.uamishub.com' | sudo tee -a /etc/hosts > /dev/null
+
+          # Verify it took. If this silently failed we would be firing
+          # bogus-key requests at production on every PR, so it is fatal.
+          resolved="$(getent hosts local-llm.uamishub.com | awk '{print $1}' | head -n1)"
+          echo "local-llm.uamishub.com resolves to: ${resolved}"
+          if [ "${resolved}" != "127.0.0.1" ]; then
+            echo "hosts override did not take -- refusing to run against the real endpoint." >&2
+            exit 1
+          fi
+
+      - name: Run the execution suite
+        working-directory: appliances/gb10/onboarding
+        run: bash test-setup-macos-linux.sh --assert-endpoint-unreachable
+
+  mutation-check:
+    name: prove the suite catches a broken script
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install the YAML parser the assertions use
+        run: python3 -m pip install --disable-pip-version-check --quiet pyyaml==6.0.2
+
+      - name: Point the LLM endpoint at nowhere (keep CI off production)
+        run: |
+          echo '127.0.0.1 local-llm.uamishub.com' | sudo tee -a /etc/hosts > /dev/null
+          resolved="$(getent hosts local-llm.uamishub.com | awk '{print $1}' | head -n1)"
+          if [ "${resolved}" != "127.0.0.1" ]; then
+            echo "hosts override did not take -- refusing to run against the real endpoint." >&2
+            exit 1
+          fi
+
+      - name: Mutate the script five ways and require the suite to notice
+        working-directory: appliances/gb10/onboarding
+        run: |
+          # Each mutation names the assertion it MUST trip. A mutation that
+          # survives, or that only trips something unrelated, fails this job
+          # -- that is a gap in the assertions, not a pass.
+          bash test-setup-macos-linux.sh --mutation-check
