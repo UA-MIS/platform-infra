@@ -140,13 +140,30 @@ build_block() {
   key_to_print="${2:-${API_KEY}}"
   cont_indent="${dash_indent}  "
 
+  # Write the key as a SINGLE-QUOTED YAML scalar. Unquoted, a key
+  # containing " #" is truncated at the comment marker and one containing
+  # ": " breaks the mapping -- both SILENTLY, producing a valid-looking
+  # config.yaml, a wrong key, and a 401 the student has no way to
+  # diagnose. LiteLLM does not mint keys shaped like that today (sk- plus
+  # url-safe base64), so this is defence against a mis-paste or a future
+  # key format, and it costs two characters.
+  #
+  # Single quotes, not double: a single-quoted YAML scalar interprets no
+  # escape sequences, so a backslash in a key stays a backslash. The only
+  # thing needing escaping is a literal single quote, which is written by
+  # doubling it -- hence the sed.
+  #
+  # Matches setup-windows.ps1, which had and has the same defect and fix.
+  # Pinned by test-setup-macos-linux.sh, scenario S14-yaml-hostile-key.
+  yaml_key="'$(printf '%s' "${key_to_print}" | sed "s/'/''/g")'"
+
   printf '%s- name: UA MIS Local (Chat)\n' "${dash_indent}"
   printf '%sprovider: openai  # "openai" here means the OpenAI-compatible API protocol,\n' "${cont_indent}"
   printf '%s                  # NOT the OpenAI company. This talks only to our own\n' "${cont_indent}"
   printf '%s                  # local box, never to openai.com.\n' "${cont_indent}"
   printf '%smodel: %s\n' "${cont_indent}" "${MODEL_ID}"
   printf '%sapiBase: %s\n' "${cont_indent}" "${MODEL_ENDPOINT}"
-  printf '%sapiKey: %s\n' "${cont_indent}" "${key_to_print}"
+  printf '%sapiKey: %s\n' "${cont_indent}" "${yaml_key}"
   printf '%sroles: [chat]\n' "${cont_indent}"
   printf '%s# Generous on purpose: measured a real MIS 321-level question\n' "${cont_indent}"
   printf '%s# (write a C# method with a parameterized query) at ~1900\n' "${cont_indent}"
@@ -166,7 +183,7 @@ build_block() {
   printf '%sprovider: openai\n' "${cont_indent}"
   printf '%smodel: %s\n' "${cont_indent}" "${MODEL_ID}"
   printf '%sapiBase: %s\n' "${cont_indent}" "${MODEL_ENDPOINT}"
-  printf '%sapiKey: %s\n' "${cont_indent}" "${key_to_print}"
+  printf '%sapiKey: %s\n' "${cont_indent}" "${yaml_key}"
   printf '%sroles: [edit, apply]\n' "${cont_indent}"
   printf '%s# Small and fast on purpose: a changed line or block, not a\n' "${cont_indent}"
   printf '%s# tutorial. Thinking is turned OFF for this role too (see\n' "${cont_indent}"
@@ -188,7 +205,7 @@ build_block() {
   printf '%sprovider: openai\n' "${cont_indent}"
   printf '%smodel: %s\n' "${cont_indent}" "${MODEL_ID}"
   printf '%sapiBase: %s\n' "${cont_indent}" "${MODEL_ENDPOINT}"
-  printf '%sapiKey: %s\n' "${cont_indent}" "${key_to_print}"
+  printf '%sapiKey: %s\n' "${cont_indent}" "${yaml_key}"
   printf '%sroles: [agent]\n' "${cont_indent}"
   printf '%s# Largest cap of the four: multi-step, tool-calling agent work\n' "${cont_indent}"
   printf '%s# (MIS 421/521) legitimately needs the most room. Measured a\n' "${cont_indent}"

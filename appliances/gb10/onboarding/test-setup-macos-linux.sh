@@ -393,6 +393,23 @@ run_suite() {
   assert_eq "no-leading-blank" "does not leave a spurious blank line at the top" \
             "models:" "$(head -n1 "$RUN_CONFIG")"
 
+  # --- S14: a key containing YAML-significant punctuation -----------------
+  # apiKey is written into the file as a YAML scalar, so the quoting of that
+  # scalar decides whether the key survives. The two hazards, both SILENT:
+  # " #" starts a comment and truncates the key there, and ": " turns the
+  # value into a nested mapping. Either produces a valid-looking
+  # config.yaml, a wrong key, and a 401 the student cannot diagnose.
+  #
+  # LiteLLM does not mint keys shaped like this today (sk- plus url-safe
+  # base64), so this is defence against a mis-paste or a future key format
+  # rather than a live bug -- but it costs two characters to be right.
+  scenario='S14-yaml-hostile-key'
+  hostile="sk-abc #hash def: ghi 'jkl"
+  h="$(new_home)"
+  run_setup "$h" "$hostile"
+  assert_eq "exit" "exits 0 with a YAML-significant key" 0 "$RUN_EXIT"
+  assert_structure "$RUN_CONFIG" --key "$hostile" --expect-count 3
+
   printf '\n%d passed, %d failed.\n' "$pass_count" "$failures"
   [ "$failures" -eq 0 ] || return 1
   return 0
@@ -422,7 +439,8 @@ mutation_ids() {
     'M2-drop-enable-thinking-from-edit' '/thinking-UAMISLocalEdit$' ; printf '%s\t%s\n' \
     'M3-wrong-maxtokens-on-chat'        '/maxtok-UAMISLocalChat$' ; printf '%s\t%s\n' \
     'M4-clobber-existing-entries'       '/preserved-entry$' ; printf '%s\t%s\n' \
-    'M5-drop-apply-role-from-edit'      '/roles-UAMISLocalEdit$'
+    'M5-drop-apply-role-from-edit'      '/roles-UAMISLocalEdit$' ; printf '%s\t%s\n' \
+    'M6-unquote-the-apikey'             '^S14-yaml-hostile-key/apikey-'
 }
 
 mutation_why() {
@@ -432,6 +450,7 @@ mutation_why() {
     M3-*) echo 'Value regression: the Chat cap drops from 4000 to 2000, which truncates good answers. Valid YAML, right shape, wrong number.' ;;
     M4-*) echo "Data loss: the merge stops emitting the lines after the models: line, so a student's existing provider is silently deleted. Valid YAML, our entries all correct." ;;
     M5-*) echo 'Role regression: the Edit entry stops declaring apply, so Continue offers no model for Apply. Valid YAML.' ;;
+    M6-*) echo 'Silent truncation: the apiKey scalar goes back to being unquoted, so a key containing " #" is cut off at the comment marker. Valid YAML, wrong key, opaque 401.' ;;
   esac
 }
 
@@ -463,6 +482,10 @@ XEOF
   printf '%sroles: [edit, apply]\n' "${cont_indent}"
 XEOF
     ;;
+    M6-*) cat <<'XEOF'
+  yaml_key="'$(printf '%s' "${key_to_print}" | sed "s/'/''/g")'"
+XEOF
+    ;;
   esac
 }
 
@@ -486,6 +509,10 @@ XEOF
     ;;
     M5-*) cat <<'XEOF'
   printf '%sroles: [edit]\n' "${cont_indent}"
+XEOF
+    ;;
+    M6-*) cat <<'XEOF'
+  yaml_key="${key_to_print}"
 XEOF
     ;;
   esac
