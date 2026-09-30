@@ -115,6 +115,41 @@ never committed. See `.env.example` for the full list and who supplies
 each one. The Tailscale auth key is the one secret consumed outside
 compose entirely — by `tailscale up` directly (Task 3).
 
+## The portal serves the onboarding setup scripts (build context matters)
+
+`local-llm-keys.uamishub.com/setup/macos-linux` and `/setup/windows` hand
+the signed-in student the real script from `onboarding/` with **their own
+key already substituted into one line**, so there is no key to copy and no
+prompt to answer. Authenticated exactly like every other portal route
+(`verify_access_jwt`, never a trusted header), served as an `attachment`
+with `Cache-Control: no-store` — the response body is a bearer credential
+and Cloudflare sits in front of this service.
+
+Two operational consequences worth knowing before you build or debug:
+
+- **The keyportal image's build context is `appliances/gb10/`, not
+  `appliances/gb10/keyportal/`** (see `docker-compose.yml`), because the
+  Dockerfile must `COPY onboarding/` in alongside `app.py`. `docker build`
+  run from inside `keyportal/` will fail. Use
+  `docker compose build keyportal`, or
+  `docker build -f keyportal/Dockerfile .` from this directory.
+  `.dockerignore` here is deny-by-default so the widened context cannot
+  start shipping `.env` into a build layer.
+- **`app.py` refuses to start** if a setup script is missing from the
+  image or if its substitution marker line (`EMBEDDED_KEY=''` /
+  `$EmbeddedKey = ''`) has drifted. That is deliberate: it is a build-time
+  invariant, so a broken image restart-loops with a named error in
+  `docker compose logs keyportal` at deploy time, instead of 500-ing on a
+  student's download during a lab. The cost, stated plainly: this takes
+  the whole portal down, not just the download route.
+
+The scripts are read from `onboarding/`, never reimplemented inside
+`app.py`, so what the portal serves is byte-identical to what the
+`gb10-onboarding-*` CI jobs execute. Both of those suites now include a
+portal-embedded-key scenario (`S15`/`S16` posix, `S13`/`S14` Windows) plus
+a mutation that fails if the embedded key stops reaching the config, so
+the path students actually take is the path CI covers.
+
 ## Key storage (keyportal holds raw keys in plaintext — deliberately)
 
 `keyportal` stores every issued LiteLLM key **in the clear** in a sqlite

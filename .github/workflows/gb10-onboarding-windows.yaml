@@ -6,18 +6,34 @@
 # Continue (VS Code) at our local LLM endpoint. MIS 221 and 321 are
 # overwhelmingly Windows laptops, so it is the single most-executed script
 # this platform ships to end users — and until this workflow it had never
-# been EXECUTED anywhere. There is no PowerShell on the dev VM and none on
-# the appliance, so it had only ever been reviewed by eye, and it was
+# been EXECUTED anywhere: it had only ever been reviewed by eye, and it was
 # hand-edited twice on 2026-09-30 with no execution evidence at all.
 #
 # A quoting or indentation bug in it is not an edge case. It is most of a
 # class failing at step one of the first lab, in the first ten minutes,
 # with no instructor able to reproduce it.
 #
-# A GitHub-hosted `windows-latest` runner is the only validation path that
-# exists for this file. platform-infra is a PUBLIC repo, so those minutes
-# are free — unlike the rest of this repo's CI, which runs on the
-# self-hosted ARC scale sets, none of which are Windows.
+# ── THIS IS NOT THE ONLY VALIDATION PATH ANY MORE ───────────────────────────
+# This header used to say a GitHub-hosted `windows-latest` runner is the only
+# validation path that exists for this file, because there is no PowerShell
+# installed on the dev VM or the appliance. That was true of INSTALLATIONS
+# and false of what is possible: `mcr.microsoft.com/powershell:7.4-debian-12`
+# plus an `--add-host local-llm.uamishub.com:127.0.0.1` runs this suite
+# locally, and it is how the portal-served-key scenarios (S13/S14) were
+# developed and verified before this job ever saw them. The exact command is
+# in test-setup-windows.ps1's own .DESCRIPTION.
+#
+# Leaving the old claim in place was actively harmful: it told the next
+# person their only option was to push and wait, which is how two unexecuted
+# hand-edits shipped in the first place.
+#
+# What the container does NOT cover, and what this job is still for, is the
+# `powershell` (5.1) leg of the matrix below — see WHY TWO LAUNCHERS. A green
+# local pwsh-7 run is evidence about half the class, not all of it.
+#
+# platform-infra is a PUBLIC repo, so the Windows minutes here are free —
+# unlike the rest of this repo's CI, which runs on the self-hosted ARC scale
+# sets, none of which are Windows.
 #
 # ── WHAT IT ACTUALLY DOES (not a lint) ──────────────────────────────────────
 # It runs the real script, non-interactively, and then PARSES the
