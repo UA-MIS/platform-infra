@@ -42,9 +42,14 @@ from jwt import PyJWKClient
 # now the "read the manual / see the source" link, not the way a student
 # gets the script: since 2026-09-30 the portal SERVES the scripts itself,
 # with the student's key already in them (see SETUP_SCRIPTS below).
+# Points at main, NOT at a feature branch. This link is on every student's
+# page, so a branch name here goes stale the moment the branch merges or is
+# deleted -- it read `tree/gb10-appliance` until PR #696 landed on main
+# (2026-09-30), at which point it was one branch deletion away from being a
+# 404 in front of the whole class. Repoint this at a branch only for local
+# debugging, never in a commit.
 ONBOARDING_URL = (
-    "https://github.com/UA-MIS/platform-infra/tree/gb10-appliance"
-    "/appliances/gb10/onboarding"
+    "https://github.com/UA-MIS/platform-infra/tree/main/appliances/gb10/onboarding"
 )
 MODEL_NAME = "qwen3.8-27b"
 MODEL_ENDPOINT = "https://local-llm.uamishub.com/v1"

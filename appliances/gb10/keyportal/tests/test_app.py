@@ -4073,3 +4073,12 @@ def test_substitution_survives_a_crlf_checkout(app_module):
         assert f"{expected}\n" not in served.replace("\r\n", "\r")
         # Still exactly one line changed.
         assert served.count("\r\n") == crlf.count("\r\n")
+
+
+def test_onboarding_url_is_not_pinned_to_a_feature_branch(app_module):
+    """This URL is on every student's page. It read `tree/gb10-appliance`
+    until PR #696 landed, which put it one branch deletion away from being
+    a 404 in front of the whole class -- and nothing would have failed to
+    tell us. A branch name here is only ever right for local debugging."""
+    assert "/tree/main/" in app_module.ONBOARDING_URL
+    assert "gb10-appliance" not in app_module.ONBOARDING_URL
