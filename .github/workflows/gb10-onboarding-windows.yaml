@@ -63,10 +63,20 @@
 # them needs an endpoint override in the script, which is a behaviour
 # change and therefore somebody's decision, not this workflow's.
 #
+# ── IT ALREADY PAID FOR ITSELF ──────────────────────────────────────────────
+# The first execution of this script, ever, found a config-destroying bug:
+# the merge path could not match a ZERO-indented existing models list (valid
+# YAML, and what `yq` emits), so it wrote a config.yaml that DID NOT PARSE
+# while printing a success message and exiting 0 -- destroying the Continue
+# setup of any student who already used another provider. Fixed in the
+# commit after this one; pinned by scenario S3-merge-0space. A second,
+# quieter one followed: the apiKey scalar was unquoted, so a key containing
+# " #" was silently truncated (scenario S12-yaml-hostile-key).
+#
 # ── WHY THE MUTATION-CHECK JOB ──────────────────────────────────────────────
 # A CI job that passes against a broken script is worse than no job,
 # because it manufactures confidence. The second job deliberately breaks
-# the script five ways and verifies the suite catches each one by tripping
+# the script six ways and verifies the suite catches each one by tripping
 # a SPECIFIC named assertion — not merely by going red. Checked in rather
 # than done once by hand, so the assertions cannot quietly rot into
 # tautologies later.
@@ -180,7 +190,7 @@ jobs:
             throw "hosts override did not take -- refusing to run against the real endpoint."
           }
 
-      - name: Mutate the script five ways and require the suite to notice
+      - name: Mutate the script six ways and require the suite to notice
         shell: pwsh
         working-directory: appliances/gb10/onboarding
         run: |

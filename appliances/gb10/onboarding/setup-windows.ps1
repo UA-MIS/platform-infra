@@ -130,6 +130,22 @@ function Build-Block {
         [string]$KeyToPrint = $ApiKey
     )
     $contIndent = "$DashIndent  "
+
+    # Write the key as a SINGLE-QUOTED YAML scalar. Unquoted, a key
+    # containing " #" is truncated at the comment marker and one
+    # containing ": " breaks the mapping -- both SILENTLY, producing a
+    # valid-looking config.yaml, a wrong key, and a 401 the student has
+    # no way to diagnose. LiteLLM does not mint keys shaped like that
+    # today (sk- plus url-safe base64), so this is defence against a
+    # mis-paste or a future key format, and it costs two characters.
+    #
+    # Single quotes, not double: a single-quoted YAML scalar interprets
+    # no escape sequences, so a backslash in a key stays a backslash.
+    # The only thing it needs escaped is a literal single quote, which
+    # is written by doubling it.
+    # Pinned by test-setup-windows.ps1, scenario S12-yaml-hostile-key.
+    $yamlKey = "'" + ($KeyToPrint -replace "'", "''") + "'"
+
     $lines = @()
 
     $lines += "$DashIndent- name: UA MIS Local (Chat)"
@@ -138,7 +154,7 @@ function Build-Block {
     $lines += "$contIndent" + '                  # local box, never to openai.com.'
     $lines += "$contIndent" + "model: $ModelId"
     $lines += "$contIndent" + "apiBase: $ModelEndpoint"
-    $lines += "$contIndent" + "apiKey: $KeyToPrint"
+    $lines += "$contIndent" + "apiKey: $yamlKey"
     $lines += "$contIndent" + "roles: [chat]"
     $lines += "$contIndent" + '# Generous on purpose: measured a real MIS 321-level question'
     $lines += "$contIndent" + '# (write a C# method with a parameterized query) at ~1900'
@@ -158,7 +174,7 @@ function Build-Block {
     $lines += "$contIndent" + "provider: openai"
     $lines += "$contIndent" + "model: $ModelId"
     $lines += "$contIndent" + "apiBase: $ModelEndpoint"
-    $lines += "$contIndent" + "apiKey: $KeyToPrint"
+    $lines += "$contIndent" + "apiKey: $yamlKey"
     $lines += "$contIndent" + "roles: [edit, apply]"
     $lines += "$contIndent" + '# Small and fast on purpose: a changed line or block, not a'
     $lines += "$contIndent" + '# tutorial. Thinking is turned OFF for this role too (see'
@@ -180,7 +196,7 @@ function Build-Block {
     $lines += "$contIndent" + "provider: openai"
     $lines += "$contIndent" + "model: $ModelId"
     $lines += "$contIndent" + "apiBase: $ModelEndpoint"
-    $lines += "$contIndent" + "apiKey: $KeyToPrint"
+    $lines += "$contIndent" + "apiKey: $yamlKey"
     $lines += "$contIndent" + "roles: [agent]"
     $lines += "$contIndent" + '# Largest cap of the four: multi-step, tool-calling agent work'
     $lines += "$contIndent" + '# (MIS 421/521) legitimately needs the most room. Measured a'

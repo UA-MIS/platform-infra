@@ -510,6 +510,24 @@ Assert-Equal "exit" "exits 0 with a punctuation-heavy key" 0 $r.Exit
 $doc = Get-ParsedConfig "yaml" $r.Config
 Assert-OurThreeEntries $doc -Key $awkward
 
+# --- S12: a key containing YAML-significant punctuation ----------------
+# apiKey is written into the file as a YAML scalar, so the quoting of that
+# scalar decides whether the key survives. The two hazards, both SILENT:
+# " #" starts a comment and truncates the key at that point, and ": "
+# turns the value into a nested mapping. Either produces a valid-looking
+# config.yaml, a wrong key, and a 401 the student cannot diagnose.
+#
+# LiteLLM does not mint keys shaped like this today (sk- plus url-safe
+# base64), so this is defence against a mis-paste or a future key format
+# rather than a live bug -- but it costs two characters to be right.
+$script:scenario = 'S12-yaml-hostile-key'
+$hostileKey = "sk-abc #hash def: ghi 'jkl"
+$h = New-Home
+$r = Invoke-Setup -HomeDir $h -ApiKey $hostileKey
+Assert-Equal "exit" "exits 0 with a YAML-significant key" 0 $r.Exit
+$doc = Get-ParsedConfig "yaml" $r.Config
+Assert-OurThreeEntries $doc -Key $hostileKey
+
 Write-Host ""
 Write-Host "$($script:passes) passed, $($script:failures) failed."
 if ($script:failures -ne 0) { return 1 }
@@ -561,6 +579,13 @@ $MUTATIONS = @(
         Find   = '$lines += "$contIndent" + "roles: [edit, apply]"'
         Repl   = '$lines += "$contIndent" + "roles: [edit]"'
         Expect = '/roles-UAMISLocalEdit$'
+    },
+    @{
+        Id     = 'M6-unquote-the-apikey'
+        Why    = 'Silent truncation: the apiKey scalar goes back to being unquoted, so a key containing " #" is cut off at the comment marker. Valid YAML, wrong key, opaque 401.'
+        Find   = '$lines += "$contIndent" + "apiKey: $yamlKey"'
+        Repl   = '$lines += "$contIndent" + "apiKey: $KeyToPrint"'
+        Expect = '^S12-yaml-hostile-key/apikey-'
     }
 )
 
