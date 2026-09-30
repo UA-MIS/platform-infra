@@ -370,14 +370,28 @@ def test_claim_key_row_reclaims_a_stale_abandoned_claim(app_module):
     finalizing used to sit there FOREVER -- nothing ever cleared it.
     _claim_key_row() now treats a claim older than _CLAIM_TTL_SECONDS as
     abandoned and reclaims it directly, rather than making every future
-    caller lose to a claim that will never resolve."""
+    caller lose to a claim that will never resolve.
+
+    Security review round 5, audit finding, step 7 (2026-09-30): the
+    previous version computed `stale_at` AS `_CLAIM_TTL_SECONDS` (plus a
+    margin) before the current time -- so the input was defined relative
+    to whatever the constant currently says, not to a real-world
+    expectation of how stale is "clearly abandoned". Setting
+    _CLAIM_TTL_SECONDS to something absurd (31 years, say) would leave
+    this test passing, since `stale_at` would just become "31 years ago"
+    too -- the test would still be internally consistent with a broken
+    constant, proving only that the mechanism exists, not that the
+    THRESHOLD is anywhere near a sane value. Pinned to a literal 90
+    seconds instead: comfortably past the documented ~60s TTL today, and
+    a value that does NOT move if the constant does, so a future change
+    to an unreasonable TTL is exactly what this test would then catch."""
     import sqlite3
     import time as time_module
     from contextlib import closing
 
     config = app_module.CONFIG
     email = "old-stuck-claim@crimson.ua.edu"
-    stale_at = time_module.time() - app_module._CLAIM_TTL_SECONDS - 5
+    stale_at = time_module.time() - 90  # literal, NOT derived from _CLAIM_TTL_SECONDS
     with closing(sqlite3.connect(config.db_path)) as conn:
         conn.execute(
             "INSERT INTO keys (email, litellm_key, key_id, created_at) "
