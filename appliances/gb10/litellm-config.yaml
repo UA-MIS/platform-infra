@@ -1,0 +1,67 @@
+model_list:
+  # The raw backend model, talking to vLLM directly over the shared
+  # network namespace with litellm. ungraded's key is pinned to exactly
+  # this name — see Task 8 — and it never resolves through the router.
+  - model_name: qwen3.8-27b-base
+    litellm_params:
+      model: openai/Inferact/Qwen3.8-27B-NVFP4
+      api_base: http://vllm:8000/v1
+      api_key: "not-needed"
+    model_info:
+      mode: chat
+      # max_tokens in model_info is the max OUTPUT tokens, NOT the context
+      # window. Setting it to the full 32768 (= vLLM --max-model-len) made
+      # LiteLLM compute available input as 32768-32768=0 and reject every
+      # request with ContextWindowExceededError. Split it explicitly.
+      max_input_tokens: 24576
+      max_output_tokens: 8192
+
+  # The public alias students/Continue actually call. Round-3 decision
+  # (2026-09-30): this used to route through auto_router/complexity_router
+  # in shadow mode (log-don't-route -- every tier resolved to the SAME
+  # base model, so there was never a second model to actually route to,
+  # only a heuristic score (D8) getting logged). Removed: confirmed live,
+  # by direct A/B against vLLM, that the router silently dropped
+  # max_tokens/max_completion_tokens specifically through this alias --
+  # a `stop` sequence passed through the identical alias correctly,
+  # which isolates this to the router, not a general parameter-
+  # forwarding bug. That defeated per-role Continue maxTokens
+  # (appliances/gb10/onboarding/) entirely: the config looked correct
+  # but had zero effect on student-visible latency. The router's own
+  # motivating premise didn't hold up under measurement either --
+  # reasoning off beat reasoning xhigh on both pass rate and speed, and
+  # the apparent case for model-switching turned out to be a prompt-
+  # context artifact -- so it was already a feature looking for a
+  # justification before it turned out to actively break the one
+  # control that matters for student latency. Points directly at the
+  # base model now, identically to qwen3.8-27b-base above (same
+  # backend, same model_info) -- there is no router to lose D8's
+  # heuristic scorer or its logging FROM; both are simply gone.
+  - model_name: qwen3.8-27b
+    litellm_params:
+      model: openai/Inferact/Qwen3.8-27B-NVFP4
+      api_base: http://vllm:8000/v1
+      api_key: "not-needed"
+    model_info:
+      mode: chat
+      # Same split as qwen3.8-27b-base above, same reason: max_tokens in
+      # model_info is max OUTPUT tokens, not the context window.
+      max_input_tokens: 24576
+      max_output_tokens: 8192
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+  disable_spend_logs: false
+  store_prompts_in_spend_logs: false   # safe default for everyone; ungraded's
+                                        # key additionally sets disable_logging
+                                        # in its own metadata (Task 8) as a
+                                        # second, key-specific guarantee.
+
+litellm_settings:
+  callbacks: ["prometheus"]
+  require_auth_for_metrics_endpoint: false   # /metrics is only reachable via
+                                              # the docker network + loopback
+                                              # publish, never public — see
+                                              # Task 13's scrape config.
+  drop_params: true

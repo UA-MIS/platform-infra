@@ -1,0 +1,23 @@
+# appliances/gb10/deploy/gb10-appliance.service
+# Governs the docker-compose workload stack ONLY. Deliberately has no
+# ordering relationship to tailscaled.service — see Task 4's rationale
+# for why the ops plane must not depend on this unit, or vice versa.
+[Unit]
+Description=GB10 local LLM appliance (docker compose)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/gb10-appliance-repo/appliances/gb10
+EnvironmentFile=/opt/gb10-appliance-repo/appliances/gb10/.env
+ExecStartPre=/opt/gb10-appliance-repo/appliances/gb10/render-config.sh
+ExecStart=/usr/bin/docker compose --env-file /opt/gb10-appliance-repo/appliances/gb10/.env --env-file /opt/gb10-appliance-repo/appliances/gb10/versions.env up -d --remove-orphans
+ExecStop=/usr/bin/docker compose --env-file /opt/gb10-appliance-repo/appliances/gb10/.env --env-file /opt/gb10-appliance-repo/appliances/gb10/versions.env down
+TimeoutStartSec=120
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

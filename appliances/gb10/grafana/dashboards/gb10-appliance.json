@@ -1,0 +1,109 @@
+{
+  "title": "GB10 Appliance",
+  "uid": "gb10-appliance",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Targets Up",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 0 },
+      "targets": [{ "expr": "up", "legendFormat": "{{job}}" }]
+    },
+    {
+      "id": 2,
+      "title": "GPU Temperature (GUESSED metric name — verify before trusting)",
+      "description": "Uses nvidia_smi_temperature_gpu, which was never observed on a running nvidia_gpu_exporter — see appliances/gb10/deploy/observability-verification.md. If this panel shows 'No data', the real metric name differs; check the exporter's own /metrics output and fix this query plus prometheus/alert-rules.yml together. Measured operating range on this box (nvidia-smi direct, 2026-09-29): idle ~40-51C, load ~62C.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "targets": [
+        { "expr": "nvidia_smi_temperature_gpu", "legendFormat": "GPU temp (C)" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "celsius" }, "overrides": [] }
+    },
+    {
+      "id": 3,
+      "title": "vLLM KV Cache Usage",
+      "description": "Confirmed live metric (vllm:kv_cache_usage_perc, gauge, 0-1) as of 2026-09-29. Substitutes for GPU-memory-percentage on this hardware — nvidia-smi reports memory.used/memory.total as N/A on this GB10's unified-memory architecture, so this is the real capacity-ceiling signal (design doc S9.3).",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "targets": [
+        { "expr": "vllm:kv_cache_usage_perc", "legendFormat": "KV cache usage" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1, "min": 0 }, "overrides": [] }
+    },
+    {
+      "id": 4,
+      "title": "LiteLLM In-Flight Requests",
+      "description": "Confirmed live metric (litellm_in_flight_requests, gauge) as of 2026-09-29.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "targets": [
+        { "expr": "sum(litellm_in_flight_requests)", "legendFormat": "in-flight" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Output Tokens/sec (all requests)",
+      "description": "Confirmed live metric (litellm_output_tokens_metric_total, counter) as of 2026-09-29.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "targets": [
+        { "expr": "sum(rate(litellm_output_tokens_metric_total[5m]))", "legendFormat": "output tok/s" }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Request Latency p95 (end to end)",
+      "description": "Confirmed live metric (litellm_request_total_latency_metric, TYPE histogram) as of 2026-09-29.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(litellm_request_total_latency_metric_bucket[5m])) by (le))",
+          "legendFormat": "p95 latency"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "id": 7,
+      "title": "Failed Requests/sec",
+      "description": "Confirmed live metric (litellm_proxy_failed_requests_metric_total, counter) as of 2026-09-29 — no samples existed at read time (nothing had failed yet), but the HELP/TYPE lines are present.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "targets": [
+        { "expr": "sum(rate(litellm_proxy_failed_requests_metric_total[5m]))", "legendFormat": "failed req/s" }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Per-Team Spend vs Budget",
+      "description": "Confirmed live metrics (litellm_spend_metric_total, litellm_remaining_team_budget_metric, litellm_team_max_budget_metric — all labeled by team/team_alias) as of 2026-09-29. D11 makes team membership the access-control boundary, so this is the operator's view of who is close to being cut off.",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 16, "x": 0, "y": 28 },
+      "targets": [
+        { "expr": "sum(litellm_spend_metric_total) by (team_alias)", "legendFormat": "{{team_alias}} spend", "format": "table", "instant": true },
+        { "expr": "litellm_remaining_team_budget_metric", "legendFormat": "{{team_alias}} remaining", "format": "table", "instant": true },
+        { "expr": "litellm_team_max_budget_metric", "legendFormat": "{{team_alias}} max", "format": "table", "instant": true }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Root Filesystem Free %",
+      "description": "Standard node_exporter metric names (node_filesystem_avail_bytes / node_filesystem_size_bytes, mountpoint label) — not deployed/observed by this author, but these are long-stable node_exporter conventions. Spot-check the mountpoint label once node-exporter is actually running (see observability-verification.md). Disk was 3.6TB, 4% used (133G), 25GB of that in the HF model cache, as of 2026-09-29.",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 28 },
+      "targets": [
+        {
+          "expr": "node_filesystem_avail_bytes{mountpoint=\"/\",fstype!~\"tmpfs|overlay\"} / node_filesystem_size_bytes{mountpoint=\"/\",fstype!~\"tmpfs|overlay\"}",
+          "legendFormat": "free %"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1, "min": 0 }, "overrides": [] }
+    }
+  ]
+}

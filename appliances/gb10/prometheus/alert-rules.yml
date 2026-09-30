@@ -1,0 +1,191 @@
+# appliances/gb10/prometheus/alert-rules.yml
+#
+# HONESTY NOTE (read before trusting any GPU-labeled alert here): these rules
+# were authored without ever deploying nvidia-gpu-exporter — I do not own
+# docker-compose.yml and was told not to run `docker compose` on this box.
+# Every metric name below is annotated CONFIRMED (I read it directly off a
+# running /metrics endpoint on the box on 2026-09-29) or GUESSED (inferred
+# from the exporter's documented field-name convention, never observed).
+# See appliances/gb10/deploy/observability-verification.md for the exact
+# command the integrator must run, and what to do if a GUESSED name is wrong.
+#
+# What changed vs. the original plan draft, and why:
+#
+# 1. GPU memory metrics are almost certainly NOT going to exist on this box.
+#    `nvidia-smi --query-gpu=memory.used,memory.total` returns `[N/A]` for
+#    both fields on this GB10 (confirmed live, 2026-09-29) — Grace Blackwell's
+#    unified CPU/GPU memory means the discrete "VRAM used/total" NVML query
+#    nvidia_gpu_exporter relies on isn't populated the way it is on a normal
+#    discrete GPU. nvidia_gpu_exporter builds its metric set dynamically from
+#    whatever nvidia-smi fields come back non-N/A, so `nvidia_smi_memory_used_bytes`
+#    / `nvidia_smi_memory_total_bytes` will most likely simply not appear in
+#    its /metrics output at all on this box. The plan's original
+#    `GB10GPUMemoryCritical` rule (used-fraction > 0.95) is DROPPED here
+#    rather than shipped broken-by-construction against metrics that don't
+#    exist.
+#
+# 2. In its place: two GPU temperature alerts (CONFIRMED field —
+#    `nvidia-smi --query-gpu=temperature.gpu` returned a real value, 51°C, at
+#    the time this was written) and a vLLM-native KV-cache-usage alert
+#    (CONFIRMED metric — `vllm:kv_cache_usage_perc` is a real HELP/TYPE entry
+#    on the running vllm container's own /metrics, gauge, 0.0-1.0). The
+#    design doc (§9.3) asks to watch "GPU memory utilization (capacity
+#    ceiling)" — on this hardware, vLLM's own KV-cache occupancy is the
+#    metric that actually answers that question, since the GPU-side memory
+#    query doesn't work here. Temperature matters independently: this is a
+#    fanless-ish appliance destined for a professor's office (team-lead
+#    brief) — idle was measured around 40-51°C at ~13-26W, load hit 62°C.
+#    nvidia-smi's own "T.Limit Temp" fields (44C, and 0C for "Max Operating")
+#    on this box look unpopulated/unreliable (the reported 44C limit is
+#    already below the 51C idle reading, which cannot be right), so
+#    thresholds below are fixed values grounded in the measured operating
+#    envelope, not derived from the GPU's self-reported limits.
+#
+# 3. vLLM's cold start is ~9 minutes on this box's current config
+#    (max-model-len=262144, per the team-lead brief, 2026-09-29 — the design
+#    doc's §5.1 benchmark figure of ~7 minutes was measured at a shorter
+#    context length and is now stale for this deployment). The "for:"
+#    duration below is set off the more current 9-minute figure, not the
+#    design doc's 7-minute one.
+#
+groups:
+  - name: gb10-appliance
+    rules:
+      # ---- Availability ----------------------------------------------
+
+      # Excludes vllm (job label) — it gets its own, much longer, tolerance
+      # below because a sub-9-minute healthcheck/alert against it will fire
+      # on every legitimate restart. CONFIRMED: `up` is a built-in Prometheus
+      # metric, not exporter-dependent.
+      - alert: GB10TargetDown
+        expr: up{job!="vllm"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }} target down on GB10 appliance"
+          description: "{{ $labels.job }} ({{ $labels.instance }}) has been down for 5 minutes."
+
+      # vLLM cold start is ~9 minutes (CUDA graph capture, MTP init) at this
+      # box's current --max-model-len=262144. 15m tolerance = ~9min + a
+      # margin, so a normal restart never pages anyone; anything still down
+      # at 15m is a real failure, not a boot in progress.
+      - alert: GB10VLLMDown
+        expr: up{job="vllm"} == 0
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "vLLM has been unreachable for 15+ minutes"
+          description: "Cold start on this box is ~9 minutes (max-model-len=262144, MTP speculative decoding). 15+ minutes down is longer than any observed legitimate boot and likely means a real failure (OOM, crash-loop, GPU fault) — check `docker logs gb10-vllm` before assuming this is just a slow restart."
+
+      # ---- GPU thermal (fanless-ish appliance, office deployment) -----
+
+      # GUESSED metric name: `nvidia_smi_temperature_gpu`, inferred from
+      # nvidia_gpu_exporter's documented convention of mapping the
+      # `temperature.gpu` nvidia-smi query field to `nvidia_smi_<field>`.
+      # NEVER OBSERVED on a running exporter. MUST be verified before this
+      # rule is trusted — see observability-verification.md.
+      - alert: GB10GPUTemperatureWarning
+        expr: nvidia_smi_temperature_gpu > 75
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "GB10 GPU temperature above 75°C"
+          description: "Measured operating range on this box: idle ~40-51°C, load ~62°C. 75°C+ for 5 minutes is well above anything observed and is worth a look, especially once the box is in an enclosed office rather than open air."
+
+      - alert: GB10GPUTemperatureCritical
+        expr: nvidia_smi_temperature_gpu > 85
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "GB10 GPU temperature above 85°C"
+          description: "85°C+ for 2 minutes on a fanless-ish appliance is a thermal-runaway signal — check airflow/enclosure and consider a manual shutdown if it keeps climbing."
+
+      # CONFIRMED metric: vllm:kv_cache_usage_perc, gauge, 0.0-1.0 range,
+      # read directly from a running vllm container's /metrics on 2026-09-29.
+      # This is the real substitute for "GPU memory utilization" on hardware
+      # where nvidia-smi doesn't report discrete memory.used/memory.total
+      # (see file header) — it is vLLM's own view of how full its KV cache
+      # pool is, which is the actual capacity ceiling the design doc (§9.3)
+      # cares about.
+      - alert: GB10VLLMKVCacheHigh
+        expr: vllm:kv_cache_usage_perc > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "vLLM KV cache usage above 90%"
+          description: "KV cache pool has been above 90% utilized for 5 minutes. This is the live capacity ceiling (spec D7/§8) — consider tightening per-team rpm/tpm/max_parallel_requests limits (a live LiteLLM policy change, not a vLLM restart) rather than assuming this needs a --gpu-memory-utilization change."
+
+      # ---- LiteLLM: concurrency, errors, budget ------------------------
+
+      # CONFIRMED metric: litellm_in_flight_requests, gauge, read directly
+      # from the running litellm container's /metrics on 2026-09-29.
+      - alert: GB10LiteLLMHighConcurrency
+        expr: sum(litellm_in_flight_requests) > 25
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "LiteLLM in-flight request count above 25"
+          description: "In-flight requests have been above 25 for 2 minutes, approaching the measured n=20 benchmark envelope (design doc §5.1). Consider tightening per-team rpm/max_parallel_requests limits (D7 — a live LiteLLM policy change, not a vLLM restart)."
+
+      # CONFIRMED metric: litellm_proxy_failed_requests_metric_total, counter.
+      # HELP/TYPE lines present on the running litellm container's /metrics
+      # on 2026-09-29 ("Total number of failed responses from proxy - the
+      # client did not get a success response from litellm proxy"); no
+      # samples existed yet at read time because nothing had failed. Counter
+      # semantics confirmed (`_total` suffix, TYPE counter), the alert logic
+      # below does not depend on any sample having existed yet.
+      - alert: GB10LiteLLMRequestErrors
+        expr: increase(litellm_proxy_failed_requests_metric_total[10m]) > 5
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 5 failed LiteLLM proxy requests in 10 minutes"
+          description: "{{ $value }} failed responses (client never got a success response from the LiteLLM proxy) in the last 10 minutes. Check `docker compose logs litellm` and `docker compose logs vllm` for the underlying cause."
+
+      # CONFIRMED metric pair: litellm_remaining_team_budget_metric and
+      # litellm_team_max_budget_metric, both gauges labeled by team/team_alias,
+      # read directly from the running litellm container's /metrics on
+      # 2026-09-29 (sample seen: team_alias="faculty", max_budget=200.0,
+      # remaining=200.0). D11 makes team membership the access-control
+      # boundary, so a team running out of budget is a real "someone is about
+      # to get cut off" signal, not just a billing curiosity.
+      # NaN-safety: for a team with max_budget=0 (e.g. `pending`, which by
+      # design gets none), this divides 0/0 = NaN, and `NaN < 0.1` evaluates
+      # false in PromQL — so pending's permanently-zero budget never
+      # spuriously fires this alert.
+      - alert: GB10TeamBudgetNearLimit
+        expr: (litellm_remaining_team_budget_metric / litellm_team_max_budget_metric) < 0.1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Team {{ $labels.team_alias }} has less than 10% of its budget remaining"
+          description: "Team {{ $labels.team_alias }} ({{ $labels.team }}) has {{ $value | humanizePercentage }} of its LiteLLM spend budget left. Members will start getting budget-exceeded errors soon if this isn't raised or reset."
+
+      # ---- Disk (silent-failure risk) ----------------------------------
+
+      # Standard node_exporter metric names/labels (node_filesystem_avail_bytes,
+      # node_filesystem_size_bytes, mountpoint label) — these are stable,
+      # long-documented node_exporter conventions, not a guess in the same
+      # sense as the GPU metrics above, but node-exporter has likewise never
+      # actually been deployed on this box by me, so the mountpoint label
+      # value for the root filesystem should still be spot-checked once it's
+      # up (see observability-verification.md). Models are ~25GB in
+      # /home/uamis/.cache/huggingface on a 3.6TB disk (4% used, confirmed
+      # live 2026-09-29) — not urgent today, but per the team-lead brief, a
+      # silently filling disk kills the appliance with no other symptom.
+      - alert: GB10DiskSpaceLow
+        expr: (node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|overlay"}) < 0.10
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "GB10 root filesystem below 10% free"
+          description: "Root filesystem has had less than 10% free space for 30 minutes. At last check (2026-09-29) the disk was 3.6TB with only 133G used (4%), so this firing means something changed significantly — check for runaway logs, spend_logs growth in Postgres, or an unexpected model download."

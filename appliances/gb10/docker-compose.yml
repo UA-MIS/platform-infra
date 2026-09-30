@@ -1,0 +1,253 @@
+name: gb10-appliance
+
+services:
+  postgres:
+    image: ${POSTGRES_DIGEST}
+    container_name: gb10-postgres
+    environment:
+      - POSTGRES_USER=litellm
+      - POSTGRES_PASSWORD=${PG_PASSWORD}
+      - POSTGRES_DB=litellm
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litellm -d litellm"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  vllm:
+    image: ${VLLM_DIGEST}
+    container_name: gb10-vllm
+    # NOT network_mode: service:litellm. vLLM takes ~9 minutes to cold start
+    # (CUDA graph capture); litellm restarts in seconds. Sharing litellm's
+    # netns made the expensive container a dependent of the cheap one, so a
+    # litellm config change orphaned vLLM networking and cost a 9-minute
+    # outage to recover. They talk over compose service DNS instead.
+    ports:
+      - "127.0.0.1:8000:8000"   # loopback only; bench harness + local debug
+    ipc: host
+    volumes:
+      - /home/uamis/.cache/huggingface:/root/.cache/huggingface
+      # 2026-09-30: without this, /root/.cache/vllm (torch.compile's AOT
+      # cache and FlashInfer's autotune cache) lives only in the
+      # container's writable layer, discarded every time the container
+      # is RECREATED (not merely restarted) -- confirmed live: enabling
+      # gb10-appliance.service made `docker compose up` create fresh
+      # containers on every boot instead of starting existing stopped
+      # ones, and a boot that had to regenerate both caches measured
+      # ~145s slower (41.2s torch.compile + ~104s FlashInfer autotune,
+      # vLLM's own logs) than one that didn't. A NAMED volume, not a
+      # host bind mount like the HuggingFace cache above: this
+      # container runs as root, and a bind mount would inherit host
+      # directory ownership in a way a named volume avoids -- the
+      # HuggingFace bind is a precedent for a PRE-EXISTING host
+      # directory the owner already manages outside Docker, which this
+      # is not. Safe to keep warm across a version bump: vLLM namespaces
+      # this cache by its own version internally (the actual path
+      # includes e.g. `0.6.18.post1/...`), so upgrading vLLM does not
+      # read a stale cache from an older version -- this is not a
+      # cache-invalidation hazard, so resist the urge to delete this
+      # volume "just to be safe" on a future upgrade.
+      - vllm-cache:/root/.cache/vllm
+    command:
+      - "--model=Inferact/Qwen3.8-27B-NVFP4"
+      - "--tensor-parallel-size=1"
+      # 262144 is the model's native context window. max-model-len is a
+      # CEILING, not a reservation: vLLM (PagedAttention) allocates KV
+      # blocks on demand, so a small request costs the same whether this
+      # is 32k or 262k. Raising it does NOT reduce concurrency for normal
+      # requests — it only lets one large request grow bigger. Primary
+      # workload is real in-project coding help, where 32k truncated on
+      # realistic multi-file context.
+      - "--max-model-len=262144"
+      - "--kv-cache-dtype=fp8"
+      - "--gpu-memory-utilization=0.75"
+      - "--reasoning-parser=qwen3"
+      # DFlash2: block-diffusion drafter, LOSSLESS (greedy output matches the
+      # target model exactly). Upstream vLLM since PR #52816 (merged 2026-08-21).
+      # Published vs MTP on coding: HumanEval 3.11x vs 2.20x, MBPP 3.29x vs 2.22x.
+      - "--speculative-config={\"method\":\"dflash\",\"model\":\"incoai/Qwen3.8-27B-DFlash2\",\"num_speculative_tokens\":7}"
+      # Required for Continue Agent mode / any tool-calling client.
+      # Without these vLLM returns tool calls as prose, the client fails
+      # to parse them, and it retry-loops. Per the vLLM recipe for this model.
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser=qwen3_xml"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    # No Docker healthcheck: cold start is ~7 minutes (CUDA graph capture).
+    # A healthcheck with any sane interval/retries would restart-loop the
+    # container before it ever finishes booting. Readiness is verified by
+    # Task 16/17's own curl-based checks, not by Docker's own restart logic.
+
+  litellm:
+    image: ${LITELLM_DIGEST}
+    container_name: gb10-litellm
+    ports:
+      - "127.0.0.1:4000:4000"
+    environment:
+      - DATABASE_URL=postgresql://litellm:${PG_PASSWORD}@postgres:5432/litellm
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+    volumes:
+      - ./litellm-config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  keyportal:
+    # Task 12 (D11): student/faculty self-service key portal, served at
+    # local-llm-keys.uamishub.com via the cloudflared service above (that
+    # hostname's ingress route already points at keyportal:8080; no
+    # cloudflared config change needed here). Verifies the Cloudflare
+    # Access JWT itself (see keyportal/app.py's verify_access_jwt) rather
+    # than trusting the Cf-Access-Authenticated-User-Email header, so it
+    # stays safe even if cloudflared's ingress is ever hand-edited to add
+    # a stray public route.
+    build:
+      context: ./keyportal
+      dockerfile: Dockerfile
+    image: gb10-keyportal:local
+    container_name: gb10-keyportal
+    environment:
+      - LITELLM_BASE_URL=http://litellm:4000
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+      - PENDING_TEAM_ID=${PENDING_TEAM_ID}
+      # STUDENTS_TEAM_ID/FACULTY_TEAM_ID/ADMIN_EMAILS added by the admin
+      # UI + roster pre-authorization work (security review F1,
+      # 2026-09-30): app.py's load_config() now hard-requires all three
+      # via _require_env -- this compose file's `environment:` list is
+      # an explicit allowlist, so a value present in .env does NOT reach
+      # the container unless it is named here too. Before this fix, the
+      # container failed at import (RuntimeError, restart-loop) with
+      # ANY of the three missing, which took down GET / for every
+      # eligible student, not just /admin.
+      - STUDENTS_TEAM_ID=${STUDENTS_TEAM_ID}
+      - FACULTY_TEAM_ID=${FACULTY_TEAM_ID}
+      - CF_ACCESS_TEAM_DOMAIN=${CF_ACCESS_TEAM_DOMAIN}
+      # CF_ACCESS_AUD_KEYPORTAL is filled from the Cloudflare Zero Trust
+      # dashboard (Access > Applications > local-llm-keys.uamishub.com).
+      # app.py refuses to start (fails loudly, container restart-loops)
+      # if this is blank rather than silently skipping JWT verification.
+      - CF_ACCESS_AUD=${CF_ACCESS_AUD_KEYPORTAL}
+      - ALLOWED_EMAIL_SUFFIXES=@crimson.ua.edu,@ua.edu
+      - ADMIN_CONTACT=${ADMIN_CONTACT}
+      # Comma-separated UA emails allowed onto /admin -- same
+      # fail-loudly-if-blank contract as CF_ACCESS_AUD (see
+      # require_admin()/_load_admin_emails() in app.py). Real values are
+      # the owner's to set in .env at deploy time.
+      - ADMIN_EMAILS=${ADMIN_EMAILS}
+      # The portal's real external hostname, for the same-origin CSRF
+      # check on state-changing POSTs (security review F5/B2,
+      # 2026-09-30) -- see verify_same_origin() in app.py. Deliberately
+      # a real required var, not derived from the Host header the
+      # container sees (which reflects internal tunnel routing, not the
+      # portal's real identity, and which an attacker controls anyway).
+      - KEYPORTAL_HOSTNAME=${KEYPORTAL_HOSTNAME}
+    volumes:
+      - keyportal-data:/data
+    depends_on:
+      - litellm
+    restart: unless-stopped
+
+  cloudflared:
+    image: ${CLOUDFLARED_DIGEST}
+    container_name: gb10-cloudflared
+    command: ["tunnel", "--no-autoupdate", "run"]
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - litellm
+    restart: unless-stopped
+
+  node-exporter:
+    image: ${NODE_EXPORTER_DIGEST}
+    container_name: gb10-node-exporter
+    command:
+      - "--path.procfs=/host/proc"
+      - "--path.sysfs=/host/sys"
+      - "--path.rootfs=/host/root"
+      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/host/root:ro
+    ports:
+      - "127.0.0.1:9100:9100"
+    restart: unless-stopped
+
+  nvidia-gpu-exporter:
+    image: ${NVIDIA_GPU_EXPORTER_DIGEST}
+    container_name: gb10-nvidia-gpu-exporter
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    ports:
+      - "127.0.0.1:9835:9835"
+    restart: unless-stopped
+
+  prometheus:
+    image: ${PROMETHEUS_DIGEST}
+    container_name: gb10-prometheus
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro
+      - prom-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+    ports:
+      - "127.0.0.1:9090:9090"
+    restart: unless-stopped
+
+  alertmanager:
+    image: ${ALERTMANAGER_DIGEST}
+    container_name: gb10-alertmanager
+    volumes:
+      # NOTE: alertmanager.yml (no .template suffix) is the file
+      # render-config.sh generates from alertmanager.yml.template + .env on
+      # the host at ExecStartPre time. It is gitignored — do not create it by
+      # hand and do not commit it if you do.
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+    ports:
+      - "127.0.0.1:9093:9093"
+    restart: unless-stopped
+
+  grafana:
+    image: ${GRAFANA_DIGEST}
+    container_name: gb10-grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
+      - GF_SERVER_ROOT_URL=https://promaxgb10-d62a.taile5d412.ts.net:3001/
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "127.0.0.1:3000:3000"
+    restart: unless-stopped
+
+volumes:
+  pg-data:
+  keyportal-data:
+  prom-data:
+  grafana-data:
+  vllm-cache:

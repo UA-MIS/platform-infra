@@ -1,0 +1,205 @@
+# ============================================================================
+# gb10-onboarding-windows.yaml — EXECUTE appliances/gb10/onboarding/setup-windows.ps1
+#
+# ── WHAT THIS IS ────────────────────────────────────────────────────────────
+# setup-windows.ps1 is the copy-paste onboarding step students run to point
+# Continue (VS Code) at our local LLM endpoint. MIS 221 and 321 are
+# overwhelmingly Windows laptops, so it is the single most-executed script
+# this platform ships to end users — and until this workflow it had never
+# been EXECUTED anywhere. There is no PowerShell on the dev VM and none on
+# the appliance, so it had only ever been reviewed by eye, and it was
+# hand-edited twice on 2026-09-30 with no execution evidence at all.
+#
+# A quoting or indentation bug in it is not an edge case. It is most of a
+# class failing at step one of the first lab, in the first ten minutes,
+# with no instructor able to reproduce it.
+#
+# A GitHub-hosted `windows-latest` runner is the only validation path that
+# exists for this file. platform-infra is a PUBLIC repo, so those minutes
+# are free — unlike the rest of this repo's CI, which runs on the
+# self-hosted ARC scale sets, none of which are Windows.
+#
+# ── WHAT IT ACTUALLY DOES (not a lint) ──────────────────────────────────────
+# It runs the real script, non-interactively, and then PARSES the
+# config.yaml the script wrote and asserts on its properties: three model
+# entries, the right roles and maxTokens on each, `enable_thinking: false`
+# as a real YAML boolean on all three, and the key and endpoint landing in
+# the right fields. Validity is established by running the file through a
+# YAML parser, not by grepping it.
+#
+# A test that only checked `exit 0` would pass against a script that wrote
+# garbage — which matters here more than usual, because BOTH of this
+# script's real failure modes are silent. It prints "Added the 'UA MIS
+# Local' model to your existing 'models:' list" and exits 0 whether it
+# merged correctly or left the student with an unparseable file.
+#
+# The scenario that earns this workflow its keep is the one where a
+# config.yaml ALREADY EXISTS with somebody else's provider in it. A student
+# who already uses Continue against Anthropic or a local Ollama must end up
+# with four models, not with our three and a lost setup.
+#
+# ── WHY TWO LAUNCHERS ───────────────────────────────────────────────────────
+# The student-facing instruction in the script's own .EXAMPLE block is
+# `powershell -ExecutionPolicy Bypass -File .\setup-windows.ps1` — that is
+# Windows PowerShell 5.1, NOT pwsh 7. The two differ in a way this script
+# explicitly depends on: 5.1's Invoke-WebRequest throws
+# System.Net.WebException for a non-2xx response, 7's throws
+# HttpResponseException, and the script carries a separate catch block for
+# each. Testing only one of them would leave half the students uncovered,
+# so the matrix runs both and both must pass.
+#
+# ── WHY THERE IS NO NETWORK ─────────────────────────────────────────────────
+# The script's step 4 verifies the student's key against the real endpoint,
+# and the endpoint is HARDCODED — there is no parameter or env var to point
+# it somewhere else. Rather than have every PR fire a bogus-key request at
+# production (and make this job's result depend on production being up),
+# the job points local-llm.uamishub.com at 127.0.0.1 in the runner's hosts
+# file. Nothing listens there, so the script takes its "could not reach the
+# endpoint" branch — which it treats as non-fatal, and which the suite
+# asserts on explicitly via -AssertEndpointUnreachable.
+#
+# That makes the hostname a dummy without touching the script. It does mean
+# the 200/401/403 key-verification branches are NOT covered here; covering
+# them needs an endpoint override in the script, which is a behaviour
+# change and therefore somebody's decision, not this workflow's.
+#
+# ── IT ALREADY PAID FOR ITSELF ──────────────────────────────────────────────
+# The first execution of this script, ever, found a config-destroying bug:
+# the merge path could not match a ZERO-indented existing models list (valid
+# YAML, and what `yq` emits), so it wrote a config.yaml that DID NOT PARSE
+# while printing a success message and exiting 0 -- destroying the Continue
+# setup of any student who already used another provider. Fixed in the
+# commit after this one; pinned by scenario S3-merge-0space. A second,
+# quieter one followed: the apiKey scalar was unquoted, so a key containing
+# " #" was silently truncated (scenario S12-yaml-hostile-key).
+#
+# ── WHY THE MUTATION-CHECK JOB ──────────────────────────────────────────────
+# A CI job that passes against a broken script is worse than no job,
+# because it manufactures confidence. The second job deliberately breaks
+# the script six ways and verifies the suite catches each one by tripping
+# a SPECIFIC named assertion — not merely by going red. Checked in rather
+# than done once by hand, so the assertions cannot quietly rot into
+# tautologies later.
+# ============================================================================
+name: gb10 onboarding (Windows)
+
+on:
+  pull_request:
+    paths:
+      - 'appliances/gb10/onboarding/**'
+      - '.github/workflows/gb10-onboarding-windows.yaml'
+  push:
+    branches: [main]
+    paths:
+      - 'appliances/gb10/onboarding/**'
+      - '.github/workflows/gb10-onboarding-windows.yaml'
+  workflow_dispatch:
+
+concurrency:
+  group: gb10-onboarding-windows-${{ github.ref }}
+  # Superseded PR pushes are worth cancelling; main history is not.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  execute:
+    name: execute setup-windows.ps1 (${{ matrix.launcher }})
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # powershell = Windows PowerShell 5.1, which is what the script's
+        # own student-facing instructions actually invoke.
+        # pwsh       = PowerShell 7, which is what a student who installed
+        #              a modern PowerShell will have.
+        launcher: [powershell, pwsh]
+
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install the YAML parser the assertions use
+        shell: pwsh
+        run: |
+          # Pinned: this is the thing deciding whether a student's config
+          # parses, so it must not drift underneath the assertions.
+          python -m pip install --disable-pip-version-check --quiet pyyaml==6.0.2
+          python -c "import yaml; print('pyyaml', yaml.__version__)"
+
+      - name: Point the LLM endpoint at nowhere (keep CI off production)
+        shell: pwsh
+        run: |
+          # See the header: the endpoint is hardcoded in the script, so the
+          # only way to give it a dummy hostname without editing it is to
+          # resolve the real name locally. Nothing listens on 127.0.0.1:443,
+          # so the script takes its non-fatal "could not reach" branch.
+          $hosts = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
+          Add-Content -Path $hosts -Value "`n127.0.0.1 local-llm.uamishub.com"
+          ipconfig /flushdns | Out-Null
+
+          # Verify it took. If this silently failed we would be firing
+          # bogus-key requests at production on every PR, so it is fatal.
+          $addrs = [System.Net.Dns]::GetHostAddresses('local-llm.uamishub.com') |
+                     ForEach-Object { $_.IPAddressToString }
+          Write-Host "local-llm.uamishub.com resolves to: $($addrs -join ', ')"
+          if ($addrs -notcontains '127.0.0.1') {
+            throw "hosts override did not take -- refusing to run against the real endpoint."
+          }
+
+      - name: Show which PowerShell is under test
+        shell: pwsh
+        run: |
+          & ${{ matrix.launcher }} -NoProfile -Command '$PSVersionTable | Out-String'
+
+      - name: Run the execution suite
+        shell: pwsh
+        working-directory: appliances/gb10/onboarding
+        run: |
+          # The harness itself always runs under pwsh 7; -Launcher selects
+          # which PowerShell executes the script under test.
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+          ./test-setup-windows.ps1 `
+            -Launcher '${{ matrix.launcher }}' `
+            -AssertEndpointUnreachable
+
+  mutation-check:
+    name: prove the suite catches a broken script
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install the YAML parser the assertions use
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check --quiet pyyaml==6.0.2
+
+      - name: Point the LLM endpoint at nowhere (keep CI off production)
+        shell: pwsh
+        run: |
+          $hosts = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
+          Add-Content -Path $hosts -Value "`n127.0.0.1 local-llm.uamishub.com"
+          ipconfig /flushdns | Out-Null
+          $addrs = [System.Net.Dns]::GetHostAddresses('local-llm.uamishub.com') |
+                     ForEach-Object { $_.IPAddressToString }
+          if ($addrs -notcontains '127.0.0.1') {
+            throw "hosts override did not take -- refusing to run against the real endpoint."
+          }
+
+      - name: Mutate the script six ways and require the suite to notice
+        shell: pwsh
+        working-directory: appliances/gb10/onboarding
+        run: |
+          # Each mutation names the assertion it MUST trip. A mutation that
+          # survives, or that only trips something unrelated, fails this job
+          # -- that is a gap in the assertions, not a pass.
+          #
+          # Mutations are judged by the failures they ADD on top of the
+          # unmodified script's own baseline, so a real open defect in the
+          # script cannot mask one.
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+          ./test-setup-windows.ps1 -MutationCheck
