@@ -1,0 +1,164 @@
+# ARC container-hook template for LabMx — mounted by the `labmx-kaniko` scale set
+# (applicationsets/arc-runner-labmx-app.yaml) as ConfigMap `arc-hook-template-labmx`.
+#
+# RENDERED, NOT A TEMPLATE. Produced from
+# platform-services/arc/per-team/hook-template.template.yaml by
+# `sed 's/__TEAM__/labmx/g'`. It IS a synced manifest, and — unlike the scale-set
+# Application, which lands in the directory-recurse applicationsets/ — this file
+# reaches the cluster ONLY because it is listed in this directory's
+# kustomization.yaml `resources:`. That list is EXPLICIT, not a glob (repo
+# convention): drop the entry and this file renders NOTHING while the PR still
+# merges clean, and the scale set then starts with no hook template.
+#
+# This is the SAME Option-C container-hook as platform-services/arc/hook-template.yaml,
+# but parameterized so EACH team's scale set mounts its OWN push secret. The k8s
+# container hook does NOT template/substitute per job (runner-container-hooks reads the
+# pod-spec patch verbatim), so a SINGLE org-wide scale set + ONE static template can
+# only ever name ONE secret — hence per-team isolation requires per-team scale sets,
+# each pointing ACTIONS_RUNNER_CONTAINER_HOOK_TEMPLATE at its own copy of THIS template.
+#
+# WHAT CHANGES vs the shared template:
+#   - ConfigMap name      : arc-hook-template-labmx   (one per scale set)
+#   - mounted push secret : harbor-push-labmx         (project-scoped robot, LabMx's
+#                           Harbor project ONLY)
+#
+# ── ⚠ THE PUSH SECRET ALREADY EXISTS AND IS **NOT** GITOPS-MANAGED (2026-09-30)
+# `harbor-push-labmx` was ALREADY present in arc-runners (created ~2026-09-09, robot
+# `robot$labmx+labmx-push`) — so this wiring did NOT need `make harbor-push-robot`
+# and no new robot was minted. It was VERIFIED working before this file was written:
+# Harbor's token endpoint grants `push,pull` on BOTH `labmx/hub` and
+# `labmx/attendance` for that robot, which is exactly what the two deploy workflows
+# need. (`GET /api/v2.0/projects/labmx` 403s for it — expected and harmless: the
+# robot has repository push/pull but no project-metadata read, and neither workflow
+# runs the Trivy gate that would require `artifact-addition:read`.)
+#
+# BUT it is a HAND-APPLIED Secret: no ownerReferences, no labels, only
+# `kubectl.kubernetes.io/last-applied-configuration`. It is NOT in git, so a cluster
+# rebuild will NOT restore it and the `labmx-kaniko` builds would then fail with an
+# unauthenticated-push refusal. This is the SAME gap platform-services/labmx/
+# kustomization.yaml already documents for that namespace's `harbor-pull` Secret.
+#
+# It was deliberately NOT sealed into git as part of this change. Sealing the live
+# credential would add a SealedSecret whose target Secret already exists WITHOUT
+# sealed-secrets ownership metadata; the controller refuses to adopt such a Secret
+# and reports `Resource already exists and is not managed by SealedSecret`, which
+# would show up as a permanent sync error on the whole `platform-svc-arc`
+# Application — i.e. it would risk the very thing this change ships. Closing the gap
+# is a separate, sequenced operator step (annotate-then-adopt, or mint a fresh robot
+# and cut over), tracked in the PR body rather than smuggled in here.
+# Everything else (the in-cluster Traefik hostAlias for the registry data plane, the
+# platform-ca trust mount) is identical and shared across teams in the arc-runners ns.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arc-hook-template-labmx
+  namespace: arc-runners
+  labels:
+    platform.capstone/component: platform
+    platform.capstone/team: labmx
+data:
+  content: |
+    spec:
+      # CI build priority: co-equal, never-preempt (platform-services/arc/
+      # priorityclass-ci-build.yaml). Rides the hook's top-level PodSpec merge, same as
+      # nodeSelector/tolerations below. The build waits for room, never evicts a workload.
+      priorityClassName: capstone-ci-build
+      # Node placement for the KANIKO BUILD step pod (CI-fast, #237/#372;
+      # #ci-build-required 2026-09-09). Mirrors the shared
+      # platform-services/arc/hook-template.yaml — see that file (and
+      # applicationsets/arc-runner-scaleset-app.yaml) for the full rationale/evidence.
+      # capstone.io/ci-build=true is now REQUIRED, not merely preferred: capstone-w1's NIC
+      # negotiates at 100 Mbit and was the intermittent cause of `npm ci` ETIMEDOUT
+      # failures inside Kaniko builds. Required set = ci-build=true (TODAY: only
+      # capstone-w2, a LIVE-ONLY hand-applied label) OR capstone.io/ci-build-emergency=true
+      # (an OPT-IN, incident-only escape hatch — NOT set anywhere by default; no automatic
+      # control-plane fallback, since n1-n3 run etcd off the same disk this pod's unbounded
+      # CPU would hammer — see applicationsets/arc-runner-scaleset-app.yaml) — NEVER the
+      # 8GiB Mac workers (too small for a 4Gi/8Gi build). REVERSIBLE: `kubectl label node
+      # capstone-w1 capstone.io/ci-build=true --overwrite` once its NIC is fixed restores
+      # 2-node capacity, no YAML change.
+      tolerations:
+        - key: capstone.io/control-plane
+          operator: Equal
+          value: "true"
+          effect: PreferNoSchedule
+        # DEDICATE laptop-01 to CI: tolerate `capstone.io/dedicated=ci-build:NoSchedule`
+        # so this per-team Kaniko BUILD step pod can land on the CI-dedicated node.
+        # Mirrors platform-services/arc/hook-template.yaml; complements #372 affinity.
+        - key: capstone.io/dedicated
+          operator: Equal
+          value: ci-build
+          effect: NoSchedule
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              # PRIMARY — a node explicitly vetted for CI (fast NIC). TODAY: only
+              # capstone-w2.
+              - matchExpressions:
+                  - { key: capstone.io/ci-build, operator: In, values: ["true"] }
+              # OPT-IN EMERGENCY escape hatch — NOT set anywhere by default. NO automatic
+              # control-plane fallback (2026-09-09, after review): n1-n3 run etcd off the
+              # SAME writable /var partition the CI work volume uses, and this container's
+              # CPU is UNBOUNDED — see applicationsets/arc-runner-scaleset-app.yaml and
+              # platform-services/arc/hook-template.yaml for the full rationale. An operator
+              # applies this label by hand during a genuine incident.
+              - matchExpressions:
+                  - { key: capstone.io/ci-build-emergency, operator: In, values: ["true"] }
+          preferredDuringSchedulingIgnoredDuringExecution:
+            # Break ties WITHIN the required set above: the vetted node always wins.
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - { key: capstone.io/ci-build, operator: In, values: ["true"] }
+            - weight: 10
+              preference:
+                matchExpressions:
+                  - { key: capstone.io/ci-build-emergency, operator: In, values: ["true"] }
+      # Resolve the Harbor registry host to Traefik IN-CLUSTER so the Kaniko PUSH
+      # never traverses the Cloudflare edge (CF Free/Pro caps request bodies at 100MB
+      # → a >100MB image layer 413s). Points the build pod straight at Traefik's
+      # ClusterIP, which terminates the wildcard TLS and routes by SNI to harbor-core.
+      # ⚠ HARDCODED Traefik ClusterIP (10.97.22.53) — keep in sync with the shared
+      # platform-services/arc/hook-template.yaml (single source of the value):
+      #   kubectl -n kube-system get svc traefik -o jsonpath='{.spec.clusterIP}'
+      hostAliases:
+        - ip: "10.97.22.53"
+          hostnames:
+            - harbor.capstone.uamishub.com
+      containers:
+        - name: "$job"
+          # Mirror the shared hook-template.yaml: "$job" sizes BOTH the job-container pod
+          # and the Kaniko step pod. Memory LIMIT 8Gi so the per-team Kaniko build can
+          # burst to the memory a yarn+tsc+snapshot build peaks at (was previously UNSET —
+          # no limit — which let the in-memory snapshot grow until the node OOM-killed the
+          # pod); MODEST 2Gi request keeps co-resident build pods within the smallest pool
+          # node's (db1 ~7.5Gi) scheduling budget.
+          resources:
+            requests: { memory: "2Gi" }
+            limits:   { memory: "8Gi" }
+          volumeMounts:
+            - name: harbor-push
+              mountPath: /kaniko/.docker
+              readOnly: true
+            - name: platform-ca
+              mountPath: /kaniko/ssl/certs/platform-ca.crt
+              subPath: ca.crt
+              readOnly: true
+      volumes:
+        # PER-TEAM push secret — this scale set's builds can ONLY mount this team's
+        # cred (a build pod never sees another team's harbor-push-<other>).
+        - name: harbor-push
+          secret:
+            secretName: harbor-push-labmx
+            optional: true
+            items:
+              - key: .dockerconfigjson
+                path: config.json
+        - name: platform-ca
+          configMap:
+            name: platform-ca
+            optional: true
+            items:
+              - key: ca.crt
+                path: ca.crt
