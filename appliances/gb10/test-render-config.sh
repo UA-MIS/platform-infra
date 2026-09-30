@@ -139,6 +139,16 @@ EOF
 # line), so the realistic way one reaches the extracted value is a
 # CRLF-terminated .env line -- e.g. a Windows-edited .env file. Written
 # with printf, not a heredoc, so the trailing \r survives exactly.
+#
+# Security review round 5, step 5 (2026-09-30): this now EXPECTS
+# 'slack', not 'null' -- a deliberate behavior change from the
+# round-4-followup version of this test. A trailing \r is a mechanical
+# line-ending artifact with no legitimate meaning in a webhook value
+# (unlike a trailing comment, below, which IS meaningful content this
+# script cannot safely guess about) -- render-config.sh now strips
+# trailing whitespace/CR before validating the value, so a Windows-
+# edited .env with an otherwise-valid webhook is used correctly instead
+# of being rejected over its line-ending style.
 printf 'ALERTMANAGER_SLACK_WEBHOOK_URL=https://hooks.slack.com/services/FAKE/TOKEN\r\n' > "$WORKDIR/.env"
 rm -f "$WORKDIR/alertmanager/alertmanager.yml"
 ( cd "$WORKDIR" && ./render-config.sh > "$WORKDIR/stdout.log" 2>&1 )
@@ -147,13 +157,43 @@ if [ "$actual_exit" -ne 0 ]; then
   echo "FAIL: CRLF-terminated webhook -- expected exit 0, got $actual_exit"
   sed 's/^/  /' "$WORKDIR/stdout.log"
   failures=$((failures + 1))
-elif ! grep -q "receiver: 'null'" "$WORKDIR/alertmanager/alertmanager.yml" 2>/dev/null; then
-  echo "FAIL: CRLF-terminated webhook -- did not degrade to the null receiver"
+elif ! grep -q "receiver: 'slack'" "$WORKDIR/alertmanager/alertmanager.yml" 2>/dev/null; then
+  echo "FAIL: CRLF-terminated webhook -- did not clean up and route to slack"
+  failures=$((failures + 1))
+elif ! grep -q "api_url: 'https://hooks.slack.com/services/FAKE/TOKEN'" "$WORKDIR/alertmanager/alertmanager.yml" 2>/dev/null; then
+  echo "FAIL: CRLF-terminated webhook -- routed to slack but the \\r survived into api_url"
   failures=$((failures + 1))
 else
-  echo "PASS: CRLF-terminated (newline-family) webhook degrades to null, exit 0"
+  echo "PASS: CRLF-terminated (newline-family) webhook is cleaned and routes to slack, exit 0"
   pass_count=$((pass_count + 1))
 fi
+
+run_case "double-quoted webhook is unwrapped and routes to slack" 0 "slack" <<'EOF'
+ALERTMANAGER_SLACK_WEBHOOK_URL="https://hooks.slack.com/services/FAKE/TOKEN"
+EOF
+
+# Single quotes need their own heredoc (rather than run_case's, which is
+# double-quoted) so the literal single quotes in the .env content
+# survive without the outer shell interpreting them.
+printf "ALERTMANAGER_SLACK_WEBHOOK_URL='https://hooks.slack.com/services/FAKE/TOKEN'\n" > "$WORKDIR/.env"
+rm -f "$WORKDIR/alertmanager/alertmanager.yml"
+( cd "$WORKDIR" && ./render-config.sh > "$WORKDIR/stdout.log" 2>&1 )
+actual_exit=$?
+if [ "$actual_exit" -ne 0 ]; then
+  echo "FAIL: single-quoted webhook -- expected exit 0, got $actual_exit"
+  sed 's/^/  /' "$WORKDIR/stdout.log"
+  failures=$((failures + 1))
+elif ! grep -q "receiver: 'slack'" "$WORKDIR/alertmanager/alertmanager.yml" 2>/dev/null; then
+  echo "FAIL: single-quoted webhook -- did not unwrap and route to slack"
+  failures=$((failures + 1))
+else
+  echo "PASS: single-quoted webhook is unwrapped and routes to slack, exit 0"
+  pass_count=$((pass_count + 1))
+fi
+
+run_case "trailing comment degrades to null (ambiguous content, not stripped)" 0 "null" <<'EOF'
+ALERTMANAGER_SLACK_WEBHOOK_URL=https://hooks.slack.com/services/FAKE/TOKEN # my webhook
+EOF
 
 echo
 echo "${pass_count} passed, ${failures} failed."

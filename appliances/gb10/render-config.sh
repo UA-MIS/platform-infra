@@ -55,6 +55,43 @@ if [ ! -f .env ]; then
 fi
 ALERTMANAGER_SLACK_WEBHOOK_URL="$(grep -m1 '^ALERTMANAGER_SLACK_WEBHOOK_URL=' .env | cut -d= -f2- || true)"
 
+# Security review round 5, step 5 (2026-09-30): `source` used to strip a
+# single matching pair of surrounding quotes as ordinary shell parsing
+# -- quoting a value in .env (`URL="https://..."` or `URL='https://...'`)
+# is conventional practice, and grep/cut have no such concept, so a
+# perfectly valid, correctly-quoted webhook arrived here with the quote
+# characters INSIDE the value, failed the character-allowlist check
+# below (quotes are not in it), and silently disabled alerting -- while
+# telling the operator their valid URL "does not look like a valid
+# https:// URL", which is actively misleading about what is actually
+# wrong. Strips ONE matching pair (both start and end must be the SAME
+# quote character) so a value that only starts or only ends with a
+# quote -- genuinely malformed, not a quoting convention -- is left
+# alone and correctly falls through to the null-receiver degradation
+# below instead of having a stray quote silently eaten.
+#
+# Order matters: trailing whitespace/CR is stripped FIRST, below,
+# before quote-detection runs -- a quoted value with a trailing space
+# or CR after the closing quote (`URL="https://..." ` or a CRLF line
+# ending after the quote) would not even LOOK quoted to a check that
+# only inspects the literal last character, since that character would
+# be the whitespace, not the quote. Pure bash parameter expansion
+# throughout, one character at a time -- no external tool, so nothing
+# about either strip is sensitive to the value's content.
+while [[ "${ALERTMANAGER_SLACK_WEBHOOK_URL}" == *[[:space:]] ]]; do
+  ALERTMANAGER_SLACK_WEBHOOK_URL="${ALERTMANAGER_SLACK_WEBHOOK_URL%?}"
+done
+if [[ "${ALERTMANAGER_SLACK_WEBHOOK_URL}" == \"*\" && ${#ALERTMANAGER_SLACK_WEBHOOK_URL} -ge 2 ]] \
+  || [[ "${ALERTMANAGER_SLACK_WEBHOOK_URL}" == \'*\' && ${#ALERTMANAGER_SLACK_WEBHOOK_URL} -ge 2 ]]; then
+  ALERTMANAGER_SLACK_WEBHOOK_URL="${ALERTMANAGER_SLACK_WEBHOOK_URL:1:${#ALERTMANAGER_SLACK_WEBHOOK_URL}-2}"
+  # A second whitespace trim -- a quoted value can still carry trailing
+  # whitespace INSIDE the quotes (`URL="https://... "`), invisible to
+  # the pass above since it was outside the quotes at that point.
+  while [[ "${ALERTMANAGER_SLACK_WEBHOOK_URL}" == *[[:space:]] ]]; do
+    ALERTMANAGER_SLACK_WEBHOOK_URL="${ALERTMANAGER_SLACK_WEBHOOK_URL%?}"
+  done
+fi
+
 if [ -z "${ALERTMANAGER_SLACK_WEBHOOK_URL}" ]; then
   receiver="null"
   # Never actually dialed -- route.receiver is 'null', not 'slack', so
