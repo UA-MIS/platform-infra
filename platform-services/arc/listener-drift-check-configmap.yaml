@@ -1,0 +1,111 @@
+# The ARC listener-drift check script, mounted by listener-drift-check-cronjob.yaml.
+#
+# WHAT IT CATCHES, AND WHY IT EXISTS (incident 2026-09-30, labmx-kaniko)
+# When an AutoscalingRunnerSet is first created, the ARC controller can reconcile it
+# twice concurrently. Each loop creates its own EphemeralRunnerSet, and each loop's
+# "Cleanup old ephemeral runner sets" pass then deletes the OTHER loop's keeper. The
+# AutoscalingListener is created in that gap, bound to whichever set the sibling loop
+# is about to delete. The controller creates a listener only when none exists and
+# NEVER rewrites an existing listener's spec.ephemeralRunnerSetName, so the dangling
+# reference is permanent: the listener crash-loops on its initial patch
+# (`could not patch ephemeral runner set ... not found`) and no job is ever assigned.
+#
+# The reason this needs a detector rather than a fix: it is SILENT. Throughout,
+# `kubectl get autoscalingrunnerset` reports `phase: Running`, and ArgoCD reports
+# Synced/Healthy, because both objects are exactly as declared. Only the listener's
+# logs and this reference mismatch reveal it. It cost an hour to find once.
+#
+# It is a live-state check, so it CANNOT live in `make validate`: that runs offline
+# in CI with kubeconform and no kubeconfig, and the mismatch is invisible in git.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arc-listener-drift-check
+  namespace: arc-system
+  labels:
+    platform.capstone/component: platform
+data:
+  check.sh: |
+    #!/usr/bin/env bash
+    # Assert every AutoscalingListener still references an EphemeralRunnerSet that
+    # exists. A dangling reference means that scale set can never run a job.
+    set -euo pipefail
+
+    REMEDIATE="${REMEDIATE:-0}"
+    log() { printf '%s\n' "$*"; }
+
+    # ── ABORT GUARDS ────────────────────────────────────────────────────────
+    # A check that cannot see its inputs must NEVER exit 0. Reporting a silent
+    # pass here would reproduce the exact class of bug this exists to catch.
+    if ! kubectl get crd autoscalinglisteners.actions.github.com >/dev/null 2>&1; then
+      log "ABORT: CRD autoscalinglisteners.actions.github.com is not present."
+      log "       Cannot determine listener state; refusing to report a pass."
+      exit 2
+    fi
+    if ! listeners=$(kubectl get autoscalinglisteners -A -o json 2>/dev/null); then
+      log "ABORT: could not list AutoscalingListeners (API error); refusing to report a pass."
+      exit 2
+    fi
+    total=$(printf '%s' "$listeners" | jq -r '.items | length')
+    if [ "$total" -eq 0 ]; then
+      log "ABORT: zero AutoscalingListeners exist. Either ARC is not installed or every"
+      log "       scale set is gone. Both are states a human should see, not a pass."
+      exit 2
+    fi
+
+    drift=0
+    ok=0
+
+    while IFS=$'\t' read -r lns lname arsns arsname ers; do
+      if [ -z "$ers" ] || [ "$ers" = "null" ]; then
+        log "DRIFT  ${lns}/${lname}: spec.ephemeralRunnerSetName is EMPTY"
+        drift=$((drift + 1))
+        continue
+      fi
+      if kubectl -n "$arsns" get ephemeralrunnerset "$ers" >/dev/null 2>&1; then
+        log "ok     ${lns}/${lname} -> ${arsns}/${ers}"
+        ok=$((ok + 1))
+        continue
+      fi
+      drift=$((drift + 1))
+      log ""
+      log "DRIFT  ${lns}/${lname}"
+      log "       references EphemeralRunnerSet ${arsns}/${ers}, which DOES NOT EXIST."
+      log "       Scale set '${arsname}' can therefore NEVER run a job: its listener"
+      log "       crash-loops on the initial patch. Note that the AutoscalingRunnerSet"
+      log "       still reports phase: Running and ArgoCD still reports Synced/Healthy,"
+      log "       so nothing else will tell you about this."
+      log "       Live EphemeralRunnerSets for this scale set:"
+      kubectl -n "$arsns" get ephemeralrunnersets -o name 2>/dev/null \
+        | grep -- "${arsname}-" | sed 's|^|         |' || log "         (none)"
+      log "       REMEDY: kubectl -n ${lns} delete autoscalinglistener ${lname}"
+      log "       The controller recreates it bound to the current set. Safe and scoped:"
+      log "       listeners are per-scale-set and carry no ownerReferences, so no other"
+      log "       scale set is affected."
+      if [ "$REMEDIATE" = "1" ]; then
+        log "       REMEDIATE=1 -> deleting the stale listener now."
+        if kubectl -n "$lns" delete autoscalinglistener "$lname" --timeout=60s; then
+          log "       deleted; the controller rebinds on its next reconcile."
+        else
+          log "       DELETE FAILED. Most likely the ClusterRole lacks the 'delete' verb"
+          log "       (it is omitted by default on purpose — see listener-drift-check-rbac.yaml),"
+          log "       or the autoscalinglistener finalizer is stuck. Reporting only."
+        fi
+      fi
+      log ""
+    done < <(printf '%s' "$listeners" | jq -r '
+      .items[] | [
+        .metadata.namespace,
+        .metadata.name,
+        .spec.autoscalingRunnerSetNamespace,
+        .spec.autoscalingRunnerSetName,
+        (.spec.ephemeralRunnerSetName // "")
+      ] | @tsv')
+
+    log ""
+    log "checked ${total} listener(s): ${ok} ok, ${drift} drifted"
+    if [ "$drift" -gt 0 ]; then
+      log "RESULT: FAIL — ${drift} scale set(s) cannot run jobs (REMEDIATE=${REMEDIATE})"
+      exit 1
+    fi
+    log "RESULT: PASS"

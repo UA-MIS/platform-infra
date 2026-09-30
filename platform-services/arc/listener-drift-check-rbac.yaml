@@ -1,0 +1,56 @@
+# RBAC for the ARC listener-drift check (listener-drift-check-cronjob.yaml).
+#
+# READ-ONLY BY DESIGN. The check reports; it does not mutate. Its remediation
+# switch (REMEDIATE=1) is deliberately NOT backed by a `delete` verb here, so
+# turning remediation on is a TWO-KEY change: flip the env var in the CronJob AND
+# add `delete` to the autoscalinglisteners rule below. That is intentional — the
+# remedy deletes a live controller-owned resource, and it should not become
+# possible by editing one line. With REMEDIATE=1 and no `delete` verb the script
+# logs `DELETE FAILED` and still exits non-zero, so it degrades to report-only
+# rather than pretending to have fixed anything.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: arc-listener-drift-check
+  namespace: arc-system
+  labels:
+    platform.capstone/component: platform
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: arc-listener-drift-check
+  labels:
+    platform.capstone/component: platform
+rules:
+  # The listeners whose spec.ephemeralRunnerSetName is the thing under test.
+  # Cluster-scoped list: listeners live in arc-system, the sets they point at live
+  # in the runner namespace, and the check must see every scale set, not one ns.
+  - apiGroups: ["actions.github.com"]
+    resources: ["autoscalinglisteners"]
+    verbs: ["get", "list"]
+    # To enable REMEDIATE=1, add "delete" here. See the header.
+  # The referents. Existence of these is the assertion.
+  - apiGroups: ["actions.github.com"]
+    resources: ["ephemeralrunnersets"]
+    verbs: ["get", "list"]
+  # Abort guard: confirm the CRD exists at all, so "no listeners found" can be
+  # distinguished from "ARC is not installed" and never reported as a pass.
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: arc-listener-drift-check
+  labels:
+    platform.capstone/component: platform
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: arc-listener-drift-check
+subjects:
+  - kind: ServiceAccount
+    name: arc-listener-drift-check
+    namespace: arc-system
