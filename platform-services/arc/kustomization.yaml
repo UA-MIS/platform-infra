@@ -21,6 +21,12 @@ resources:
   - configmap-job-started-hook.yaml # runner pre-job hook: echoes spec.nodeName into every job's "Set up job" log
   - priorityclass-ci-build.yaml    # cluster-scoped: CI builds wait-not-fail, never preempt (queue-not-OOM)
   - sealedsecret-harbor-push.yaml
+  # LabMx's per-team container-hook template (ConfigMap arc-hook-template-labmx),
+  # mounted by the `labmx-kaniko` scale set (applicationsets/arc-runner-labmx-app.yaml).
+  # LabMx is a platform-operated site, not a scaffolded Crossplane tenant, so its hook
+  # ConfigMap is hand-rendered here rather than emitted by the tenant Composition —
+  # see hook-template-labmx.yaml's header.
+  - hook-template-labmx.yaml
   - platform-ca-configmap.yaml     # platform CA → mounted into Kaniko so the push verifies Traefik's cert
   - limitrange.yaml                # per-container defaults so no $job pod is ever BestEffort
   - resourcequota.yaml             # cross-tenant aggregate concurrency ceiling (~18 concurrent jobs)

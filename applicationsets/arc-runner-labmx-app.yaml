@@ -1,0 +1,400 @@
+# ARC runner scale set for LabMx — the `labmx-kaniko` pool (retro #4 per-team model).
+#
+# RENDERED, NOT A TEMPLATE. Produced from
+# platform-services/arc/per-team/runner-scaleset-app.template.yaml by
+# `sed 's/__TEAM__/labmx/g'`, then hand-adjusted (maxRunners, this header). It IS a
+# synced manifest — applicationsets/ is a directory-recurse Application
+# (bootstrap/root-app.yaml), so committing this file here IS the declaration; no
+# appset edit and no explicit resource list entry are needed.
+#
+# ── WHY HAND-RENDERED AND NOT CROSSPLANE-COMPOSED
+# platform-services/crossplane/apis/composition.yaml is the source of truth for
+# runner pools belonging to SCAFFOLDED TENANTS: a CapstoneTenant claim in
+# tenants/_claims/ fans out the hook ConfigMap + Harbor robot + Vault PushSecret +
+# ExternalSecret + this Application, all keyed on $team. LabMx is NOT a tenant — it
+# is a platform-operated site living in platform-services/labmx (see that
+# directory's kustomization.yaml for why), with no claim, no tenant namespace, no
+# student ServiceAccount and no tenant lifecycle. Writing a CapstoneTenant claim
+# just to obtain a runner would provision a whole tenant around it (tenant Harbor
+# project, namespaces, DB, Vault tree) and collide with the existing hand-adopted
+# `labmx` namespace and Harbor project. Per per-team/README.md the manual-render
+# path is the documented fallback for exactly this case, so that is what this is.
+#
+# ⚠ CONSEQUENCE: nothing keeps this file in sync with the composition. When the
+# composition's runner block changes (runner image pin, work-volume class,
+# placement, spread), this file must be updated BY HAND alongside it — the same
+# unbound-copies hazard called out in the sync warnings further down.
+#
+# WHY one scale set per team (not one org-wide set): the container hook cannot select
+# a secret per job, so per-team push isolation = per-team scale set, each with its own
+# hook-template ConfigMap (per-team/hook-template.template.yaml) → its own
+# `harbor-push-labmx` secret. `runs-on: labmx-kaniko` selects this set.
+#
+# A1 (shared `arc-runners` ns): all per-team scale sets live in arc-runners and
+# SHARE the existing `arc-github-app` SealedSecret, `platform-ca` ConfigMap,
+# `arc-job-started-hook` ConfigMap, and the runner NetworkPolicy + CiliumNetworkPolicy.
+# VERIFIED 2026-09-30 that those shared pieces need NO per-team addition for LabMx:
+# hardening/netpol-runners/{runner-netpol,apiserver-cnp}.yaml select `podSelector: {}`
+# / `endpointSelector: {}` — namespace-wide, so this new scale set's pods inherit the
+# DNS, apiserver and Traefik-:8443 egress allowances (that last one is what lets the
+# Kaniko push reach Traefik's ClusterIP in-cluster) with no netpol edit at all.
+# Residual: a runner SA in the shared ns can, in principle, read a sibling team's
+# harbor-push-<other> Secret. To close that (A2) move each team to its own
+# `arc-<team>` ns (then the runner SA is ns-confined) — see per-team/README.md.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-arc-runner-labmx
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+    platform.capstone/team: labmx
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"   # after the controller CRDs (wave 0)
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: ghcr.io/actions/actions-runner-controller-charts
+    chart: gha-runner-scale-set
+    targetRevision: 0.14.2               # pinned (match the controller chart)
+    helm:
+      # releaseName == the runs-on label the team's workflow selects.
+      releaseName: labmx-kaniko
+      values: |
+        githubConfigUrl: "https://github.com/UA-MIS"
+        githubConfigSecret: arc-github-app   # SHARED SealedSecret in arc-runners (A1)
+        controllerServiceAccount:
+          name: arc-gha-rs-controller
+          namespace: arc-system
+        minRunners: 0
+        # maxRunners = OPERATOR-QUEUE lever: jobs beyond it wait "Waiting for a runner"
+        # IN GitHub Actions (no pod → no OOM). Mirrors the LIVE per-tenant value rendered
+        # by the Crossplane composition (platform-services/crossplane/apis/composition.yaml,
+        # the actual source of truth for onboarded tenants — this file is the manual-render
+        # fallback per per-team/README.md) — raised 3→8 there 2026-08-25 (owner-approved,
+        # cluster now 80 vCPU / ~216GiB across 5 nodes). Keep this in sync if hand-rendering
+        # a team that predates the Crossplane composition path.
+        # ── SIZE THIS IN PODS-PER-NODE, NOT CLUSTER CPU/MEMORY (2026-08-25) ────────
+        # The reasoning below sizes maxRunners against CLUSTER-WIDE cpu/memory. That is
+        # the wrong frame and it is how we wedged CI on 2026-08-25. The binding
+        # constraint is the PER-NODE kubelet pod ceiling.
+        #
+        # Each concurrent job pins up to THREE pods to ONE node:
+        #   1. the runner pod (this scale set),
+        #   2. the workflow pod  — the job's `container:` — created by the hook's
+        #      createPod(), which sets spec.nodeName = the runner's node,
+        #   3. a container-step pod per `uses: docker://` step (Kaniko, scanners,
+        #      toolchains) — created by the hook's createJob(), which sets
+        #      job.spec.template.spec.nodeName the same way.
+        # The RWO `_work` PVC co-pins them regardless. So `maxRunners: N` means up to
+        # 3N pods on a single node — NOT N, and not the 2N that the older "pair"
+        # language (job-container + Kaniko step) implies: that phrasing omits the
+        # runner pod itself.
+        #
+        # This is a CLIFF, not a slowdown. Because those pods are nodeName-pinned they
+        # bypass the scheduler, so a node at its ceiling REJECTS them — kubelet
+        # `OutOfpods`, phase Failed — rather than queueing them Pending. The hook then
+        # blocks in `Initialize containers` until the job lease expires (~10 min) and
+        # the run fails with "Executing the custom container implementation failed".
+        #
+        # CORRECTION (2026-08-25): an earlier revision of this comment claimed n1-n3
+        # carry neither pool=build nor the standard control-plane label, so the
+        # second nodeSelectorTerm "never matches". That is WRONG. All three DO carry
+        # node-role.kubernetes.io/control-plane, so `operator: Exists` matches and
+        # the required candidate set is ALL FIVE nodes.
+        #   GOTCHA that produced the error: control-plane labels carry an EMPTY
+        #   VALUE, so a jsonpath/`-o` lookup prints "" and reads as absent. `Exists`
+        #   matches empty-valued labels. Check for the KEY, not a value.
+        # Routine CI is nevertheless kept off n1-n3 by the spread/toleration
+        # mechanism above, with those nodes retained as a genuine fallback.
+        #
+        # Measured 2026-08-25, BEFORE the maxPods raise (allocatable was 110/node):
+        #     capstone-w1  103/110  → headroom  7 pods ≈ 2 jobs
+        #     capstone-w2   63/110  → headroom 47 pods ≈ 15 jobs
+        # maxPods has since been raised 110 -> 200 on BOTH Debian workers (durable,
+        # in ansible/roles/kubelet_join/templates/kubelet-config.yaml.j2), giving the
+        # build pool ~400 slots against ~166 in use — roughly 234 free, i.e. ~78 CI
+        # triples. The pool-headroom arithmetic below is therefore no longer the
+        # binding constraint; re-derive before changing any maxRunners value.
+        # and Velero's hourly kopia-maintenance burst (~34 pods, landing mostly on w1)
+        # moves w1's baseline by up to ~23 pods with no CI involvement at all.
+        #
+        # SIZING RULE — spread is `ScheduleAnyway` (soft) and ImageLocality biases
+        # toward the warm node, so size against the WORST pool node, not the average:
+        #     ceil(N_pool_total / n_build_nodes) * 3  ≤  min(per-node headroom) − burst
+        # Today that arithmetic does NOT support the live 8/8/4 (=20 jobs ⇒ up to 60
+        # pods against 54 pool-wide headroom, most of it on one node). Until w1's
+        # baseline is brought down toward w2's, keep the AGGREGATE at ~10 concurrent
+        # jobs (ida-llm 4 / crimson-copies 4 / ua-mis 2). Restoring 8/8/4 is fine once
+        # w1 is rebalanced or maxPods is raised — re-derive with the rule above, don't
+        # guess. NOTE the arc-runners ResourceQuota (pods 40) was itself sized on pair
+        # math: at 3 pods/job it admits ~13 jobs, not 20.
+        #
+        # LABMX = 2 (not the template's 8). LabMx has exactly TWO deploy workflows
+        # (deploy-hub.yml, deploy-attendance.yml) and they are path-filtered on
+        # `src/apps/{hub,attendance}/**` + `src/packages/**`, so the realistic worst
+        # case is both firing on one push to a shared package — 2 concurrent jobs.
+        # 2 covers that with no queueing and costs at most 6 pods (3/job) against the
+        # measured 30-pod headroom in the arc-runners quota (hard 40 / used 10,
+        # 2026-09-30). Sizing it at the template's 8 would reserve headroom this
+        # repo's own aggregate guidance (~10 concurrent jobs pool-wide) says is
+        # already oversubscribed across the eight existing scale sets, to no benefit
+        # — LabMx can never use it. Raise it only if LabMx gains more workflows.
+        maxRunners: 2
+        containerMode:
+          type: "kubernetes"
+          # ⚠ MUST STAY IN SYNC — this work-volume claim is defined in THREE places and
+          # NOTHING (no comment, no CI check) bound them before 2026-08-25:
+          #   applicationsets/arc-runner-scaleset-app.yaml            (ua-mis-kaniko)
+          #   platform-services/crossplane/apis/composition.yaml      (all tenant pools)
+          #   platform-services/arc/per-team/runner-scaleset-app.template.yaml
+          # Change ALL THREE or none. That exact unbound-copies pattern is what dropped
+          # podAntiAffinity from the tenant pools and wedged CI (see ADR-038).
+          #
+          # PERF (measured, ADR-038 §2a): the ARC hook's copyExternalsToRoot() copies the
+          # runner's externals/ — 594 MB / 8,986 files — into THIS volume on EVERY job,
+          # before the workflow pod is created. Benchmarked on an idle node with the real
+          # runner image: ~47s on ceph-block vs ~13s on node-local disk. Moving this to a
+          # node-local StorageClass is the single biggest CI latency win available and is
+          # safe (the hook pins every job pod to the runner's node, so node-affine RWO
+          # binds by construction) — but it needs a new cluster-wide provisioner whose
+          # per-volume helper pods add churn to pod-constrained nodes. PROPOSED, not
+          # taken: owner go/no-go, ADR-038 §5.
+          kubernetesModeWorkVolumeClaim:
+            accessModes: ["ReadWriteOnce"]
+            # SWITCHED ceph-block -> local-path-ci (2026-08-25, ADR-038 §3). The hook copies
+            # 594 MB / 8,986 files of runner externals into THIS volume on EVERY job before
+            # the workflow pod is created; on ceph-block that measured ~47s idle and
+            # 132-189s under concurrency. Node-local measured ~13s for the same tree.
+            # ACCESS MODE STAYS RWO — deliberately. The job-container + Kaniko step
+            # co-pinning argument that sizes their 4Gi requests depends on it, and it costs
+            # nothing here: the class is WaitForFirstConsumer, so the PV is created on the
+            # node the runner lands on, and ARC pins the workflow pod and every step pod to
+            # that same node. Node-local RWO binds correctly BY CONSTRUCTION.
+            # TRADE-OFF, know it: local-path does NOT enforce the requested size — it is a
+            # directory on the node root fs, so `storage: 5Gi` is NOMINAL, not a hard cap.
+            # A runaway build can now pressure the NODE instead of failing alone at 5Gi.
+            # Compensating control: the BuildPoolDiskFilling alert
+            # (platform-services/monitoring/alerts.yaml) fires at <20% free, ahead of the
+            # kubelet's 10% eviction threshold.
+            storageClassName: "local-path-ci"
+            resources:
+              requests:
+                storage: "5Gi"
+        template:
+          spec:
+            # CI build priority: co-equal, never-preempt (see the shared scale set +
+            # platform-services/arc/priorityclass-ci-build.yaml). Builds wait for room,
+            # never evict a running workload.
+            priorityClassName: capstone-ci-build
+            # Node placement for the RUNNER pod (CI-fast, #237/#372; #ci-build-required
+            # 2026-09-09). Mirrors the org-wide scale set
+            # (applicationsets/arc-runner-scaleset-app.yaml) and the build step-pod
+            # placement in per-team/hook-template.template.yaml — see the org-wide file
+            # for the full rationale/evidence. capstone.io/ci-build=true is now REQUIRED,
+            # not merely preferred: capstone-w1's NIC negotiates at 100 Mbit and was the
+            # intermittent cause of `npm ci` ETIMEDOUT failures inside Kaniko builds.
+            # Required set = ci-build=true (TODAY: only capstone-w2, a LIVE-ONLY
+            # hand-applied label) OR capstone.io/ci-build-emergency=true (an OPT-IN,
+            # incident-only escape hatch — NOT set anywhere by default; no automatic
+            # control-plane fallback, since n1-n3 run etcd off the same disk this pod's
+            # build-triple would hammer — see applicationsets/arc-runner-scaleset-app.yaml)
+            # — NEVER the 8GiB Mac workers. REVERSIBLE: `kubectl label node capstone-w1
+            # capstone.io/ci-build=true --overwrite` once its NIC is fixed restores
+            # 2-node capacity, no YAML change.
+            tolerations:
+              # REMOVED 2026-08-25 — the capstone.io/control-plane PreferNoSchedule
+              # toleration. This absence is load-bearing, NOT an oversight: it is what
+              # keeps routine CI off the control plane while leaving n1-n3 available
+              # under genuine pressure.
+              #   - topologySpreadConstraints below sets `nodeTaintsPolicy: Honor`, which
+              #     counts a tainted node as a spread domain ONLY if the pod TOLERATES
+              #     that taint. Dropping this toleration removes n1-n3 from the spread
+              #     DOMAINS, so spread balances across the build pool (w1+w2) instead of
+              #     pulling runners onto the control plane.
+              #   - The taint is PreferNoSchedule (SOFT). NOTE (2026-09-09): n1-n3 are no
+              #     longer reachable via nodeAffinity at all except through the opt-in
+              #     capstone.io/ci-build-emergency=true escape hatch (see below) — this
+              #     toleration is now dormant for routine placement and only matters if
+              #     that label is ever applied during a genuine incident.
+              # WHY: with the toleration present, #540's spread treated all 5 nodes as
+              # equal domains and placed 1 of 5 ida-llm runners on EACH control-plane
+              # node. That violated the owner's stated preference AND measured slower
+              # (cold image caches / different disks on n1-n3). See ADR-038.
+              # DEDICATE laptop-01 to CI: tolerate `capstone.io/dedicated=ci-build:NoSchedule`
+              # so this per-team RUNNER pod can land on the CI-dedicated node. Mirrors
+              # per-team/hook-template.template.yaml; complements #372 affinity.
+              - key: capstone.io/dedicated
+                operator: Equal
+                value: ci-build
+                effect: NoSchedule
+            affinity:
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                    # PRIMARY — a node explicitly vetted for CI (fast NIC). TODAY: only
+                    # capstone-w2.
+                    - matchExpressions:
+                        - { key: capstone.io/ci-build, operator: In, values: ["true"] }
+                    # OPT-IN EMERGENCY escape hatch — NOT set anywhere by default. NO
+                    # automatic control-plane fallback (2026-09-09, after review): n1-n3
+                    # run etcd off the SAME writable /var partition the CI work volume
+                    # uses, and the build triple's CPU is UNBOUNDED — see
+                    # applicationsets/arc-runner-scaleset-app.yaml for the full
+                    # rationale. An operator applies this label by hand during a
+                    # genuine incident.
+                    - matchExpressions:
+                        - { key: capstone.io/ci-build-emergency, operator: In, values: ["true"] }
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  # Break ties WITHIN the required set above: the vetted node always wins.
+                  - weight: 100
+                    preference:
+                      matchExpressions:
+                        - { key: capstone.io/ci-build, operator: In, values: ["true"] }
+                  - weight: 10
+                    preference:
+                      matchExpressions:
+                        - { key: capstone.io/ci-build-emergency, operator: In, values: ["true"] }
+              # ── SOFT SPREAD runner pods across the build pool ──────────────────
+              # One runner pod exists per in-flight build. Soft-prefer a pool node not
+              # already running another runner pod so concurrent builds spread instead
+              # of stacking. `preferred` never blocks (a one-free-node pool still
+              # schedules); topologyKey per-node scales to N pool nodes with no edit.
+              #
+              # RESTORED 2026-08-25 (#CI-latency): this block is present in the org-wide
+              # scale set (applicationsets/arc-runner-scaleset-app.yaml) and in the Kaniko
+              # step pod (platform-services/arc/hook-template.yaml), but was DROPPED when
+              # the nodeAffinity tiers were copied here — so every TENANT pool
+              # (ida-llm-kaniko, crimson-copies-kaniko) ran with NO spread signal while
+              # the platform pool had one. Live consequence: all 8 ida-llm runners stacked
+              # onto capstone-w1 and drove it to its 110-pod kubelet ceiling. That is not
+              # merely slow: the ARC hook pins each workflow pod to its runner's node via
+              # spec.nodeName (bypassing the scheduler), so a full node REJECTS the pod
+              # as OutOfpods instead of queueing it Pending — jobs hang in
+              # `Initialize containers` until the 10-minute lease expires.
+              podAntiAffinity:
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 100
+                    podAffinityTerm:
+                      labelSelector:
+                        matchLabels:
+                          app.kubernetes.io/part-of: gha-runner-scale-set
+                      topologyKey: kubernetes.io/hostname
+            # ── HARD-ish pod-count spread across the build pool ────────────────
+            # The soft podAntiAffinity above is only a SCORE, and it loses to
+            # ImageLocality (the node with the runner/Kaniko images cached wins every
+            # tiebreak) — which is how one node got packed to its ceiling. Pod COUNT is
+            # not a scheduler scoring input at all, so nothing bounded the skew.
+            # maxSkew:2 bounds it explicitly; ScheduleAnyway keeps this a preference so
+            # a single-node pool, or a burst larger than the pool, still schedules
+            # rather than hanging Pending. Counts only this scale-set's own runner pods.
+            # ⚠ MUST STAY IN SYNC with the same block in
+            # applicationsets/arc-runner-scaleset-app.yaml and
+            # platform-services/crossplane/apis/composition.yaml.
+            # Change ALL THREE or none.
+            topologySpreadConstraints:
+              - maxSkew: 2
+                topologyKey: kubernetes.io/hostname
+                whenUnsatisfiable: ScheduleAnyway
+                # Honor => a tainted node counts as a spread domain only if this pod
+                # tolerates its taint. With the control-plane toleration dropped above,
+                # this confines spread to the pool=build nodes (w1+w2).
+                nodeTaintsPolicy: Honor
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/part-of: gha-runner-scale-set
+            securityContext:
+              runAsNonRoot: true
+              runAsUser: 1001
+              fsGroup: 1001
+              seccompProfile:
+                type: RuntimeDefault
+            containers:
+              - name: runner
+                # KEEP IN SYNC with applicationsets/arc-runner-scaleset-app.yaml and
+                # platform-services/crossplane/apis/composition.yaml — see that file's
+                # comment for why this version pin is a live outage root cause, not
+                # cosmetic (2026-09-25/09-27 CI outages, platform-services/arc/README.md).
+                image: ghcr.io/actions/actions-runner:2.337.0
+                command: ["/home/runner/run.sh"]
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  capabilities:
+                    drop: ["ALL"]
+                env:
+                  # Point the hook at THIS team's template (mounted below) → the build
+                  # pod mounts secret harbor-push-labmx at /kaniko/.docker.
+                  - name: ACTIONS_RUNNER_CONTAINER_HOOK_TEMPLATE
+                    value: /home/runner/pod-templates/hook-template.yaml
+                  # Node visibility (2026-09-09, #ci-build-required) — same shared
+                  # mechanism as applicationsets/arc-runner-scaleset-app.yaml (see
+                  # platform-services/arc/configmap-job-started-hook.yaml). SHARED
+                  # ConfigMap (no team token) — the script carries no team-specific or
+                  # secret content.
+                  - name: NODE_NAME
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: spec.nodeName
+                  - name: ACTIONS_RUNNER_HOOK_JOB_STARTED
+                    value: /home/runner/ci-hooks/job-started.sh
+                volumeMounts:
+                  - name: hook-template
+                    mountPath: /home/runner/pod-templates
+                    readOnly: true
+                  - name: job-started-hook
+                    mountPath: /home/runner/ci-hooks
+                    readOnly: true
+                resources:
+                  # Mirror the shared scaleset (applicationsets/arc-runner-scaleset-app.yaml):
+                  # memory LIMIT 8Gi so a per-team Kaniko build is not OOM-capped; request
+                  # kept modest (1Gi) so co-resident build pods fit the smallest pool node.
+                  requests: { cpu: "250m", memory: "1Gi" }
+                  limits:   { cpu: "2",    memory: "8Gi" }
+            volumes:
+              # Per-team hook template ConfigMap (per-team/hook-template.template.yaml,
+              # rendered → arc-hook-template-labmx).
+              - name: hook-template
+                configMap:
+                  name: arc-hook-template-labmx
+                  items:
+                    - key: content
+                      path: hook-template.yaml
+              # Node-visibility pre-job hook script — SHARED (platform-services/arc/
+              # configmap-job-started-hook.yaml), not per-team.
+              - name: job-started-hook
+                configMap:
+                  name: arc-job-started-hook
+                  defaultMode: 0755
+                  items:
+                    - key: job-started.sh
+                      path: job-started.sh
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: arc-runners
+  # 2026-09-25 CI outage: without this, ArgoCD's periodic reconcile sweep (every
+  # ~2-3 min, cluster-wide, not just on webhook) sees the arc-gha-rs-controller's
+  # own runner-scale-set-id/-name/-group annotation patches on this
+  # AutoscalingRunnerSet as drift and, with selfHeal+ServerSideApply, strips them
+  # straight back out. The controller then finds the ID annotation gone, decides
+  # its ephemeral runner set is "outdated", and tears the whole scale set down
+  # (delete-from-GitHub + recreate) — every cycle, forever, no error logged. See
+  # applicationsets/arc-runner-scaleset-app.yaml for the full incident note; same
+  # fix, mirrored here for hand-rendered teams (composition.yaml is the live
+  # source of truth and carries the identical block).
+  ignoreDifferences:
+    - group: actions.github.com
+      kind: AutoscalingRunnerSet
+      jsonPointers:
+        - /metadata/annotations
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }
