@@ -291,9 +291,37 @@ Replace <YOUR_KEY> above with the key you just entered.
 
     if [ "${models_line_idx}" -eq -1 ]; then
       # No top-level "models:" key at all — append a new section.
+      #
+      # The count guard is not decoration. macOS ships bash 3.2.57 as
+      # /bin/bash and the README tells students to run `bash
+      # setup-macos-linux.sh`, so 3.2 is the interpreter for most of the
+      # people this script exists for. Before bash 4.4, expanding
+      # "${arr[@]}" on an EMPTY array under `set -u` is an error --
+      # "lines[@]: unbound variable" -- which would abort the script here,
+      # after the backup but before writing anything.
+      #
+      # That path is reachable: an existing but EMPTY ~/.continue/config.yaml
+      # leaves `lines` empty, and this README tells students to "find or
+      # create config.yaml" in the manual instructions, so a student who
+      # created the file and then ran the script lands exactly here.
+      #
+      # The guard also fixes a real bug on modern bash: `printf '%s\n'`
+      # with no arguments prints one empty line, so an empty config.yaml
+      # used to gain a spurious blank line.
+      #
+      # The two slice expansions further down cannot be empty --
+      # models_line_idx is >= 0 on that branch, so the slice holds at
+      # least the `models:` line itself -- so they need no guard.
       {
-        printf '%s\n' "${lines[@]}"
-        printf '\nmodels:\n'
+        if [ "${#lines[@]}" -gt 0 ]; then
+          printf '%s\n' "${lines[@]}"
+          # Blank line separating the student's existing content from the
+          # section being appended. Inside the guard on purpose: with
+          # nothing to separate from, an empty config.yaml would otherwise
+          # gain a leading blank line.
+          printf '\n'
+        fi
+        printf 'models:\n'
         build_block "  "
       } > "${CONFIG_YAML}" || fail "Could not write ${CONFIG_YAML}"
       log "No existing 'models:' section was found, so a new one was added"

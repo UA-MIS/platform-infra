@@ -35,7 +35,15 @@
 #   bash test-setup-macos-linux.sh [--script PATH] [--mutation-check]
 #                                  [--assert-endpoint-unreachable]
 #
-# Requires: bash 4+, python3 with PyYAML.
+# Requires: bash 3.2+, python3 with PyYAML.
+#
+# bash 3.2, not 4+, ON PURPOSE: this suite runs on macos-latest as well as
+# ubuntu-latest, and macOS ships bash 3.2.57 as /bin/bash. A harness that
+# needed bash 4 would silently not be testing the interpreter most
+# students actually use. Nothing below uses associative arrays, mapfile,
+# ${var^^}, negative indices or &>>, and every external tool has a BSD
+# fallback -- see sha() and the stat call, both of which fail LOUDLY
+# rather than degrading to a vacuous comparison.
 
 set -uo pipefail
 
@@ -142,7 +150,20 @@ no_key_leak() {
   esac
 }
 count_backups() { ls -1 "$1/.continue/" 2>/dev/null | grep -c '^config\.yaml\.bak-' || true; }
-sha() { sha256sum "$1" 2>/dev/null | cut -d' ' -f1; }
+# Digest of a file, portably. macOS has no sha256sum -- it has shasum.
+# This must FAIL LOUDLY rather than return empty on an unknown platform:
+# an empty digest compares equal to another empty digest, so every
+# "byte-identical" assertion would pass without checking anything.
+SHA_TOOL=''
+if command -v sha256sum >/dev/null 2>&1;  then SHA_TOOL='sha256sum'
+elif command -v shasum >/dev/null 2>&1;   then SHA_TOOL='shasum -a 256'
+elif command -v openssl >/dev/null 2>&1;  then SHA_TOOL='openssl dgst -sha256 -r'
+else
+  echo "no sha256sum, shasum or openssl on PATH -- refusing to run, because" >&2
+  echo "the byte-identical assertions would silently pass without them." >&2
+  exit 3
+fi
+sha() { $SHA_TOOL "$1" 2>/dev/null | cut -d' ' -f1; }
 
 # ---------------------------------------------------------------------------
 # Fixtures. Every one is a shape a real student's config.yaml can be in.
@@ -339,7 +360,10 @@ run_suite() {
 
   # --- S10: CRLF config (a Windows-edited file shared to a Mac) ---------
   scenario='S10-crlf-existing'
-  h="$(new_home)"; fixture_2space | sed 's/$/\r/' | seed_yaml "$h"
+  # awk, not `sed 's/$/\r/'`: BSD sed does not interpret \r in a
+  # replacement and would insert a literal 'r', leaving this scenario
+  # quietly testing nothing.
+  h="$(new_home)"; fixture_2space | awk '{ printf "%s\r\n", $0 }' | seed_yaml "$h"
   run_setup "$h"
   assert_eq "exit" "exits 0 on a CRLF config" 0 "$RUN_EXIT"
   assert_structure "$RUN_CONFIG" --key "$DUMMY_KEY" --expect-count 4 \
@@ -351,6 +375,23 @@ run_suite() {
   run_setup "$h" 'sk-a1b2_c3-d4.e5'
   assert_eq "exit" "exits 0 with a punctuation-heavy key" 0 "$RUN_EXIT"
   assert_structure "$RUN_CONFIG" --key 'sk-a1b2_c3-d4.e5' --expect-count 3
+
+  # --- S13: an existing but EMPTY config.yaml -----------------------------
+  # The README's manual path tells students to "find or create config.yaml",
+  # so a student who created the file and then ran the script arrives here
+  # with a 0-byte file. On any bash before 4.4 -- which includes the 3.2.57
+  # that macOS ships as /bin/bash -- expanding "${lines[@]}" on the
+  # resulting empty array under `set -u` aborts the script, AFTER the backup
+  # has been written and before anything is written back.
+  scenario='S13-empty-existing-config'
+  h="$(new_home)"; : | seed_yaml "$h"
+  run_setup "$h"
+  assert_eq "exit" "exits 0 on an existing but empty config.yaml" 0 "$RUN_EXIT"
+  assert_structure "$RUN_CONFIG" --key "$DUMMY_KEY" --expect-count 3
+  # `printf '%s\n'` with no arguments emits one blank line, so an unguarded
+  # array expansion also left a spurious leading blank line here.
+  assert_eq "no-leading-blank" "does not leave a spurious blank line at the top" \
+            "models:" "$(head -n1 "$RUN_CONFIG")"
 
   printf '\n%d passed, %d failed.\n' "$pass_count" "$failures"
   [ "$failures" -eq 0 ] || return 1
@@ -367,14 +408,87 @@ run_suite() {
 # one.
 # ---------------------------------------------------------------------------
 
-# id | why | find | replace | expected-failid-regex   (TAB separated)
-mutation_specs() {
-  printf '%s\n' \
-"M1-collapse-continuation-indent	Structural break: continuation keys line up with the \"- \" dash instead of being indented under it, so the block is no longer valid YAML.	cont_indent=\"\${dash_indent}  \"	cont_indent=\"\${dash_indent}\"	/yaml\$" \
-"M2-drop-enable-thinking-from-edit	Subtle break: the Edit entry silently loses enable_thinking: false, so that role truncates mid-reasoning. The file is still perfectly valid YAML.	  printf '%s  maxTokens: 400\\\\n' \"\${cont_indent}\"\n  printf '%srequestOptions:\\\\n' \"\${cont_indent}\"\n  printf '%s  extraBodyProperties:\\\\n' \"\${cont_indent}\"\n  printf '%s    chat_template_kwargs:\\\\n' \"\${cont_indent}\"\n  printf '%s      enable_thinking: false\\\\n' \"\${cont_indent}\"	  printf '%s  maxTokens: 400\\\\n' \"\${cont_indent}\"	/thinking-UAMISLocalEdit\$" \
-"M3-wrong-maxtokens-on-chat	Value regression: the Chat cap drops from 4000 to 2000, which truncates good answers. Valid YAML, right shape, wrong number.	  printf '%s  maxTokens: 4000\\\\n' \"\${cont_indent}\"	  printf '%s  maxTokens: 2000\\\\n' \"\${cont_indent}\"	/maxtok-UAMISLocalChat\$" \
-"M4-clobber-existing-entries	Data loss: the merge stops emitting the lines after the models: line, so a student's existing provider is silently deleted. Valid YAML, our entries all correct.	        if [ \"\$((models_line_idx + 1))\" -lt \"\${#lines[@]}\" ]; then\n          printf '%s\\\\n' \"\${lines[@]:\$((models_line_idx + 1))}\"\n        fi	        :	/preserved-entry\$" \
-"M5-drop-apply-role-from-edit	Role regression: the Edit entry stops declaring apply, so Continue offers no model for Apply. Valid YAML.	  printf '%sroles: [edit, apply]\\\\n' \"\${cont_indent}\"	  printf '%sroles: [edit]\\\\n' \"\${cont_indent}\"	/roles-UAMISLocalEdit\$"
+# Mutation definitions.
+#
+# find/replace bodies are quoted heredocs rather than escaped one-liners,
+# so they are the literal text of the script and can be read and checked by
+# eye. The anchor must match EXACTLY ONCE -- an ambiguous anchor fails the
+# mutation rather than silently patching the wrong site.
+
+mutation_ids() {
+  # id <TAB> regex the mutation MUST newly trip
+  printf '%s\t%s\n' \
+    'M1-collapse-continuation-indent'   '/yaml$' ; printf '%s\t%s\n' \
+    'M2-drop-enable-thinking-from-edit' '/thinking-UAMISLocalEdit$' ; printf '%s\t%s\n' \
+    'M3-wrong-maxtokens-on-chat'        '/maxtok-UAMISLocalChat$' ; printf '%s\t%s\n' \
+    'M4-clobber-existing-entries'       '/preserved-entry$' ; printf '%s\t%s\n' \
+    'M5-drop-apply-role-from-edit'      '/roles-UAMISLocalEdit$'
+}
+
+mutation_why() {
+  case "$1" in
+    M1-*) echo 'Structural break: continuation keys line up with the "- " dash instead of being indented under it, so the block is no longer valid YAML.' ;;
+    M2-*) echo 'Subtle break: the Edit entry silently loses enable_thinking: false, so that role truncates mid-reasoning. The file is still perfectly valid YAML.' ;;
+    M3-*) echo 'Value regression: the Chat cap drops from 4000 to 2000, which truncates good answers. Valid YAML, right shape, wrong number.' ;;
+    M4-*) echo "Data loss: the merge stops emitting the lines after the models: line, so a student's existing provider is silently deleted. Valid YAML, our entries all correct." ;;
+    M5-*) echo 'Role regression: the Edit entry stops declaring apply, so Continue offers no model for Apply. Valid YAML.' ;;
+  esac
+}
+
+mutation_find() {
+  case "$1" in
+    M1-*) cat <<'XEOF'
+  cont_indent="${dash_indent}  "
+XEOF
+    ;;
+    M2-*) cat <<'XEOF'
+  printf '%s  maxTokens: 400\n' "${cont_indent}"
+  printf '%srequestOptions:\n' "${cont_indent}"
+  printf '%s  extraBodyProperties:\n' "${cont_indent}"
+  printf '%s    chat_template_kwargs:\n' "${cont_indent}"
+  printf '%s      enable_thinking: false\n' "${cont_indent}"
+XEOF
+    ;;
+    M3-*) cat <<'XEOF'
+  printf '%s  maxTokens: 4000\n' "${cont_indent}"
+XEOF
+    ;;
+    M4-*) cat <<'XEOF'
+        if [ "$((models_line_idx + 1))" -lt "${#lines[@]}" ]; then
+          printf '%s\n' "${lines[@]:$((models_line_idx + 1))}"
+        fi
+XEOF
+    ;;
+    M5-*) cat <<'XEOF'
+  printf '%sroles: [edit, apply]\n' "${cont_indent}"
+XEOF
+    ;;
+  esac
+}
+
+mutation_repl() {
+  case "$1" in
+    M1-*) cat <<'XEOF'
+  cont_indent="${dash_indent}"
+XEOF
+    ;;
+    M2-*) cat <<'XEOF'
+  printf '%s  maxTokens: 400\n' "${cont_indent}"
+XEOF
+    ;;
+    M3-*) cat <<'XEOF'
+  printf '%s  maxTokens: 2000\n' "${cont_indent}"
+XEOF
+    ;;
+    M4-*) cat <<'XEOF'
+        :
+XEOF
+    ;;
+    M5-*) cat <<'XEOF'
+  printf '%sroles: [edit]\n' "${cont_indent}"
+XEOF
+    ;;
+  esac
 }
 
 # Collects the FAILIDs the suite emits against a given script.
@@ -402,20 +516,22 @@ run_mutation_check() {
   echo
 
   local mut_fail=0 total=0
-  while IFS="$(printf '\t')" read -r id why find repl expect; do
+  while IFS="$(printf '\t')" read -r id expect; do
     [ -n "$id" ] || continue
     total=$((total + 1))
     printf -- '--- %s ---\n' "$id"
-    printf '    %s\n' "$why"
+    printf '    %s\n' "$(mutation_why "$id")"
 
     local mutant="${mutwork}/${id}.sh"
-    # printf %b so the \n escapes in the spec become real newlines for
-    # multi-line anchors.
+    mutation_find "$id" > "${mutwork}/find.txt"
+    mutation_repl "$id" > "${mutwork}/repl.txt"
     if ! "$PYTHON" - "$SCRIPT_UNDER_TEST" "$mutant" \
-           "$(printf '%b' "$find")" "$(printf '%b' "$repl")" <<'PY'
+           "${mutwork}/find.txt" "${mutwork}/repl.txt" <<'PY'
 import sys
-src, dst, find, repl = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+src, dst, findf, replf = sys.argv[1:5]
 s = open(src).read()
+find = open(findf).read()
+repl = open(replf).read()
 n = s.count(find)
 if n != 1:
     sys.stderr.write("anchor matched %d times (need exactly 1)\n" % n)
@@ -441,13 +557,13 @@ PY
       mut_fail=$((mut_fail + 1))
     elif [ -z "$hit" ]; then
       printf 'MUTANT-MISDETECTED: %s -- failures were added, but none matching the expected assertion %s.\n' "$id" "$expect"
-      printf '    added: %s\n' "$(printf '%s\n' "$added" | paste -sd, -)"
+      printf '    added: %s\n' "$(printf '%s\n' "$added" | tr '\n' ',' | sed 's/,$//')"
       mut_fail=$((mut_fail + 1))
     else
-      printf 'MUTANT-CAUGHT: %s -- newly tripped: %s\n' "$id" "$(printf '%s\n' "$hit" | paste -sd, -)"
+      printf 'MUTANT-CAUGHT: %s -- newly tripped: %s\n' "$id" "$(printf '%s\n' "$hit" | tr '\n' ',' | sed 's/,$//')"
     fi
     echo
-  done <<< "$(mutation_specs)"
+  done <<< "$(mutation_ids)"
 
   printf '=== Mutation check: %d/%d mutations caught ===\n' "$((total - mut_fail))" "$total"
   [ "$mut_fail" -eq 0 ] || return 1
