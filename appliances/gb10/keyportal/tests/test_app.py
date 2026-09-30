@@ -917,18 +917,46 @@ def test_render_page_active_shows_key_and_continue_config(app_module):
     assert "sk-realkey" in html
     assert "qwen3.8-27b" in html
     assert "https://local-llm.uamishub.com/v1" in html
-    assert "roles: [chat, edit, apply, agent]" in html
+    # Security review round-6-followup / Task 1 (2026-09-30): three
+    # entries now, one per role group, not one combined
+    # "roles: [chat, edit, apply, agent]" line -- see
+    # _manual_config_block()'s own docstring for why (Continue's
+    # completion options apply per model block, not per role).
+    assert "roles: [chat]" in html
+    assert "roles: [edit, apply]" in html
+    assert "roles: [agent]" in html
     assert "Regenerate" in html
     assert app_module.ONBOARDING_URL in html
+
+
+def test_manual_config_block_thinking_off_on_all_three_entries(app_module):
+    """Task 1 (2026-09-30, correcting an inherited default rather than
+    a decision): chat and agent used to keep thinking ON -- the
+    single-turn benchmark showed no quality difference worth the wait
+    (off 41/54 vs xhigh 39/54, within noise; low tracked off), so off is
+    now the evidence-based default for every role. Counts exactly 3
+    occurrences of the marker, one per entry -- not just "at least one",
+    which would pass even if only the Edit entry (which already had it)
+    kept it and Chat/Agent were never actually updated."""
+    block = app_module._manual_config_block()
+    assert block.count("enable_thinking: false") == 3
 
 
 def test_render_page_active_roles_include_agent(app_module):
     """Regression guard for the team-lead brief: the plan's own snippet
     and the onboarding/ scripts still say [chat, edit, apply] -- agent
-    tool calling now works on vLLM, so the portal must include "agent"."""
+    tool calling now works on vLLM, so the portal must include "agent".
+
+    2026-09-30: updated for the three-entry shape -- the OLD assertion
+    (`"agent" in html.split("roles:")[1].splitlines()[0]`) checked only
+    the FIRST "roles:" occurrence, which is now `roles: [chat]` and
+    would make this regression guard fail even though agent tool
+    calling is still correctly declared, just in its own entry further
+    down. Checks the Agent entry specifically instead of assuming there
+    is only one "roles:" line in the whole page."""
     config = app_module.CONFIG
     html = app_module.render_page("x@ua.edu", "sk-k", True, config)
-    assert "agent" in html.split("roles:")[1].splitlines()[0]
+    assert "roles: [agent]" in html
 
 
 def test_render_page_links_to_onboarding_scripts_both_states(app_module):
@@ -1097,7 +1125,9 @@ def test_index_active_user_sees_key_and_config(
     resp = client.get("/", headers={"Cf-Access-Jwt-Assertion": "irrelevant-mocked"})
     assert resp.status_code == 200
     assert "sk-active-key" in resp.text
-    assert "roles: [chat, edit, apply, agent]" in resp.text
+    assert "roles: [chat]" in resp.text
+    assert "roles: [edit, apply]" in resp.text
+    assert "roles: [agent]" in resp.text
 
 
 def test_index_unrecognized_cached_key_reissues_instead_of_500(

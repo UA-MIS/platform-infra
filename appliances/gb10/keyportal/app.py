@@ -44,14 +44,18 @@ ONBOARDING_URL = (
 )
 MODEL_NAME = "qwen3.8-27b"
 MODEL_ENDPOINT = "https://local-llm.uamishub.com/v1"
-# Keep this in lockstep with onboarding/setup-macos-linux.sh's build_block()
-# and setup-windows.ps1. "agent" was added after tool calling started
-# working on vLLM (--enable-auto-tool-choice / --tool-call-parser=
-# qwen3_xml, see docker-compose.yml's vllm service). The onboarding
-# scripts still say `[chat, edit, apply]` as of this writing and are
-# known-stale (Task 12 team-lead brief, 2026-09-29) -- do not "fix" this
-# constant to match them; fix them to match this instead.
-CONTINUE_ROLES = "[chat, edit, apply, agent]"
+# 2026-09-30: this used to be a single CONTINUE_ROLES constant
+# ("[chat, edit, apply, agent]") rendered as one combined model entry --
+# that comment used to say "fix onboarding/ to match THIS", which
+# reversed once the maxTokens task (0c4a93f) split the onboarding
+# scripts into three per-role entries (Continue's defaultCompletionOptions/
+# requestOptions apply per MODEL block, not per role within a shared
+# one) and this file was NOT updated to match, a known gap flagged in
+# that commit's own message. _manual_config_block() below now generates
+# the identical three-entry shape the onboarding scripts do -- keep
+# both in lockstep; there is no longer a constant here to drift, because
+# the whole block (roles, per-entry maxTokens, per-entry
+# chat_template_kwargs) is now the thing that must match.
 
 
 def _require_env(name: str, *, hint: str = "") -> str:
@@ -1623,17 +1627,94 @@ a { color: #7a1526; }
 
 
 def _manual_config_block(api_key_placeholder: str = "&lt;your key&gt;") -> str:
-    """The same shape as the personalized block below, but with a
-    placeholder key -- shown to EVERY visitor (pending or active) so a
-    beginner can see exactly what the file should look like even before
-    their key is usable, without leaving this page."""
+    """The single source for the config block this portal shows,
+    whether the visitor has a real key yet or not -- called with a
+    placeholder for the pending/beginner-facing copy shown to EVERY
+    visitor, and with the visitor's real key for the personalized block
+    shown once they are active (see render_page(), which calls this
+    same function with `key` instead of maintaining its own separate
+    template -- the two rendering the SAME shape by construction, not by
+    two hand-kept-in-sync copies, is what this refactor exists for).
+
+    2026-09-30: three separate model entries, not one, for the same
+    reason onboarding/setup-macos-linux.sh's build_block() and
+    setup-windows.ps1's Build-Block are three entries -- Continue's
+    defaultCompletionOptions/requestOptions apply per MODEL block, not
+    per role within a shared one, so there is no way to give chat,
+    edit/apply, and agent different maxTokens on a single entry (see
+    https://docs.continue.dev/reference). All three point at the exact
+    same backend model; only the role assignment and completion options
+    differ. Continue only offers each role a choice among the models
+    that declare it, so a student sees one candidate per role, not three
+    confusing "chat" options.
+
+    thinking is OFF (chat_template_kwargs.enable_thinking: false) on
+    ALL THREE entries -- corrected 2026-09-30 from chat/agent keeping it
+    ON, which was inheriting the model's default and calling it a
+    decision. The single-turn benchmark showed no quality difference
+    worth the wait (off 41/54 vs xhigh 39/54, within noise; low tracked
+    off) -- off is the evidence-based default everywhere now.
+    """
+    key = api_key_placeholder
     return f"""models:
-  - name: UA MIS Local
+  - name: UA MIS Local (Chat)
+    provider: openai  # "openai" here means the OpenAI-compatible API
+                      # protocol, NOT the OpenAI company. This talks
+                      # only to our own local box, never to openai.com.
+    model: {MODEL_NAME}
+    apiBase: {MODEL_ENDPOINT}
+    apiKey: {key}
+    roles: [chat]
+    # Generous on purpose: measured a real MIS 321-level question
+    # (write a C# method with a parameterized query) at ~1900 tokens
+    # end to end, a good and correct answer, finishing on its own well
+    # under this cap. Do not lower this to "speed things up" -- it
+    # truncates good answers, not slow ones.
+    defaultCompletionOptions:
+      maxTokens: 4000
+    requestOptions:
+      extraBodyProperties:
+        chat_template_kwargs:
+          enable_thinking: false
+
+  - name: UA MIS Local (Edit)
     provider: openai
     model: {MODEL_NAME}
     apiBase: {MODEL_ENDPOINT}
-    apiKey: {api_key_placeholder}
-    roles: {CONTINUE_ROLES}"""
+    apiKey: {key}
+    roles: [edit, apply]
+    # Small and fast on purpose: a changed line or block, not a
+    # tutorial. Measured real edit/apply tasks (rename variables, add
+    # error handling) at 37-90 tokens with thinking off; 400 leaves
+    # real headroom for a larger function.
+    defaultCompletionOptions:
+      maxTokens: 400
+    requestOptions:
+      extraBodyProperties:
+        chat_template_kwargs:
+          enable_thinking: false
+
+  - name: UA MIS Local (Agent)
+    provider: openai
+    model: {MODEL_NAME}
+    apiBase: {MODEL_ENDPOINT}
+    apiKey: {key}
+    roles: [agent]
+    # Largest cap of the three: multi-step, tool-calling agent work
+    # legitimately needs the most room. Measured a real multi-file
+    # scaffold task at ~3700 tokens, finishing on its own well under
+    # this cap. 8000 sits just under this deployment's own hard backend
+    # ceiling (8192).
+    defaultCompletionOptions:
+      maxTokens: 8000
+    requestOptions:
+      extraBodyProperties:
+        chat_template_kwargs:
+          enable_thinking: false
+    # Deliberately no "autocomplete" role on any of the three entries
+    # above: GitHub Copilot Free already handles inline completions
+    # well, and this shared GPU box shouldn't spend capacity on every
+    # keystroke."""
 
 
 def render_intro(email: str, config: Config) -> str:
@@ -1701,16 +1782,14 @@ already have will start working, and you'll see the
 do anything else right now, and you do not need to regenerate anything.</p>
 </div>
 </body></html>"""
-    config_snippet = f"""models:
-  - name: UA MIS Local
-    provider: openai
-    model: {MODEL_NAME}
-    apiBase: {MODEL_ENDPOINT}
-    apiKey: {key}
-    roles: {CONTINUE_ROLES}
-    # Deliberately no "autocomplete" role: GitHub Copilot Free already
-    # handles inline completions; this shared GPU box shouldn't spend
-    # capacity on every keystroke."""
+    # 2026-09-30: reuses _manual_config_block() itself, with the
+    # visitor's real key, instead of maintaining a second, separately
+    # hand-kept-in-sync template -- that second copy is exactly how
+    # this route drifted out of sync with the onboarding scripts'
+    # three-entry redesign in the first place (0c4a93f touched
+    # onboarding/ only; this file's OWN copy was never updated because
+    # nothing forced the two to match). One function, two callers.
+    config_snippet = _manual_config_block(key)
     return f"""<!doctype html>
 <html><head>{head}</head>
 <body>
