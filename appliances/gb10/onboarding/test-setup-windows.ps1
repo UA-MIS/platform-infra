@@ -6,11 +6,35 @@
 .DESCRIPTION
   setup-windows.ps1 is the copy-paste onboarding step for MIS 221/321
   students, who are overwhelmingly on Windows laptops. Before this
-  harness it had never been EXECUTED anywhere -- there is no PowerShell
-  on the dev VM or on the appliance, so it had only ever been reviewed
-  by eye, and it was hand-edited twice on 2026-09-30 without any
-  execution evidence. A quoting or indentation bug in it is not an edge
-  case; it is most of a class failing at step one of the first lab.
+  harness it had never been EXECUTED anywhere: it had only ever been
+  reviewed by eye, and it was hand-edited twice on 2026-09-30 without
+  any execution evidence. A quoting or indentation bug in it is not an
+  edge case; it is most of a class failing at step one of the first lab.
+
+  You CAN run this harness locally, and should before pushing. The
+  original version of this paragraph said there is no PowerShell on the
+  dev VM or the appliance and left it there, which read as "CI is the
+  only option" and was the reason two hand-edits shipped unexecuted.
+  There is still no PowerShell installed on either box, but a container
+  is not an installation:
+
+    docker run --rm --add-host local-llm.uamishub.com:127.0.0.1 \
+      -v "$PWD:/w:ro" mcr.microsoft.com/powershell:7.4-debian-12 bash -c '
+        apt-get -qq update >/dev/null && \
+          apt-get -qq install -y python3 python3-yaml >/dev/null
+        cp -r /w /tmp/onb && cd /tmp/onb
+        pwsh -NoProfile -File ./test-setup-windows.ps1 \
+          -Launcher pwsh -AssertEndpointUnreachable'
+
+  The --add-host is not optional: it is what keeps a bogus-key request
+  off production, exactly as the CI job's hosts-file edit does.
+
+  What that does NOT cover, and what still needs the windows-latest CI
+  job: Windows PowerShell 5.1, which is what this script's own .EXAMPLE
+  block tells students to use, and whose Invoke-WebRequest throws a
+  different exception type than pwsh 7 (the script carries a separate
+  catch block for each). A green local run is evidence about half the
+  class, not all of it.
 
   This harness follows the house style of appliances/gb10/test-render-config.sh:
   one process per scenario, assert on the OUTCOME rather than the exit
