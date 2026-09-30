@@ -1,0 +1,156 @@
+# ============================================================================
+# gb10-keyportal.yaml — run appliances/gb10/keyportal/tests/
+#
+# ── WHY THIS EXISTS ─────────────────────────────────────────────────────────
+# The keyportal suite had 170 tests and NO CI job. The two onboarding scripts
+# it serves have five jobs between them; the service that authenticates every
+# student, mints their LiteLLM key, holds the only plaintext copy of it, and
+# now hands out a file containing it had zero. Every one of those tests only
+# ever ran on whichever machine last happened to run them by hand.
+#
+# That asymmetry is backwards. The onboarding scripts are ~500 lines of shell
+# and PowerShell with no auth surface; app.py is the thing standing between a
+# student's identity and somebody else's credential, and five rounds of
+# security review are recorded in its docstrings. Those rounds produced tests.
+# Nothing was running them.
+#
+# ── WHAT IT ACTUALLY DOES ───────────────────────────────────────────────────
+# Runs the real suite, which is not a lint: it drives the FastAPI app through
+# TestClient, executes the setup script the portal serves with real bash and
+# parses the config.yaml it wrote with PyYAML, and asserts on response
+# headers, log output and substitution byte-for-byte.
+#
+# ── WHY THE MUTATION-CHECK JOB ──────────────────────────────────────────────
+# Same argument as the onboarding workflows: a CI job that passes against
+# broken code manufactures confidence. It applies eight mutations to app.py
+# and requires each to trip a SPECIFIC named test.
+#
+# It has already paid for itself, before this workflow ever ran in CI. On its
+# first execution it found that M7-skip-the-marker-validation SURVIVED: the
+# drift test called _validate_setup_script() directly, so deleting the call
+# to it from load_setup_scripts() broke nothing. A drifted onboarding script
+# would have been loaded and served to every student with no key in it. The
+# test asserted what the validator DID, not that it was WIRED IN. That gap is
+# invisible to review and to coverage, and only a mutation found it.
+#
+# ── WHY ubuntu-latest, AND WHY NO MATRIX ────────────────────────────────────
+# This service runs in exactly one place: a python:3.12-slim container on the
+# GB10, single uvicorn process (see keyportal/Dockerfile's own warning about
+# --workers). There is no second platform to cover, unlike the onboarding
+# scripts, whose whole point is that they run on students' own machines. The
+# interpreter is pinned to 3.12 to match the image rather than tracking
+# whatever the runner ships.
+#
+# ── WHY THERE IS NO NETWORK ─────────────────────────────────────────────────
+# Nothing here reaches LiteLLM or Cloudflare: every outbound call is mocked at
+# httpx, and Cloudflare Access JWT verification is patched out. The one test
+# that runs the real setup script points curl at a dead local proxy, the same
+# technique the onboarding suites use, so the hardcoded model endpoint is
+# never contacted. No secrets are needed and none are granted.
+# ============================================================================
+name: gb10 keyportal
+
+on:
+  pull_request:
+    paths:
+      - 'appliances/gb10/keyportal/**'
+      # The suite reads the onboarding scripts from disk and asserts the
+      # portal serves them byte-for-byte, so a change over there can turn
+      # this suite red without touching a single file under keyportal/.
+      # That coupling is the feature (one tested copy, not two), which
+      # means it belongs in this trigger.
+      - 'appliances/gb10/onboarding/setup-macos-linux.sh'
+      - 'appliances/gb10/onboarding/setup-windows.ps1'
+      - '.github/workflows/gb10-keyportal.yaml'
+  push:
+    branches: [main]
+    paths:
+      - 'appliances/gb10/keyportal/**'
+      - 'appliances/gb10/onboarding/setup-macos-linux.sh'
+      - 'appliances/gb10/onboarding/setup-windows.ps1'
+      - '.github/workflows/gb10-keyportal.yaml'
+  workflow_dispatch:
+
+concurrency:
+  group: gb10-keyportal-${{ github.ref }}
+  # Superseded PR pushes are worth cancelling; main history is not.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    name: run the keyportal suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: appliances/gb10/keyportal
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          # Matches keyportal/Dockerfile's python:3.12-slim. Pinned rather
+          # than tracking the runner image, so the interpreter under test is
+          # the interpreter in production.
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          # requirements-dev.txt pulls in requirements.txt, so this is the
+          # production dependency set plus pytest/pytest-mock/PyYAML. Every
+          # version in both files is pinned, deliberately: this suite is what
+          # decides whether a credential-handling service is correct, so it
+          # must not start failing (or, worse, start passing) because a
+          # transitive dependency moved.
+          python -m pip install --disable-pip-version-check --quiet \
+            -r requirements-dev.txt
+          python -c "import fastapi, httpx, jwt, yaml; print('deps ok')"
+
+      - name: Run the suite
+        run: |
+          # -ra so the log records skips with their reasons. One test is
+          # skipped by design (tests/test_live_integration.py needs the real
+          # appliance); a skip count silently drifting upward is how a suite
+          # stops testing things, so it is printed rather than hidden.
+          python -m pytest tests/ -q -ra
+
+  mutation-check:
+    name: prove the suite catches broken code
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: appliances/gb10/keyportal
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --disable-pip-version-check --quiet \
+            -r requirements-dev.txt
+
+      - name: Mutate app.py eight ways and require the suite to notice
+        run: |
+          # Each mutation names the test it MUST newly trip. A mutation that
+          # survives, or that only trips something unrelated, fails this job
+          # -- that is a gap in the assertions, not a pass. All eight are
+          # SILENT failures: each leaves a service that starts, serves 200s
+          # and looks right.
+          #
+          # Mutations are applied to a staged COPY of the tree, never to the
+          # checkout, and the script refuses to report at all unless the
+          # baseline actually executed the suite (its first version staged
+          # the tree wrong, collected 230 import errors, and read that as a
+          # clean green baseline).
+          python tests/mutation-check.py

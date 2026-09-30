@@ -4152,3 +4152,71 @@ def test_pending_page_does_not_send_a_student_back_for_a_config_block(
     # The reassurance, and the run-it-now invitation, must still be there.
     assert "do not need to" in pending_block
     assert "run the setup script above right now" in pending_block
+
+
+def test_load_setup_scripts_actually_validates_what_it_loads(
+    app_module, tmp_path, monkeypatch
+):
+    """Found by the mutation check, not by reading the code.
+
+    test_loader_rejects_a_script_whose_marker_line_has_drifted calls
+    _validate_setup_script DIRECTLY, so it proves the validator works --
+    and nothing more. Deleting the call to it from load_setup_scripts()
+    left that test green: mutation M7-skip-the-marker-validation survived,
+    and a drifted script would have been loaded, served to every student
+    with no key in it, and prompted them for one they were told they would
+    not need.
+
+    "Asserting what a function does" is not the same as "asserting it is
+    wired in". This test exercises load_setup_scripts() itself, through
+    KEYPORTAL_ONBOARDING_DIR, against a directory where one script has
+    drifted -- the path the container actually takes at startup.
+    """
+    for drifted_slug, drifted in app_module.SETUP_SCRIPTS.items():
+        directory = tmp_path / drifted_slug
+        directory.mkdir()
+        for slug, spec in app_module.SETUP_SCRIPTS.items():
+            text = app_module.SETUP_SCRIPT_SOURCES[slug]
+            if slug == drifted_slug:
+                text = text.replace(spec.marker_line, "")
+            (directory / spec.source_filename).write_text(text, encoding="utf-8")
+        monkeypatch.setenv("KEYPORTAL_ONBOARDING_DIR", str(directory))
+        with pytest.raises(RuntimeError, match="marker"):
+            app_module.load_setup_scripts()
+
+
+def test_load_setup_scripts_refuses_a_directory_missing_a_script(
+    app_module, tmp_path, monkeypatch
+):
+    """The other half of the startup contract: a script absent from the
+    image must stop the container, not surface later as a 500 on a
+    student's download."""
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setenv("KEYPORTAL_ONBOARDING_DIR", str(empty))
+    with pytest.raises(RuntimeError, match="Could not read"):
+        app_module.load_setup_scripts()
+
+
+def test_load_setup_scripts_refuses_a_missing_directory(
+    app_module, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("KEYPORTAL_ONBOARDING_DIR", str(tmp_path / "nope"))
+    with pytest.raises(RuntimeError, match="onboarding scripts directory"):
+        app_module.load_setup_scripts()
+
+
+def test_load_setup_scripts_succeeds_on_a_good_directory(
+    app_module, tmp_path, monkeypatch
+):
+    """The positive control for the three refusals above. Without it, a
+    load_setup_scripts() that raised unconditionally would satisfy all of
+    them -- every "it rejects X" test needs one thing it accepts."""
+    good = tmp_path / "good"
+    good.mkdir()
+    for slug, spec in app_module.SETUP_SCRIPTS.items():
+        (good / spec.source_filename).write_text(
+            app_module.SETUP_SCRIPT_SOURCES[slug], encoding="utf-8"
+        )
+    monkeypatch.setenv("KEYPORTAL_ONBOARDING_DIR", str(good))
+    assert app_module.load_setup_scripts() == app_module.SETUP_SCRIPT_SOURCES
