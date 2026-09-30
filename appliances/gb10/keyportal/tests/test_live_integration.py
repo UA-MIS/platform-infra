@@ -31,7 +31,9 @@ explicit "yes, hit the real server" opt-in.
 """
 
 import os
+import shutil
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -90,7 +92,18 @@ def live_config():
         admin_contact="Test Admin",
         admin_emails=("unused-for-this-test@ua.edu",),
         keyportal_hostname="unused-for-this-test.example",
-        db_path=f"/tmp/keyportal-live-test-{uuid.uuid4().hex}.db",
+        # 2026-09-30 fix: init_db() locks the db file's PARENT directory
+        # down to 0700 (see its own docstring) -- a bare file directly
+        # under /tmp made that target /tmp ITSELF, which os.chmod()
+        # correctly refuses (PermissionError: Operation not permitted),
+        # since chmod'ing a shared system directory to owner-only would
+        # break it for every other process on the box. tempfile.mkdtemp()
+        # creates a fresh directory this process already owns at 0700,
+        # so init_db()'s chmod is a no-op on an already-correct target
+        # rather than an attempt to relock a directory it does not own.
+        db_path=os.path.join(
+            tempfile.mkdtemp(prefix="keyportal-live-test-"), "keyportal.db"
+        ),
     )
 
 
@@ -115,13 +128,25 @@ def test_real_promotion_and_regenerate_lifecycle(live_config, synthetic_email):
     Exercises the exact production call sequence:
       1. issue_key() into pending -- as a first-time portal visit does.
       2. Confirm pending: team_grants_access() is False.
-      3. Promote with a SINGLE /key/update call (no /team/member_add
-         dance) -- this is the step that 403'd before the fix, because
-         issue_key() used to also set user_id=email.
+      3. promote_user() -- the actual function admin_promote() and
+         promote-user.sh call, not a hand-rolled request. This is
+         TWO calls (_litellm_clear_legacy_user_id() then
+         _litellm_set_team()), and the first of those two is the step
+         that made the second one's /key/update 403 before the fix
+         (see app.py's issue_key() docstring for the full postmortem)
+         -- a test that skips straight to a single /key/update call
+         never exercises the call this regression test exists for.
       4. Confirm active: team_grants_access() is True, SAME key string
          (no reissue).
       5. revoke_and_reissue() -- confirm it lands on the SAME (promoted)
          team, not pending; old key rejected by LiteLLM, new key active.
+
+    2026-09-30 fix (security review round 5, audit finding, step 7):
+    this test previously called httpx.post(/key/update) directly instead
+    of promote_user() -- exercising only ONE of the two calls the real
+    admin_promote() route makes, and specifically not the
+    _litellm_clear_legacy_user_id() call the 2026-09-29 postmortem is
+    actually about. Fixed to call promote_user() itself.
     """
     import app as app_module
 
@@ -141,23 +166,17 @@ def test_real_promotion_and_regenerate_lifecycle(live_config, synthetic_email):
         assert team_id == live_config.pending_team_id
         assert app_module.team_grants_access(live_config, team_id) is False
 
-        # Step 3: promote with ONE /key/update call -- the production
-        # shape an admin (or promote-user.sh) actually uses. This is
-        # the exact call that returned
+        # Step 3: promote via the REAL promote_user() -- the production
+        # shape admin_promote()/promote-user.sh actually use, TWO calls
+        # (_litellm_clear_legacy_user_id() then _litellm_set_team()), not
+        # a hand-rolled single /key/update. The first of those two calls
+        # is the step whose absence made the second one 403 with
         # {"error": "User=<email> is not a member of the team=<id>"}
         # before the fix (verified live, 2026-09-29, with the old
         # user_id=email payload -- see app.py's issue_key() docstring).
-        resp = httpx.post(
-            f"{live_config.litellm_base_url}/key/update",
-            headers={"Authorization": f"Bearer {live_config.litellm_master_key}"},
-            json={"key": key, "team_id": _REAL_ENV["STUDENTS_TEAM_ID"]},
-            timeout=15.0,
-        )
-        assert resp.status_code == 200, (
-            f"promotion failed: {resp.status_code} {resp.text} -- if this "
-            f"says 'is not a member of the team', issue_key() is setting "
-            f"user_id again; it must not."
-        )
+        # A test that only sent the second call could pass even if the
+        # first one silently stopped happening.
+        app_module.promote_user(live_config, synthetic_email, "students")
 
         # Step 4: active now, SAME key.
         team_id_after = app_module.get_current_team_id(live_config, key)
@@ -182,13 +201,25 @@ def test_real_promotion_and_regenerate_lifecycle(live_config, synthetic_email):
             params={"key": key},
             timeout=15.0,
         )
-        assert old_key_info.status_code == 200
+        # 2026-09-30 fix (security review round 5, audit finding, step 7):
+        # this used to also assert `old_key_info.status_code == 200` --
+        # which is true, but it asserts WHAT LITELLM DOES (a soft-delete
+        # detail, confirmed live and stated three lines above as
+        # observational context, not a requirement), not what this test
+        # requires. The requirement is that the old key reads as
+        # deleted; asserting the incidental status code alongside it is
+        # exactly the "encodes what the code does rather than what the
+        # requirement demands" pattern this whole review has been
+        # naming -- if LiteLLM ever changed to a real 404 here instead
+        # of a soft-delete 200, that would still correctly satisfy "the
+        # old key is rejected", and the removed assertion would have
+        # failed a change that made nothing worse.
         old_info = old_key_info.json().get("info", old_key_info.json())
         assert old_info.get("status") == "deleted"
     finally:
         for k in issued_keys:
             _delete_key(live_config, k)
-        try:
-            os.remove(live_config.db_path)
-        except OSError:
-            pass
+        # Removes the whole mkdtemp() directory, not just the db file --
+        # matches the fixture creating a dedicated directory rather than
+        # a bare file, so nothing is left behind under /tmp.
+        shutil.rmtree(os.path.dirname(live_config.db_path), ignore_errors=True)
