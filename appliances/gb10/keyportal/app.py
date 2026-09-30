@@ -710,6 +710,21 @@ def _mint_and_finalize_claim(
         raise
 
 
+class LiteLLMKeyGoneError(Exception):
+    """Security review round 5, soft-delete finding (2026-09-30): LiteLLM
+    does NOT 404 a key that was deleted through it -- it soft-deletes.
+    Confirmed live: minted a key, called /key/delete (200), then looked
+    the same hash up again -- still 200, now with `"status": "deleted"`
+    (plus `deleted_at`/`deleted_by`) added to the info payload that
+    previously had neither. A fabricated hash that never existed at all
+    DOES 404 cleanly. These are two different, observable shapes for
+    "this key is gone", and only one of them raises httpx.HTTPStatusError
+    -- this exception exists so get_current_team_id()'s callers can
+    treat both the same way without each one re-deriving the detection
+    logic.
+    """
+
+
 def get_current_team_id(config: Config, key: str) -> Optional[str]:
     """Look up a key's CURRENT team_id, live, from LiteLLM.
 
@@ -728,6 +743,19 @@ def get_current_team_id(config: Config, key: str) -> Optional[str]:
     ONLY place in this file that ever put a raw key in a URL -- every
     other LiteLLM call (/key/generate, /key/update, /key/delete) already
     sends the key in a JSON body, not a query string.
+
+    Security review round 5, soft-delete finding (2026-09-30): raises
+    LiteLLMKeyGoneError if the response indicates the key was deleted
+    (see that class's docstring for the live evidence). Keyed off
+    `status == "deleted"` specifically -- NOT off `team_id` being null,
+    which a legitimately team-less (never-promoted) key would also show,
+    and NOT off the mere presence of `deleted_at`, which is a
+    consequential timestamp rather than the field LiteLLM appears to
+    have added FOR the purpose of signaling this state. `status` reads
+    as the canonical, purpose-built marker; keying off it rather than a
+    side-effect field is the more robust choice if a future LiteLLM
+    version adds another reason to set a timestamp-shaped field without
+    meaning "gone".
     """
     key_hash = hashlib.sha256(key.encode()).hexdigest()
     resp = httpx.get(
@@ -739,6 +767,10 @@ def get_current_team_id(config: Config, key: str) -> Optional[str]:
     resp.raise_for_status()
     data = resp.json()
     key_info = data.get("info", data)
+    if key_info.get("status") == "deleted":
+        raise LiteLLMKeyGoneError(
+            f"LiteLLM reports this key as soft-deleted (status=deleted)."
+        )
     return key_info.get("team_id")
 
 
@@ -871,7 +903,25 @@ def revoke_and_reissue(config: Config, email: str) -> str:
         old_key = get_cached_key(config.db_path, email)
         team_id = config.pending_team_id
         if old_key:
-            team_id = get_current_team_id(config, old_key) or config.pending_team_id
+            # Security review round 5, soft-delete finding (2026-09-30):
+            # old_key can be genuinely gone here too -- an admin (or a
+            # crashed prior regenerate) deleted it out-of-band since this
+            # row was last read. A 404 or a LiteLLMKeyGoneError both mean
+            # "cannot verify the old team", so fall back to pending, the
+            # same safe default an unresolvable team_id already used
+            # (via the `or` below, now folded into this except). A
+            # genuine 5xx here is NOT treated the same way -- that means
+            # LiteLLM is unwell, not that old_key is gone, and masking an
+            # outage as "team unknown, proceed onto pending" would be the
+            # exact B6 mistake at a second call site.
+            try:
+                team_id = get_current_team_id(config, old_key) or config.pending_team_id
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 404:
+                    raise
+                team_id = config.pending_team_id
+            except LiteLLMKeyGoneError:
+                team_id = config.pending_team_id
             claim_token = _claim_key_row(config, email, old_key)
             if claim_token is None:
                 raise RuntimeError(
@@ -1017,6 +1067,29 @@ def list_issued_users(config: Config) -> list:
             if team_id not in team_active_cache:
                 team_active_cache[team_id] = team_grants_access(config, team_id)
             active = team_active_cache[team_id]
+        except LiteLLMKeyGoneError as exc:
+            # Security review round 5, soft-delete finding (2026-09-30):
+            # a soft-deleted key returns 200, not 404 -- WITHOUT this
+            # branch, it fell all the way through to the success path
+            # below with team_id=None, rendering as "(none)"/inactive
+            # indistinguishably from a key that simply was never
+            # promoted. An admin's obvious next move on THAT row is
+            # Promote, which "succeeds" against a dead key and changes
+            # nothing -- a permanent, silently misleading dead end for
+            # both the student and the admin. Distinct wording so this
+            # reads as "this key is gone", not "this key just needs
+            # activating".
+            users.append(
+                IssuedUser(
+                    email=email,
+                    team_id=None,
+                    team_label="(deleted -- this key was removed from LiteLLM)",
+                    active=False,
+                    created_at=created_at,
+                    lookup_error=str(exc),
+                )
+            )
+            continue
         except httpx.HTTPStatusError as exc:
             # A real HTTP status came back (typically 404) -- LiteLLM is
             # reachable and answered; it just does not recognize this
@@ -2003,16 +2076,25 @@ def _team_id_for_key_or_reissue(config: Config, email: str, key: str) -> tuple:
     and real httpx refuses to even evaluate a property that touches
     `.request` in that shape.
 
-    Known, separate, NOT fixed by this: a genuinely soft-deleted key
-    (confirmed live -- LiteLLM's own /key/delete does not remove the
-    row; a later /key/info on the same hash still returns 200, now with
-    `"status": "deleted"` added) never raises HTTPStatusError at all,
-    so this wrap never sees it and never re-issues for that specific
-    path -- get_current_team_id() just returns None, which
-    team_grants_access() already handles gracefully as "not active",
-    so the student sees pending rather than a crash, but their dead key
-    stays displayed/cached rather than being replaced. Flagged, not
-    silently left implicit; a separate fix from B6.
+    Security review round 5, soft-delete finding, authorized as in-scope
+    (2026-09-30): the paragraph above originally described the
+    soft-delete path as a known, separate gap, NOT fixed here. It is
+    fixed here now -- team-lead's own read of the consequence is why:
+    "deleted out-of-band" was one of the three triggers B5's report
+    named, so B5 was only HALF closed. A soft-deleted key returns 200
+    (LiteLLM's /key/delete does not remove the row; a later /key/info on
+    the same hash returns 200 with `"status": "deleted"` added), so no
+    HTTPStatusError was ever raised, this wrap never fired, and
+    get_current_team_id() just returned None -- team_grants_access()
+    handled that gracefully as "not active" (no crash), but the student
+    was left holding a dead key FOREVER, displayed as "issued but not
+    yet activated", while an admin's obvious remedy (Promote) does
+    nothing useful against a key that no longer exists. get_current_
+    team_id() now raises LiteLLMKeyGoneError for this shape (see that
+    class's own docstring for why it is keyed off `status`, not
+    `team_id`); caught here identically to a 404, unconditionally (there
+    is no status code to filter on -- a 200-with-deletion-marker only
+    ever means one thing).
 
     Re-issues via issue_key() directly onto PENDING, reusing its own
     claim-before-mint CAS unconditionally rather than guessing at a team
@@ -2039,17 +2121,19 @@ def _team_id_for_key_or_reissue(config: Config, email: str, key: str) -> tuple:
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code != 404:
             raise
-        print(
-            f"WARNING: {email}'s cached key was not found by LiteLLM "
-            f"(404) -- re-issuing onto PENDING. If they were previously "
-            f"promoted, this is a SILENT DEMOTION an admin will need to "
-            f"notice and re-promote; this function has no way to verify "
-            f"their prior team once LiteLLM no longer recognizes the "
-            f"old key.",
-            file=sys.stderr,
-        )
-        key = issue_key(config, email, config.pending_team_id)
-        return key, get_current_team_id(config, key)
+        reason = "was not found by LiteLLM (404)"
+    except LiteLLMKeyGoneError:
+        reason = "was soft-deleted by LiteLLM (status=deleted)"
+    print(
+        f"WARNING: {email}'s cached key {reason} -- re-issuing onto "
+        f"PENDING. If they were previously promoted, this is a SILENT "
+        f"DEMOTION an admin will need to notice and re-promote; this "
+        f"function has no way to verify their prior team once LiteLLM "
+        f"no longer recognizes the old key.",
+        file=sys.stderr,
+    )
+    key = issue_key(config, email, config.pending_team_id)
+    return key, get_current_team_id(config, key)
 
 
 @app.get("/", response_class=HTMLResponse)

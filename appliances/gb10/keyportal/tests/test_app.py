@@ -641,6 +641,50 @@ def test_get_current_team_id_sends_sha256_hash_not_raw_key(
     assert sent_key == hashlib.sha256(raw_key.encode()).hexdigest()
 
 
+def test_get_current_team_id_raises_on_soft_deleted_key(
+    app_module, mocker, fake_response
+):
+    """Security review round 5, soft-delete finding (2026-09-30):
+    LiteLLM does not 404 a key it deleted through its own /key/delete --
+    confirmed live, that returns 200 with "status": "deleted" added to
+    the info payload. Before this fix, get_current_team_id() just
+    returned team_id (null), no exception, so the whole B5/B6 recovery
+    wrapper never fired for this shape -- a student kept a dead key
+    forever. Must raise LiteLLMKeyGoneError instead."""
+    config = app_module.CONFIG
+    mocker.patch(
+        "app.httpx.get",
+        return_value=fake_response(
+            {
+                "info": {
+                    "team_id": None,
+                    "status": "deleted",
+                    "deleted_at": "2026-09-30T00:00:00Z",
+                }
+            }
+        ),
+    )
+    with pytest.raises(app_module.LiteLLMKeyGoneError):
+        app_module.get_current_team_id(config, "sk-softdeleted")
+
+
+def test_get_current_team_id_does_not_key_off_null_team_id_alone(
+    app_module, mocker, fake_response
+):
+    """The other half of the same fix, explicitly guarded against:
+    team-lead's own caution -- a legitimately team-less (never-promoted)
+    key ALSO has team_id=null, and must NOT be treated as gone just
+    because of that. Only the explicit "status": "deleted" marker means
+    gone; team_id=null with no such marker must return None normally,
+    same as before this fix existed."""
+    config = app_module.CONFIG
+    mocker.patch(
+        "app.httpx.get",
+        return_value=fake_response({"info": {"team_id": None}}),
+    )
+    assert app_module.get_current_team_id(config, "sk-legitimatelynoteam") is None
+
+
 def test_team_grants_access_false_for_pending_team_without_http_call(
     app_module, mocker
 ):
@@ -1169,6 +1213,38 @@ def test_team_id_for_key_or_reissue_404_reissues(app_module, mocker, fake_respon
     post_mock.assert_called_once()
 
 
+def test_team_id_for_key_or_reissue_soft_deleted_reissues(
+    app_module, mocker, fake_response
+):
+    """Security review round 5, soft-delete finding, authorized as
+    in-scope (2026-09-30): a 200-with-deletion-marker must re-issue
+    exactly like a 404 -- confirmed here at the wrapper's own level,
+    not just inside get_current_team_id(). Unlike the HTTPStatusError
+    branch, there is no status code to filter on: a soft-delete marker
+    only ever means one thing, so this must reissue unconditionally."""
+    config = app_module.CONFIG
+    email = "b6-softdelete-reissue@crimson.ua.edu"
+    call_count = {"n": 0}
+
+    def get_side_effect(url, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return fake_response({"info": {"team_id": None, "status": "deleted"}})
+        return fake_response({"info": {"team_id": config.pending_team_id}})
+
+    mocker.patch("app.httpx.get", side_effect=get_side_effect)
+    post_mock = mocker.patch(
+        "app.httpx.post", return_value=fake_response({"key": "sk-b6softreissued"})
+    )
+
+    key, team_id = app_module._team_id_for_key_or_reissue(
+        config, email, "sk-b6softdeleted"
+    )
+    assert key == "sk-b6softreissued"
+    assert team_id == config.pending_team_id
+    post_mock.assert_called_once()
+
+
 def test_team_id_for_key_or_reissue_5xx_does_not_reissue(
     app_module, mocker, fake_response
 ):
@@ -1383,6 +1459,43 @@ def test_list_issued_users_stale_row_is_explicit_not_fatal(
     assert stale_user.stale is True
     assert stale_user.active is False
     assert stale_user.lookup_error is not None
+
+
+def test_list_issued_users_soft_deleted_row_has_distinct_wording(
+    app_module, mocker, fake_response
+):
+    """Security review round 5, soft-delete finding, authorized as
+    in-scope (2026-09-30): before this fix, a soft-deleted key rendered
+    on /admin as team_label="(none)", active=False, stale=False --
+    INDISTINGUISHABLE from a key that simply was never promoted. An
+    admin's obvious next move on that row (Promote) succeeds against a
+    key that no longer exists and changes nothing -- a permanent,
+    silently misleading dead end. Must render as an explicit stale row
+    with wording that says the key is gone, not that it just needs
+    activating."""
+    config = app_module.CONFIG
+    email = "softdeleted-row@crimson.ua.edu"
+    with mocker_seed_cache(app_module, config, email, "sk-softdeletedrow"):
+        pass
+
+    def get_side_effect(url, **kwargs):
+        if url.endswith("/key/info"):
+            return fake_response({"info": {"team_id": None, "status": "deleted"}})
+        raise AssertionError(f"unexpected GET {url}")
+
+    mocker.patch("app.httpx.get", side_effect=get_side_effect)
+    users = app_module.list_issued_users(config)
+    assert len(users) == 1
+    user = users[0]
+    assert user.stale is True
+    assert user.active is False
+    assert "deleted" in user.team_label.lower()
+    # Distinct from BOTH the 404 wording (this key was never found at
+    # all) and the plain "(none)" a legitimately never-promoted key
+    # would show -- the whole point of this fix is that an admin must
+    # not confuse "gone" with "just needs activating".
+    assert "does not recognize this key" not in user.team_label.lower()
+    assert user.team_label != "(none)"
 
 
 def test_list_issued_users_connection_failure_wording_differs_from_bad_key(
@@ -3054,6 +3167,61 @@ def test_revoke_and_reissue_releases_claim_when_delete_fails(app_module, mocker)
     release_spy.assert_called_once_with(config, email, mocker.ANY, "sk-revokedelfail")
     # Released back to the original key -- not stuck on a claim token.
     assert app_module.get_cached_key(config.db_path, email) == "sk-revokedelfail"
+
+
+def test_revoke_and_reissue_old_key_soft_deleted_falls_back_to_pending(
+    app_module, mocker, fake_response
+):
+    """Security review round 5, soft-delete finding, authorized as
+    in-scope (2026-09-30): old_key can already be gone here too -- an
+    admin (or a crashed prior regenerate) deleted it out-of-band since
+    this row was last read. Falls back to pending, the same safe default
+    an unresolvable team_id already used -- proceeds to mint a fresh key
+    regardless, since that is the whole point of clicking Regenerate."""
+    config = app_module.CONFIG
+    email = "revoke-softdeleted-old@crimson.ua.edu"
+    with mocker_seed_cache(app_module, config, email, "sk-revokesoftdel"):
+        pass
+    mocker.patch.object(
+        app_module,
+        "get_current_team_id",
+        side_effect=app_module.LiteLLMKeyGoneError("soft-deleted"),
+    )
+    mocker.patch(
+        "app.httpx.post", return_value=fake_response({"key": "sk-revokerecovered"})
+    )
+
+    new_key = app_module.revoke_and_reissue(config, email)
+    assert new_key == "sk-revokerecovered"
+    assert app_module.get_cached_key(config.db_path, email) == "sk-revokerecovered"
+
+
+def test_revoke_and_reissue_old_key_5xx_still_raises(app_module, mocker, fake_response):
+    """The B6 discipline applied consistently at this SECOND call site:
+    a genuine LiteLLM 5xx on the old key's lookup must NOT be treated the
+    same as "gone" -- that would mask an outage as "team unknown, proceed
+    onto pending", exactly the mistake B6 fixed at the other call site,
+    reopened here if this one were not equally careful."""
+    import httpx as httpx_lib
+
+    config = app_module.CONFIG
+    email = "revoke-old-5xx@crimson.ua.edu"
+    with mocker_seed_cache(app_module, config, email, "sk-revoke5xxold"):
+        pass
+    mocker.patch.object(
+        app_module,
+        "get_current_team_id",
+        side_effect=httpx_lib.HTTPStatusError(
+            "500",
+            request=None,
+            response=fake_response({"error": "boom"}, status_code=500),
+        ),
+    )
+    post_mock = mocker.patch("app.httpx.post")
+
+    with pytest.raises(httpx_lib.HTTPStatusError):
+        app_module.revoke_and_reissue(config, email)
+    post_mock.assert_not_called()
 
 
 def test_index_preauthorized_first_login_is_active(
