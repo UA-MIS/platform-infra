@@ -301,7 +301,27 @@ Replace <YOUR_KEY> above with the key you just entered.
     else
       # Detect the indentation of the first existing sequence item, if any,
       # by scanning forward from the models: line for the next non-blank,
-      # non-comment line that is still part of this list (i.e. indented).
+      # non-comment line that is still part of this list.
+      #
+      # The capture group is [[:space:]]*, NOT [[:space:]]+: a sequence
+      # item under a mapping key may legitimately sit at ZERO
+      # indentation --
+      #
+      #   models:
+      #   - name: Something
+      #
+      # -- which is ordinary valid YAML and is what `yq` emits by
+      # default. With + that line did not match, item_indent kept its
+      # "  " default, and our entries went in at 2-space indent directly
+      # above the student's 0-space ones. A YAML block sequence cannot
+      # mix indentation, so the merged file DID NOT PARSE -- and this
+      # script still printed "Added the 'UA MIS Local' model..." and
+      # exited 0. The student lost their whole Continue config, not just
+      # our model, and had no reason to go looking for the .bak file.
+      # Silent, common, catastrophic. The Windows script had the
+      # identical defect (\s+); both were found on 2026-09-30 by
+      # executing them for the first time.
+      # Pinned by test-setup-macos-linux.sh, scenario S3-merge-0space.
       item_indent="  "  # default: 2 spaces
       j=$((models_line_idx + 1))
       while [ "${j}" -lt "${#lines[@]}" ]; do
@@ -310,7 +330,7 @@ Replace <YOUR_KEY> above with the key you just entered.
           j=$((j + 1))
           continue
         fi
-        if [[ "${cl}" =~ ^([[:space:]]+)-[[:space:]] ]]; then
+        if [[ "${cl}" =~ ^([[:space:]]*)-[[:space:]] ]]; then
           item_indent="${BASH_REMATCH[1]}"
         fi
         break
