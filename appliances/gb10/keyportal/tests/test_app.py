@@ -4082,3 +4082,39 @@ def test_onboarding_url_is_not_pinned_to_a_feature_branch(app_module):
     tell us. A branch name here is only ever right for local debugging."""
     assert "/tree/main/" in app_module.ONBOARDING_URL
     assert "gb10-appliance" not in app_module.ONBOARDING_URL
+
+
+@pytest.mark.parametrize("path", ["/docs", "/redoc", "/openapi.json"])
+def test_openapi_surface_is_not_exposed(client, path):
+    """FastAPI serves all three by default, and they were live here. That
+    published every /admin* route and its exact form field names to any
+    signed-in student -- free reconnaissance against the routes this
+    service's own admin checks defend, handed over for no benefit.
+
+    404, not 401: they must not exist, rather than exist-and-be-guarded.
+    Checked on all three rather than one, because `openapi_url=None` is the
+    setting that actually stops the schema being GENERATED -- disabling
+    only /docs and /redoc leaves the JSON they read still served, which
+    looks fixed and isn't."""
+    resp = client.get(path)
+    assert resp.status_code == 404
+
+
+def test_no_route_is_lost_to_disabling_the_docs(app_module):
+    """The counterpart: proving the three doc paths are gone is only half
+    of it. This pins that the real routes are all still mounted, so a
+    future edit cannot "fix" a docs problem by breaking the app."""
+    paths = {r.path for r in app_module.app.routes if hasattr(r, "path")}
+    assert {
+        "/",
+        "/regenerate",
+        "/setup/macos-linux",
+        "/setup/windows",
+        "/admin",
+        "/admin/promote",
+        "/admin/demote",
+        "/admin/preauthorize",
+        "/admin/preauthorize/remove",
+        "/healthz",
+    } <= paths
+    assert not paths & {"/docs", "/redoc", "/openapi.json"}

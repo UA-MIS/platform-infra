@@ -2453,7 +2453,27 @@ init_db(CONFIG.db_path)
 # for why this is a startup concern rather than a per-request one.
 SETUP_SCRIPT_SOURCES = load_setup_scripts()
 
-app = FastAPI()
+# FastAPI's interactive docs and machine-readable schema are OFF
+# (2026-09-30). They are on by default, and they were live on this portal
+# at /docs, /redoc and /openapi.json -- which published the complete
+# route surface, including every /admin* endpoint and its exact form field
+# names, to anyone who thought to look.
+#
+# Cloudflare Access bounds that to UA accounts, so it was never open to
+# the internet -- but the people it WAS open to are precisely the
+# population this service's admin routes defend against: several hundred
+# students, some of them in a security course, all of whom can already
+# authenticate here. /admin itself fails closed on require_admin()
+# regardless, so this is reconnaissance rather than access -- but it is
+# free reconnaissance handed over for no benefit whatsoever. Nothing on
+# this appliance consumes the schema: there is no client generator, no
+# API consumer, and no test that reads it.
+#
+# Set to None rather than moved to an obscure path: a path is not a
+# control. openapi_url=None is what actually stops the schema being
+# generated; without it, /docs and /redoc are gone but the JSON they read
+# is still served. Pinned by test_openapi_surface_is_not_exposed.
+app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
 
 @app.middleware("http")
