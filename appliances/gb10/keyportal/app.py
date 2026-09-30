@@ -722,6 +722,27 @@ class LiteLLMKeyGoneError(Exception):
     -- this exception exists so get_current_team_id()'s callers can
     treat both the same way without each one re-deriving the detection
     logic.
+
+    KNOWN GAP, backlogged with a date (2026-09-30), deliberately not
+    fixed here -- so this is not rediscovered as a mystery once it
+    starts happening: an EXPIRED key (issued with `duration: "365d"`,
+    so the first real expiries land around September 2027 -- check
+    THAT date if you are reading this after it has passed) is a THIRD
+    shape, confirmed live the same day as the two above, and it is
+    worse than either: /key/info still returns 200 with `team_id`
+    UNCHANGED and no marker of any kind -- LiteLLM does not compare
+    `expires` against the current time for this endpoint -- while the
+    raw key correctly 401s ("Authentication Error - Expired Key") the
+    moment it is actually used. So an expired key looks FULLY ACTIVE to
+    this portal (team_grants_access() reads it as active, same as a
+    healthy key) right up until a student tries to use it and it fails
+    -- this is not caught by get_current_team_id() today, by this
+    exception, or by the 404 path above. Fix, when picked up: compare
+    the `expires` field from /key/info against now in UTC (with a
+    safety margin), and treat a past expiry as gone via this same
+    exception -- but first CONFIRM `expires`'s exact format/timezone
+    and whether it is even always present, the same way this file
+    confirms every other LiteLLM response shape, rather than assuming.
     """
 
 
