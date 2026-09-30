@@ -2127,15 +2127,15 @@ def render_page(email: str, key: str, active: bool, config: Config) -> str:
 <div class="pending">
 <p><strong>Your key is issued but not yet activated -- contact
 {config.admin_contact} to be added to a course team.</strong></p>
-<p>Once you're added, come back to this same page -- the same key you
-already have will start working, and you'll see the
-<code>~/.continue/config.yaml</code> block to paste. You do not need to
-do anything else right now, and you do not need to regenerate anything.</p>
-<p>You can still <strong>run the setup script above right now</strong> if
-you'd like to get VS Code ready. It already has your key in it. It will
-finish by telling you the key isn't activated yet -- that's the same
-message as this one, not a second problem -- and once you're added to a
-team it starts working without you re-running anything.</p>
+<p>You do not need to do anything else right now, and you do not need to
+regenerate anything. The key you already have is the one that will work
+-- nothing about it changes when you're added.</p>
+<p><strong>You can run the setup script above right now</strong>, before
+you're activated. It already has your key in it. It will set VS Code up
+correctly and then finish by telling you the key isn't active yet --
+that's this same message, not a second problem. Once you're added to a
+team it starts working on its own: no re-running the script, no new key,
+nothing to come back here for.</p>
 </div>
 </body></html>"""
     # 2026-09-30: reuses _manual_config_block() itself, with the

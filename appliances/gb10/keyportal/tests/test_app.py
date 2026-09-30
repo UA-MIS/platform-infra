@@ -4118,3 +4118,37 @@ def test_no_route_is_lost_to_disabling_the_docs(app_module):
         "/healthz",
     } <= paths
     assert not paths & {"/docs", "/redoc", "/openapi.json"}
+
+
+def test_pending_page_does_not_send_a_student_back_for_a_config_block(
+    app_module, client, mocker, fake_response
+):
+    """The pending banner used to promise "come back to this same page ...
+    and you'll see the config.yaml block to paste". That was accurate when
+    pasting WAS the path; now that the download carries the key, it points
+    a waiting student at the fallback as though it were the main route, and
+    invites a second trip here that buys them nothing -- the script they
+    can already run handles the promotion on its own.
+
+    Asserts the misleading instruction is gone AND that the reassurance it
+    carried survived, since "you don't need to do anything else" is the
+    part a pending student actually needs."""
+    email = "pendingcopy@crimson.ua.edu"
+    mocker.patch.object(app_module, "verify_access_jwt", return_value=email)
+    with mocker_seed_cache(app_module, app_module.CONFIG, email, "sk-pending-copy"):
+        pass
+    mocker.patch(
+        "app.httpx.get",
+        return_value=fake_response(
+            {"info": {"team_id": app_module.CONFIG.pending_team_id}}
+        ),
+    )
+    resp = client.get("/", headers={"Cf-Access-Jwt-Assertion": "irrelevant-mocked"})
+    assert resp.status_code == 200
+
+    pending_block = resp.text.split('<div class="pending">', 1)[1]
+    assert "come back to this same page" not in pending_block
+    assert "block to paste" not in pending_block
+    # The reassurance, and the run-it-now invitation, must still be there.
+    assert "do not need to" in pending_block
+    assert "run the setup script above right now" in pending_block
