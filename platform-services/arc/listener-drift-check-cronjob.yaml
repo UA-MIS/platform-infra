@@ -1,0 +1,111 @@
+# ARC listener-drift check — catches the silent wedge where an AutoscalingListener
+# references a deleted EphemeralRunnerSet, so its scale set can never run a job while
+# still reporting phase: Running / Synced / Healthy. Full mechanism and the 2026-09-30
+# labmx-kaniko incident: listener-drift-check-configmap.yaml's header.
+#
+# ── WHY A CRONJOB AND NOT A `make validate` GUARD
+# `make validate` runs OFFLINE in CI (kubeconform, no kubeconfig — see
+# .github/workflows/validate.yaml), and this drift exists only in live cluster state:
+# the manifests in git are correct, which is precisely why it is invisible. A git-time
+# guard cannot see it. So it has to run in-cluster.
+#
+# ── NAMESPACE: arc-system, NOT arc-runners
+# arc-runners carries the CI ResourceQuota (pods 40) and a LimitRange. A detector pod
+# there would consume a CI pod slot every run. arc-system has neither quota nor
+# LimitRange and is where the listeners being checked already live. Both namespaces are
+# declared by this same directory (namespace.yaml), so ownership is unchanged.
+#
+# ── ⚠ HOW LOUD THIS ACTUALLY IS — READ BEFORE TRUSTING IT
+# A non-zero exit fails the Job, which raises kube-prometheus-stack's `KubeJobFailed`.
+# That alert exists. But as of 2026-09-30 Alertmanager's webhook receiver is ~81% lossy
+# (alertmanager_notifications_total{webhook}=87052 against 70859 failed: 20519
+# clientError + 50340 other), so the page may never arrive. This check therefore makes
+# the failure DETECTABLE and legible in `kubectl -n arc-system get jobs` + the Job log;
+# it does not make it reliably DELIVERED. Fixing Alertmanager delivery is a separate,
+# larger problem that gates every alert in this cluster, not just this one. Do not read
+# a quiet inbox as a healthy fleet.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: arc-listener-drift-check
+  namespace: arc-system
+  labels:
+    platform.capstone/component: platform
+spec:
+  # Every 15 min — the knob. The drift only ARISES when a scale set is first created
+  # (team onboarding, or a cluster rebuild that recreates all of them at once), but it
+  # is permanent once it happens and it blocks that team's CI outright, so a short
+  # detection latency is worth one ~5s pod. Cheap: no quota here, exits in seconds.
+  schedule: "*/15 * * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # 1 retry, not 0: a transient apiserver blip should not be reported as drift.
+      # A genuine dangling reference fails both attempts in seconds.
+      backoffLimit: 1
+      activeDeadlineSeconds: 180
+      ttlSecondsAfterFinished: 3600
+      template:
+        metadata:
+          labels:
+            platform.capstone/component: platform
+            app.kubernetes.io/name: arc-listener-drift-check
+        spec:
+          serviceAccountName: arc-listener-drift-check
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            fsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: check
+              # kubectl + bash + jq, pinned to the cluster's server minor (v1.31.5).
+              # Same image and pin as the repo's other cluster-reading CronJobs
+              # (platform-services/crossplane-mr-prune, cohort-gc, portal-tenants-refresh).
+              image: alpine/k8s:1.31.5
+              command: ["/bin/bash", "/scripts/check.sh"]
+              env:
+                # ── REMEDIATION SWITCH ──────────────────────────────────────
+                # "0" (default) = report only. "1" = also delete a stale listener so
+                # the controller rebinds it, turning a permanent wedge into a
+                # self-correcting one. Left OFF deliberately: it is an autonomous
+                # delete of a live controller-owned resource, which is an owner's
+                # call, not a default. Flipping it ALSO requires adding the `delete`
+                # verb in listener-drift-check-rbac.yaml — a two-key change on
+                # purpose. At "1" without that verb the script logs DELETE FAILED and
+                # still exits non-zero, i.e. it degrades to report-only.
+                - name: REMEDIATE
+                  value: "0"
+                - name: HOME
+                  value: /tmp        # kubectl cache dir on the writable tmp volume
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests: { cpu: "25m", memory: "64Mi" }
+                limits:   { cpu: "250m", memory: "128Mi" }
+              volumeMounts:
+                - name: script
+                  mountPath: /scripts
+                  readOnly: true
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: script
+              configMap:
+                name: arc-listener-drift-check
+                defaultMode: 0755
+                items:
+                  - key: check.sh
+                    path: check.sh
+            - name: tmp
+              emptyDir: {}

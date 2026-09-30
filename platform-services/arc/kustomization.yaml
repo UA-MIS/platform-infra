@@ -27,6 +27,14 @@ resources:
   # ConfigMap is hand-rendered here rather than emitted by the tenant Composition —
   # see hook-template-labmx.yaml's header.
   - hook-template-labmx.yaml
+  # ARC listener-drift check: asserts every AutoscalingListener still references an
+  # EphemeralRunnerSet that exists. A dangling reference silently prevents that scale
+  # set from EVER running a job while the AutoscalingRunnerSet still reports
+  # phase: Running and ArgoCD reports Healthy (2026-09-30 labmx-kaniko incident).
+  # Lives in arc-system so it does not consume an arc-runners CI pod slot.
+  - listener-drift-check-rbac.yaml
+  - listener-drift-check-configmap.yaml
+  - listener-drift-check-cronjob.yaml
   - platform-ca-configmap.yaml     # platform CA → mounted into Kaniko so the push verifies Traefik's cert
   - limitrange.yaml                # per-container defaults so no $job pod is ever BestEffort
   - resourcequota.yaml             # cross-tenant aggregate concurrency ceiling (~18 concurrent jobs)
