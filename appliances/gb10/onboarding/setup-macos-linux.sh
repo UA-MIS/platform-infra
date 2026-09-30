@@ -13,7 +13,13 @@
 # Usage:
 #   bash setup-macos-linux.sh [YOUR_KEY]
 #
-# If you don't pass a key, the script will prompt for one (hidden input).
+# The easiest way to get this file is to download it from the keys portal
+# (https://local-llm-keys.uamishub.com) while signed in -- the portal
+# serves this same script with YOUR key already filled into the
+# EMBEDDED_KEY line below, so there is nothing to paste and nothing to
+# type. If you got this file from git instead, pass your key as the first
+# argument, or run it with no arguments and it will prompt for one
+# (hidden input).
 #
 # This script is intentionally conservative: if anything about your
 # existing setup looks unusual, it stops and tells you what to do by
@@ -24,7 +30,22 @@ set -u
 
 MODEL_ENDPOINT="https://local-llm.uamishub.com/v1"
 MODEL_ID="qwen3.8-27b"
-ADMIN="<ADMIN>"
+
+# Where a stuck student should go. Deliberately the keys portal itself,
+# not a person or an email address: the portal is the one place a student
+# can SEE their own key and its activation state without asking anybody,
+# it is already the thing Cloudflare Access authenticates them to, and it
+# stays correct when the instructor, the course or the term changes. This
+# replaced a literal "<ADMIN>" placeholder that was never filled in, so
+# every error path below -- including the entirely NORMAL "not yet
+# activated" state every brand-new key starts in -- told a stuck student
+# to contact an angle bracket.
+#
+# Must match KEYPORTAL_HOSTNAME in the appliance's .env, which is what
+# ../keyportal/app.py builds its own links from. A static file in git
+# cannot read that env var, so this is the one place the hostname is
+# duplicated; MODEL_ENDPOINT above is hardcoded for the same reason.
+KEYS_PORTAL="https://local-llm-keys.uamishub.com"
 
 CONTINUE_DIR="${HOME}/.continue"
 CONFIG_YAML="${CONTINUE_DIR}/config.yaml"
@@ -43,7 +64,36 @@ hr
 #    doesn't leave a half-finished edit behind.
 # ---------------------------------------------------------------------------
 
-API_KEY="${1:-}"
+# The keys portal replaces the EMBEDDED_KEY line below, in full, with the
+# signed-in student's own key before serving this file -- see
+# _substitute_embedded_key() in ../keyportal/app.py. That is what removes
+# the paste step, which is where most of this script's real-world failures
+# started (a half-copied key, a trailing space, a key pasted into the
+# wrong prompt).
+#
+# CONTRACT WITH THE PORTAL -- do not break casually:
+#   * The portal matches this line EXACTLY, anchored, and refuses to start
+#     if it does not find it precisely once. So: no trailing comment on
+#     the line, no change of quoting style, no reindentation, no renaming
+#     the variable on one side only. A rename here that is not made there
+#     takes the portal container down at startup -- loudly, on purpose,
+#     rather than silently serving a keyless script.
+#   * The portal writes the key as a single-quoted POSIX shell literal
+#     (any literal ' in the key becomes '\'', which is the only correct
+#     escape -- doubling it, as YAML and PowerShell do, would SILENTLY
+#     DELETE the quote here). The raw key therefore arrives in API_KEY
+#     byte-for-byte, and build_block() below still does its own separate
+#     single-quoted YAML escaping on top. Neither undoes the other.
+#
+# When this file comes from git instead of the portal the line stays empty
+# and the argument/prompt path below takes over unchanged -- which is the
+# path both CI suites exercise.
+EMBEDDED_KEY=''
+
+# An explicit argument still wins over the embedded key, so a student who
+# was handed a replacement key can re-run a previously downloaded file
+# without re-downloading it.
+API_KEY="${1:-${EMBEDDED_KEY}}"
 
 if [ -z "${API_KEY}" ]; then
   if [ -r /dev/tty ]; then
@@ -420,7 +470,8 @@ if [ "${curl_exit}" -ne 0 ]; then
   [ -n "${curl_err}" ] && log "Details: ${curl_err}"
   log ""
   log "The service may be down, or you may not have network access to it."
-  log "Contact ${ADMIN} if this keeps happening."
+  log "If this keeps happening, sign in at ${KEYS_PORTAL}"
+  log "-- that page shows your key and whether it is active yet."
   log ""
   log "Your Continue config was still updated — once the service is reachable,"
   log "restart VS Code and try the Continue sidebar again."
@@ -445,22 +496,25 @@ case "${http_code}" in
   403)
     log "Your key is issued but not yet activated (HTTP 403)."
     log "This is the normal state for a brand-new key — nobody gets model"
-    log "access automatically. Ask ${ADMIN} to add you to a course team,"
-    log "then just restart VS Code and try again — no need to re-run this"
-    log "script or get a new key."
+    log "access automatically -- your instructor adds you to a course team."
+    log "You can see your own status any time at ${KEYS_PORTAL}."
+    log "Once that page stops saying \"not yet activated\", just restart VS"
+    log "Code and try again -- no need to re-run this script or get a new key."
     ;;
   *)
     if printf '%s' "${body}" | grep -qi 'team\|model access\|not.*allowed\|not.*permitted'; then
       log "Your key is issued but not yet activated (HTTP ${http_code})."
       log "This is the normal state for a brand-new key — nobody gets model"
-      log "access automatically. Ask ${ADMIN} to add you to a course team,"
-      log "then just restart VS Code and try again — no need to re-run this"
-      log "script or get a new key."
+      log "access automatically -- your instructor adds you to a course team."
+      log "You can see your own status any time at ${KEYS_PORTAL}."
+      log "Once that page stops saying \"not yet activated\", just restart VS"
+      log "Code and try again -- no need to re-run this script or get a new key."
     else
       log "Got an unexpected response (HTTP ${http_code})."
       [ -n "${body}" ] && log "Response: ${body}"
       log ""
-      log "The service may be down. Contact ${ADMIN} if this persists."
+      log "The service may be down. Sign in at ${KEYS_PORTAL}"
+      log "to see your key and whether it is active yet."
     fi
     ;;
 esac

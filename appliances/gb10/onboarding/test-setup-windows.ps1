@@ -154,7 +154,10 @@ function Invoke-Setup {
     param(
         [string]$HomeDir,                  # fake USERPROFILE
         [string]$ApiKey = $DUMMY_KEY,
-        [switch]$NoKeyArg
+        [switch]$NoKeyArg,
+        # Which file to execute. Defaults to the script under test; the
+        # portal-embedded-key scenarios pass a substituted COPY of it.
+        [string]$ScriptPath = $ScriptUnderTest
     )
     $prevProfile  = $env:USERPROFILE
     $prevHttps    = $env:HTTPS_PROXY
@@ -171,7 +174,7 @@ function Invoke-Setup {
 
         $argList = @('-NoProfile')
         if ($IsWindows -ne $false) { $argList += @('-ExecutionPolicy','Bypass') }
-        $argList += @('-File', $ScriptUnderTest)
+        $argList += @('-File', $ScriptPath)
         if (-not $NoKeyArg) { $argList += @('-ApiKey', $ApiKey) }
 
         $out = & $LAUNCHER @argList 2>&1 | Out-String
@@ -278,6 +281,39 @@ function Assert-OurThreeEntries {
 function Assert-NoKeyLeak {
     param($Res)
     Assert-True "no-key-in-stdout" "the API key is never echoed to the console" (-not $Res.Output.Contains($DUMMY_KEY)) "the key appeared in the script's own output"
+}
+
+# Writes a copy of the script under test with the keys portal's
+# substitution already applied, exactly as keyportal/app.py serves it:
+# the single line `$EmbeddedKey = ''` becomes `$EmbeddedKey = '<key>'`.
+#
+# Reproduced here in the SAME quoting rule the portal uses -- a
+# single-quoted PowerShell literal, with a literal quote written by
+# DOUBLING it -- so that if the portal's rule and this script's parsing
+# ever disagree, this suite is what says so, in CI, rather than a
+# student's opaque 401. Note that rule is the OPPOSITE of the POSIX shell
+# rule the macOS/Linux script's own portal substitution uses ('\''), and
+# using either in the other's place fails SILENTLY.
+#
+# Throws if the marker line is not present exactly once -- the same
+# contract keyportal/app.py's _validate_setup_script() enforces at
+# startup. A silently-unsubstituted copy would make the scenarios below
+# pass for the wrong reason.
+function New-EmbeddedKeyScript {
+    param([string]$ApiKey)
+    $marker = "`$EmbeddedKey = ''"
+    $quoted = "'" + ($ApiKey -replace "'", "''") + "'"
+    $hits   = 0
+    $lines  = [System.IO.File]::ReadAllLines($ScriptUnderTest)
+    $out    = foreach ($line in $lines) {
+        if ($line -eq $marker) { $hits++; '$EmbeddedKey = ' + $quoted } else { $line }
+    }
+    if ($hits -ne 1) {
+        throw "HARNESS ERROR: expected exactly one '$marker' line in $ScriptUnderTest, found $hits"
+    }
+    $path = Join-Path ([System.IO.Path]::GetTempPath()) ("uamis-served-" + [guid]::NewGuid().ToString('n') + ".ps1")
+    [System.IO.File]::WriteAllLines($path, $out, (New-Object System.Text.UTF8Encoding($false)))
+    return $path
 }
 
 function Get-Sha([string]$Path) { (Get-FileHash -Algorithm SHA256 -Path $Path).Hash }
@@ -528,6 +564,47 @@ Assert-Equal "exit" "exits 0 with a YAML-significant key" 0 $r.Exit
 $doc = Get-ParsedConfig "yaml" $r.Config
 Assert-OurThreeEntries $doc -Key $hostileKey
 
+# --- S13: the key the PORTAL embedded, with no -ApiKey at all -----------
+# The keys portal (keyportal/app.py) serves this script with the student's
+# own key substituted into the $EmbeddedKey line, so the student runs it
+# with no parameter and answers no prompt. Every other scenario in this
+# suite passes -ApiKey, which means none of them execute the path an
+# actual portal-served run takes.
+#
+# That gap is exactly the kind this suite exists to close: the whole
+# reason the portal serves these files instead of embedding its own copy
+# is so that CI covers what students run. Serving a script through an
+# untested code path would give that up for the one line that matters
+# most -- and on Windows this runner is the ONLY PowerShell that ever
+# executes this file, since there is none on the dev VM or the appliance.
+$script:scenario = 'S13-portal-embedded-key'
+$served = New-EmbeddedKeyScript -ApiKey $DUMMY_KEY
+$h = New-Home
+$r = Invoke-Setup -HomeDir $h -NoKeyArg -ScriptPath $served
+Assert-Equal "exit" "exits 0 with the key embedded and no -ApiKey" 0 $r.Exit
+Assert-True "no-prompt" "never prompts when the portal already embedded a key" `
+    (-not $r.Output.Contains('Paste your local-llm key')) `
+    "the script prompted anyway -- the embedded key did not reach `$ApiKey"
+Assert-NoKeyLeak $r
+$doc = Get-ParsedConfig "yaml" $r.Config
+Assert-OurThreeEntries $doc -Key $DUMMY_KEY
+
+# --- S14: a portal-embedded key hostile to BOTH quoting layers ----------
+# The key now passes through TWO single-quoting layers on its way into
+# config.yaml -- the portal's PowerShell literal and Build-Block's YAML
+# scalar. Both happen to double a literal quote here, but they are
+# independent implementations, and getting either wrong does not error:
+# it silently drops or duplicates a character, producing a valid-looking
+# config.yaml with a wrong key and an opaque 401. This is S12's hazard one
+# layer deeper, and only an executed round trip catches it.
+$script:scenario = 'S14-portal-embedded-hostile-key'
+$served = New-EmbeddedKeyScript -ApiKey $hostileKey
+$h = New-Home
+$r = Invoke-Setup -HomeDir $h -NoKeyArg -ScriptPath $served
+Assert-Equal "exit" "exits 0 with a doubly-hostile embedded key" 0 $r.Exit
+$doc = Get-ParsedConfig "yaml" $r.Config
+Assert-OurThreeEntries $doc -Key $hostileKey
+
 Write-Host ""
 Write-Host "$($script:passes) passed, $($script:failures) failed."
 if ($script:failures -ne 0) { return 1 }
@@ -586,6 +663,13 @@ $MUTATIONS = @(
         Find   = '$lines += "$contIndent" + "apiKey: $yamlKey"'
         Repl   = '$lines += "$contIndent" + "apiKey: $KeyToPrint"'
         Expect = '^S12-yaml-hostile-key/apikey-'
+    },
+    @{
+        Id     = 'M7-ignore-the-embedded-key'
+        Why    = "Portal regression: `$ApiKey stops picking up `$EmbeddedKey, so a portal-served script ignores the key the portal put in it. Deliberately mutated to a WRONG key rather than to empty: empty would fall through to Read-Host, which in a non-interactive runner is a HANG rather than a clean failure, and a mutation check that times out proves nothing."
+        Find   = '    $ApiKey = $EmbeddedKey'
+        Repl   = "    `$ApiKey = 'sk-mutant-ignored-the-embedded-key'"
+        Expect = '^S1[34]-portal-embedded.*/apikey-'
     }
 )
 

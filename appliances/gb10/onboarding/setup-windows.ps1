@@ -16,7 +16,14 @@
   be worse than this script doing nothing.
 
 .PARAMETER ApiKey
-  Your local-llm key. If omitted, you will be prompted (hidden input).
+  Your local-llm key.
+
+  The easiest way to get this file is to download it from the keys portal
+  (https://local-llm-keys.uamishub.com) while signed in -- the portal
+  serves this same script with YOUR key already filled into the
+  $EmbeddedKey line below, so there is nothing to paste and nothing to
+  type. If you got this file from git instead, pass -ApiKey, or run it
+  with no arguments and it will prompt (hidden input).
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File .\setup-windows.ps1
@@ -31,7 +38,22 @@ param(
 
 $ModelEndpoint = "https://local-llm.uamishub.com/v1"
 $ModelId       = "qwen3.8-27b"
-$Admin         = "<ADMIN>"
+
+# Where a stuck student should go. Deliberately the keys portal itself,
+# not a person or an email address: the portal is the one place a student
+# can SEE their own key and its activation state without asking anybody,
+# it is already the thing Cloudflare Access authenticates them to, and it
+# stays correct when the instructor, the course or the term changes. This
+# replaced a literal "<ADMIN>" placeholder that was never filled in, so
+# every error path below -- including the entirely NORMAL "not yet
+# activated" state every brand-new key starts in -- told a stuck student
+# to contact an angle bracket.
+#
+# Must match KEYPORTAL_HOSTNAME in the appliance's .env, which is what
+# keyportal/app.py builds its own links from. A static file in git cannot
+# read that env var, so this is the one place the hostname is duplicated;
+# $ModelEndpoint above is hardcoded for the same reason.
+$KeysPortal    = "https://local-llm-keys.uamishub.com"
 
 $ContinueDir  = Join-Path $env:USERPROFILE ".continue"
 $ConfigYaml   = Join-Path $ContinueDir "config.yaml"
@@ -47,6 +69,41 @@ Write-Hr
 # ---------------------------------------------------------------------------
 # 0. Get the API key first (before touching any files).
 # ---------------------------------------------------------------------------
+
+# The keys portal replaces the $EmbeddedKey line below, in full, with the
+# signed-in student's own key before serving this file -- see
+# _substitute_embedded_key() in ../keyportal/app.py. That is what removes
+# the paste step, which is where most of this script's real-world failures
+# started (a half-copied key, a trailing space, a key pasted into the
+# wrong prompt).
+#
+# CONTRACT WITH THE PORTAL -- do not break casually:
+#   * The portal matches this line EXACTLY, anchored, and refuses to start
+#     if it does not find it precisely once. So: no trailing comment on
+#     the line, no change of quoting style, no reindentation, no renaming
+#     the variable on one side only. A rename here that is not made there
+#     takes the portal container down at startup -- loudly, on purpose,
+#     rather than silently serving a keyless script.
+#   * The portal writes the key as a SINGLE-quoted PowerShell literal, in
+#     which no escape sequences are interpreted and the only character
+#     needing escaping is a literal ' -- doubled, exactly as Build-Block
+#     below doubles it for YAML. Single quotes also mean a $ in a key is
+#     never expanded as a variable, which a double-quoted literal would
+#     do, silently and catastrophically. The raw key therefore arrives in
+#     $ApiKey byte-for-byte, and Build-Block still does its own separate
+#     single-quoted YAML escaping on top. Neither undoes the other.
+#
+# When this file comes from git instead of the portal the line stays empty
+# and the parameter/prompt path below takes over unchanged -- which is the
+# path both CI suites exercise.
+$EmbeddedKey = ''
+
+# An explicit -ApiKey still wins over the embedded key, so a student who
+# was handed a replacement key can re-run a previously downloaded file
+# without re-downloading it.
+if ([string]::IsNullOrWhiteSpace($ApiKey)) {
+    $ApiKey = $EmbeddedKey
+}
 
 if ([string]::IsNullOrWhiteSpace($ApiKey)) {
     $secure = Read-Host -Prompt "Paste your local-llm key (input is hidden), then press Enter" -AsSecureString
@@ -407,7 +464,8 @@ if ($null -eq $statusCode) {
     if ($networkError) { Write-Line "Details: $networkError" }
     Write-Line ""
     Write-Line "The service may be down, or you may not have network access to it."
-    Write-Line "Contact $Admin if this keeps happening."
+    Write-Line "If this keeps happening, sign in at $KeysPortal"
+    Write-Line "-- that page shows your key and whether it is active yet."
     Write-Line ""
     Write-Line "Your Continue config was still updated -- once the service is reachable,"
     Write-Line "restart VS Code and try the Continue sidebar again."
@@ -426,22 +484,25 @@ elseif ($statusCode -eq 401) {
 elseif ($statusCode -eq 403) {
     Write-Line "Your key is issued but not yet activated (HTTP 403)."
     Write-Line "This is the normal state for a brand-new key -- nobody gets model"
-    Write-Line "access automatically. Ask $Admin to add you to a course team,"
-    Write-Line "then just restart VS Code and try again -- no need to re-run this"
-    Write-Line "script or get a new key."
+    Write-Line "access automatically -- your instructor adds you to a course team."
+    Write-Line "You can see your own status any time at $KeysPortal."
+    Write-Line "Once that page stops saying ""not yet activated"", just restart VS"
+    Write-Line "Code and try again -- no need to re-run this script or get a new key."
 }
 elseif ($responseBody -and ($responseBody -match '(?i)team|model access|not.*allowed|not.*permitted')) {
     Write-Line "Your key is issued but not yet activated (HTTP $statusCode)."
     Write-Line "This is the normal state for a brand-new key -- nobody gets model"
-    Write-Line "access automatically. Ask $Admin to add you to a course team,"
-    Write-Line "then just restart VS Code and try again -- no need to re-run this"
-    Write-Line "script or get a new key."
+    Write-Line "access automatically -- your instructor adds you to a course team."
+    Write-Line "You can see your own status any time at $KeysPortal."
+    Write-Line "Once that page stops saying ""not yet activated"", just restart VS"
+    Write-Line "Code and try again -- no need to re-run this script or get a new key."
 }
 else {
     Write-Line "Got an unexpected response (HTTP $statusCode)."
     if ($responseBody) { Write-Line "Response: $responseBody" }
     Write-Line ""
-    Write-Line "The service may be down. Contact $Admin if this persists."
+    Write-Line "The service may be down. Sign in at $KeysPortal"
+    Write-Line "to see your key and whether it is active yet."
 }
 
 Write-Hr

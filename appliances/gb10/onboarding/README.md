@@ -6,45 +6,57 @@ third-party AI service. It takes about a minute if the script works, or a
 few minutes if you do it by hand.
 
 You need: VS Code installed, the **Continue** extension installed
-(Extensions panel → search "Continue" → Install), and your local-llm key
-from `<ADMIN>`.
+(Extensions panel → search "Continue" → Install), and a UA sign-in at the
+keys portal, <https://local-llm-keys.uamishub.com>. The portal issues
+your key the first time you visit it — there is nobody to ask and nothing
+to request.
 
 ---
 
-## The one-liner
+## The setup script
+
+Sign in **in a web browser** at <https://local-llm-keys.uamishub.com>
+and click the download link for your platform:
+
+| Your machine | Link on the portal | Saves as |
+| --- | --- | --- |
+| macOS / Linux | `https://local-llm-keys.uamishub.com/setup/macos-linux` | `setup-macos-linux.sh` |
+| Windows | `https://local-llm-keys.uamishub.com/setup/windows` | `setup-windows.ps1` |
+
+**The portal fills your own key into the file it hands you**, so there is
+nothing to copy, nothing to paste, and no prompt to answer. Then run the
+file you just downloaded.
 
 ### macOS / Linux
 
 ```bash
-curl -fsSL <SETUP_SCRIPT_URL_MACOS_LINUX> -o setup-macos-linux.sh && bash setup-macos-linux.sh
+bash ~/Downloads/setup-macos-linux.sh
 ```
-
-You'll be prompted to paste your key (it will not be shown on screen as
-you type). You can also pass it directly:
-`bash setup-macos-linux.sh <your key>`
 
 ### Windows
 
 Open PowerShell and run:
 
 ```powershell
-Invoke-WebRequest -Uri <SETUP_SCRIPT_URL_WINDOWS> -OutFile setup-windows.ps1
-powershell -ExecutionPolicy Bypass -File .\setup-windows.ps1
+powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\Downloads\setup-windows.ps1"
 ```
 
-The second line is important — see [PowerShell won't run the
-script](#powershell-wont-run-the-script-execution-policy) below for why,
-and don't skip the `-ExecutionPolicy Bypass` part.
+The `-ExecutionPolicy Bypass` part is important — see [PowerShell won't
+run the script](#powershell-wont-run-the-script-execution-policy) below
+for why, and don't skip it.
 
-> **Don't have the script link yet?** Ask `<ADMIN>` for it, or skip
-> straight to the fully manual steps below — they get you to the exact
-> same end result.
+> **Use a browser, not `curl` or `Invoke-WebRequest`.** The portal is
+> behind Cloudflare Access, so a command-line download gets the sign-in
+> *page* rather than the script — and saves that HTML under the script's
+> name, which then fails in a confusing way when you run it. If you would
+> rather not download anything at all, the fully manual steps below get
+> you to the exact same end result.
 
 ---
 
 ## The fully manual path (works even if the script fails)
 
-Use this if the one-liner isn't available to you, or if it stops and
+Use this if the setup script isn't available to you, or if it stops and
 tells you to do something by hand (it does this on purpose rather than
 guessing when your setup looks unusual — see
 [Why the script might refuse to touch your file](#why-the-script-might-refuse-to-touch-your-file)).
@@ -137,8 +149,8 @@ guessing when your setup looks unusual — see
    Copilot Free already handles inline completions well, and this
    shared GPU box shouldn't spend capacity on every keystroke.
 
-   Replace `<your key>` (all three places) with the key `<ADMIN>` gave
-   you. Watch your indentation — YAML cares about it. Every item in the
+   Replace `<your key>` (all three places) with the key shown on the
+   keys portal, <https://local-llm-keys.uamishub.com>. Watch your indentation — YAML cares about it. Every item in the
    `models:` list needs the same indentation as the others.
 
 4. **Save the file and restart VS Code completely** (not just reload the
@@ -170,10 +182,11 @@ guessing when your setup looks unusual — see
 
 **This is the expected, normal state for a brand-new key — it is not an
 error and does not mean anything is broken.** Every new key starts with
-zero model access on purpose, so ask `<ADMIN>` to add you to a course
-team. Once that happens, restart VS Code and try again — you do **not**
-need a new key or to re-run the setup script; the same key starts
-working once you're added to a team.
+zero model access on purpose — your instructor adds you to a course team.
+You can check your own status any time at <https://local-llm-keys.uamishub.com>:
+once that page stops saying "not yet activated", restart VS Code and try
+again. You do **not** need a new key or to re-run the setup script; the
+same key starts working once you're added to a team.
 
 ### macOS: `code` command not found / script can't open VS Code for you
 
@@ -237,7 +250,10 @@ below.
 
 ### Something else is wrong
 
-Contact `<ADMIN>`.
+Sign in at <https://local-llm-keys.uamishub.com>. That page shows
+your current key and whether it has been activated yet, which is the
+answer to most of what goes wrong here. If it does not explain what you
+are seeing, ask your course instructor.
 
 ---
 

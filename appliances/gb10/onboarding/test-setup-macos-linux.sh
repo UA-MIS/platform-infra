@@ -120,6 +120,60 @@ run_setup() { # $1=home  $2=api key (optional, defaults to DUMMY_KEY)
   set -e
 }
 
+# Writes a copy of the script under test with the portal's substitution
+# already applied, and runs it with NO key argument -- the way a student
+# who downloaded it from the keys portal actually runs it.
+#
+# This is the seam the portal uses: keyportal/app.py replaces the single
+# line `EMBEDDED_KEY=''` with `EMBEDDED_KEY=<shell-quoted key>` and serves
+# the result. Reproduced here in the SAME quoting rule the portal uses --
+# a single-quoted POSIX literal with a literal quote written as '\'' --
+# so that if the portal's rule and this script's parsing ever disagree,
+# this suite is what says so, in CI, rather than a student's 401.
+#
+# Sets the same RUN_EXIT/RUN_OUT/RUN_CONFIG as run_setup().
+run_setup_embedded() { # $1=home  $2=key to embed
+  local h="$1"; local key="$2"
+  local served; served="$(mktemp "${WORKROOT}/served.XXXXXX")"
+
+  # The SAME quoting rule keyportal/app.py's _shell_single_quote() uses:
+  # wrap in single quotes, and write a literal single quote as '\'' --
+  # close, escaped quote, reopen. This is NOT the rule build_block() uses
+  # for the YAML scalar below (which DOUBLES the quote), and swapping them
+  # fails silently rather than loudly, which is why S16 executes it.
+  local quoted
+  quoted="'$(printf '%s' "$key" | sed "s/'/'\\\\''/g")'"
+
+  # awk on an exact line match, not sed: the key may contain any
+  # punctuation, including sed's delimiters and backreference syntax. The
+  # replacement travels through the environment so nothing parses it.
+  # sprintf("%c",39) rather than \x27 because BSD awk (macOS) has no hex
+  # escapes. Fails LOUDLY if the marker is not present exactly once -- the
+  # same contract keyportal/app.py's _validate_setup_script() enforces.
+  REPL="EMBEDDED_KEY=${quoted}" awk '
+    BEGIN { marker = "EMBEDDED_KEY=" sprintf("%c%c", 39, 39) }
+    $0 == marker { print ENVIRON["REPL"]; n++; next }
+    { print }
+    END {
+      if (n != 1) {
+        printf "expected exactly one EMBEDDED_KEY marker line, saw %d\n", n+0 \
+          > "/dev/stderr"
+        exit 3
+      }
+    }
+  ' "$SCRIPT_UNDER_TEST" > "$served" \
+    || { echo "HARNESS ERROR: EMBEDDED_KEY substitution failed" >&2; exit 3; }
+
+  RUN_CONFIG="${h}/.continue/config.yaml"
+  set +e
+  RUN_OUT="$(HOME="$h" \
+             http_proxy='http://127.0.0.1:9' https_proxy='http://127.0.0.1:9' \
+             ALL_PROXY='http://127.0.0.1:9' \
+             bash "$served" 2>&1)"
+  RUN_EXIT=$?
+  set -e
+}
+
 # Runs the structural assertions and folds their tally into ours.
 assert_structure() { # $1=config path, rest = extra args to the asserter
   local cfg="$1"; shift
@@ -410,6 +464,46 @@ run_suite() {
   assert_eq "exit" "exits 0 with a YAML-significant key" 0 "$RUN_EXIT"
   assert_structure "$RUN_CONFIG" --key "$hostile" --expect-count 3
 
+  # --- S15: the key the PORTAL embedded, with no argument at all ----------
+  # The keys portal (keyportal/app.py) serves this script with the student's
+  # own key substituted into the EMBEDDED_KEY line, so the student runs it
+  # with no argument and answers no prompt. Every other scenario in this
+  # suite passes the key POSITIONALLY, which means none of them execute the
+  # path an actual portal-served run takes.
+  #
+  # That gap is exactly the kind this suite exists to close: the whole
+  # reason the portal serves these files instead of embedding its own copy
+  # is so that CI covers what students run. Serving a script through an
+  # untested code path would give that up for the one line that matters
+  # most.
+  scenario='S15-portal-embedded-key'
+  h="$(new_home)"
+  run_setup_embedded "$h" "$DUMMY_KEY"
+  assert_eq "exit" "exits 0 with the key embedded and no argument" 0 "$RUN_EXIT"
+  case "$RUN_OUT" in
+    *"Paste your local-llm key"*)
+      fail "no-prompt" "never prompts when the portal already embedded a key" \
+           "the script prompted anyway -- the embedded key did not reach API_KEY" ;;
+    *) pass "no-prompt" "never prompts when the portal already embedded a key" ;;
+  esac
+  no_key_leak
+  assert_structure "$RUN_CONFIG" --key "$DUMMY_KEY" --expect-count 3
+
+  # --- S16: a portal-embedded key that is hostile to BOTH quoting layers --
+  # The key now passes through TWO different single-quoting rules on its way
+  # into config.yaml, and they are NOT the same rule: the portal's shell
+  # literal escapes a quote as '\'' , and build_block's YAML scalar escapes
+  # it by DOUBLING it. Using either rule in the other's place does not
+  # error -- it silently drops or duplicates a character, producing a
+  # valid-looking config.yaml with a wrong key and an opaque 401. This is
+  # S14's hazard one layer deeper, and only an executed round trip catches
+  # it.
+  scenario='S16-portal-embedded-hostile-key'
+  h="$(new_home)"
+  run_setup_embedded "$h" "$hostile"
+  assert_eq "exit" "exits 0 with a doubly-hostile embedded key" 0 "$RUN_EXIT"
+  assert_structure "$RUN_CONFIG" --key "$hostile" --expect-count 3
+
   printf '\n%d passed, %d failed.\n' "$pass_count" "$failures"
   [ "$failures" -eq 0 ] || return 1
   return 0
@@ -440,7 +534,8 @@ mutation_ids() {
     'M3-wrong-maxtokens-on-chat'        '/maxtok-UAMISLocalChat$' ; printf '%s\t%s\n' \
     'M4-clobber-existing-entries'       '/preserved-entry$' ; printf '%s\t%s\n' \
     'M5-drop-apply-role-from-edit'      '/roles-UAMISLocalEdit$' ; printf '%s\t%s\n' \
-    'M6-unquote-the-apikey'             '^S14-yaml-hostile-key/apikey-'
+    'M6-unquote-the-apikey'             '^S14-yaml-hostile-key/apikey-' ; printf '%s\t%s\n' \
+    'M7-ignore-the-embedded-key'        '^S1[56]-portal-embedded'
 }
 
 mutation_why() {
@@ -451,6 +546,7 @@ mutation_why() {
     M4-*) echo "Data loss: the merge stops emitting the lines after the models: line, so a student's existing provider is silently deleted. Valid YAML, our entries all correct." ;;
     M5-*) echo 'Role regression: the Edit entry stops declaring apply, so Continue offers no model for Apply. Valid YAML.' ;;
     M6-*) echo 'Silent truncation: the apiKey scalar goes back to being unquoted, so a key containing " #" is cut off at the comment marker. Valid YAML, wrong key, opaque 401.' ;;
+    M7-*) echo "Portal regression: API_KEY stops falling back to EMBEDDED_KEY, so a portal-served script ignores the key the portal put in it and prompts the student instead -- the exact step the portal exists to remove." ;;
   esac
 }
 
@@ -486,6 +582,10 @@ XEOF
   yaml_key="'$(printf '%s' "${key_to_print}" | sed "s/'/''/g")'"
 XEOF
     ;;
+    M7-*) cat <<'XEOF'
+API_KEY="${1:-${EMBEDDED_KEY}}"
+XEOF
+    ;;
   esac
 }
 
@@ -513,6 +613,10 @@ XEOF
     ;;
     M6-*) cat <<'XEOF'
   yaml_key="${key_to_print}"
+XEOF
+    ;;
+    M7-*) cat <<'XEOF'
+API_KEY="${1:-}"
 XEOF
     ;;
   esac

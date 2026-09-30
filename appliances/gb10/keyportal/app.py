@@ -26,18 +26,22 @@ from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from html import escape
+from pathlib import Path
 from typing import Optional
 from urllib.parse import urlsplit
 
 import httpx
 import jwt
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from starlette.concurrency import run_in_threadpool
 from jwt import PyJWKClient
 
 # The onboarding scripts already live in this same repo/branch -- link to
-# them rather than duplicating their install instructions here.
+# them rather than duplicating their install instructions here. This is
+# now the "read the manual / see the source" link, not the way a student
+# gets the script: since 2026-09-30 the portal SERVES the scripts itself,
+# with the student's key already in them (see SETUP_SCRIPTS below).
 ONBOARDING_URL = (
     "https://github.com/UA-MIS/platform-infra/tree/gb10-appliance"
     "/appliances/gb10/onboarding"
@@ -1601,6 +1605,284 @@ def remove_preauthorized_email(config: Config, email: str) -> None:
         conn.commit()
 
 
+# ---------------------------------------------------------------------------
+# Portal-served setup scripts (2026-09-30).
+#
+# The portal has already authenticated this visitor through Cloudflare
+# Access and already knows their key, so it can hand back a setup script
+# that needs no editing. That removes the paste step -- a half-copied key,
+# a trailing space, a key pasted into the wrong prompt -- which is where
+# most real onboarding failures started, and it skips the interactive
+# prompt branch that NEITHER onboarding CI suite can cover (both run the
+# scripts non-interactively, passing the key positionally).
+#
+# The scripts are NOT reimplemented here. They are read verbatim from
+# appliances/gb10/onboarding/ -- the exact bytes the five CI jobs and the
+# two 250+ assertion suites execute -- and exactly ONE line is replaced.
+# A second copy inside this file would drift from the tested one, which
+# is not hypothetical: _manual_config_block() above exists because this
+# file's own hand-kept copy of the Continue config DID drift out of sync
+# with the onboarding scripts' three-entry redesign, silently, because
+# nothing forced the two to match.
+# ---------------------------------------------------------------------------
+
+
+def _shell_single_quote(value: str) -> str:
+    """Render `value` as a POSIX shell single-quoted literal.
+
+    A single-quoted shell string cannot contain a single quote at all, so
+    the only correct escape is to CLOSE the quote, emit an escaped quote,
+    and reopen: it's -> 'it'\\''s'.
+
+    Deliberately not the same rule as YAML and PowerShell, which both
+    escape a quote by DOUBLING it. Doubling here would not fail -- it
+    would silently concatenate two adjacent literals and DELETE the
+    quote, handing the student a subtly wrong key and an opaque 401 they
+    have no way to diagnose. That is the same silent-truncation shape as
+    the unquoted-YAML-apiKey bug the onboarding scripts were fixed for on
+    this same day, so it is executed against real bash in the tests
+    rather than reasoned about.
+
+    Not shlex.quote(): that leaves a "safe-looking" value unquoted
+    entirely, so the served line's shape would depend on the key's
+    contents. Always emitting a quoted literal keeps the substituted line
+    one predictable shape, which is what the diff test can pin.
+    """
+    return "'" + value.replace("'", "'\\''") + "'"
+
+
+def _powershell_single_quote(value: str) -> str:
+    """Render `value` as a PowerShell single-quoted literal.
+
+    A single-quoted PowerShell string interprets no escape sequences (a
+    backslash stays a backslash) and performs no variable expansion, so a
+    key containing `$` or a backtick is safe here and would NOT be in a
+    double-quoted one. The only character needing escaping is a literal
+    single quote, written by doubling it -- the same rule Build-Block in
+    setup-windows.ps1 already uses for the YAML scalar, and the OPPOSITE
+    of the shell rule above.
+    """
+    return "'" + value.replace("'", "''") + "'"
+
+
+# Control characters are rejected rather than escaped. The substitution
+# below is LINE-oriented, so a newline or carriage return in a key would
+# not corrupt the served script -- it would INJECT a line of code into a
+# file a student is about to execute. LiteLLM has no business minting a
+# key like that, so the honest response is to fail loudly (a 500 on the
+# download; the student gets nothing) rather than to escape it cleverly
+# and serve it anyway.
+#
+# Deliberately a rejection of control characters ONLY, not an allowlist of
+# "sk- plus url-safe base64". The onboarding scripts were deliberately
+# hardened to survive a hostile key SHAPE (quotes, " #", ": ") instead of
+# assuming today's LiteLLM format; narrowing the accepted charset here
+# would quietly undo that hardening one layer up.
+_KEY_FORBIDDEN_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+@dataclass(frozen=True)
+class SetupScript:
+    """One portal-served onboarding script.
+
+    `marker_line` is the EXACT line the portal replaces, and it is part of
+    a contract written into the script itself (see the "CONTRACT WITH THE
+    PORTAL" comment above it in both files). The loader asserts the line
+    appears exactly once, at startup -- see _validate_setup_script().
+    """
+
+    slug: str  # URL path segment, also the SETUP_SCRIPT_SOURCES key
+    source_filename: str  # file name under appliances/gb10/onboarding/
+    download_filename: str  # what the browser saves it as
+    language: str  # "shell" or "powershell" -- picks the quoting rule
+    assign_prefix: str  # everything on the marker line before the value
+    label: str  # student-facing link text
+
+    @property
+    def marker_line(self) -> str:
+        return self.assign_prefix + "''"
+
+    @property
+    def route(self) -> str:
+        return f"/setup/{self.slug}"
+
+    def quote_key(self, key: str) -> str:
+        if self.language == "shell":
+            return _shell_single_quote(key)
+        if self.language == "powershell":
+            return _powershell_single_quote(key)
+        raise RuntimeError(f"unknown setup-script language {self.language!r}")
+
+
+# Route paths carry NO file extension on purpose. Cloudflare sits in front
+# of this service and decides what to cache partly by URL shape; a route
+# ending in .sh or .ps1 invites a cache layer to treat a response
+# containing a bearer credential as a static asset. The saved filename
+# comes from Content-Disposition instead, which is where it belongs.
+SETUP_SCRIPTS = {
+    "macos-linux": SetupScript(
+        slug="macos-linux",
+        source_filename="setup-macos-linux.sh",
+        download_filename="setup-macos-linux.sh",
+        language="shell",
+        assign_prefix="EMBEDDED_KEY=",
+        label="macOS / Linux",
+    ),
+    "windows": SetupScript(
+        slug="windows",
+        source_filename="setup-windows.ps1",
+        download_filename="setup-windows.ps1",
+        language="powershell",
+        assign_prefix="$EmbeddedKey = ",
+        label="Windows",
+    ),
+}
+
+
+def _marker_pattern(spec: SetupScript) -> "re.Pattern":
+    """The one definition of "this is the marker line", shared by the
+    startup validation and the substitution so they cannot disagree about
+    what counts as a match. Group `cr` captures a CRLF checkout's trailing
+    carriage return so the substitution can put it back."""
+    return re.compile("^" + re.escape(spec.marker_line) + r"(?P<cr>\r?)$", re.MULTILINE)
+
+
+def _validate_setup_script(spec: SetupScript, text: str) -> None:
+    """Assert the substitution marker is present EXACTLY once.
+
+    Called at import time, so a drifted script takes the container down at
+    startup -- loudly, restart-looping with this message in
+    `docker compose logs keyportal` -- rather than at request time. The
+    alternative is a portal that cheerfully serves every student a script
+    with no key in it and an interactive prompt they were told they would
+    not see, silently, for as long as nobody looks. Same "fail loudly,
+    never silently" contract as _require_env().
+
+    Anchored to a whole line (MULTILINE ^...$), not a substring: both
+    scripts MENTION the variable in their own explanatory comments, and a
+    substring match would find those too.
+
+    Tolerates a trailing CR so a CRLF checkout does not take the portal
+    down. Both files are LF-only today and there is no .gitattributes in
+    this repo, but `*.ps1 text eol=crlf` is an entirely reasonable thing
+    for somebody shipping PowerShell to Windows students to add later, and
+    the consequence of not allowing for it here would be the WHOLE portal
+    refusing to start -- GET / and /admin included -- over a line ending.
+    The substitution preserves whatever ending it found.
+    """
+    pattern = _marker_pattern(spec)
+    found = len(pattern.findall(text))
+    if found != 1:
+        raise RuntimeError(
+            f"{spec.source_filename}: expected the substitution marker line "
+            f"{spec.marker_line!r} exactly once, found {found}. The keys "
+            "portal replaces that line with the signed-in student's key; "
+            "if it was renamed or reformatted in the onboarding script, "
+            "rename it in SETUP_SCRIPTS in keyportal/app.py to match. "
+            "Refusing to start rather than serve a script with no key in it."
+        )
+
+
+def _substitute_embedded_key(text: str, spec: SetupScript, key: str) -> str:
+    """Return `text` with the marker line replaced by an assignment of
+    `key`, and nothing else changed.
+
+    Uses a replacement FUNCTION rather than a replacement string: re.sub()
+    interprets backslash escapes in a replacement string, and the shell
+    escape for a single quote ('\\'') contains one. A key with a quote in
+    it would otherwise be mangled -- silently.
+    """
+    if not key:
+        raise RuntimeError(
+            "refusing to serve a setup script with an empty key -- a student "
+            "would get a script that silently falls back to prompting them."
+        )
+    bad = _KEY_FORBIDDEN_CHARS_RE.search(key)
+    if bad:
+        raise RuntimeError(
+            "refusing to substitute a key containing the control character "
+            f"{bad.group()!r} into a setup script: the substitution is "
+            "line-oriented, so this would inject a line of code into a file "
+            "a student is about to execute."
+        )
+    _validate_setup_script(spec, text)
+    replacement = spec.assign_prefix + spec.quote_key(key)
+    return _marker_pattern(spec).sub(
+        lambda match: replacement + match.group("cr"), text, count=1
+    )
+
+
+def _resolve_onboarding_dir() -> Path:
+    """Locate appliances/gb10/onboarding/.
+
+    DECISION (2026-09-30): the scripts are BAKED INTO THE IMAGE at build
+    time (keyportal/Dockerfile COPYs them next to app.py) and read ONCE,
+    here at import, rather than re-read from disk on every request.
+
+    Why not per-request: inside the container the files cannot change for
+    the life of the container, so a per-request read buys nothing and adds
+    a failure mode that lands on a STUDENT -- a missing or unreadable file
+    becomes a 500 on their download, at 9am in the first lab, which
+    nobody is watching for. Reading once at import means the same fault
+    becomes a startup failure the owner sees the moment they run
+    `docker compose up -d keyportal`, with a named error, and it means the
+    marker-line contract above is checked at startup too.
+
+    The cost, stated rather than hidden: a broken or missing script file
+    takes the WHOLE portal down, including GET / and /admin, not just the
+    download. That is the right trade here because it is a BUILD-time
+    invariant, not a runtime dependency -- the files ship inside the same
+    image as this file, so their absence means the image itself is wrong
+    and should never have served anything. (Contrast B3's fail-safe
+    wrapper around list_issued_users(), which degrades instead: LiteLLM is
+    a live external service that can fail at 3am through nobody's fault.)
+
+    Two candidate layouts, both known and both checked, rather than one
+    magic guess: `./onboarding` relative to app.py is the IMAGE layout
+    (/app/app.py, /app/onboarding/), and `../onboarding` is the REPO
+    layout (keyportal/app.py, onboarding/). KEYPORTAL_ONBOARDING_DIR
+    overrides both. Neither present raises.
+    """
+    override = os.environ.get("KEYPORTAL_ONBOARDING_DIR", "").strip()
+    here = Path(__file__).resolve().parent
+    candidates = (
+        [Path(override)]
+        if override
+        else [
+            here / "onboarding",  # image layout
+            here.parent / "onboarding",  # repo layout
+        ]
+    )
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    raise RuntimeError(
+        "Could not find the onboarding scripts directory. Looked in: "
+        + ", ".join(str(c) for c in candidates)
+        + ". The keyportal image must COPY appliances/gb10/onboarding/ "
+        "next to app.py (see keyportal/Dockerfile); set "
+        "KEYPORTAL_ONBOARDING_DIR to override. Refusing to start."
+    )
+
+
+def load_setup_scripts() -> dict:
+    """Read every script in SETUP_SCRIPTS and validate its marker line."""
+    directory = _resolve_onboarding_dir()
+    sources = {}
+    for slug, spec in SETUP_SCRIPTS.items():
+        path = directory / spec.source_filename
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise RuntimeError(
+                f"Could not read the onboarding script {path}: {exc}. "
+                "Refusing to start rather than 500 on a student's download."
+            ) from exc
+        _validate_setup_script(spec, text)
+        sources[slug] = text
+    return sources
+
+
 # Shared, plain, dependency-free CSS -- no framework, no CDN, no build
 # step. UA crimson used sparingly as an accent (headings, links, the
 # course-policy rule, button outline) -- not an attempt to reproduce an
@@ -1717,13 +1999,73 @@ def _manual_config_block(api_key_placeholder: str = "&lt;your key&gt;") -> str:
     # keystroke."""
 
 
-def render_intro(email: str, config: Config) -> str:
+def _setup_download_links() -> str:
+    """The download links, built from SETUP_SCRIPTS so a route and its link
+    cannot drift apart. Relative hrefs on purpose: they are correct
+    without consulting config.keyportal_hostname, and they keep working
+    if the portal is ever reached on a different hostname."""
+    items = "\n".join(
+        f'<li><a href="{spec.route}"><strong>{escape(spec.label)}</strong></a> '
+        f"&mdash; saves as <code>{escape(spec.download_filename)}</code></li>"
+        for spec in SETUP_SCRIPTS.values()
+    )
+    return f"<ul>\n{items}\n</ul>"
+
+
+def render_intro(email: str, config: Config, active: bool) -> str:
     """The student-landing-page content, shown above the key section in
     BOTH the pending and active states (D-<team-lead-brief>, 2026-09-29):
     what this is, how to use it, honest performance expectations, the
     course-policy line, and who to contact. `config.admin_contact` is the
     ADMIN_CONTACT env var -- never hardcode a name here.
+
+    2026-09-30: the setup scripts are now SERVED BY THIS PORTAL with the
+    student's own key already substituted in, instead of being a GitHub
+    link plus "and paste your key into it". The paste step is where most
+    of the real failures started.
+
+    `active` exists only so the pending state can be HONEST about what the
+    downloaded script will do. DECISION (2026-09-30): a pending student
+    gets the real script with their real key, NOT a placeholder and NOT a
+    refusal --
+
+      * Their key is not fake. It is their real, permanent key, issued and
+        inactive. The config the script writes is byte-for-byte the config
+        they will need forever, and it starts working the moment an admin
+        promotes them, with nothing to re-run. The script's own 403 branch
+        says exactly that, in those words.
+      * A placeholder would be actively harmful rather than merely
+        useless: the script refuses to touch a config.yaml that already
+        mentions local-llm.uamishub.com ("Skipping the file edit so we
+        don't create a duplicate entry"), so a placeholder written today
+        is one the script will NOT fix on a later re-run. The student
+        would be permanently stuck with a dead key and a script that
+        declines to help -- the exact silent-failure shape every security
+        round on this file has been closing.
+      * A refusal costs a second trip back and moves the setup to the
+        moment they are least patient, while giving them nothing to do
+        with the wait.
+
+    "Do not hand them something that looks working and isn't" is met by
+    saying so in three places instead: the caveat below, the pending
+    banner in render_page(), and the script's own verification step.
     """
+    if active:
+        script_note = (
+            "<p>The download already contains <strong>your own key</strong> "
+            "&mdash; there is nothing to copy and nothing to paste. Run the "
+            "file you downloaded and it does steps 2 and 3 for you.</p>"
+        )
+    else:
+        script_note = (
+            "<p>The download already contains <strong>your own key</strong> "
+            "&mdash; there is nothing to copy and nothing to paste. You can "
+            "run it now even though your key is <strong>not activated "
+            "yet</strong> (see below): it sets VS Code up correctly, and it "
+            "will finish by telling you the key is not active yet. Once you "
+            "are added to a course team it starts working on its own &mdash; "
+            "you will not need to run this again or get a new key.</p>"
+        )
     return f"""<h1>UA MIS Local LLM</h1>
 <p>Signed in as <strong>{email}</strong>.</p>
 <section class="intro">
@@ -1734,13 +2076,17 @@ machine.</p>
 
 <h2>How to use it</h2>
 <ol>
-<li>Get your API key -- it's below on this page.</li>
 <li>Install the free <strong>Continue</strong> extension in VS Code
 (Extensions panel &rarr; search &quot;Continue&quot; &rarr; Install).</li>
-<li>Paste the configuration below into <code>~/.continue/config.yaml</code>.</li>
+<li>Download the setup script for your machine and run it:</li>
 </ol>
-<p>Setup scripts that do steps 2 and 3 for you (macOS, Linux, Windows):
-<a href="{ONBOARDING_URL}">{ONBOARDING_URL}</a></p>
+{_setup_download_links()}
+{script_note}
+<p>Prefer to do it by hand, or the script stopped and told you to? Install
+Continue as above, then put this into <code>~/.continue/config.yaml</code>
+(on Windows, <code>%USERPROFILE%\\.continue\\config.yaml</code>), replacing
+&lt;your key&gt; with the key {"shown below" if active else "this page will show once your key is activated"}.
+Full instructions: <a href="{ONBOARDING_URL}">the onboarding README</a>.</p>
 <pre>{_manual_config_block()}</pre>
 
 <h2>What to expect</h2>
@@ -1766,7 +2112,7 @@ _PAGE_HEAD = """<meta charset="utf-8">
 
 
 def render_page(email: str, key: str, active: bool, config: Config) -> str:
-    intro = render_intro(email, config)
+    intro = render_intro(email, config, active)
     head = _PAGE_HEAD.format(style=_STYLE)
     if not active:
         return f"""<!doctype html>
@@ -1780,6 +2126,11 @@ def render_page(email: str, key: str, active: bool, config: Config) -> str:
 already have will start working, and you'll see the
 <code>~/.continue/config.yaml</code> block to paste. You do not need to
 do anything else right now, and you do not need to regenerate anything.</p>
+<p>You can still <strong>run the setup script above right now</strong> if
+you'd like to get VS Code ready. It already has your key in it. It will
+finish by telling you the key isn't activated yet -- that's the same
+message as this one, not a second problem -- and once you're added to a
+team it starts working without you re-running anything.</p>
 </div>
 </body></html>"""
     # 2026-09-30: reuses _manual_config_block() itself, with the
@@ -2093,6 +2444,9 @@ def _list_issued_users_or_none(config: Config):
 CONFIG = load_config()
 JWKS_CLIENT = PyJWKClient(CONFIG.jwks_url)
 init_db(CONFIG.db_path)
+# Read once, at import, and validated here -- see _resolve_onboarding_dir()
+# for why this is a startup concern rather than a per-request one.
+SETUP_SCRIPT_SOURCES = load_setup_scripts()
 
 app = FastAPI()
 
@@ -2250,6 +2604,80 @@ def index(request: Request) -> str:
     key, team_id = _team_id_for_key_or_reissue(CONFIG, email, key)
     active = team_grants_access(CONFIG, team_id)
     return render_page(email, key, active, CONFIG)
+
+
+def _serve_setup_script(request: Request, spec: SetupScript) -> Response:
+    """Hand the signed-in student the real onboarding script with their own
+    key already in it.
+
+    Takes NO user-supplied identifier of any kind -- no query parameter,
+    no path segment, no form field. The only email it can ever act on is
+    the one verify_access_jwt() returned from a signature- and
+    audience-valid Cloudflare Access assertion, so "fetch somebody else's
+    script" is not a request that can be expressed, rather than one that
+    is checked for and rejected. Pinned by
+    test_setup_script_cannot_serve_another_students_key.
+
+    Same key-resolution path as index(), deliberately reused rather than
+    reimplemented: issue_initial_key() for a first-time visitor (this
+    route is reachable without ever loading `/` -- a bookmark, or a link
+    a classmate pasted), then _team_id_for_key_or_reissue(), which is what
+    repairs a cached key LiteLLM no longer recognizes. Without that second
+    call this route could hand a student a DEAD key baked into a file,
+    which is materially worse than the dead key on a page they can reload.
+
+    Does NOT call team_grants_access(): the served script is byte-identical
+    whether or not the key is active yet (see the pending decision in
+    render_intro()), so spending a second LiteLLM round trip to compute a
+    value nothing reads would be cost without a consumer.
+
+    Logs NOTHING about the key. This portal already had one leak of exactly
+    this shape -- a raw key in a /key/info query parameter, recorded
+    verbatim by any access log in front of the proxy -- fixed by hashing
+    (security review F4). A friendly "serving setup-windows.ps1 to
+    alice@crimson.ua.edu (sk-...)" line here would be the same bug in a new
+    place. Pinned by test_setup_script_never_logs_the_key.
+    """
+    email = verify_access_jwt(request, CONFIG, JWKS_CLIENT)
+    key = get_cached_key(CONFIG.db_path, email)
+    if key is None:
+        key = issue_initial_key(CONFIG, email)
+    key, _team_id = _team_id_for_key_or_reissue(CONFIG, email, key)
+    body = _substitute_embedded_key(SETUP_SCRIPT_SOURCES[spec.slug], spec, key)
+    return Response(
+        content=body,
+        media_type="text/plain; charset=utf-8",
+        headers={
+            # attachment, so a browser saves the file instead of rendering
+            # a student's own key as a wall of text in a tab they may then
+            # leave open on a lab machine. Both filenames are fixed
+            # literals from SETUP_SCRIPTS -- nothing from the request
+            # reaches this header.
+            "Content-Disposition": f'attachment; filename="{spec.download_filename}"',
+            # This body IS a bearer credential and Cloudflare sits in front
+            # of this service. A cached copy of one student's script served
+            # to another would hand out a working key under someone else's
+            # identity -- the worst thing this feature could do. no-store
+            # (do not write it down anywhere at all) is the instruction
+            # that matters; no-cache alone would permit storing it.
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0, private",
+            "Pragma": "no-cache",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@app.get("/setup/macos-linux")
+def setup_script_macos_linux(request: Request) -> Response:
+    # Two explicit routes rather than one /setup/{slug}: nothing from the
+    # request path is ever used to select a file, so there is no lookup to
+    # get wrong later.
+    return _serve_setup_script(request, SETUP_SCRIPTS["macos-linux"])
+
+
+@app.get("/setup/windows")
+def setup_script_windows(request: Request) -> Response:
+    return _serve_setup_script(request, SETUP_SCRIPTS["windows"])
 
 
 @app.post("/regenerate", response_class=HTMLResponse)
