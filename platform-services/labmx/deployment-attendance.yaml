@@ -26,6 +26,58 @@ spec:
       labels:
         app: attendance
     spec:
+      # ── SINGLE-WRITER PIN (Galera certification-conflict mitigation) ─────────
+      # Forces the DB hostname in DATABASE_URL to resolve to the MariaDB Galera
+      # PRIMARY Service instead of the 3-way round-robin Service, so that all of
+      # this app's writes land on ONE node.
+      #
+      # WHY: db-tier is MariaDB 11.8.8 Galera with 3 nodes, and ALL THREE are
+      # writable (read_only=OFF on 0, 1 and 2 — measured). The DSN points at
+      # svc/capstone-mariadb-mariadb-cluster, which round-robins. Concurrent
+      # upserts of the SAME row therefore land on different writable nodes and one
+      # is certification-aborted at commit, surfacing as MariaDB error 1020
+      # "Record has changed since last read" / Prisma P2034.
+      #
+      # WHY HERE AND NOT IN THE DSN: the DSN is supposed to come from Vault path
+      # `tenants/labmx/prod/app` via externalsecret-env.yaml — but that path has
+      # NEVER BEEN SEEDED. The ExternalSecret has been failing continuously since
+      # 2026-09-09 ("could not get secret data from provider" / "Secret does not
+      # exist"), so the live `labmx-env` Secret is still the hand-applied object
+      # and NOTHING in GitOps can currently rewrite its DATABASE_URL. The password
+      # must never enter this PUBLIC repo, so the host cannot be inlined here
+      # either. Overriding resolution is the only password-free, in-git lever.
+      #
+      # ⚠ COUPLING — THIS IS A HARD-CODED ClusterIP. It is the ClusterIP of
+      # svc/capstone-mariadb-mariadb-cluster-primary in namespace db-tier, whose
+      # selector pins to statefulset pod `capstone-mariadb-mariadb-cluster-0`.
+      # ClusterIPs are stable for the life of a Service but are NOT stable across
+      # delete/recreate of it. If that Service is ever recreated, this entry points
+      # at a dead IP and LabMx loses its database. The failure is LOUD (connection
+      # timeouts, not silent wrong answers). Re-read the current value with:
+      #   kubectl -n db-tier get svc capstone-mariadb-mariadb-cluster-primary \
+      #     -o jsonpath='{.spec.clusterIP}'
+      #
+      # ⚠ THE DSN TEXT STILL SAYS `...-mariadb-cluster...`. Reading DATABASE_URL
+      # alone will make it look like writes are still spread across three nodes.
+      # They are not. This block is why. Do not "fix" the apparent mismatch.
+      #
+      # VERIFIED BY EXECUTION, not inspection: a pod built from THIS hub image,
+      # with this exact hostAliases entry and the live DATABASE_URL, ran 6 separate
+      # Prisma connections and landed on `-0` 6/6 times; the same pod bypassing
+      # /etc/hosts (connecting to the round-robin ClusterIP directly) spread across
+      # -0/-1/-2. So Prisma's Rust query engine DOES honor /etc/hosts here.
+      #
+      # REMOVE THIS BLOCK once `tenants/labmx/prod/app` is seeded in Vault and the
+      # `target.template` host rewrite in externalsecret-env.yaml is live — at that
+      # point the DSN itself names the primary and this override is redundant.
+      #
+      # MITIGATION, NOT A FIX: single-writer routing shrinks the conflict window;
+      # it does not make concurrent same-row upserts correct. The real fix is
+      # removing the unconditional user.upsert-per-request write path.
+      hostAliases:
+        - ip: "10.110.221.127"
+          hostnames:
+            - "capstone-mariadb-mariadb-cluster.db-tier.svc.cluster.local"
       imagePullSecrets:
         - name: harbor-pull
       containers:
