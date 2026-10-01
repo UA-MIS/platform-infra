@@ -81,6 +81,17 @@ spec:
             {{- if hasKey $spec "cpuLimit" }}
             {{-   $cpuLimit = $spec.cpuLimit }}
             {{- end }}
+            {{- /* Per-tenant Kaniko BUILD step-pod memory ceiling (xrd.yaml
+                   spec.kanikoMemoryLimitGi). Default 8 == the arc-runners namespace
+                   LimitRange default (platform-services/arc/limitrange.yaml) every
+                   tenant gets when this field is unset, so an unset tenant is
+                   unaffected. Feeds the $job container's resources.limits.memory in
+                   arc-hook-template-<team> below. Same hasKey guard as $cpuLimit
+                   above and for the identical reason (missingkey=error). */}}
+            {{- $kanikoMemGi := 8 }}
+            {{- if hasKey $spec "kanikoMemoryLimitGi" }}
+            {{-   $kanikoMemGi = $spec.kanikoMemoryLimitGi }}
+            {{- end }}
             {{- $domain := $spec.domain | default "capstone.uamishub.com" }}
             {{- $preview := $spec.previewEnabled | default false }}
             {{- /* SECURITY-GATED opt-out from the non-prod SSO forwardAuth, DEV ONLY.
@@ -1764,6 +1775,20 @@ spec:
                                 mountPath: /kaniko/ssl/certs/platform-ca.crt
                                 subPath: ca.crt
                                 readOnly: true
+                            {{- /* Only render an explicit resources block for a tenant that
+                                   has actually raised $kanikoMemGi above the platform default
+                                   (xrd.yaml spec.kanikoMemoryLimitGi). At the default (8), this
+                                   container renders with NO resources -- byte-identical to
+                                   every tenant today -- and picks up the arc-runners namespace
+                                   LimitRange default (8Gi) exactly as before
+                                   (platform-services/arc/limitrange.yaml). This keeps the
+                                   change scoped to the one tenant that raises it; nobody else's
+                                   rendered ConfigMap moves at all. */}}
+                            {{- if gt $kanikoMemGi 8 }}
+                            resources:
+                              requests: { memory: "2Gi" }
+                              limits: { memory: {{ printf "%dGi" $kanikoMemGi | quote }} }
+                            {{- end }}
                         volumes:
                           - name: harbor-push
                             secret:
