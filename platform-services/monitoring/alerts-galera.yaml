@@ -139,6 +139,99 @@ spec:
               exporter, so it can only report a node that is down while the
               exporter itself is healthy.
 
+        # ── (e) LabMx-SPECIFIC: pod -0 down means LabMx is ENTIRELY OFFLINE ───
+        # ⚠ TEMPORARY RULE. DELETE IT WHEN LABMX IS UNPINNED. See the removal
+        # condition at the bottom of this comment.
+        #
+        # WHY THIS EXISTS WHEN (c) GaleraNodeDown ALREADY COVERS pod -0.
+        # Not because the condition is undetected — (c) detects it fine. Because
+        # (c) says the wrong thing about it. (c) reads "Galera node X is not
+        # answering", which for a 3-node cluster is a REDUNDANCY event: the
+        # cluster stays writable, nothing is customer-facing, and a human triages
+        # it accordingly. For LabMx that is now false. LabMx's DATABASE_URL points
+        # at svc/capstone-mariadb-mariadb-cluster-primary, whose selector is
+        # `statefulset.kubernetes.io/pod-name=capstone-mariadb-mariadb-cluster-0`
+        # — a single endpoint. If pod -0 goes, LabMx has NO database at all, while
+        # the other two nodes sit there healthy and the cluster looks fine.
+        #
+        # So the blast radius is the thing that needs to be in the alert text. It
+        # was previously recorded only in a comment in
+        # platform-services/labmx/externalsecret-env.yaml, which is to say: in
+        # tribal knowledge. Whoever reads a page at 3am does not have that file
+        # open. One alert, one summary — the same reasoning that makes
+        # GaleraMetricsMissing a separate rule rather than an `or` arm on (b).
+        #
+        # WHY `for: 2m` AND NOT (c)'s 5m. (c) is reporting lost headroom; two
+        # extra minutes of confirmation is cheap there. This is reporting a
+        # live customer-facing outage of uamishub.com and attendance.uamishub.com,
+        # where every minute is user-visible. 2m still rides out a kubelet blip.
+        #
+        # THE SELECTOR, AND WHY `[.]` RATHER THAN `-0`. instance values are pod
+        # FQDNs, so the discriminator is the character after `-0`. A bare
+        # `=~".*-0.*"` would also match any future `-0` elsewhere in the FQDN, and
+        # a literal `\.` has to survive both YAML and PromQL escaping. `[.]` is a
+        # character class, needs no escaping in either, and cannot be broken by a
+        # later reformat. Verified against live Prometheus before commit: this
+        # selector returns exactly 1 series (pod -0) where the unanchored form
+        # returns 3, and the `== 0` expression parses and evaluates with 0 results
+        # while the node is healthy.
+        #
+        # INHERITED BLINDNESS, DELIBERATELY NOT DUPLICATED. mysql_up comes from the
+        # same single exporter as everything else in this file, so this rule also
+        # goes QUIET rather than firing if that pod dies — exactly the failure (d)
+        # exists to catch. (d) already covers it cluster-wide; adding a LabMx
+        # absent() arm here would be a second alert for one event. Read (d) as
+        # covering this rule too.
+        #
+        # ⚠ DELIVERY. Like every rule in this file, this does not page anyone
+        # today: alert delivery is ~92% lossy through `webhook`, the only
+        # configured integration (72329 of 88614 notifications failed lifetime; 60
+        # of 65 in the hour this was written), and the Watchdog dead-man's switch
+        # ships through that same webhook so it cannot report its own failure.
+        # This rule is therefore worth exactly one thing right now: it is VISIBLE
+        # in Prometheus and Grafana, which is where someone actually looks. It
+        # becomes a real page the moment delivery is fixed, which is a separate,
+        # platform-wide piece of work.
+        #
+        # REMOVE THIS RULE WHEN: LabMx's DSN goes back to the round-robin
+        # svc/capstone-mariadb-mariadb-cluster. Confirm with
+        #   kubectl -n labmx get secret labmx-env -o jsonpath='{.data.DATABASE_URL}' \
+        #     | base64 -d | sed -E 's#^mysql://[^@]+@##'
+        # If that no longer shows `-primary`, this rule is describing a coupling
+        # that no longer exists and should be deleted rather than left to rot.
+        - alert: LabMxDatabaseUnavailable
+          expr: mysql_up{namespace="db-tier",instance=~"capstone-mariadb-mariadb-cluster-0[.].*"} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "LabMx has NO DATABASE — uamishub.com and attendance.uamishub.com are down"
+            description: >-
+              Galera pod capstone-mariadb-mariadb-cluster-0 is not answering, and
+              LabMx is pinned to it. This is NOT the usual "one of three nodes is
+              down" — for LabMx it is a COMPLETE OUTAGE of both uamishub.com and
+              attendance.uamishub.com, even though the Galera cluster itself will
+              still report Primary and writable on the other two nodes, and
+              GaleraClusterDegraded will only be a warning. Do not triage this as
+              a redundancy event.
+              WHY: LabMx's DATABASE_URL points at
+              svc/capstone-mariadb-mariadb-cluster-primary, which selects ONLY
+              pod -0, as a temporary mitigation for Galera write-certification
+              conflicts (MariaDB 1020 / Prisma P2034 on concurrent same-row
+              upserts).
+              FIRST, restore pod -0:
+              `kubectl -n db-tier get pod capstone-mariadb-mariadb-cluster-0` and
+              `kubectl -n db-tier describe mariadb capstone-mariadb-mariadb-cluster`.
+              IF pod -0 cannot be restored quickly, the FASTEST path back for
+              LabMx is to unpin it onto the surviving nodes: patch the DSN host in
+              secret/labmx-env from
+              `capstone-mariadb-mariadb-cluster-primary.db-tier.svc.cluster.local`
+              to `capstone-mariadb-mariadb-cluster.db-tier.svc.cluster.local`,
+              then `kubectl -n labmx rollout restart deploy/hub deploy/attendance`
+              — env is only re-read at container start, so an unrestarted pod will
+              NOT pick it up. That re-exposes the P2034 conflict bug, which is
+              degraded service rather than no service: prefer it during an outage.
+
         # ── (d) THE absent() ARM — "we can no longer see Galera at all" ───────
         # Fires precisely when the single unprotected exporter pod is gone, or
         # its scrape has broken, or someone deleted the ServiceMonitor. While
