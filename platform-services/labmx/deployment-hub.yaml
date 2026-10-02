@@ -39,7 +39,7 @@ spec:
         - name: harbor-pull
       containers:
         - name: hub
-          image: harbor.capstone.uamishub.com/labmx/hub:3d5250da53083b6165021bd611112eda8a4e6759
+          image: harbor.capstone.uamishub.com/labmx/hub:fec9c5f28592723b75f07221b1646f3946456910
           ports:
             - containerPort: 3000
           envFrom:
