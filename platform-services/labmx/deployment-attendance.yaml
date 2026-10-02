@@ -30,7 +30,7 @@ spec:
         - name: harbor-pull
       containers:
         - name: attendance
-          image: harbor.capstone.uamishub.com/labmx/attendance:fec9c5f28592723b75f07221b1646f3946456910
+          image: harbor.capstone.uamishub.com/labmx/attendance:685e2827ea7378b5d7d1260282bbcf06487a12be
           ports:
             - containerPort: 3001
           envFrom:
