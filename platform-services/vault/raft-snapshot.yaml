@@ -128,6 +128,14 @@ spec:
                                                  # needs ~32 GiB. The configured target
                                                  # exceeding the volume is why it filled.
                                                  # Raise this only together with the PVC.
+                - name: MIN_SNAPSHOT_MB
+                  value: "1800"                  # lower bound for a complete snapshot. Sits
+                                                 # between the measured populations: every
+                                                 # truncated snapshot was <=1514 MB, every
+                                                 # complete one >=2050 MB. Scaled UP at
+                                                 # runtime to 70% of the largest snapshot
+                                                 # present, so it does not go stale as the
+                                                 # raft store grows.
                 - name: RESERVE_MB
                   value: "4096"                  # free space required BEFORE writing. A
                                                  # fixed conservative figure on purpose -
@@ -301,6 +309,43 @@ spec:
                     exit 1
                   fi
                   echo "[snapshot] saved $(wc -c < "${DEST}") bytes, VERIFIED by 'snapshot inspect'"
+
+                  # ── CHEAP SIZE FLOOR: the guard that works when nobody is looking ────
+                  # Measured on 2026-10-05 across 12 snapshots: every COMPLETE snapshot was
+                  # >= 2.15 GB and every TRUNCATED one was <= 1.59 GB. The populations do not
+                  # overlap, so size alone separates them — at the cost of an `ls` rather
+                  # than a two-minute decompression. Had this existed, nine corrupt
+                  # snapshots would have been caught weeks earlier.
+                  #
+                  # This does NOT replace `snapshot inspect` above, which is authoritative.
+                  # Its value is that it is cheap enough to run anywhere, including from a
+                  # monitoring rule that never loads the file at all.
+                  #
+                  # ⚠ A FIXED SIZE FLOOR GOES STALE AND BECOMES ITS OWN FALSE GUARD. The raft
+                  # store grows (currently ~3.5M tokens and climbing), so a constant that is
+                  # conservative today is trivially satisfied later. Mitigated by scaling the
+                  # floor to the largest snapshot already on the volume: by this point
+                  # sweep_partials has removed the truncated ones, so that reference is a
+                  # complete snapshot. MIN_SNAPSHOT_MB is only the lower bound for a cold
+                  # volume with nothing to compare against. REVISIT the constant if the
+                  # store shrinks materially (e.g. after a token revocation).
+                  floor_mb="${MIN_SNAPSHOT_MB}"
+                  biggest_mb="$(ls -1S /snapshots/vault-raft-*.snap 2>/dev/null | head -1 | xargs -r du -m 2>/dev/null | awk '{print $1}')"
+                  if [ -n "${biggest_mb}" ]; then
+                    scaled=$(( biggest_mb * 70 / 100 ))
+                    [ "${scaled}" -gt "${floor_mb}" ] && floor_mb="${scaled}"
+                  fi
+                  dest_mb="$(du -m "${DEST}" | awk '{print $1}')"
+                  if [ "${dest_mb}" -lt "${floor_mb}" ]; then
+                    echo "[snapshot] WARNING: ${DEST} is ${dest_mb} MB, below the ${floor_mb} MB" >&2
+                    echo "[snapshot] floor for a complete snapshot on this volume. It PASSED" >&2
+                    echo "[snapshot] 'snapshot inspect', so it is structurally valid — but a" >&2
+                    echo "[snapshot] sudden shrink is the signature of a partial write or a" >&2
+                    echo "[snapshot] large unexpected change in the raft store. Investigate" >&2
+                    echo "[snapshot] before trusting it as a restore point." >&2
+                  else
+                    echo "[snapshot] size check: ${dest_mb} MB >= ${floor_mb} MB floor"
+                  fi
                   echo "[snapshot] retention keeps newest ${RETAIN}; current snapshots:"
                   ls -1t /snapshots/vault-raft-*.snap 2>/dev/null || true
               # ── RESOURCE REQUESTS: THIS IS THE ACTUAL BUG FIX ───────────────────
