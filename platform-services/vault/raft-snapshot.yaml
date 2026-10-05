@@ -117,9 +117,17 @@ spec:
                 - name: VAULT_ROLE
                   value: "snapshot"              # k8s auth role (runbook §D)
                 - name: RETAIN
-                  value: "14"                    # CEILING, not a target: keep AT MOST this
-                                                 # many. prune_to_fit may keep fewer when
-                                                 # space is short. Never fewer than 1.
+                  value: "6"                     # CEILING, not a target: keep AT MOST this
+                                                 # many; prune_to_fit may keep fewer when
+                                                 # space is short, never fewer than 1.
+                                                 #
+                                                 # WAS 14, WHICH WAS NEVER ACHIEVABLE. A
+                                                 # COMPLETE snapshot measures 2.15-2.43 GB
+                                                 # (three verified samples), so the 20Gi PVC
+                                                 # (19.6G usable) holds at most ~8. RETAIN=14
+                                                 # needs ~32 GiB. The configured target
+                                                 # exceeding the volume is why it filled.
+                                                 # Raise this only together with the PVC.
                 - name: RESERVE_MB
                   value: "4096"                  # free space required BEFORE writing. A
                                                  # fixed conservative figure on purpose -
@@ -193,6 +201,39 @@ spec:
                       echo "[snapshot] prune-before-write: ${have} MB free, proceeding"
                     fi
                   }
+                  # ── SWEEP PRE-EXISTING SNAPSHOTS FOR STRANDED PARTIALS ──────────────
+                  # ⚠ ITS PURPOSE: this is THE ONLY FIX THAT CAN CATCH A STRANDED PARTIAL,
+                  # and it is NOT redundant with the `snapshot inspect` check below. Do not
+                  # remove it on the reasoning that the new snapshot is already validated.
+                  #
+                  # WHY NO IN-PROCESS CHECK SUFFICES: when this pod is killed (SIGKILL —
+                  # eviction, OOM, node loss) mid-`snapshot save`, the partial file is left
+                  # on the PVC and NEITHER the validator NOR the EXIT trap runs. The bad file
+                  # is created by the absence of this script, so only a LATER run can find
+                  # it. That is exactly how nine truncated snapshots accumulated and were
+                  # counted as good backups by retention.
+                  #
+                  # Uses `gzip -t`, not `snapshot inspect`: measured agreement was 11/11 on
+                  # this failure mode (truncation), and `gzip -t` is the cheaper of two full
+                  # decompressions. The authoritative `inspect` is still run on the snapshot
+                  # this job writes.
+                  #
+                  # FLOOR OF 1 APPLIES HERE TOO: the newest file is never swept, even if it
+                  # is bad. A visible bad backup is better than silently having none, and a
+                  # sweep that can empty the volume is a worse failure than the one it fixes.
+                  sweep_partials() {
+                    swept=0
+                    for old in $(ls -1t /snapshots/vault-raft-*.snap 2>/dev/null | tail -n +2); do
+                      if ! gzip -t "${old}" 2>/dev/null; then
+                        echo "[snapshot] sweep: $(basename "${old}") is TRUNCATED ($(wc -c < "${old}") bytes) — not a usable backup, removing"
+                        rm -f "${old}"
+                        swept=$((swept + 1))
+                      fi
+                    done
+                    [ "${swept}" -gt 0 ] && echo "[snapshot] sweep removed ${swept} unusable snapshot(s)" || echo "[snapshot] sweep: all pre-existing snapshots pass gzip integrity"
+                  }
+                  sweep_partials
+
                   prune_to_fit
 
                   # Preflight — confirm VAULT_ADDR resolves to the RAFT LEADER. `snapshot
@@ -226,28 +267,29 @@ spec:
                     exit 1
                   fi
 
-                  # ── VALIDATE WITH `snapshot inspect`, NOT `gzip -t` ─────────────────
-                  # ⚠ THIS CHECK WAS `gzip -t` AND THAT IS WHY WE SHIPPED CORRUPT BACKUPS.
-                  # `gzip -t` validates the COMPRESSION STREAM. It says nothing about the
-                  # ARCHIVE CONTENTS. A Vault raft snapshot is a gzipped tar containing
-                  # `meta.json` AND `state.bin` (the actual state). When the PVC filled,
-                  # `snapshot save` wrote an archive holding only `meta.json` with a
-                  # truncated `state.bin` — and because the gzip stream itself was intact,
-                  # `gzip -t` PASSED it. The script then logged "gzip-verified OK", kept the
-                  # file, and retention counted it as one of the N good backups.
+                  # ── VALIDATE WITH `snapshot inspect` (a STRONGER check, not a bug fix) ──
+                  # ⚠ READ THIS BEFORE CHANGING IT, AND NOTE WHAT IT IS *NOT* FIXING.
                   #
-                  # So the guard built to stop exactly this outcome is what certified it.
-                  # Demonstrated on the real artifact, not a synthetic one: see the
-                  # snapshot-validity matrix in artifacts/ for the pair of results on
-                  # vault-raft-20261004T030739Z.snap (690 MB).
+                  # An earlier version of this change claimed `gzip -t` had been passing
+                  # truncated snapshots and thereby certifying corrupt backups. THAT WAS
+                  # WRONG and is retracted. Measured across all 11 snapshots on the volume,
+                  # `gzip -t` and `snapshot inspect` agreed 11 out of 11:
+                  #     gzip PASS <=> inspect VALID <=> 4 archive members
+                  #     gzip FAIL <=> inspect CORRUPT <=> 2 archive members
+                  # `gzip -t` would have rejected every corrupt file. It was never blind.
                   #
-                  # `vault operator raft snapshot inspect` parses the snapshot's actual
-                  # state and fails on a truncated or incomplete one. It needs no Vault
-                  # server and no token — it is a local file operation.
+                  # The corrupt files survived because the POD WAS KILLED (see the resource
+                  # requests below), so this script never reached the validator and the EXIT
+                  # trap never ran. No in-process check of any strength can prevent that.
+                  #
+                  # `snapshot inspect` is kept anyway because it is strictly stronger: it
+                  # parses the actual raft state, so it would also catch an archive that is
+                  # a VALID gzip yet semantically incomplete — which `gzip -t` cannot. It
+                  # needs no Vault server and no token; it is a local file operation.
                   #
                   # Do NOT "optimise" this back to a cheaper check. The cost of reading the
-                  # file is the entire point; a validator that does not read the state
-                  # cannot tell you the state is there.
+                  # file is the point: a validator that does not read the state cannot tell
+                  # you the state is there.
                   if ! vault operator raft snapshot inspect "${DEST}" >/dev/null 2>&1; then
                     echo "[snapshot] FATAL: ${DEST} failed 'raft snapshot inspect' — the" >&2
                     echo "[snapshot] archive is truncated or incomplete and is NOT a usable" >&2
@@ -261,6 +303,22 @@ spec:
                   echo "[snapshot] saved $(wc -c < "${DEST}") bytes, VERIFIED by 'snapshot inspect'"
                   echo "[snapshot] retention keeps newest ${RETAIN}; current snapshots:"
                   ls -1t /snapshots/vault-raft-*.snap 2>/dev/null || true
+              # ── RESOURCE REQUESTS: THIS IS THE ACTUAL BUG FIX ───────────────────
+              # With no requests at all this pod was QoS class BestEffort, which the
+              # kubelet evicts FIRST under node memory pressure. A SIGKILL bypasses
+              # `trap ... EXIT`, so an evicted run leaves a truncated snapshot on the
+              # PVC that nothing cleans up and retention counts as a good backup. That
+              # — not a weak validator — is how nine corrupt snapshots accumulated.
+              #
+              # Requests alone move this to Burstable, which is enough: the kubelet
+              # ranks BestEffort pods for eviction ahead of Burstable ones using more
+              # than their requests. No limits, deliberately: `snapshot save` streams a
+              # multi-GB file and a memory limit would reintroduce a kill, which is the
+              # failure being fixed.
+              resources:
+                requests:
+                  cpu: 200m
+                  memory: 256Mi
               volumeMounts:
                 - name: snapshots
                   mountPath: /snapshots
