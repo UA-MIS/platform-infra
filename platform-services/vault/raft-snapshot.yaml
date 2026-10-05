@@ -117,7 +117,14 @@ spec:
                 - name: VAULT_ROLE
                   value: "snapshot"              # k8s auth role (runbook §D)
                 - name: RETAIN
-                  value: "14"                    # keep newest N snapshots; prune older
+                  value: "14"                    # CEILING, not a target: keep AT MOST this
+                                                 # many. prune_to_fit may keep fewer when
+                                                 # space is short. Never fewer than 1.
+                - name: RESERVE_MB
+                  value: "4096"                  # free space required BEFORE writing. A
+                                                 # fixed conservative figure on purpose -
+                                                 # see prune_to_fit for why recent snapshot
+                                                 # sizes are not a safe basis.
               command: ["/bin/sh", "-ec"]
               args:
                 - |
@@ -144,6 +151,49 @@ spec:
                     exit "${rc}"
                   }
                   trap cleanup EXIT
+
+                  # ── PRUNE BEFORE WRITING, NOT ONLY IN THE EXIT TRAP ─────────────────
+                  # The owner's rule, verbatim: "old vaults should NEVER cause new vaults
+                  # to fail. As long as we have at least 1 backup, that's fine."
+                  #
+                  # The trap-only design could not satisfy that: it pruned AFTER the write,
+                  # so a full PVC made `snapshot save` fail, and the space that would have
+                  # let it succeed was only reclaimed once it already had. The job needed
+                  # free space that it created only after failing.
+                  #
+                  # RESERVE_MB is a deliberately CONSERVATIVE FIXED figure, not a number
+                  # derived from recent snapshot sizes. Recent sizes are untrustworthy as a
+                  # basis precisely because a truncated snapshot is SMALLER than a complete
+                  # one — sizing from them would shrink the reserve in exactly the situation
+                  # that caused the corruption. 4096 MB comfortably exceeds the largest
+                  # snapshot observed while the volume was healthy (~2.2 GB).
+                  #
+                  # FLOOR OF 1: the newest snapshot is never deleted, whatever the space
+                  # pressure. A new snapshot failing must never cost us the last good one.
+                  # If we cannot free enough while keeping it, we fail loudly WITHOUT having
+                  # destroyed anything.
+                  avail_mb() { df -Pm /snapshots | awk 'NR==2 {print $4}'; }
+
+                  prune_to_fit() {
+                    want="${RESERVE_MB}"
+                    echo "[snapshot] prune-before-write: need ${want} MB, have $(avail_mb) MB"
+                    # Oldest-first, and never the newest (tail -n +2 on a newest-first list
+                    # drops the newest from the deletion candidates).
+                    for old in $(ls -1t /snapshots/vault-raft-*.snap 2>/dev/null | tail -n +2 | sed '1!G;h;$!d'); do
+                      [ "$(avail_mb)" -ge "${want}" ] && break
+                      echo "[snapshot] pruning $(basename "${old}") ($(wc -c < "${old}") bytes) to make room"
+                      rm -f "${old}"
+                    done
+                    have="$(avail_mb)"
+                    if [ "${have}" -lt "${want}" ]; then
+                      echo "[snapshot] WARNING: only ${have} MB free after pruning to the last" >&2
+                      echo "[snapshot] remaining snapshot; refusing to delete it. The write may" >&2
+                      echo "[snapshot] fail, but the last known backup is preserved. GROW THE PVC." >&2
+                    else
+                      echo "[snapshot] prune-before-write: ${have} MB free, proceeding"
+                    fi
+                  }
+                  prune_to_fit
 
                   # Preflight — confirm VAULT_ADDR resolves to the RAFT LEADER. `snapshot
                   # save` is a raft-local op that is NOT request-forwarded to the active node
@@ -176,13 +226,39 @@ spec:
                     exit 1
                   fi
 
-                  # Validate: a complete snapshot is a non-empty gzip tarball. Guard against a
-                  # 0-byte / truncated file ever being counted as a good DR backup.
-                  if ! gzip -t "${DEST}" 2>/dev/null; then
-                    echo "[snapshot] FATAL: ${DEST} is not a valid gzip archive — corrupt/incomplete." >&2
+                  # ── VALIDATE WITH `snapshot inspect`, NOT `gzip -t` ─────────────────
+                  # ⚠ THIS CHECK WAS `gzip -t` AND THAT IS WHY WE SHIPPED CORRUPT BACKUPS.
+                  # `gzip -t` validates the COMPRESSION STREAM. It says nothing about the
+                  # ARCHIVE CONTENTS. A Vault raft snapshot is a gzipped tar containing
+                  # `meta.json` AND `state.bin` (the actual state). When the PVC filled,
+                  # `snapshot save` wrote an archive holding only `meta.json` with a
+                  # truncated `state.bin` — and because the gzip stream itself was intact,
+                  # `gzip -t` PASSED it. The script then logged "gzip-verified OK", kept the
+                  # file, and retention counted it as one of the N good backups.
+                  #
+                  # So the guard built to stop exactly this outcome is what certified it.
+                  # Demonstrated on the real artifact, not a synthetic one: see the
+                  # snapshot-validity matrix in artifacts/ for the pair of results on
+                  # vault-raft-20261004T030739Z.snap (690 MB).
+                  #
+                  # `vault operator raft snapshot inspect` parses the snapshot's actual
+                  # state and fails on a truncated or incomplete one. It needs no Vault
+                  # server and no token — it is a local file operation.
+                  #
+                  # Do NOT "optimise" this back to a cheaper check. The cost of reading the
+                  # file is the entire point; a validator that does not read the state
+                  # cannot tell you the state is there.
+                  if ! vault operator raft snapshot inspect "${DEST}" >/dev/null 2>&1; then
+                    echo "[snapshot] FATAL: ${DEST} failed 'raft snapshot inspect' — the" >&2
+                    echo "[snapshot] archive is truncated or incomplete and is NOT a usable" >&2
+                    echo "[snapshot] backup. Most likely cause: the PVC ran out of space" >&2
+                    echo "[snapshot] mid-write. Check 'df -h /snapshots'. The partial file is" >&2
+                    echo "[snapshot] removed by the exit trap so it cannot be mistaken for a" >&2
+                    echo "[snapshot] good backup or occupy a retention slot." >&2
+                    vault operator raft snapshot inspect "${DEST}" 2>&1 | sed 's/^/[snapshot]   /' >&2 || true
                     exit 1
                   fi
-                  echo "[snapshot] saved $(wc -c < "${DEST}") bytes, gzip-verified OK"
+                  echo "[snapshot] saved $(wc -c < "${DEST}") bytes, VERIFIED by 'snapshot inspect'"
                   echo "[snapshot] retention keeps newest ${RETAIN}; current snapshots:"
                   ls -1t /snapshots/vault-raft-*.snap 2>/dev/null || true
               volumeMounts:
