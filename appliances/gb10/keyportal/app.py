@@ -1619,6 +1619,11 @@ h1 { color: #9E1B32; margin-bottom: 4px; font-size: 1.6rem; }
 h2 { margin-top: 28px; font-size: 1.15rem; }
 .intro { background: #faf9f7; border: 1px solid #e6e1da; padding: 16px 18px; border-radius: 8px; }
 .policy { border-left: 4px solid #9E1B32; padding: 4px 0 4px 12px; margin: 16px 0; }
+.stale-config { background: #fdecea; border: 3px solid #b00020; padding: 16px 18px; border-radius: 8px; margin: 18px 0; }
+.stale-config strong.alarm { color: #b00020; font-size: 1.1rem; }
+.indent-fix { border-left: 4px solid #9E1B32; padding: 2px 0 2px 14px; margin: 18px 0; }
+.indent-fix .bad { color: #b00020; }
+.indent-fix .good { color: #1b6e2f; }
 .pending { background: #fff3cd; border: 1px solid #ffe69c; padding: 16px; border-radius: 8px; }
 pre { background: #f4f4f4; padding: 12px; overflow-x: auto; white-space: pre-wrap; word-break: break-word; border-radius: 6px; font-size: 0.9rem; }
 code { background: #f0f0f0; padding: 1px 5px; border-radius: 4px; font-size: 0.9em; }
@@ -1773,9 +1778,12 @@ def render_intro(
             "it. Use the button to copy it, then follow the steps above.</p>"
         )
         copy_button = (
-            '<button type="button" onclick="navigator.clipboard.writeText('
-            "document.getElementById('cfg-block').textContent)\">"
-            "Copy config block</button>"
+            '<button type="button" id="copy-cfg" onclick="'
+            "var b=this;navigator.clipboard.writeText("
+            "document.getElementById('cfg-block').textContent)"
+            ".then(function(){b.textContent='Copied \u2713'},"
+            "function(){b.textContent='Copy blocked - select the block and copy it by hand'});"
+            '">Copy config block</button>'
         )
     else:
         block_note = (
@@ -1795,13 +1803,36 @@ are never sent to any outside company -- everything stays on this
 machine.</p>
 
 <h2>How to use it</h2>
-<div class="pending">
-<p><strong>Set this up before? Delete the old entries first.</strong> If your
-config already has any <code>UA MIS Local (...)</code> entries (from an
-earlier version of this page or a setup script), delete <em>all</em> of them
-before pasting, so you do not end up with two sets. This also fixes a
-&ldquo;Continue shows a config error&rdquo; problem: an earlier version used a
-role called <code>agent</code>, which Continue rejects.</p>
+<div class="stale-config">
+<p><strong class="alarm">STOP &mdash; already set this up, or tried an earlier
+setup script? Delete the old entries first.</strong></p>
+<p>If your config already has <em>any</em> <code>UA MIS Local (...)</code>
+entry, delete <em>all</em> of them before pasting, so you do not end up with
+two sets. An earlier version of this page and its setup script wrote a role
+called <code>agent</code>, which Continue rejects: if the Continue panel shows
+a config error, or no &ldquo;UA MIS Local&rdquo; models, this is almost
+certainly why, and deleting those entries and pasting the block below fixes it.</p>
+</div>
+<div class="indent-fix">
+<p><strong>Indentation is the one thing that can go wrong.</strong> Every item
+under <code>models:</code> must start at the same column. Look at the entry
+already in your file: if its <code>- name:</code> line is flush against the left
+edge (no spaces), indent the pasted block to match.</p>
+<pre class="bad">WRONG &mdash; mixed (file will not load):
+models:
+- name: My Old Model        &larr; yours starts at column 0
+  provider: anthropic
+  - name: UA MIS Local (Chat) &larr; pasted, indented 2 spaces
+    provider: openai</pre>
+<pre class="good">RIGHT &mdash; all items at the same column:
+models:
+- name: My Old Model
+  provider: anthropic
+- name: UA MIS Local (Chat)  &larr; pasted block shifted left 2 to match
+  provider: openai
+  ...</pre>
+<p>(If your list is already indented two spaces, paste the block exactly as
+shown.)</p>
 </div>
 <ol>
 <li>Install the free <strong>Continue</strong> extension in VS Code
@@ -1815,9 +1846,8 @@ opens in VS Code. (Or: Continue&rsquo;s settings &rarr; <em>Configs</em>
 little between Continue versions.</li>
 <li>Find the line <code>models:</code> and paste the block below
 <strong>directly underneath it</strong>, keeping any models already listed
-there. Do <strong>not</strong> select-all and paste over the file. Keep the
-indentation as shown (if your existing entries are not indented, indent the
-whole pasted block to match them). If the file has no <code>models:</code>
+there. Do <strong>not</strong> select-all and paste over the file. Match the
+indentation of your existing entries (see the red-bordered box above). If the file has no <code>models:</code>
 line, first add one on its own line; if it says <code>models: []</code>,
 change that to just <code>models:</code>.</li>
 <li>Save, then fully quit and reopen VS Code.</li>
@@ -1850,7 +1880,10 @@ _PAGE_HEAD = """<meta charset="utf-8">
 
 
 def render_page(email: str, key: str, active: bool, config: Config) -> str:
-    intro = render_intro(email, config, active, key)
+    # Second layer of the pending-key guard: render_intro() ALSO withholds the
+    # key unless `active`. Two independent checks on purpose -- a pending
+    # student's real key must never reach the page through one edit.
+    intro = render_intro(email, config, active, key if active else None)
     head = _PAGE_HEAD.format(style=_STYLE)
     if not active:
         return f"""<!doctype html>

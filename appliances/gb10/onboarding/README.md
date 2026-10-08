@@ -32,10 +32,27 @@ time you visit it — there is nobody to ask and nothing to request.
 3. Find the line `models:` and paste the block **directly underneath it**,
    keeping any models already listed. **Do not select-all and paste over the
    file.**
-   - Keep the indentation as pasted (the block's `-` items are indented two
-     spaces). If your existing entries are not indented, indent the whole
-     pasted block to match them. YAML needs every item in the list at the
-     same indentation.
+   - **Indentation is the one thing that can go wrong.** Every `- name:` item
+     under `models:` must start at the same column. If your existing entries
+     start flush at the left edge, shift the pasted block left two spaces:
+
+     ```yaml
+     # WRONG (mixed columns -- the file will not load)
+     models:
+     - name: My Old Model
+       provider: anthropic
+       - name: UA MIS Local (Chat)
+         provider: openai
+
+     # RIGHT (same column)
+     models:
+     - name: My Old Model
+       provider: anthropic
+     - name: UA MIS Local (Chat)
+       provider: openai
+     ```
+
+     If your list is already indented two spaces, paste exactly as shown.
    - No `models:` line at all? Add `models:` on its own line first.
    - `models: []`? Change it to just `models:`.
 4. Save, then **fully quit and reopen VS Code** (not just reload the window).

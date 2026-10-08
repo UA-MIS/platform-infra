@@ -141,8 +141,19 @@ MUTATIONS = [
             "A not-yet-activated student's real key is rendered on the page "
             "instead of the placeholder."
         ),
-        "find": "block_html = escape(_manual_config_block(key if active else None, header=False))",
-        "repl": "block_html = escape(_manual_config_block(key, header=False))",
+        # Mutates BOTH independent layers (render_page's call and
+        # render_intro's own guard). Mutating one alone survives by design:
+        # the other layer still withholds the key.
+        "edits": [
+            (
+                "intro = render_intro(email, config, active, key if active else None)",
+                "intro = render_intro(email, config, active, key)",
+            ),
+            (
+                "block_html = escape(_manual_config_block(key if active else None, header=False))",
+                "block_html = escape(_manual_config_block(key, header=False))",
+            ),
+        ],
         "expect": r"pending_page_block_has_placeholder",
     },
 ]
@@ -206,17 +217,18 @@ def stage(tmp: Path, mutation=None) -> Path:
         return dest
     target = dest / "app.py"
     text = target.read_text(encoding="utf-8")
-    found = text.count(mutation["find"])
-    if found != 1:
-        raise SystemExit(
-            f"MUTANT-ERROR: {mutation['id']} -- anchor matched {found} times "
-            "(need exactly 1). The mutation could not be applied, so it "
-            "proves nothing. Update its `find` body in tests/mutation-check.py "
-            "to match the current app.py."
-        )
-    target.write_text(
-        text.replace(mutation["find"], mutation["repl"], 1), encoding="utf-8"
-    )
+    edits = mutation.get("edits") or [(mutation["find"], mutation["repl"])]
+    for find, repl in edits:
+        found = text.count(find)
+        if found != 1:
+            raise SystemExit(
+                f"MUTANT-ERROR: {mutation['id']} -- anchor matched {found} times "
+                "(need exactly 1). The mutation could not be applied, so it "
+                "proves nothing. Update its anchor in tests/mutation-check.py "
+                "to match the current app.py."
+            )
+        text = text.replace(find, repl, 1)
+    target.write_text(text, encoding="utf-8")
     return dest
 
 

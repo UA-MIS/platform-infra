@@ -953,6 +953,16 @@ CONTINUE_VALID_ROLES = {
 CONTINUE_VALID_CAPABILITIES = {"tool_use", "image_input"}
 
 
+def invalid_roles_and_capabilities(models):
+    """The real validity check, used by BOTH the invariant test and its guard
+    test: every (name, value) whose role/capability Continue does not accept."""
+    bad = [(m.get("name"), "role", r) for m in models for r in m.get("roles", [])
+           if r not in CONTINUE_VALID_ROLES]
+    bad += [(m.get("name"), "capability", c) for m in models
+            for c in m.get("capabilities", []) if c not in CONTINUE_VALID_CAPABILITIES]
+    return bad
+
+
 def _block_models(app_module, key=None):
     import yaml
 
@@ -965,26 +975,26 @@ def test_config_block_uses_only_roles_continue_accepts(app_module):
     current literal, so a regression to ANY other invalid role also fails."""
     for key in (None, "sk-real"):
         models = _block_models(app_module, key)
-        bad = [(m["name"], r) for m in models for r in m.get("roles", [])
-               if r not in CONTINUE_VALID_ROLES]
-        assert bad == []
-        badcap = [(m["name"], c) for m in models for c in m.get("capabilities", [])
-                  if c not in CONTINUE_VALID_CAPABILITIES]
-        assert badcap == []
+        assert invalid_roles_and_capabilities(models) == []
         names = [m["name"] for m in models]
         assert len(names) == len(set(names))
         assert "autocomplete" not in [r for m in models for r in m["roles"]]
 
 
-def test_config_block_validity_check_rejects_bad_roles(app_module, monkeypatch):
-    """Guards the guard: the invariant above must actually fail on a bad
-    role, whatever the bad value is."""
+def test_config_block_validity_check_rejects_bad_roles_and_capabilities(app_module):
+    """Guards the guard: the REAL check (invalid_roles_and_capabilities, the
+    one the invariant test calls) must flag any bad role or capability."""
     import yaml
 
-    real = app_module._manual_config_block()
+    real = app_module._manual_config_block("sk-real")
+    marker = 'roles: [chat]\n    # "agent" is NOT'
+    assert real.count(marker) == 1
     for bad in ("agent", "subagent-x", "tool", "Chat"):
-        models = yaml.safe_load(real.replace("roles: [chat]\n    # \"agent\"", f"roles: [{bad}]\n    # \"agent\"", 1))["models"]
-        assert any(r not in CONTINUE_VALID_ROLES for m in models for r in m["roles"]), bad
+        models = yaml.safe_load(real.replace(marker, f'roles: [{bad}]\n    # "agent" is NOT'))["models"]
+        assert [b[2] for b in invalid_roles_and_capabilities(models)] == [bad], bad
+    cap = real.replace("- tool_use", "- agent_mode")
+    flagged = invalid_roles_and_capabilities(yaml.safe_load(cap)["models"])
+    assert flagged == [("UA MIS Local (Agent)", "capability", "agent_mode")]
 
 
 def test_config_block_agent_entry_declares_tool_use(app_module):
@@ -1041,6 +1051,11 @@ def test_active_page_has_personalized_copyable_block(app_module):
     assert "gear" in html
     # The delete-old-entries warning is prominent: it sits BEFORE the steps.
     assert html.index("Delete the old entries first") < html.index("<ol>")
+    # Alarming, and visually distinct from the amber not-activated banner.
+    assert 'class="stale-config"' in html and 'class="indent-fix"' in html
+    assert html.index('class="indent-fix"') < html.index("<ol>")
+    assert "WRONG" in html and "RIGHT" in html
+    assert "Copied" in html  # clipboard feedback
     # Retired: nothing on the page may point at a script download.
     assert "/setup/" not in html
 
@@ -3730,3 +3745,12 @@ def test_student_pages_escape_email_and_admin_contact(app_module, monkeypatch):
         assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
     origin_page = app_module.render_regenerate_origin_mismatch_page(config)
     assert "<script>alert(1)</script>" not in origin_page
+
+
+def test_pending_key_is_withheld_by_each_layer_independently(app_module):
+    """render_page() AND render_intro() each withhold a pending student's key.
+    Calling render_intro() directly with a real key and active=False must not
+    leak it (the second layer), so one edit to render_page cannot expose it."""
+    html = app_module.render_intro("x@ua.edu", app_module.CONFIG, False, "sk-pending-direct")
+    assert "sk-pending-direct" not in html
+    assert "&lt;your key&gt;" in html
