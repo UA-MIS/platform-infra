@@ -1196,6 +1196,7 @@ def test_index_first_time_visit_issues_pending_key(
     assert resp.status_code == 200
     assert "not yet activated" in resp.text
     assert "sk-issued-pending" not in resp.text
+    assert "no-store" in resp.headers["cache-control"]
 
 
 def test_index_active_user_sees_key_and_config(
@@ -1225,7 +1226,13 @@ def test_index_active_user_sees_key_and_config(
     mocker.patch("app.httpx.get", side_effect=get_side_effect)
     resp = client.get("/", headers={"Cf-Access-Jwt-Assertion": "irrelevant-mocked"})
     assert resp.status_code == 200
+    # The page carries the live key twice (key box + copy-paste block), so
+    # it must never be stored by a shared cache.
+    cc = resp.headers["cache-control"]
+    assert "no-store" in cc and "private" in cc
     assert "sk-active-key" in resp.text
+    # Paste-it-yourself block comes BEFORE the optional script download.
+    assert resp.text.index('id="cfg-block"') < resp.text.index("/setup/macos-linux")
     assert "roles: [chat]" in resp.text
     assert "roles: [edit, apply]" in resp.text
     assert "roles: [agent]" not in resp.text

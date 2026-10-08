@@ -2671,8 +2671,19 @@ def _team_id_for_key_or_reissue(config: Config, email: str, key: str) -> tuple:
     return key, get_current_team_id(config, key)
 
 
+def _private_html(html: str) -> HTMLResponse:
+    """The student page embeds the student's live key (in the key box and in
+    the copy-paste config block), so no shared cache -- Cloudflare, a
+    browser back-cache on a lab machine -- may store it. Same header
+    _serve_setup_script() uses for the same reason."""
+    return HTMLResponse(
+        html,
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0, private"},
+    )
+
+
 @app.get("/", response_class=HTMLResponse)
-def index(request: Request) -> str:
+def index(request: Request) -> HTMLResponse:
     email = verify_access_jwt(request, CONFIG, JWKS_CLIENT)
     key = get_cached_key(CONFIG.db_path, email)
     if key is None:
@@ -2684,7 +2695,7 @@ def index(request: Request) -> str:
         key = issue_initial_key(CONFIG, email)
     key, team_id = _team_id_for_key_or_reissue(CONFIG, email, key)
     active = team_grants_access(CONFIG, team_id)
-    return render_page(email, key, active, CONFIG)
+    return _private_html(render_page(email, key, active, CONFIG))
 
 
 def _serve_setup_script(request: Request, spec: SetupScript) -> Response:
@@ -2795,7 +2806,7 @@ def regenerate(request: Request) -> str:
     # guaranteed. Same defensive wrap as index(), for the same reason.
     key, team_id = _team_id_for_key_or_reissue(CONFIG, email, key)
     active = team_grants_access(CONFIG, team_id)
-    return render_page(email, key, active, CONFIG)
+    return _private_html(render_page(email, key, active, CONFIG))
 
 
 @app.get("/admin", response_class=HTMLResponse)
