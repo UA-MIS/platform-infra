@@ -1,12 +1,9 @@
 -r requirements.txt
 pytest==8.3.3
 pytest-mock==3.14.0
-# Used only by the end-to-end test that EXECUTES the setup script this
-# portal serves and then parses the config.yaml it wrote (see
-# test_served_macos_script_actually_configures_continue). Grepping that
-# file would pass against a script that produced something unparseable,
-# which is the exact failure mode both onboarding suites exist to catch --
-# so validity is established with a real YAML parser. Pinned to the same
-# version the gb10-onboarding-* CI jobs install, so "valid YAML" means the
-# same thing in both places.
+# Used by the tests that parse the Continue config block the portal renders
+# (valid YAML, valid roles/capabilities, the key round-tripping byte for
+# byte). Grepping the text would pass against a block that no longer parses
+# or that names a role Continue rejects, so validity is established with a
+# real YAML parser.
 PyYAML==6.0.2

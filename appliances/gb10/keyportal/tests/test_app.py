@@ -1026,11 +1026,47 @@ def test_active_page_has_personalized_copyable_block(app_module):
     m = _re.search(r'<pre id="cfg-block">(.*?)</pre>', html, _re.S)
     assert m, "config block <pre> missing"
     block_text = unescape(m.group(1))
-    assert block_text == app_module._manual_config_block(key)
+    # The copied text is the list items only (no second `models:` key)...
+    assert block_text == app_module._manual_config_block(key, header=False)
+    assert not block_text.startswith("models:")
+    # ...and pasting it under a `models:` line yields exactly the full config.
+    import yaml
+
+    assert yaml.safe_load("models:\n" + block_text) == yaml.safe_load(
+        app_module._manual_config_block(key)
+    )
     assert "Copy config block" in html and "cfg-block" in html
     # Instructions name the merge, not the overwrite.
-    assert "underneath it" in html and "paste over the file" in html
+    assert "directly underneath it" in html and "select-all" in html
     assert "gear" in html
+    # The delete-old-entries warning is prominent: it sits BEFORE the steps.
+    assert html.index("Delete the old entries first") < html.index("<ol>")
+    # Retired: nothing on the page may point at a script download.
+    assert "/setup/" not in html
+
+
+def test_config_block_entries_have_the_expected_shape(app_module):
+    """Per-entry values that used to be asserted by the onboarding suites'
+    structural checker (retired with the scripts): provider, model,
+    endpoint, per-role token caps, key in every entry."""
+    models = _block_models(app_module, "sk-real")
+    expected = [
+        ("UA MIS Local (Chat)", ["chat"], 4000),
+        ("UA MIS Local (Edit)", ["edit", "apply"], 400),
+        ("UA MIS Local (Agent)", ["chat"], 8000),
+    ]
+    assert [(m["name"], m["roles"], m["defaultCompletionOptions"]["maxTokens"])
+            for m in models] == expected
+    for m in models:
+        assert m["provider"] == "openai"
+        assert m["model"] == "qwen3.8-27b"
+        assert m["apiBase"] == "https://local-llm.uamishub.com/v1"
+        assert m["apiKey"] == "sk-real"
+
+
+def test_setup_script_routes_are_gone(client):
+    for route in ("/setup/macos-linux", "/setup/windows"):
+        assert client.get(route).status_code in (404, 405)
 
 
 def test_pending_page_block_has_placeholder_and_never_the_key(app_module):
@@ -1231,8 +1267,8 @@ def test_index_active_user_sees_key_and_config(
     cc = resp.headers["cache-control"]
     assert "no-store" in cc and "private" in cc
     assert "sk-active-key" in resp.text
-    # Paste-it-yourself block comes BEFORE the optional script download.
-    assert resp.text.index('id="cfg-block"') < resp.text.index("/setup/macos-linux")
+    # The scripts and their /setup/* routes are retired: nothing may point there.
+    assert "/setup/" not in resp.text
     assert "roles: [chat]" in resp.text
     assert "roles: [edit, apply]" in resp.text
     assert "roles: [agent]" not in resp.text
@@ -3604,592 +3640,6 @@ def test_admin_index_reads_roster_before_key_list(app_module, client, mocker):
     assert call_order == ["roster", "keys"]
 
 
-# ---------------------------------------------------------------------------
-# Portal-served setup scripts (2026-09-30)
-#
-# The portal already authenticates the student through Cloudflare Access
-# and already knows their key, so it can hand back a setup script that
-# needs no editing -- which removes the paste step, the single richest
-# source of real onboarding failures, and skips the interactive-prompt
-# branch neither onboarding CI suite can cover.
-#
-# The scripts themselves are NOT forked into app.py. They are read from
-# appliances/gb10/onboarding/ -- the copy the five CI jobs and the two
-# 250+ assertion suites actually execute -- and the ONLY thing this
-# portal changes is one line. These tests exist to pin that "only one
-# line" claim, the authentication boundary around it, and the quoting.
-# ---------------------------------------------------------------------------
-
-
-SETUP_ROUTES = ["/setup/macos-linux", "/setup/windows"]
-
-
-def _seed_active_student(app_module, mocker, fake_response, email, key):
-    """Signed-in student with an already-cached key on an ACTIVE team."""
-    mocker.patch.object(app_module, "verify_access_jwt", return_value=email)
-    with mocker_seed_cache(app_module, app_module.CONFIG, email, key):
-        pass
-
-    def get_side_effect(url, **kwargs):
-        if url.endswith("/key/info"):
-            return fake_response({"info": {"team_id": "students-team"}})
-        if url.endswith("/team/info"):
-            return fake_response({"team_info": {"models": ["qwen3.8-27b"]}})
-        raise AssertionError(f"unexpected GET {url}")
-
-    mocker.patch("app.httpx.get", side_effect=get_side_effect)
-
-
-@pytest.mark.parametrize("route", SETUP_ROUTES)
-def test_setup_script_without_jwt_assertion_returns_401(client, route):
-    """Same authentication boundary as every other route: the assertion
-    is verified by verify_access_jwt(), never a header taken on trust.
-    Checked on BOTH routes rather than one, because this response body
-    is a bearer credential -- "we authenticated the other one" is not a
-    property either route inherits from the other."""
-    resp = client.get(route)
-    assert resp.status_code == 401
-    assert "sk-" not in resp.text
-
-
-@pytest.mark.parametrize(
-    "route,marker_prefix,filename",
-    [
-        ("/setup/macos-linux", "EMBEDDED_KEY=", "setup-macos-linux.sh"),
-        ("/setup/windows", "$EmbeddedKey = ", "setup-windows.ps1"),
-    ],
-)
-def test_setup_script_serves_the_signed_in_students_own_key(
-    app_module, client, mocker, fake_response, route, marker_prefix, filename
-):
-    email = "active@crimson.ua.edu"
-    key = "sk-active-download-key"
-    _seed_active_student(app_module, mocker, fake_response, email, key)
-
-    resp = client.get(route, headers={"Cf-Access-Jwt-Assertion": "irrelevant-mocked"})
-
-    assert resp.status_code == 200
-    assert f"{marker_prefix}'{key}'" in resp.text
-    assert resp.headers["content-disposition"] == f'attachment; filename="{filename}"'
-    assert resp.headers["content-type"].startswith("text/plain")
-    assert resp.headers["x-content-type-options"] == "nosniff"
-
-
-@pytest.mark.parametrize("route", SETUP_ROUTES)
-def test_setup_script_is_never_cached(
-    app_module, client, mocker, fake_response, route
-):
-    """The response body contains a bearer credential, and Cloudflare sits
-    in front of this service. A cached copy of student A's script served
-    to student B would hand B a working key under A's identity -- the
-    single worst thing this feature could do. `no-store` is the
-    instruction that forbids storing it anywhere at all, which is
-    stronger than `no-cache` (store, but revalidate) and is the one that
-    actually matters here."""
-    _seed_active_student(
-        app_module, mocker, fake_response, "cache@crimson.ua.edu", "sk-cache-key"
-    )
-    resp = client.get(route, headers={"Cf-Access-Jwt-Assertion": "irrelevant-mocked"})
-    assert resp.status_code == 200
-    cache_control = resp.headers["cache-control"]
-    assert "no-store" in cache_control
-    assert "private" in cache_control
-
-
-@pytest.mark.parametrize("route", SETUP_ROUTES)
-def test_setup_script_cannot_serve_another_students_key(
-    app_module, client, mocker, fake_response, route
-):
-    """Structural, not incidental: the route takes NO user-supplied
-    identifier of any kind -- no query parameter, no path segment, no
-    form field -- so the only email it can act on is the one
-    verify_access_jwt() returned from a signature- and audience-valid
-    Cloudflare Access assertion. This test pins that by giving a SECOND
-    student a cached key and proving it cannot appear in the first
-    student's download, which is the assertion that would start failing
-    if somebody later added an `?email=` override "for admin testing"."""
-    victim_key = "sk-VICTIM-must-never-be-served"
-    with mocker_seed_cache(
-        app_module, app_module.CONFIG, "victim@crimson.ua.edu", victim_key
-    ):
-        pass
-    _seed_active_student(
-        app_module, mocker, fake_response, "attacker@crimson.ua.edu", "sk-attacker-key"
-    )
-
-    resp = client.get(
-        route + "?email=victim@crimson.ua.edu",
-        headers={"Cf-Access-Jwt-Assertion": "irrelevant-mocked"},
-    )
-
-    assert resp.status_code == 200
-    assert "sk-attacker-key" in resp.text
-    assert victim_key not in resp.text
-
-
-@pytest.mark.parametrize("route", SETUP_ROUTES)
-def test_setup_script_pending_student_gets_their_real_key(
-    app_module, client, mocker, fake_response, route
-):
-    """DECISION (2026-09-30): a pending student gets the REAL script with
-    their REAL key, not a placeholder and not a refusal.
-
-    A pending student's key is not fake -- it is their real, permanent
-    key, issued and inactive. The config the script writes with it is
-    byte-for-byte the config they will need forever, and it starts
-    working the moment an admin promotes them, with nothing to re-run
-    (the script's own 403 branch says exactly that).
-
-    A placeholder would be actively harmful, not merely useless: the
-    script refuses to touch a config.yaml that already mentions
-    local-llm.uamishub.com ("Skipping the file edit so we don't create a
-    duplicate entry"), so a placeholder written today is one the script
-    will NOT fix on a later re-run. The student would be permanently
-    stuck with a dead key and a script that declines to help -- exactly
-    the silent-failure shape this codebase keeps closing.
-
-    "Do not hand them something that looks working and isn't" is met by
-    saying so in three places instead: the portal's pending banner, the
-    copy next to the download link, and the script's own verification
-    step at the end of its run."""
-    email = "pending@crimson.ua.edu"
-    key = "sk-pending-real-key"
-    mocker.patch.object(app_module, "verify_access_jwt", return_value=email)
-    with mocker_seed_cache(app_module, app_module.CONFIG, email, key):
-        pass
-    mocker.patch(
-        "app.httpx.get",
-        return_value=fake_response(
-            {"info": {"team_id": app_module.CONFIG.pending_team_id}}
-        ),
-    )
-
-    resp = client.get(route, headers={"Cf-Access-Jwt-Assertion": "irrelevant-mocked"})
-
-    assert resp.status_code == 200
-    assert key in resp.text
-
-
-@pytest.mark.parametrize("route", SETUP_ROUTES)
-def test_setup_script_first_visit_issues_a_key(
-    app_module, client, mocker, fake_response, route
-):
-    """Reachable without ever loading `/`: a bookmark, or a link a
-    classmate pasted. Goes through issue_initial_key() exactly as index()
-    does -- same claim-before-mint CAS, same pre-authorization handling
-    -- rather than erroring with "you have no key", which a student has
-    no way to act on."""
-    email = "firstdownload@crimson.ua.edu"
-    mocker.patch.object(app_module, "verify_access_jwt", return_value=email)
-    mocker.patch(
-        "app.httpx.post", return_value=fake_response({"key": "sk-issued-on-download"})
-    )
-    mocker.patch(
-        "app.httpx.get",
-        return_value=fake_response(
-            {"info": {"team_id": app_module.CONFIG.pending_team_id}}
-        ),
-    )
-
-    resp = client.get(route, headers={"Cf-Access-Jwt-Assertion": "irrelevant-mocked"})
-
-    assert resp.status_code == 200
-    assert "sk-issued-on-download" in resp.text
-
-
-@pytest.mark.parametrize("route", SETUP_ROUTES)
-def test_setup_script_never_logs_the_key(
-    app_module, client, mocker, fake_response, capfd, route
-):
-    """The key is a bearer credential. This portal already had one leak of
-    exactly this shape -- a raw key in a /key/info QUERY PARAMETER, where
-    every HTTP access log in front of the proxy records it verbatim --
-    fixed by hashing (security review F4). A download route that printed
-    "serving setup-windows.ps1 to alice@crimson.ua.edu (sk-...)" would be
-    the same bug in a new place, so this pins the absence rather than
-    trusting a reading of the code.
-
-    Uses capfd, not capsys: this file's existing WARNING lines go to
-    sys.stderr via print(), but uvicorn's own access logging writes at
-    the file-descriptor level, and capfd is the fixture that sees both."""
-    key = "sk-must-not-be-logged-0123456789"
-    _seed_active_student(
-        app_module, mocker, fake_response, "logged@crimson.ua.edu", key
-    )
-    capfd.readouterr()  # drop anything the fixtures themselves emitted
-
-    resp = client.get(route, headers={"Cf-Access-Jwt-Assertion": "irrelevant-mocked"})
-    assert resp.status_code == 200
-    assert key in resp.text  # the key really did flow through this request
-
-    captured = capfd.readouterr()
-    assert key not in captured.out
-    assert key not in captured.err
-
-
-@pytest.mark.parametrize("route", SETUP_ROUTES)
-def test_setup_script_key_never_appears_in_the_url(
-    app_module, client, mocker, fake_response, route
-):
-    """The counterpart to the logging test: a key cannot reach an access
-    log through a URL if the URL never contains one. Pins that these
-    routes are static paths with no key-bearing segment or query
-    parameter -- and, deliberately, that they carry no file extension
-    either, so no cache layer in front of this service is tempted to
-    treat them as static assets."""
-    assert route == route.lower()
-    assert "?" not in route
-    assert not route.endswith((".sh", ".ps1"))
-    _seed_active_student(
-        app_module, mocker, fake_response, "url@crimson.ua.edu", "sk-url-key"
-    )
-    resp = client.get(route, headers={"Cf-Access-Jwt-Assertion": "irrelevant-mocked"})
-    assert resp.status_code == 200
-    assert "sk-url-key" not in str(resp.url)
-
-
-# --- the substitution itself ------------------------------------------------
-
-
-HOSTILE_KEYS = [
-    "sk-plain-0123456789",
-    "sk-abc #hash def: ghi 'jkl",          # the S14 key both onboarding suites use
-    "sk-with'single'quotes",
-    'sk-with"double"quotes',
-    "sk-with\\backslash",
-    "sk-with$dollar-and-`backtick",
-    "sk-with;semicolon&ampersand|pipe",
-    "sk-with$(command) `substitution`",
-]
-
-
-@pytest.mark.parametrize("key", HOSTILE_KEYS)
-def test_shell_quoting_round_trips_through_real_bash(app_module, key, tmp_path):
-    """Executed, not reasoned about. POSIX shell and PowerShell escape a
-    single quote DIFFERENTLY -- shell needs '\\'' and PowerShell needs ''
-    -- and using PowerShell's rule in a shell literal SILENTLY DELETES
-    the quote rather than failing, producing a wrong key and an opaque
-    401 the student cannot diagnose. That is the same class of silent
-    truncation the unquoted-YAML-apiKey bug was, so it gets the same
-    treatment: run the real interpreter and compare bytes."""
-    import subprocess
-
-    quoted = app_module._shell_single_quote(key)
-    out = subprocess.run(
-        ["bash", "-c", f"EMBEDDED_KEY={quoted}\nprintf %s \"$EMBEDDED_KEY\""],
-        capture_output=True,
-        text=True,
-    )
-    assert out.returncode == 0, out.stderr
-    assert out.stdout == key
-
-
-@pytest.mark.parametrize("key", HOSTILE_KEYS)
-def test_shell_quoting_round_trips_through_the_real_script_prelude(
-    app_module, key
-):
-    """One level up from the previous test: substitutes into the ACTUAL
-    setup-macos-linux.sh text and executes the real file's prelude up to
-    and including its API_KEY assignment, proving the key survives THAT
-    file's own quoting and `set -u`, not just a hand-written line."""
-    import subprocess
-
-    spec = app_module.SETUP_SCRIPTS["macos-linux"]
-    text = app_module._substitute_embedded_key(
-        app_module.SETUP_SCRIPT_SOURCES["macos-linux"], spec, key
-    )
-    prelude, sep, _rest = text.partition('API_KEY="${1:-${EMBEDDED_KEY}}"')
-    assert sep, "the script's API_KEY assignment changed shape -- update this test"
-    out = subprocess.run(
-        ["bash", "-c", prelude + sep + '\nprintf %s "$API_KEY"'],
-        capture_output=True,
-        text=True,
-    )
-    assert out.returncode == 0, out.stderr
-    assert out.stdout.splitlines()[-1] == key
-
-
-@pytest.mark.parametrize("key", HOSTILE_KEYS)
-def test_powershell_quoting_doubles_single_quotes(app_module, key):
-    """There is no PowerShell on this machine or on the appliance -- the
-    windows-latest CI job is the only interpreter this file's output ever
-    meets -- so this asserts the documented rule directly: a single-quoted
-    PowerShell literal interprets no escapes, and the one character
-    needing escaping is ' , written by doubling it. Single quotes also
-    stop a $ in a key being expanded as a variable, which a double-quoted
-    literal would do silently."""
-    quoted = app_module._powershell_single_quote(key)
-    assert quoted.startswith("'") and quoted.endswith("'")
-    assert quoted[1:-1] == key.replace("'", "''")
-    # Unbalanced quoting would be a syntax error in the served file.
-    assert quoted.count("'") % 2 == 0
-
-
-def test_substitution_replaces_exactly_one_line_and_nothing_else(app_module):
-    """The whole premise of this feature is "serve the tested script, change
-    ONE line". Anything else drifting in would be the forked-copy problem
-    the manual config block already caused once."""
-    import difflib
-
-    for slug, spec in app_module.SETUP_SCRIPTS.items():
-        original = app_module.SETUP_SCRIPT_SOURCES[slug]
-        served = app_module._substitute_embedded_key(original, spec, "sk-abc")
-        diff = [
-            line
-            for line in difflib.unified_diff(
-                original.splitlines(), served.splitlines(), n=0, lineterm=""
-            )
-            if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
-        ]
-        assert diff == [
-            "-" + spec.marker_line,
-            "+" + spec.assign_prefix + spec.quote_key("sk-abc"),
-        ], f"{slug}: substitution changed more than the marker line"
-
-
-@pytest.mark.parametrize(
-    "bad_key",
-    [
-        "sk-with\nnewline",
-        "sk-with\rcarriage-return",
-        "sk-with\x00null",
-        "sk-with\ttab",
-        "",
-    ],
-)
-def test_substitution_refuses_a_key_that_would_break_the_line(app_module, bad_key):
-    """The substitution is LINE-oriented, so a newline in a key would not
-    corrupt the script -- it would INJECT a line of code into a file a
-    student then executes. Rejected loudly (the request 500s and the
-    student sees nothing) rather than escaped cleverly: LiteLLM has no
-    business minting a key like this, and a 500 on a download is a far
-    better outcome than a script that runs an extra line.
-
-    Deliberately a rejection of CONTROL characters only, not an allowlist
-    of "sk- plus base64": the onboarding scripts were deliberately
-    hardened to survive a hostile key shape (quotes, #, ": ") rather than
-    assume today's format, and narrowing that here would undo it."""
-    for spec in app_module.SETUP_SCRIPTS.values():
-        source = app_module.SETUP_SCRIPT_SOURCES[spec.slug]
-        with pytest.raises(RuntimeError):
-            app_module._substitute_embedded_key(source, spec, bad_key)
-
-
-def test_loader_rejects_a_script_whose_marker_line_has_drifted(app_module):
-    """Fails at STARTUP, not at request time. If somebody renames
-    EMBEDDED_KEY in the onboarding script without renaming it here, the
-    alternative to this check is a portal that cheerfully serves every
-    student a script with no key in it and an interactive prompt they
-    were told they would not see -- silently, for as long as nobody
-    looks. The container restart-looping with a named error is the
-    better failure."""
-    for spec in app_module.SETUP_SCRIPTS.values():
-        source = app_module.SETUP_SCRIPT_SOURCES[spec.slug]
-        with pytest.raises(RuntimeError, match="marker"):
-            app_module._validate_setup_script(spec, source.replace(spec.marker_line, ""))
-        with pytest.raises(RuntimeError, match="marker"):
-            app_module._validate_setup_script(
-                spec, source + "\n" + spec.marker_line + "\n"
-            )
-
-
-def test_served_scripts_are_the_real_onboarding_files_not_a_copy(app_module):
-    """The reason this route reads the onboarding scripts instead of
-    embedding them: a second copy inside app.py drifts from the tested
-    one. That already happened once here -- the manual config block in
-    this very file fell out of sync with the onboarding scripts'
-    three-entry redesign, because nothing forced the two to match.
-    Nothing forces it here either, except this test."""
-    from pathlib import Path
-
-    onboarding = Path(app_module.__file__).resolve().parent.parent / "onboarding"
-    for slug, spec in app_module.SETUP_SCRIPTS.items():
-        on_disk = (onboarding / spec.source_filename).read_text(encoding="utf-8")
-        assert app_module.SETUP_SCRIPT_SOURCES[slug] == on_disk
-
-
-# --- the portal page's own copy ---------------------------------------------
-
-
-def test_index_offers_the_download_links(app_module, client, mocker, fake_response):
-    _seed_active_student(
-        app_module, mocker, fake_response, "links@crimson.ua.edu", "sk-links-key"
-    )
-    resp = client.get("/", headers={"Cf-Access-Jwt-Assertion": "irrelevant-mocked"})
-    assert resp.status_code == 200
-    assert 'href="/setup/macos-linux"' in resp.text
-    assert 'href="/setup/windows"' in resp.text
-
-
-def test_pending_page_offers_the_links_and_says_the_key_is_not_active_yet(
-    app_module, client, mocker, fake_response
-):
-    """The pending student gets the script (see the decision docstring
-    above), so the page must not let them believe it will work yet. Both
-    halves are asserted together on purpose: the link WITHOUT the caveat
-    is the "looks working and isn't" failure, and the caveat without the
-    link is the wasted trip back."""
-    email = "pendinglinks@crimson.ua.edu"
-    mocker.patch.object(app_module, "verify_access_jwt", return_value=email)
-    with mocker_seed_cache(app_module, app_module.CONFIG, email, "sk-pending-links"):
-        pass
-    mocker.patch(
-        "app.httpx.get",
-        return_value=fake_response(
-            {"info": {"team_id": app_module.CONFIG.pending_team_id}}
-        ),
-    )
-    resp = client.get("/", headers={"Cf-Access-Jwt-Assertion": "irrelevant-mocked"})
-    assert resp.status_code == 200
-    assert 'href="/setup/macos-linux"' in resp.text
-    assert 'href="/setup/windows"' in resp.text
-    assert "not yet activated" in resp.text
-    # The pending page still must not print the key itself (pre-existing
-    # guarantee -- restated here because this change added a new way for
-    # a key to reach this page).
-    assert "sk-pending-links" not in resp.text
-
-
-def test_no_unfilled_placeholders_remain_in_the_onboarding_files():
-    """`<ADMIN>` was an unfilled placeholder in both setup scripts and the
-    onboarding README, reached on EVERY error path -- including the
-    entirely normal "not yet activated" state every brand-new key starts
-    in. A stuck student was told to contact a literal angle bracket."""
-    from pathlib import Path
-
-    onboarding = Path(__file__).resolve().parent.parent.parent / "onboarding"
-    for name in (
-        "setup-macos-linux.sh",
-        "setup-windows.ps1",
-        "README.md",
-    ):
-        text = (onboarding / name).read_text(encoding="utf-8")
-        for placeholder in (
-            "<ADMIN>",
-            "<SETUP_SCRIPT_URL_WINDOWS>",
-            "<SETUP_SCRIPT_URL_MACOS_LINUX>",
-        ):
-            # The scripts explain in a comment which placeholder they
-            # replaced; only USES of it are the defect.
-            uses = [
-                line
-                for line in text.splitlines()
-                if placeholder in line
-                and not line.lstrip().startswith(("#", "//"))
-            ]
-            assert uses == [], f"{name} still uses {placeholder}: {uses}"
-
-
-# ---------------------------------------------------------------------------
-# End-to-end: EXECUTE the script the portal actually serves
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("key", ["sk-e2e-normal-key", "sk-abc #hash def: ghi 'jkl"])
-def test_served_macos_script_actually_configures_continue(
-    app_module, client, mocker, fake_response, tmp_path, key
-):
-    """The one test that closes the loop: take the bytes THIS PORTAL serves
-    over HTTP, run them as a real script, and parse the config.yaml they
-    produced.
-
-    Everything else about this feature is verified one layer at a time --
-    the substitution changes exactly one line, the key survives the
-    script's prelude, the onboarding suites run a script substituted by
-    their OWN independent reimplementation of the portal's quoting rule.
-    That last one is a genuine cross-check (two implementations agreeing
-    is worth more than one asserting about itself), but it also means
-    nothing yet proves app.py's own output is a runnable file. Three
-    separate bugs in this directory were found only by executing
-    something for the first time; this is the executed version.
-
-    macOS/Linux only. There is no PowerShell on this machine or on the
-    appliance -- the windows-latest CI job is the only interpreter
-    setup-windows.ps1 ever meets, which is why its equivalent coverage
-    lives in test-setup-windows.ps1 (scenarios S13/S14) rather than here.
-    """
-    import subprocess
-
-    yaml = pytest.importorskip("yaml")
-
-    _seed_active_student(app_module, mocker, fake_response, "e2e@crimson.ua.edu", key)
-    resp = client.get(
-        "/setup/macos-linux", headers={"Cf-Access-Jwt-Assertion": "irrelevant-mocked"}
-    )
-    assert resp.status_code == 200
-
-    served = tmp_path / "setup-macos-linux.sh"
-    served.write_text(resp.text, encoding="utf-8")
-    fake_home = tmp_path / "home"
-    fake_home.mkdir()
-
-    # The endpoint is HARDCODED in the script with no override, so the only
-    # way to keep this test off production is to make the request fail.
-    # curl honours these; nothing listens on port 9, so the script takes
-    # its own non-fatal "could not reach the endpoint" branch. Same
-    # technique the onboarding suites use, for the same reason.
-    env = {
-        **os.environ,
-        "HOME": str(fake_home),
-        "http_proxy": "http://127.0.0.1:9",
-        "https_proxy": "http://127.0.0.1:9",
-        "ALL_PROXY": "http://127.0.0.1:9",
-    }
-    # No key argument and no stdin: a portal-served script must need
-    # neither. stdin is closed rather than inherited so that a regression
-    # which reintroduces the prompt FAILS here instead of hanging.
-    run = subprocess.run(
-        ["bash", str(served)],
-        env=env,
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    assert run.returncode == 0, run.stdout + run.stderr
-    assert "Paste your local-llm key" not in run.stdout
-    # The script must not echo the key to a terminal a classmate can see
-    # over a shoulder, or into a CI log.
-    assert key not in run.stdout
-    assert key not in run.stderr
-
-    config = yaml.safe_load(
-        (fake_home / ".continue" / "config.yaml").read_text(encoding="utf-8")
-    )
-    models = config["models"]
-    assert len(models) == 3
-    # The whole point: the key round-trips byte-for-byte through the
-    # portal's shell quoting AND the script's YAML quoting, into every
-    # entry.
-    assert [m["apiKey"] for m in models] == [key, key, key]
-    assert [m["roles"] for m in models] == [["chat"], ["edit", "apply"], ["chat"]]
-    assert [m.get("capabilities") for m in models] == [None, None, ["tool_use"]]
-    # PARITY: the downloadable script and the portal page's copy-paste block
-    # are two implementations (the script is a standalone file and cannot
-    # import app.py). They must produce the same models, key included --
-    # this is what stops them drifting apart again.
-    assert models == yaml.safe_load(app_module._manual_config_block(key))["models"]
-
-
-def test_substitution_survives_a_crlf_checkout(app_module):
-    """Both scripts are LF-only today and there is no .gitattributes in
-    this repo, but `*.ps1 text eol=crlf` is a reasonable thing for somebody
-    shipping PowerShell to Windows students to add later. Without this the
-    marker regex would stop matching and the WHOLE portal -- GET / and
-    /admin included -- would refuse to start over a line ending. The
-    substituted line must keep the CR it found, or the served file would
-    have one stray LF-only line in an otherwise CRLF file."""
-    for slug, spec in app_module.SETUP_SCRIPTS.items():
-        crlf = app_module.SETUP_SCRIPT_SOURCES[slug].replace("\n", "\r\n")
-        app_module._validate_setup_script(spec, crlf)  # must not raise
-        served = app_module._substitute_embedded_key(crlf, spec, "sk-crlf")
-        expected = spec.assign_prefix + "'sk-crlf'"
-        assert f"{expected}\r\n" in served
-        assert f"{expected}\n" not in served.replace("\r\n", "\r")
-        # Still exactly one line changed.
-        assert served.count("\r\n") == crlf.count("\r\n")
-
-
 def test_onboarding_url_is_not_pinned_to_a_feature_branch(app_module):
     """This URL is on every student's page. It read `tree/gb10-appliance`
     until PR #696 landed, which put it one branch deletion away from being
@@ -4223,8 +3673,6 @@ def test_no_route_is_lost_to_disabling_the_docs(app_module):
     assert {
         "/",
         "/regenerate",
-        "/setup/macos-linux",
-        "/setup/windows",
         "/admin",
         "/admin/promote",
         "/admin/demote",
@@ -4233,6 +3681,9 @@ def test_no_route_is_lost_to_disabling_the_docs(app_module):
         "/healthz",
     } <= paths
     assert not paths & {"/docs", "/redoc", "/openapi.json"}
+    # The setup-script download routes are retired (paste-the-block is the
+    # only path); they must stay gone rather than 200 with a stale script.
+    assert not paths & {"/setup/macos-linux", "/setup/windows"}
 
 
 def test_pending_page_tells_a_student_what_to_do_while_waiting(
@@ -4262,74 +3713,6 @@ def test_pending_page_tells_a_student_what_to_do_while_waiting(
     assert "do not need to" in pending_block
     assert "reload this page" in pending_block
     assert "sk-pending-copy" not in resp.text
-
-
-def test_load_setup_scripts_actually_validates_what_it_loads(
-    app_module, tmp_path, monkeypatch
-):
-    """Found by the mutation check, not by reading the code.
-
-    test_loader_rejects_a_script_whose_marker_line_has_drifted calls
-    _validate_setup_script DIRECTLY, so it proves the validator works --
-    and nothing more. Deleting the call to it from load_setup_scripts()
-    left that test green: mutation M7-skip-the-marker-validation survived,
-    and a drifted script would have been loaded, served to every student
-    with no key in it, and prompted them for one they were told they would
-    not need.
-
-    "Asserting what a function does" is not the same as "asserting it is
-    wired in". This test exercises load_setup_scripts() itself, through
-    KEYPORTAL_ONBOARDING_DIR, against a directory where one script has
-    drifted -- the path the container actually takes at startup.
-    """
-    for drifted_slug, drifted in app_module.SETUP_SCRIPTS.items():
-        directory = tmp_path / drifted_slug
-        directory.mkdir()
-        for slug, spec in app_module.SETUP_SCRIPTS.items():
-            text = app_module.SETUP_SCRIPT_SOURCES[slug]
-            if slug == drifted_slug:
-                text = text.replace(spec.marker_line, "")
-            (directory / spec.source_filename).write_text(text, encoding="utf-8")
-        monkeypatch.setenv("KEYPORTAL_ONBOARDING_DIR", str(directory))
-        with pytest.raises(RuntimeError, match="marker"):
-            app_module.load_setup_scripts()
-
-
-def test_load_setup_scripts_refuses_a_directory_missing_a_script(
-    app_module, tmp_path, monkeypatch
-):
-    """The other half of the startup contract: a script absent from the
-    image must stop the container, not surface later as a 500 on a
-    student's download."""
-    empty = tmp_path / "empty"
-    empty.mkdir()
-    monkeypatch.setenv("KEYPORTAL_ONBOARDING_DIR", str(empty))
-    with pytest.raises(RuntimeError, match="Could not read"):
-        app_module.load_setup_scripts()
-
-
-def test_load_setup_scripts_refuses_a_missing_directory(
-    app_module, tmp_path, monkeypatch
-):
-    monkeypatch.setenv("KEYPORTAL_ONBOARDING_DIR", str(tmp_path / "nope"))
-    with pytest.raises(RuntimeError, match="onboarding scripts directory"):
-        app_module.load_setup_scripts()
-
-
-def test_load_setup_scripts_succeeds_on_a_good_directory(
-    app_module, tmp_path, monkeypatch
-):
-    """The positive control for the three refusals above. Without it, a
-    load_setup_scripts() that raised unconditionally would satisfy all of
-    them -- every "it rejects X" test needs one thing it accepts."""
-    good = tmp_path / "good"
-    good.mkdir()
-    for slug, spec in app_module.SETUP_SCRIPTS.items():
-        (good / spec.source_filename).write_text(
-            app_module.SETUP_SCRIPT_SOURCES[slug], encoding="utf-8"
-        )
-    monkeypatch.setenv("KEYPORTAL_ONBOARDING_DIR", str(good))
-    assert app_module.load_setup_scripts() == app_module.SETUP_SCRIPT_SOURCES
 
 
 def test_student_pages_escape_email_and_admin_contact(app_module, monkeypatch):

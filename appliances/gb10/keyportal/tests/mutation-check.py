@@ -2,8 +2,8 @@
 """Prove the keyportal suite actually catches a broken app.py.
 
 A CI job that passes against broken code is worse than no job, because it
-manufactures confidence. This is the same idea as the two onboarding
-suites' --mutation-check, deliberately kept much smaller: a table of exact
+manufactures confidence. This is the same idea as the (now retired) two onboarding
+retired onboarding suites' --mutation-check, deliberately kept much smaller: a table of exact
 find/replace pairs plus a loop, not a harness. The onboarding suites need
 a harness because they drive an external interpreter and parse its output;
 here pytest already is the harness.
@@ -49,102 +49,78 @@ MUTATIONS = [
     {
         "id": "M1-trust-the-email-header",
         "why": (
-            "Authentication bypass: the download route trusts "
+            "Authentication bypass: the student page trusts "
             "Cf-Access-Authenticated-User-Email instead of verifying the "
             "signed assertion, so anyone who can reach the port can name "
-            "any student and be handed that student's key."
+            "any student and be shown that student's key."
         ),
-        "find": "    email = verify_access_jwt(request, CONFIG, JWKS_CLIENT)\n"
-        "    key = get_cached_key(CONFIG.db_path, email)\n"
-        "    if key is None:\n"
-        "        key = issue_initial_key(CONFIG, email)\n"
-        "    key, _team_id = _team_id_for_key_or_reissue(CONFIG, email, key)\n"
-        "    body = _substitute_embedded_key(",
-        "repl": '    email = request.headers.get("Cf-Access-Authenticated-User-Email", "")\n'
-        "    key = get_cached_key(CONFIG.db_path, email)\n"
-        "    if key is None:\n"
-        "        key = issue_initial_key(CONFIG, email)\n"
-        "    key, _team_id = _team_id_for_key_or_reissue(CONFIG, email, key)\n"
-        "    body = _substitute_embedded_key(",
+        "find": "def index(request: Request) -> HTMLResponse:\n"
+        "    email = verify_access_jwt(request, CONFIG, JWKS_CLIENT)",
+        "repl": "def index(request: Request) -> HTMLResponse:\n"
+        '    email = request.headers.get("Cf-Access-Authenticated-User-Email", "")',
         "expect": r"without_jwt_assertion_returns_401",
     },
     {
-        "id": "M2-log-the-key",
+        "id": "M2-let-cloudflare-cache-the-key",
         "why": (
-            "Credential leak: a friendly log line puts the raw key in "
-            "stderr, and from there in `docker compose logs`. This portal "
-            "already had one leak of this shape (F4, a raw key in a "
-            "/key/info query parameter, fixed by hashing)."
+            "Worst-case cross-student leak: the page embeds the student's "
+            "live key and Cloudflare sits in front of this service, so a "
+            "cached copy of one student's page served to another hands out a "
+            "working key under someone else's identity."
         ),
-        "find": "    body = _substitute_embedded_key(SETUP_SCRIPT_SOURCES[spec.slug], spec, key)",
-        "repl": '    print(f"serving {spec.slug} to {email} ({key})", file=sys.stderr)\n'
-        "    body = _substitute_embedded_key(SETUP_SCRIPT_SOURCES[spec.slug], spec, key)",
-        "expect": r"never_logs_the_key",
+        "find": 'headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0, private"},',
+        "repl": 'headers={"Cache-Control": "public, max-age=3600"},',
+        "expect": r"index_active_user_sees_key_and_config|index_first_time_visit",
     },
     {
-        "id": "M3-let-cloudflare-cache-the-key",
+        "id": "M3-unquote-the-apikey",
         "why": (
-            "Worst-case cross-student leak: the response body is a bearer "
-            "credential and Cloudflare sits in front of this service, so a "
-            "cached copy of one student's script served to another hands "
-            "out a working key under someone else's identity."
+            "Silent truncation: the apiKey scalar goes back to being "
+            "unquoted, so a key containing ' #' is cut off at the comment "
+            "marker. Valid YAML, wrong key, opaque 401."
         ),
-        "find": '            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0, private",',
-        "repl": '            "Cache-Control": "public, max-age=3600",',
-        "expect": r"is_never_cached",
+        "find": """    return "'" + value.replace("'", "''") + "'\"""",
+        "repl": "    return value",
+        "expect": r"substitutes_the_key_exactly",
     },
     {
-        "id": "M4-powershell-quoting-in-the-shell-literal",
+        "id": "M4-accept-control-characters-in-a-key",
         "why": (
-            "Silent wrong key: POSIX shell needs '\\'' and PowerShell needs "
-            "'' for a literal quote. Using the PowerShell rule in a shell "
-            "literal does not error -- it concatenates two adjacent "
-            "literals and DELETES the quote, producing a valid-looking "
-            "config.yaml, a wrong key, and an opaque 401."
+            "YAML injection: a newline in a key adds arbitrary lines to the "
+            "config block a student pastes into their editor."
         ),
-        "find": """    return "'" + value.replace("'", "'\\\\''") + "'\"""",
-        "repl": """    return "'" + value.replace("'", "''") + "'\"""",
-        "expect": r"round_trips_through_real_bash|actually_configures_continue",
+        "find": "        if _KEY_FORBIDDEN_CHARS_RE.search(api_key):",
+        "repl": "        if False:",
+        "expect": r"refuses_empty_or_control_char_key",
     },
     {
-        "id": "M5-accept-control-characters-in-a-key",
+        "id": "M5-regress-the-agent-role",
         "why": (
-            "Code injection into a file a student executes: the "
-            "substitution is line-oriented, so a newline in a key adds a "
-            "line of shell/PowerShell to the served script."
+            "The original defect: the Agent entry goes back to `roles: "
+            "[agent]`, which Continue rejects (config fails to load). Must "
+            "trip the valid-roles invariant, not a literal compare."
         ),
-        "find": "    bad = _KEY_FORBIDDEN_CHARS_RE.search(key)",
-        "repl": "    bad = None",
-        "expect": r"refuses_a_key_that_would_break_the_line",
+        "find": '    roles: [chat]\n    # "agent" is NOT a Continue role',
+        "repl": '    roles: [agent]\n    # "agent" is NOT a Continue role',
+        "expect": r"only_roles_continue_accepts",
     },
     {
-        "id": "M6-serve-inline-instead-of-attachment",
+        "id": "M6-drop-tool-use",
         "why": (
-            "Renders a student's own key as a wall of text in a browser tab "
-            "they may then leave open on a shared lab machine, instead of "
-            "downloading a file."
+            "Agent mode silently lost: the Agent entry stops declaring "
+            "tool_use, so Continue never offers agent mode on it. Valid "
+            "YAML, valid roles."
         ),
-        "find": '            "Content-Disposition": f\'attachment; filename="{spec.download_filename}"\',',
-        "repl": '            "Content-Disposition": f\'inline; filename="{spec.download_filename}"\',',
-        "expect": r"serves_the_signed_in_students_own_key",
+        "find": "    capabilities:\n      - tool_use\n",
+        "repl": "",
+        "expect": r"agent_entry_declares_tool_use",
     },
     {
-        "id": "M7-skip-the-marker-validation",
-        "why": (
-            "Removes the startup contract: a renamed EMBEDDED_KEY in the "
-            "onboarding script would then be served to every student as a "
-            "script with no key in it and an interactive prompt they were "
-            "told they would not see -- silently, for as long as nobody "
-            "looks."
-        ),
-        "find": "        _validate_setup_script(spec, text)\n        sources[slug] = text",
-        "repl": "        sources[slug] = text",
-        # NOT marker_line_has_drifted: that test calls
-        # _validate_setup_script() directly, so it stays green when the CALL
-        # to it is deleted from load_setup_scripts() -- which is how this
-        # mutation survived on its first run. The test that catches this one
-        # has to exercise the loader itself.
-        "expect": r"actually_validates_what_it_loads",
+        "id": "M7-stop-escaping-the-email",
+        "why": "Unescaped interpolation of the signed-in email into HTML.",
+        "find": "<p>Signed in as <strong>{escape(email)}</strong>.</p>\n<section",
+        "repl": "<p>Signed in as <strong>{email}</strong>.</p>\n<section",
+        "expect": r"escape_email_and_admin_contact",
     },
     {
         "id": "M8-expose-the-openapi-schema",
@@ -158,6 +134,16 @@ MUTATIONS = [
         "find": "app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)",
         "repl": "app = FastAPI(docs_url=None, redoc_url=None)",
         "expect": r"openapi_surface_is_not_exposed",
+    },
+    {
+        "id": "M9-show-a-pending-student-their-key",
+        "why": (
+            "A not-yet-activated student's real key is rendered on the page "
+            "instead of the placeholder."
+        ),
+        "find": "block_html = escape(_manual_config_block(key if active else None, header=False))",
+        "repl": "block_html = escape(_manual_config_block(key, header=False))",
+        "expect": r"pending_page_block_has_placeholder",
     },
 ]
 
@@ -206,13 +192,7 @@ def stage(tmp: Path, mutation=None) -> Path:
     """Stage a runnable copy of the appliance layout and optionally apply a
     mutation. Returns the directory to run pytest from.
 
-    Copies BOTH keyportal/ and onboarding/, preserving their relative
-    positions, because app.py's _resolve_onboarding_dir() finds the setup
-    scripts at ../onboarding in the repo layout and refuses to start
-    without them. Staging keyportal/ alone was the first version's bug: the
-    app raised at import, every test ERRORed, and the checker reported all
-    eight mutations as survivors -- the baseline included, which read GREEN
-    on a suite that had executed nothing.
+    Copies keyportal/ only (app.py reads nothing outside its own directory).
 
     Never touches the working tree. An earlier hand-run of these same
     mutations edited app.py in place and restored it with `cp`, which is one
@@ -221,7 +201,6 @@ def stage(tmp: Path, mutation=None) -> Path:
     root = tmp / (mutation["id"] if mutation else "baseline")
     ignore = shutil.ignore_patterns("__pycache__", ".pytest_cache", "*.db")
     shutil.copytree(KEYPORTAL, root / KEYPORTAL.name, ignore=ignore)
-    shutil.copytree(KEYPORTAL.parent / "onboarding", root / "onboarding", ignore=ignore)
     dest = root / KEYPORTAL.name
     if mutation is None:
         return dest
