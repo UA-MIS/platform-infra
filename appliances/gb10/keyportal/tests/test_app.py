@@ -4330,3 +4330,20 @@ def test_load_setup_scripts_succeeds_on_a_good_directory(
         )
     monkeypatch.setenv("KEYPORTAL_ONBOARDING_DIR", str(good))
     assert app_module.load_setup_scripts() == app_module.SETUP_SCRIPT_SOURCES
+
+
+def test_student_pages_escape_email_and_admin_contact(app_module, monkeypatch):
+    """The email comes from a verified Access JWT and admin_contact from an
+    operator env var, so neither is attacker-controlled today -- but 'the
+    source is trusted' stops holding the day a second code path sets them.
+    Both pages (pending and active) must render them escaped."""
+    import dataclasses
+
+    evil = '<script>alert(1)</script>"&'
+    config = dataclasses.replace(app_module.CONFIG, admin_contact=evil)
+    for active in (False, True):
+        html = app_module.render_page(evil, "sk-k", active, config)
+        assert "<script>alert(1)</script>" not in html
+        assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    origin_page = app_module.render_regenerate_origin_mismatch_page(config)
+    assert "<script>alert(1)</script>" not in origin_page

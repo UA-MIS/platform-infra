@@ -2110,7 +2110,7 @@ def render_intro(
         )
         copy_button = ""
     return f"""<h1>UA MIS Local LLM</h1>
-<p>Signed in as <strong>{email}</strong>.</p>
+<p>Signed in as <strong>{escape(email)}</strong>.</p>
 <section class="intro">
 <p>This is a private AI coding assistant that runs on a computer owned by
 the MIS program. It's free for you to use, and your code and questions
@@ -2167,7 +2167,7 @@ not a sign that something is broken.</p>
 <p class="policy"><strong>Course policy:</strong> using this tool does not override your course's rules on AI assistance -- always follow your
 assignment's instructions.</p>
 
-<p>Questions or problems? Contact <strong>{config.admin_contact}</strong>.</p>
+<p>Questions or problems? Contact <strong>{escape(config.admin_contact)}</strong>.</p>
 </section>
 <hr>
 """
@@ -2189,7 +2189,7 @@ def render_page(email: str, key: str, active: bool, config: Config) -> str:
 {intro}
 <div class="pending">
 <p><strong>Your key is issued but not yet activated -- contact
-{config.admin_contact} to be added to a course team.</strong></p>
+{escape(config.admin_contact)} to be added to a course team.</strong></p>
 <p>You do not need to do anything else right now, and you do not need to
 regenerate anything. The key you already have is the one that will work
 -- nothing about it changes when you're added.</p>
@@ -2249,7 +2249,7 @@ actually need a new key, there is nothing else to do -- just go back to
 <a href="/">the main page</a>.</p>
 <p>If you do need to regenerate, try again after checking your browser
 isn't blocking "referrer" information for this site, or in a different
-browser. Still stuck? Contact <strong>{config.admin_contact}</strong>.</p>
+browser. Still stuck? Contact <strong>{escape(config.admin_contact)}</strong>.</p>
 </div>
 </body></html>"""
 
