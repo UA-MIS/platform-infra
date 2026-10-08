@@ -65,9 +65,9 @@ on the deployed config.
 The 2026-09-29 long-context tool-call test (`artifacts/exploration/2026-09-29-gb10-longcontext-toolcall-test.md` in the project workspace, not this repo) tested to
 118,337 tokens and passed. It measured **tool-call structural integrity only**:
 short structured output (a JSON tool call) stays valid under fp8 error, while
-free-text prose rots. Nothing regressed afterwards: both flags were already live
+free-text prose rots. Nothing regressed afterwards: `--kv-cache-dtype=fp8` was already live
 about four hours before that test (`cc5a3dd` at 02:27 vs the artifact at
-06:38). The artifact stated its limitation honestly; the conclusion drawn from
+06:38; it also set `--max-model-len` at the time). The artifact stated its limitation honestly; the conclusion drawn from
 it ("long context is fine") quietly exceeded what it measured. When testing a
 long-context change, **generate long free-text prose and run a repeat detector**
 — do not rely on structured-output checks alone.
