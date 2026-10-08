@@ -931,17 +931,17 @@ def test_render_page_active_shows_key_and_continue_config(app_module):
     assert app_module.ONBOARDING_URL in html
 
 
-def test_manual_config_block_thinking_off_on_all_three_entries(app_module):
+def test_manual_config_block_thinking_off_on_both_entries(app_module):
     """Task 1 (2026-09-30, correcting an inherited default rather than
     a decision): chat and agent used to keep thinking ON -- the
     single-turn benchmark showed no quality difference worth the wait
     (off 41/54 vs xhigh 39/54, within noise; low tracked off), so off is
-    now the evidence-based default for every role. Counts exactly 3
-    occurrences of the marker, one per entry -- not just "at least one",
-    which would pass even if only the Edit entry (which already had it)
-    kept it and Chat/Agent were never actually updated."""
+    now the evidence-based default for every role. Counts exactly 2
+    occurrences of the marker, one per entry (Edit and the chat/agent
+    entry; the separate Chat entry was removed 2026-10-08) -- not just "at
+    least one", which would pass even if only one entry kept it."""
     block = app_module._manual_config_block()
-    assert block.count("enable_thinking: false") == 3
+    assert block.count("enable_thinking: false") == 2
 
 
 # Every `roles:` value Continue accepts (https://docs.continue.dev/reference).
@@ -987,24 +987,37 @@ def test_config_block_validity_check_rejects_bad_roles_and_capabilities(app_modu
     import yaml
 
     real = app_module._manual_config_block("sk-real")
-    marker = 'roles: [chat]\n    # "agent" is NOT'
+    marker = 'roles: [chat]\n    # This ONE entry'
     assert real.count(marker) == 1
     for bad in ("agent", "subagent-x", "tool", "Chat"):
-        models = yaml.safe_load(real.replace(marker, f'roles: [{bad}]\n    # "agent" is NOT'))["models"]
+        models = yaml.safe_load(real.replace(marker, f'roles: [{bad}]\n    # This ONE entry'))["models"]
         assert [b[2] for b in invalid_roles_and_capabilities(models)] == [bad], bad
     cap = real.replace("- tool_use", "- agent_mode")
     flagged = invalid_roles_and_capabilities(yaml.safe_load(cap)["models"])
-    assert flagged == [("UA MIS Local (Agent)", "capability", "agent_mode")]
+    assert flagged == [("UA MIS Local", "capability", "agent_mode")]
 
 
-def test_config_block_agent_entry_declares_tool_use(app_module):
+def test_config_block_chat_entry_declares_tool_use(app_module):
     models = {m["name"]: m for m in _block_models(app_module, "sk-real")}
-    agent = models["UA MIS Local (Agent)"]
-    assert agent["roles"] == ["chat"]
-    assert agent["capabilities"] == ["tool_use"]
-    assert agent["defaultCompletionOptions"]["maxTokens"] == 8000
-    assert "capabilities" not in models["UA MIS Local (Chat)"]
+    chat = models["UA MIS Local"]
+    assert chat["roles"] == ["chat"]
+    assert chat["capabilities"] == ["tool_use"]
+    assert chat["defaultCompletionOptions"]["maxTokens"] == 8000
     assert "capabilities" not in models["UA MIS Local (Edit)"]
+
+
+def test_config_block_has_exactly_one_chat_capable_entry(app_module):
+    """Tools are attached per MODE, so one tool_use chat entry serves Chat
+    AND Agent mode. A second chat entry would show up as a pointless extra
+    choice in the picker (the removed "UA MIS Local (Chat)" did exactly
+    that), so exactly one must exist, and the removed names must stay gone."""
+    for key in (None, "sk-real"):
+        models = _block_models(app_module, key)
+        chat_capable = [m["name"] for m in models if "chat" in m.get("roles", [])]
+        assert chat_capable == ["UA MIS Local"]
+        assert len(models) == 2
+        names = {m["name"] for m in models}
+        assert names == {"UA MIS Local", "UA MIS Local (Edit)"}
 
 
 def test_config_block_enable_thinking_is_boolean_false_everywhere(app_module):
@@ -1018,7 +1031,7 @@ def test_config_block_enable_thinking_is_boolean_false_everywhere(app_module):
 @pytest.mark.parametrize("key", ["sk-plain", "sk-abc #hash def: ghi 'jkl", "sk-a\\b$c"])
 def test_config_block_substitutes_the_key_exactly_in_every_entry(app_module, key):
     models = _block_models(app_module, key)
-    assert [m["apiKey"] for m in models] == [key, key, key]
+    assert [m["apiKey"] for m in models] == [key, key]
 
 
 @pytest.mark.parametrize("bad", ["", "   ", "sk-a\nmodels: evil", "sk-a\x00"])
@@ -1055,6 +1068,9 @@ def test_active_page_has_personalized_copyable_block(app_module):
     assert 'class="stale-config"' in html and 'class="indent-fix"' in html
     assert html.index('class="indent-fix"') < html.index("<ol>")
     assert "WRONG" in html and "RIGHT" in html
+    # The warning names the literal entries a student pasted earlier today.
+    box = html[html.index('class="stale-config"'):html.index('class="indent-fix"')]
+    assert "UA MIS Local (Chat)" in box and "UA MIS Local (Agent)" in box
     assert "Copied" in html  # clipboard feedback
     # Retired: nothing on the page may point at a script download.
     assert "/setup/" not in html
@@ -1066,9 +1082,8 @@ def test_config_block_entries_have_the_expected_shape(app_module):
     endpoint, per-role token caps, key in every entry."""
     models = _block_models(app_module, "sk-real")
     expected = [
-        ("UA MIS Local (Chat)", ["chat"], 4000),
         ("UA MIS Local (Edit)", ["edit", "apply"], 400),
-        ("UA MIS Local (Agent)", ["chat"], 8000),
+        ("UA MIS Local", ["chat"], 8000),
     ]
     assert [(m["name"], m["roles"], m["defaultCompletionOptions"]["maxTokens"])
             for m in models] == expected
@@ -1107,7 +1122,7 @@ def test_render_page_active_roles_include_agent(app_module):
     config = app_module.CONFIG
     html = app_module.render_page("x@ua.edu", "sk-k", True, config)
     assert "roles: [agent]" not in html
-    assert "UA MIS Local (Agent)" in html
+    assert "UA MIS Local" in html
     assert "tool_use" in html
 
 

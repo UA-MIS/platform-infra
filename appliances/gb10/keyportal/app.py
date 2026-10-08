@@ -1665,18 +1665,26 @@ def _manual_config_block(api_key: Optional[str] = None, *, header: bool = True) 
     shows: students paste it UNDER the `models:` key they already have, and a
     second `models:` line would be a duplicate key.
 
-    2026-09-30: three separate model entries, not one -- Continue's
-    defaultCompletionOptions/requestOptions apply per MODEL block, not
-    per role within a shared one, so there is no way to give chat,
-    edit/apply, and agent-mode chat different maxTokens on a single entry (see
-    https://docs.continue.dev/reference). All three point at the exact
-    same backend model; only the role assignment and completion options
-    differ. Continue only offers each role a choice among the models
-    that declare it, so a student sees one candidate per role, not three
-    confusing "chat" options.
+    TWO entries, not one and not three. Continue's
+    defaultCompletionOptions/requestOptions apply per MODEL entry, not per
+    role within a shared one, so edit/apply (which should be small and
+    fast: maxTokens 400) cannot share an entry with chat (maxTokens 8000).
+    Both point at the exact same backend model.
+
+    There is deliberately NO separate "UA MIS Local (Chat)" entry
+    (removed 2026-10-08; do not re-add it). Per Continue's docs tools are
+    attached per MODE, not per model: Chat mode sends no tools, Plan mode
+    read-only tools, Agent mode all tools. So `capabilities: [tool_use]`
+    costs nothing in Chat mode and merely makes the entry eligible for Agent
+    mode, which makes a tool-less Chat entry a strict subset of this one --
+    same model, same endpoint, same role, a smaller token ceiling -- and a
+    second chat choice in the picker that nobody has a reason to pick. Exactly
+    one chat-capable entry must exist (pinned by a test).
+    https://docs.continue.dev/ide-extensions/agent/how-it-works
+    https://docs.continue.dev/ide-extensions/agent/model-setup
 
     thinking is OFF (chat_template_kwargs.enable_thinking: false) on
-    ALL THREE entries -- corrected 2026-09-30 from chat/agent keeping it
+    BOTH entries -- corrected 2026-09-30 from chat/agent keeping it
     ON, which was inheriting the model's default and calling it a
     decision. The single-turn benchmark showed no quality difference
     worth the wait (off 41/54 vs xhigh 39/54, within noise; low tracked
@@ -1691,28 +1699,10 @@ def _manual_config_block(api_key: Optional[str] = None, *, header: bool = True) 
             raise ValueError("refusing to render a Continue config with a control character in the key")
         key = _yaml_single_quote(api_key)
     full = f"""models:
-  - name: UA MIS Local (Chat)
+  - name: UA MIS Local (Edit)
     provider: openai  # "openai" here means the OpenAI-compatible API
                       # protocol, NOT the OpenAI company. This talks
                       # only to our own local box, never to openai.com.
-    model: {MODEL_NAME}
-    apiBase: {MODEL_ENDPOINT}
-    apiKey: {key}
-    roles: [chat]
-    # Generous on purpose: measured a real MIS 321-level question
-    # (write a C# method with a parameterized query) at ~1900 tokens
-    # end to end, a good and correct answer, finishing on its own well
-    # under this cap. Do not lower this to "speed things up" -- it
-    # truncates good answers, not slow ones.
-    defaultCompletionOptions:
-      maxTokens: 4000
-    requestOptions:
-      extraBodyProperties:
-        chat_template_kwargs:
-          enable_thinking: false
-
-  - name: UA MIS Local (Edit)
-    provider: openai
     model: {MODEL_NAME}
     apiBase: {MODEL_ENDPOINT}
     apiKey: {key}
@@ -1728,31 +1718,32 @@ def _manual_config_block(api_key: Optional[str] = None, *, header: bool = True) 
         chat_template_kwargs:
           enable_thinking: false
 
-  - name: UA MIS Local (Agent)
+  - name: UA MIS Local
     provider: openai
     model: {MODEL_NAME}
     apiBase: {MODEL_ENDPOINT}
     apiKey: {key}
     roles: [chat]
-    # "agent" is NOT a Continue role (valid: chat, autocomplete, embed,
-    # rerank, edit, apply, summarize) and an unknown role makes Continue
-    # reject the whole config. Agent mode is switched on by a chat model
-    # that declares tool_use, which this server supports.
+    # This ONE entry serves both Chat and Agent mode. "agent" is NOT a
+    # Continue role (valid: chat, autocomplete, embed, rerank, edit,
+    # apply, summarize) and an unknown role makes Continue reject the
+    # whole config; Agent mode is available to any chat model that
+    # declares tool_use, which this server supports.
     capabilities:
       - tool_use
-    # Largest cap of the three: multi-step, tool-calling agent work
-    # legitimately needs the most room. Measured a real multi-file
-    # scaffold task at ~3700 tokens, finishing on its own well under
-    # this cap. 8000 sits just under this deployment's own hard backend
-    # ceiling (8192).
+    # Sized for the heaviest chat-capable use: multi-step, tool-calling
+    # agent work needs the most room. Measured a real multi-file
+    # scaffold task at ~3700 tokens, and a MIS 321-level chat answer at
+    # ~1900, both finishing on their own well under this cap. 8000 sits
+    # just under this deployment's own hard backend ceiling (8192).
+    # Do not lower it to "speed things up" -- it truncates good answers.
     defaultCompletionOptions:
       maxTokens: 8000
     requestOptions:
       extraBodyProperties:
         chat_template_kwargs:
           enable_thinking: false
-    # Deliberately no "autocomplete" role on any of the three entries
-    # above: GitHub Copilot Free already handles inline completions
+    # Deliberately no "autocomplete" role on either entry above: GitHub Copilot Free already handles inline completions
     # well, and this shared GPU box shouldn't spend capacity on every
     # keystroke."""
     return full if header else full.split("\n", 1)[1]
@@ -1806,9 +1797,12 @@ machine.</p>
 <div class="stale-config">
 <p><strong class="alarm">STOP &mdash; already set this up, or tried an earlier
 setup script? Delete the old entries first.</strong></p>
-<p>If your config already has <em>any</em> <code>UA MIS Local (...)</code>
-entry, delete <em>all</em> of them before pasting, so you do not end up with
-two sets. An earlier version of this page and its setup script wrote a role
+<p>If your config already has an entry named <code>UA MIS Local (Chat)</code>,
+<code>UA MIS Local (Agent)</code> or <code>UA MIS Local (Edit)</code> (or anything
+else starting <code>UA MIS Local</code>), delete <strong>all</strong> of them
+before pasting &mdash; the new block is just <code>UA MIS Local</code> and
+<code>UA MIS Local (Edit)</code>, and leftovers would give you a duplicate
+chat model in the picker. An earlier version of this page and its setup script wrote a role
 called <code>agent</code>, which Continue rejects: if the Continue panel shows
 a config error, or no &ldquo;UA MIS Local&rdquo; models, this is almost
 certainly why, and deleting those entries and pasting the block below fixes it.</p>
@@ -1822,13 +1816,13 @@ edge (no spaces), indent the pasted block to match.</p>
 models:
 - name: My Old Model        &larr; yours starts at column 0
   provider: anthropic
-  - name: UA MIS Local (Chat) &larr; pasted, indented 2 spaces
+  - name: UA MIS Local &larr; pasted, indented 2 spaces
     provider: openai</pre>
 <pre class="good">RIGHT &mdash; all items at the same column:
 models:
 - name: My Old Model
   provider: anthropic
-- name: UA MIS Local (Chat)  &larr; pasted block shifted left 2 to match
+- name: UA MIS Local  &larr; pasted block shifted left 2 to match
   provider: openai
   ...</pre>
 <p>(If your list is already indented two spaces, paste the block exactly as

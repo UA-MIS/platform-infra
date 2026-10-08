@@ -100,8 +100,8 @@ MUTATIONS = [
             "[agent]`, which Continue rejects (config fails to load). Must "
             "trip the valid-roles invariant, not a literal compare."
         ),
-        "find": '    roles: [chat]\n    # "agent" is NOT a Continue role',
-        "repl": '    roles: [agent]\n    # "agent" is NOT a Continue role',
+        "find": '    roles: [chat]\n    # This ONE entry',
+        "repl": '    roles: [agent]\n    # This ONE entry',
         "expect": r"only_roles_continue_accepts",
     },
     {
@@ -113,7 +113,7 @@ MUTATIONS = [
         ),
         "find": "    capabilities:\n      - tool_use\n",
         "repl": "",
-        "expect": r"agent_entry_declares_tool_use",
+        "expect": r"chat_entry_declares_tool_use",
     },
     {
         "id": "M7-stop-escaping-the-email",
@@ -155,6 +155,18 @@ MUTATIONS = [
             ),
         ],
         "expect": r"pending_page_block_has_placeholder",
+    },
+    {
+        "id": "M10-reintroduce-a-second-chat-entry",
+        "why": (
+            "A second chat-capable entry (as the removed 'UA MIS Local "
+            "(Chat)' was) reappears as a pointless duplicate choice in "
+            "Continue's picker. Mutated by giving the Edit entry the chat "
+            "role, the easiest accidental way to get there."
+        ),
+        "find": "    roles: [edit, apply]\n",
+        "repl": "    roles: [chat, edit, apply]\n",
+        "expect": r"exactly_one_chat_capable_entry",
     },
 ]
 
