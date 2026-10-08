@@ -113,15 +113,8 @@ services:
     # stays safe even if cloudflared's ingress is ever hand-edited to add
     # a stray public route.
     build:
-      # Context is this directory, NOT ./keyportal, so the Dockerfile can
-      # COPY onboarding/ into the image (2026-09-30). The portal now serves
-      # the onboarding setup scripts itself, with the signed-in student's
-      # own key substituted into one line, which means it must ship the
-      # SAME BYTES the gb10-onboarding-* CI jobs execute rather than a
-      # second copy inside app.py -- see _resolve_onboarding_dir() in
-      # keyportal/app.py. .dockerignore keeps the widened context small.
-      context: ./
-      dockerfile: keyportal/Dockerfile
+      context: ./keyportal
+      dockerfile: Dockerfile
     image: gb10-keyportal:local
     container_name: gb10-keyportal
     environment:
