@@ -53,6 +53,17 @@ Edit the `vllm` service `command:` block in `docker-compose.yml`, then
 `sudo systemctl restart gb10-appliance`. This is a planned, deliberate
 change — never do it mid-class to handle a traffic spike.
 
+Two rules learned the hard way (details in
+[KV-CACHE-FP8-INCIDENT.md](KV-CACHE-FP8-INCIDENT.md)):
+
+- **Edit it in git, not on the box.** This host has no reconciler, so a
+  hand-edit of `docker-compose.yml` is silently invisible to everyone else
+  and is lost or reverted on the next pull. Change the repo, then pull.
+- **Never add `--kv-cache-dtype=fp8`.** On GB10 (SM121) it corrupts output
+  past ~17k tokens and cut throughput 40%.
+- `--max-model-len` and `litellm-config.yaml`'s `max_input_tokens` +
+  `max_output_tokens` must move together (they sum to the window).
+
 ## Changing concurrency limits (policy — live, no restart)
 
 Use the LiteLLM admin UI at `https://local-llm.uamishub.com/ui` (ops-only
