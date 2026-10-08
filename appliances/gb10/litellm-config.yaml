@@ -10,10 +10,19 @@ model_list:
     model_info:
       mode: chat
       # max_tokens in model_info is the max OUTPUT tokens, NOT the context
-      # window. Setting it to the full 32768 (= vLLM --max-model-len) made
-      # LiteLLM compute available input as 32768-32768=0 and reject every
+      # window. Setting it to the full window (= vLLM --max-model-len) made
+      # LiteLLM compute available input as window-window=0 and reject every
       # request with ContextWindowExceededError. Split it explicitly.
-      max_input_tokens: 24576
+      #
+      # THESE MUST SUM TO docker-compose.yml's vllm --max-model-len:
+      #   253952 (input) + 8192 (output) = 262144.
+      # If you change --max-model-len, change max_input_tokens with it.
+      # (They read 24576 + 8192 = 32768 for nine days after the window went
+      # to 262144, silently capping every request at ~24k of a 262k window.)
+      #
+      # 8192 output is governed by student patience, not context arithmetic:
+      # at ~36 tok/s it is already ~3.7 minutes of continuous generation.
+      max_input_tokens: 253952
       max_output_tokens: 8192
 
   # The public alias students/Continue actually call. Round-3 decision
@@ -45,8 +54,10 @@ model_list:
     model_info:
       mode: chat
       # Same split as qwen3.8-27b-base above, same reason: max_tokens in
-      # model_info is max OUTPUT tokens, not the context window.
-      max_input_tokens: 24576
+      # model_info is max OUTPUT tokens, not the context window. Same sum
+      # rule too: 253952 + 8192 = 262144 = vllm --max-model-len. Keep the
+      # two entries identical.
+      max_input_tokens: 253952
       max_output_tokens: 8192
 
 general_settings:

@@ -61,8 +61,32 @@ services:
       # requests — it only lets one large request grow bigger. Primary
       # workload is real in-project coding help, where 32k truncated on
       # realistic multi-file context.
+      #
+      # The window and the LiteLLM limits move TOGETHER: litellm-config.yaml
+      # max_input_tokens + max_output_tokens must equal this (253952 + 8192
+      # = 262144). Change one, change the other.
+      #
+      # Measured with BF16 KV (the default; see the note below): "Available
+      # KV cache memory: 53.62 GiB", "GPU KV cache size: 605,692 tokens", so
+      # one full 262144-token request still leaves ~2.3x concurrency.
       - "--max-model-len=262144"
-      - "--kv-cache-dtype=fp8"
+      # DO NOT ADD `--kv-cache-dtype=fp8` BACK, "to save memory". It was here
+      # and it was the cause of the repeating-output bug ("!ductductduct",
+      # Continue's "model is repeating the same chunk"). On GB10/SM121 vLLM
+      # warns at boot that fp8 KV has no calibration data and falls back to
+      # q_scale=1.0; the error compounds with sequence depth until the output
+      # locks into a loop. Free-text prose, temp 0, repeat detector:
+      #     prompt tokens   with fp8              without fp8
+      #     11,224          clean                 clean
+      #     17,624          99x ' Register'       clean
+      #     56,024          degenerate            clean
+      #     112,024         --                    clean (61 s)
+      # It also cost ~40% throughput (25.84 -> 36.13 tok/s): the corrupted
+      # target distribution made DFlash2 draft tokens get rejected wholesale
+      # (acceptance pinned at 1.00 while still drafting); acceptance is now
+      # 3.0-7.3. So it cost correctness AND speed, to save memory we have
+      # 53 GiB of. Write-up and caveats: ./KV-CACHE-FP8-INCIDENT.md
+      # https://ai-muninn.com/en/blog/dgx-spark-fp8-kvcache-repetition
       - "--gpu-memory-utilization=0.75"
       - "--reasoning-parser=qwen3"
       # DFlash2: block-diffusion drafter, LOSSLESS (greedy output matches the
