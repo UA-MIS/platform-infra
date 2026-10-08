@@ -50,10 +50,20 @@ MODEL_ID = "qwen3.8-27b"
 # from the scripts, because a test that reads its expectations from the code
 # under test asserts nothing.
 EXPECTED = [
-    {"name": "UA MIS Local (Chat)",  "roles": ["chat"],          "max_tokens": 4000},
-    {"name": "UA MIS Local (Edit)",  "roles": ["edit", "apply"], "max_tokens": 400},
-    {"name": "UA MIS Local (Agent)", "roles": ["agent"],         "max_tokens": 8000},
+    {"name": "UA MIS Local (Chat)",  "roles": ["chat"],          "max_tokens": 4000, "tool_use": False},
+    {"name": "UA MIS Local (Edit)",  "roles": ["edit", "apply"], "max_tokens": 400,  "tool_use": False},
+    # "agent" is NOT a Continue role. Agent mode = a chat model that declares
+    # capabilities: [tool_use]. Kept as its own block because maxTokens is
+    # per-model, not per-role.
+    {"name": "UA MIS Local (Agent)", "roles": ["chat"],          "max_tokens": 8000, "tool_use": True},
 ]
+
+# Every `roles:` value Continue accepts, from the config.yaml reference
+# (https://docs.continue.dev/reference) -- a fixed list, NOT derived from the
+# scripts. Any other value makes Continue reject the whole config.
+VALID_CONTINUE_ROLES = frozenset(
+    ["chat", "autocomplete", "embed", "rerank", "edit", "apply", "summarize"])
+VALID_CONTINUE_CAPABILITIES = frozenset(["tool_use", "image_input"])
 
 
 class Asserter(object):
@@ -165,6 +175,14 @@ def main():
         a.eq("maxtok-" + s,   "%s maxTokens is %d" % (exp["name"], exp["max_tokens"]),
              exp["max_tokens"], (m.get("defaultCompletionOptions") or {}).get("maxTokens"))
 
+        caps = m.get("capabilities")
+        if exp["tool_use"]:
+            a.eq("toolusecap-" + s, "%s declares capabilities: [tool_use]" % exp["name"],
+                 ["tool_use"], caps)
+        else:
+            a.true("toolusecap-" + s, "%s does not declare tool_use" % exp["name"],
+                   not caps, "capabilities: %r" % (caps,))
+
         et = (((m.get("requestOptions") or {})
                .get("extraBodyProperties") or {})
               .get("chat_template_kwargs") or {})
@@ -181,6 +199,29 @@ def main():
                       "boolean, but true")
             else:
                 a.ok("thinking-" + s, "%s has enable_thinking: false (boolean)" % exp["name"])
+
+    # The invariant behind the "agent" bug, checked on EVERY entry in the
+    # file (not only ours): no role outside Continue's valid set, and no
+    # capability outside it. Deliberately independent of EXPECTED above, so it
+    # still fails if EXPECTED is ever edited to bless a bad role.
+    bad_roles = []
+    bad_caps = []
+    for m in models:
+        if not isinstance(m, dict):
+            continue
+        for r in (m.get("roles") or []):
+            if r not in VALID_CONTINUE_ROLES:
+                bad_roles.append("%s: %r" % (m.get("name"), r))
+        for c in (m.get("capabilities") or []):
+            if c not in VALID_CONTINUE_CAPABILITIES:
+                bad_caps.append("%s: %r" % (m.get("name"), c))
+    a.true("valid-roles", "every role in the file is one Continue accepts", not bad_roles,
+           "invalid roles: %s" % "; ".join(bad_roles))
+    a.true("valid-capabilities", "every capability in the file is one Continue accepts",
+           not bad_caps, "invalid capabilities: %s" % "; ".join(bad_caps))
+    names = [m.get("name") for m in models if isinstance(m, dict)]
+    a.true("distinct-names", "model names are distinct", len(names) == len(set(names)),
+           "names: %r" % (names,))
 
     # No autocomplete role anywhere: this shared GPU box is deliberately not
     # answering every keystroke.

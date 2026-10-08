@@ -59,7 +59,7 @@
 
 .PARAMETER Launcher
   Which PowerShell runs the script under test. The student-facing
-  instructions say `powershell -ExecutionPolicy Bypass -File ...`, i.e.
+  instructions say `powershell -NoProfile -ExecutionPolicy Bypass -File ...`, i.e.
   Windows PowerShell 5.1 -- NOT pwsh 7. Those two differ in ways this
   script actually depends on (5.1's Invoke-WebRequest throws
   WebException for non-2xx, 7's throws HttpResponseException; the script
@@ -110,10 +110,30 @@ $MODEL_ID   = 'qwen3.8-27b'
 # exercises both '-' and '_' surviving the write) but obviously fake.
 $DUMMY_KEY  = 'sk-uamis_TEST-do_not_use-0123456789abcdef'
 $EXPECTED = @(
-    @{ Name = 'UA MIS Local (Chat)';  Roles = @('chat');          MaxTokens = 4000 }
-    @{ Name = 'UA MIS Local (Edit)';  Roles = @('edit','apply');  MaxTokens = 400  }
-    @{ Name = 'UA MIS Local (Agent)'; Roles = @('agent');         MaxTokens = 8000 }
+    @{ Name = 'UA MIS Local (Chat)';  Roles = @('chat');          MaxTokens = 4000; ToolUse = $false }
+    @{ Name = 'UA MIS Local (Edit)';  Roles = @('edit','apply');  MaxTokens = 400;  ToolUse = $false }
+    # "agent" is NOT a Continue role. Agent mode = a chat model that declares
+    # capabilities: [tool_use]. Its own block because maxTokens is per-model.
+    @{ Name = 'UA MIS Local (Agent)'; Roles = @('chat');          MaxTokens = 8000; ToolUse = $true  }
 )
+
+# Every `roles:` value Continue accepts, from the config.yaml reference
+# (https://docs.continue.dev/reference) -- a fixed list, NOT derived from the
+# script. Any other value makes Continue reject the whole config.
+$VALID_ROLES = @('chat','autocomplete','embed','rerank','edit','apply','summarize')
+$VALID_CAPABILITIES = @('tool_use','image_input')
+
+# Returns a list of human-readable problems; empty = every role/capability
+# in the models is one Continue accepts. Independent of $EXPECTED so it still
+# fails if $EXPECTED is ever edited to bless a bad role.
+function Get-InvalidRolesAndCaps($Models) {
+    $bad = @()
+    foreach ($m in @($Models)) {
+        foreach ($r in @($m.roles)) { if ($r -and ($VALID_ROLES -cnotcontains $r)) { $bad += "$($m.name): role '$r'" } }
+        foreach ($c in @($m.capabilities)) { if ($c -and ($VALID_CAPABILITIES -cnotcontains $c)) { $bad += "$($m.name): capability '$c'" } }
+    }
+    return $bad
+}
 
 # ---------------------------------------------------------------------------
 # Harness plumbing
@@ -181,13 +201,17 @@ function Invoke-Setup {
         [switch]$NoKeyArg,
         # Which file to execute. Defaults to the script under test; the
         # portal-embedded-key scenarios pass a substituted COPY of it.
-        [string]$ScriptPath = $ScriptUnderTest
+        [string]$ScriptPath = $ScriptUnderTest,
+        # Optional CONTINUE_GLOBAL_DIR for the child process.
+        [string]$ContinueGlobalDir
     )
     $prevProfile  = $env:USERPROFILE
     $prevHttps    = $env:HTTPS_PROXY
     $prevHttp     = $env:HTTP_PROXY
+    $prevGlobal   = $env:CONTINUE_GLOBAL_DIR
     try {
         $env:USERPROFILE = $HomeDir
+        $env:CONTINUE_GLOBAL_DIR = $ContinueGlobalDir
         # Belt and braces for the endpoint check. CI additionally points
         # the hostname at 127.0.0.1 in the hosts file, which is what
         # actually stops Windows PowerShell 5.1 (whose Invoke-WebRequest
@@ -207,13 +231,14 @@ function Invoke-Setup {
             Exit   = $code
             Output = $out
             Home   = $HomeDir
-            Config = (Join-Path (Join-Path $HomeDir '.continue') 'config.yaml')
+            Config = $(if ($ContinueGlobalDir) { Join-Path $ContinueGlobalDir 'config.yaml' } else { Join-Path (Join-Path $HomeDir '.continue') 'config.yaml' })
         }
     }
     finally {
         $env:USERPROFILE = $prevProfile
         $env:HTTPS_PROXY = $prevHttps
         $env:HTTP_PROXY  = $prevHttp
+        $env:CONTINUE_GLOBAL_DIR = $prevGlobal
     }
 }
 
@@ -280,6 +305,9 @@ function Assert-OurThreeEntries {
         Assert-Equal "apikey-$short"    "$($exp.Name) apiKey round-trips exactly" $Key      $m.apiKey
         Assert-Equal "roles-$short"     "$($exp.Name) roles are [$($exp.Roles -join ', ')]" ($exp.Roles -join ',') ((@($m.roles)) -join ',')
         Assert-Equal "maxtok-$short"    "$($exp.Name) maxTokens is $($exp.MaxTokens)" $exp.MaxTokens $m.defaultCompletionOptions.maxTokens
+        $caps = ((@($m.capabilities)) | Where-Object { $_ }) -join ','
+        if ($exp.ToolUse) { Assert-Equal "toolusecap-$short" "$($exp.Name) declares capabilities: [tool_use]" 'tool_use' $caps }
+        else { Assert-Equal "toolusecap-$short" "$($exp.Name) does not declare tool_use" '' $caps }
 
         # enable_thinking must be boolean false. The string 'false' is
         # truthy to most clients and would silently leave reasoning ON,
@@ -296,6 +324,10 @@ function Assert-OurThreeEntries {
             Pass "thinking-$short" "$($exp.Name) has enable_thinking: false (boolean)"
         }
     }
+    $badRoles = @(Get-InvalidRolesAndCaps $models)
+    Assert-True "valid-roles" "every role and capability in the file is one Continue accepts" ($badRoles.Count -eq 0) ("invalid: " + ($badRoles -join '; '))
+    $names = @($models | ForEach-Object { $_.name })
+    Assert-True "distinct-names" "model names are distinct" ($names.Count -eq @($names | Select-Object -Unique).Count) ("names: " + ($names -join ', '))
     # No autocomplete role anywhere: this shared GPU box is deliberately
     # not answering every keystroke.
     $ac = @($models | Where-Object { $_.roles -contains 'autocomplete' })
@@ -629,6 +661,170 @@ Assert-Equal "exit" "exits 0 with a doubly-hostile embedded key" 0 $r.Exit
 $doc = Get-ParsedConfig "yaml" $r.Config
 Assert-OurThreeEntries $doc -Key $hostileKey
 
+# --- S15..S22: WHICH config file does Continue read? --------------------
+# Continue has no precedence between config files: .continue\config.yaml and
+# every *.yaml under .continue\{agents,assistants,configs} are separate
+# profiles, and the student picks one in the UI (remembered in
+# .continue\index\globalContext.json). One candidate -> edit it; several ->
+# do NOT guess. See setup-windows.ps1 section 3a.
+function Assert-StoppedUntouched {
+    param($Res, [string]$Sha, [string]$HomeDir)
+    Assert-Equal "exit" "stops with a non-zero exit when the right config is ambiguous" 1 $Res.Exit
+    Assert-Equal "untouched" "leaves config.yaml byte-identical" $Sha (Get-Sha $Res.Config)
+    Assert-True "no-backup" "does not leave a stray backup behind" ((Get-Backups $HomeDir).Count -eq 0) "a backup was written for a run that changed nothing"
+    Assert-True "handoff" "prints a hand-editable block with a key placeholder" ($Res.Output -match '<YOUR_KEY>') "expected the <YOUR_KEY> placeholder"
+    Assert-True "instructions" "tells the student how to open the config Continue is using" ($Res.Output -match 'gear') "expected the gear-icon instructions"
+    Assert-NoKeyLeak $Res
+}
+
+$script:scenario = 'S15-agents-file-present'
+$h = New-Home -ExistingConfigYaml $EXISTING_2SPACE
+$ad = Join-Path $h '.continue/agents'; New-Item -ItemType Directory -Force -Path $ad | Out-Null
+[System.IO.File]::WriteAllText((Join-Path $ad 'other.yaml'), "name: Other`nschema: v1`nmodels: []`n")
+$cfg = Join-Path $h '.continue/config.yaml'; $sha = Get-Sha $cfg; $ash = Get-Sha (Join-Path $ad 'other.yaml')
+$r = Invoke-Setup -HomeDir $h
+Assert-StoppedUntouched $r $sha $h
+Assert-Equal "agents-untouched" "does not touch the agents file either" $ash (Get-Sha (Join-Path $ad 'other.yaml'))
+Assert-True "lists-candidates" "names the competing file so the student can see it" ($r.Output -match 'other\.yaml') "other.yaml not named"
+
+$script:scenario = 'S16-assistants-yml-no-main'
+$h = New-Home
+$ad = Join-Path $h '.continue/assistants'; New-Item -ItemType Directory -Force -Path $ad | Out-Null
+[System.IO.File]::WriteAllText((Join-Path $ad 'a.yml'), "name: A`nschema: v1`n")
+$r = Invoke-Setup -HomeDir $h
+Assert-Equal "exit" "stops when the only file is an assistants/*.yml (Continue would also recreate a main config)" 1 $r.Exit
+Assert-True "no-main-created" "does not create config.yaml" (-not (Test-Path $r.Config)) "config.yaml was created"
+
+$script:scenario = 'S17-selected-profile-is-a-file'
+$h = New-Home -ExistingConfigYaml $EXISTING_2SPACE
+$id = Join-Path $h '.continue/index'; New-Item -ItemType Directory -Force -Path $id | Out-Null
+[System.IO.File]::WriteAllText((Join-Path $id 'globalContext.json'), '{ "lastSelectedProfileForWorkspace": { "file:///c%3A/proj": "file:///c%3A/proj/.continue/agents/mine.yaml" } }')
+$cfg = Join-Path $h '.continue/config.yaml'; $sha = Get-Sha $cfg
+$r = Invoke-Setup -HomeDir $h
+Assert-StoppedUntouched $r $sha $h
+
+$script:scenario = 'S18-selected-profile-local-is-fine'
+$h = New-Home -ExistingConfigYaml $EXISTING_2SPACE
+$id = Join-Path $h '.continue/index'; New-Item -ItemType Directory -Force -Path $id | Out-Null
+[System.IO.File]::WriteAllText((Join-Path $id 'globalContext.json'), '{ "indexingPaused": false, "lastSelectedProfileForWorkspace": { "file:///a": "local", "file:///b": "local" }, "lastSelectedOrgIdForWorkspace": { "file:///a": "some-org" } }')
+$r = Invoke-Setup -HomeDir $h
+Assert-Equal "exit" "edits the main config when every remembered selection is the main config" 0 $r.Exit
+$doc = Get-ParsedConfig "yaml" $r.Config
+Assert-OurThreeEntries $doc
+Assert-ExistingPreserved $doc
+
+$script:scenario = 'S19-nonconfig-files-ignored'
+$h = New-Home -ExistingConfigYaml $EXISTING_2SPACE
+$ad = Join-Path $h '.continue/agents'; New-Item -ItemType Directory -Force -Path $ad | Out-Null
+$id = Join-Path $h '.continue/index'; New-Item -ItemType Directory -Force -Path $id | Out-Null
+[System.IO.File]::WriteAllText((Join-Path $ad 'README.md'), "# notes`n")
+[System.IO.File]::WriteAllText((Join-Path $id 'globalContext.json'), '{ "lastSelectedProfileForWorkspace": {} }')
+$r = Invoke-Setup -HomeDir $h
+Assert-Equal "exit" "a README in agents/ and an empty selection map do not block the edit" 0 $r.Exit
+$doc = Get-ParsedConfig "yaml" $r.Config
+Assert-OurThreeEntries $doc
+
+$script:scenario = 'S20-continue-global-dir'
+$h = New-Home
+$other = Join-Path (New-Home) 'elsewhere'; New-Item -ItemType Directory -Force -Path $other | Out-Null
+[System.IO.File]::WriteAllText((Join-Path $other 'config.yaml'), $EXISTING_2SPACE)
+$r = Invoke-Setup -HomeDir $h -ContinueGlobalDir $other
+Assert-Equal "exit" "exits 0 with CONTINUE_GLOBAL_DIR set" 0 $r.Exit
+Assert-True "edited-the-right-dir" "edits the config Continue reads, not %USERPROFILE%\.continue" (-not (Test-Path (Join-Path $h '.continue/config.yaml'))) "wrote under USERPROFILE anyway"
+$doc = Get-ParsedConfig "yaml" $r.Config
+Assert-OurThreeEntries $doc
+Assert-ExistingPreserved $doc
+
+# --- S21: repair a config written by the earlier, broken script ---------
+$EXISTING_OLD_AGENT = @"
+schema: v1
+models:
+  - name: Claude Sonnet 4
+    provider: anthropic
+    apiKey: sk-ant-ALREADY-HERE
+    roles: [chat, edit]
+  - name: UA MIS Local (Chat)
+    provider: openai
+    model: qwen3.8-27b
+    apiBase: https://local-llm.uamishub.com/v1
+    apiKey: '$DUMMY_KEY'
+    roles: [chat]
+    defaultCompletionOptions:
+      maxTokens: 4000
+    requestOptions:
+      extraBodyProperties:
+        chat_template_kwargs:
+          enable_thinking: false
+
+  - name: UA MIS Local (Edit)
+    provider: openai
+    model: qwen3.8-27b
+    apiBase: https://local-llm.uamishub.com/v1
+    apiKey: '$DUMMY_KEY'
+    roles: [edit, apply]
+    defaultCompletionOptions:
+      maxTokens: 400
+    requestOptions:
+      extraBodyProperties:
+        chat_template_kwargs:
+          enable_thinking: false
+
+  - name: UA MIS Local (Agent)
+    provider: openai
+    model: qwen3.8-27b
+    apiBase: https://local-llm.uamishub.com/v1
+    apiKey: '$DUMMY_KEY'
+    roles: [agent]
+    defaultCompletionOptions:
+      maxTokens: 8000
+    requestOptions:
+      extraBodyProperties:
+        chat_template_kwargs:
+          enable_thinking: false
+"@
+$script:scenario = 'S21-repair-old-agent-role'
+$h = New-Home -ExistingConfigYaml $EXISTING_OLD_AGENT
+$before = Get-Content -Raw -Path (Join-Path $h '.continue/config.yaml')
+$r = Invoke-Setup -HomeDir $h
+Assert-Equal "exit" "exits 0 when repairing" 0 $r.Exit
+$doc = Get-ParsedConfig "yaml" $r.Config
+Assert-OurThreeEntries $doc
+Assert-ExistingPreserved $doc
+$baks = Get-Backups $h
+Assert-True "backup-made" "the repair is preceded by a backup" ($baks.Count -eq 1) "found $($baks.Count) backup files"
+if ($baks.Count -eq 1) { Assert-Equal "backup-content" "the backup is the broken original, byte for byte" $before (Get-Content -Raw -Path $baks[0].FullName) }
+$sha = Get-Sha $r.Config
+$r2 = Invoke-Setup -HomeDir $h
+Assert-Equal "idempotent" "re-running after the repair changes nothing" $sha (Get-Sha $r2.Config)
+Assert-True "no-second-backup" "re-running after the repair writes no further backup" ((Get-Backups $h).Count -eq 1) "extra backup written"
+
+$script:scenario = 'S21b-repair-leaves-other-entries'
+$h = New-Home -ExistingConfigYaml ($EXISTING_OLD_AGENT + "`n  - name: Someone Elses`n    provider: openai`n    roles: [agent]`n")
+$r = Invoke-Setup -HomeDir $h
+Assert-Equal "exit" "exits 0" 0 $r.Exit
+$left = @((Get-Content -Path $r.Config) | Where-Object { $_ -eq '    roles: [agent]' }).Count
+Assert-Equal "other-untouched" "an unrelated entry's roles line is left alone" 1 $left
+
+# --- S22: the validity check itself must fail on a bad role -------------
+# The trap this suite exists to avoid: a test that merely asserts the new
+# literal passes against ANY future regression to a different invalid value.
+# Feed the validity check configs with invalid roles; it must report them.
+$script:scenario = 'S22-validity-check-rejects-invalid-roles'
+foreach ($bad in @('agent','subagent-x','tool','Chat')) {
+    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("uamis-bad-" + [guid]::NewGuid().ToString('n') + ".yaml")
+    [System.IO.File]::WriteAllText($tmp, $EXISTING_OLD_AGENT.Replace('roles: [agent]', "roles: [$bad]"))
+    $json = & $PYTHON $yamlToJson $tmp | Out-String
+    $found = @(Get-InvalidRolesAndCaps (($json | ConvertFrom-Json).models))
+    Assert-True "rejects-$bad" "validity check flags roles: [$bad]" ($found.Count -ge 1) "nothing flagged"
+    Remove-Item -Force $tmp -ErrorAction SilentlyContinue
+}
+$tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("uamis-bad-" + [guid]::NewGuid().ToString('n') + ".yaml")
+[System.IO.File]::WriteAllText($tmp, $EXISTING_OLD_AGENT.Replace('roles: [agent]', "roles: [chat]`n    capabilities: [agent_mode]"))
+$json = & $PYTHON $yamlToJson $tmp | Out-String
+$found = @(Get-InvalidRolesAndCaps (($json | ConvertFrom-Json).models))
+Assert-True "rejects-bad-capability" "validity check flags capabilities: [agent_mode]" ($found.Count -ge 1) "nothing flagged"
+Remove-Item -Force $tmp -ErrorAction SilentlyContinue
+
 Write-Host ""
 Write-Host "$($script:passes) passed, $($script:failures) failed."
 if ($script:failures -ne 0) { return 1 }
@@ -694,6 +890,29 @@ $MUTATIONS = @(
         Find   = '    $ApiKey = $EmbeddedKey'
         Repl   = "    `$ApiKey = 'sk-mutant-ignored-the-embedded-key'"
         Expect = '^S1[34]-portal-embedded.*/apikey-'
+    },
+    @{
+        Id     = 'M8-regress-agent-role'
+        Why    = 'The original defect: the third entry goes back to an invalid role. Must trip the independent valid-roles check, not just a literal compare.'
+        Find   = '$lines += "$contIndent" + "roles: [chat]"
+    $lines += "$contIndent" + ''# "agent" is NOT'
+        Repl   = '$lines += "$contIndent" + "roles: [agent]"
+    $lines += "$contIndent" + ''# "agent" is NOT'
+        Expect = '/valid-roles$'
+    },
+    @{
+        Id     = 'M9-never-detect-ambiguity'
+        Why    = 'Guessing: ambiguity detection is disabled, so with several candidate configs the script edits one anyway and may leave the student with a setup Continue never reads.'
+        Find   = 'if (($extraConfigs.Count -gt 0) -or ($selectedOther.Count -gt 0)) {'
+        Repl   = 'if ($false) {'
+        Expect = '^S1[57]-.*/untouched$'
+    },
+    @{
+        Id     = 'M10-drop-tool-use'
+        Why    = 'Agent mode silently lost: the Agent entry stops declaring tool_use, so Continue never offers agent mode on it. Valid YAML, valid roles.'
+        Find   = '$lines += "$contIndent" + "  - tool_use"'
+        Repl   = '$lines += "$contIndent" + "  - chat_only"'
+        Expect = '/toolusecap-UAMISLocalAgent$'
     }
 )
 

@@ -1928,7 +1928,7 @@ def _manual_config_block(api_key_placeholder: str = "&lt;your key&gt;") -> str:
     setup-windows.ps1's Build-Block are three entries -- Continue's
     defaultCompletionOptions/requestOptions apply per MODEL block, not
     per role within a shared one, so there is no way to give chat,
-    edit/apply, and agent different maxTokens on a single entry (see
+    edit/apply, and agent-mode chat different maxTokens on a single entry (see
     https://docs.continue.dev/reference). All three point at the exact
     same backend model; only the role assignment and completion options
     differ. Continue only offers each role a choice among the models
@@ -1986,7 +1986,13 @@ def _manual_config_block(api_key_placeholder: str = "&lt;your key&gt;") -> str:
     model: {MODEL_NAME}
     apiBase: {MODEL_ENDPOINT}
     apiKey: {key}
-    roles: [agent]
+    roles: [chat]
+    # "agent" is NOT a Continue role (valid: chat, autocomplete, embed,
+    # rerank, edit, apply, summarize) and an unknown role makes Continue
+    # reject the whole config. Agent mode is switched on by a chat model
+    # that declares tool_use, which this server supports.
+    capabilities:
+      - tool_use
     # Largest cap of the three: multi-step, tool-calling agent work
     # legitimately needs the most room. Measured a real multi-file
     # scaffold task at ~3700 tokens, finishing on its own well under
@@ -2004,6 +2010,40 @@ def _manual_config_block(api_key_placeholder: str = "&lt;your key&gt;") -> str:
     # keystroke."""
 
 
+# What a Windows student pastes into a normal PowerShell window. Process-scope
+# only: it waives the execution policy for this ONE run (no elevation, no
+# persistent setting changed) and also gets past the browser's
+# Mark-of-the-Web, which RemoteSigned would otherwise refuse. Kept out of
+# the f-string below because it contains backslashes. Mirrors the header of
+# onboarding/setup-windows.ps1 -- keep both in step.
+_WINDOWS_RUN_COMMAND = (
+    'powershell -NoProfile -ExecutionPolicy Bypass -File '
+    '"$env:USERPROFILE\\Downloads\\setup-windows.ps1"'
+)
+_POSIX_RUN_COMMAND = 'bash ~/Downloads/setup-macos-linux.sh'
+
+
+def _setup_run_instructions() -> str:
+    """How to RUN the downloaded script. The Windows half matters: a
+    browser-downloaded .ps1 is refused by default (execution policy and the
+    Mark-of-the-Web) BEFORE any of its code runs, so the script cannot
+    explain the refusal itself -- this page is the only place that can."""
+    return (
+        "<p><strong>Windows:</strong> open <em>PowerShell</em> from the Start "
+        "menu (a normal window &mdash; <em>not</em> &quot;Run as "
+        "administrator&quot;), paste this, and press Enter. Don't "
+        "double-click the file, and don't change any PowerShell settings: "
+        "this waives Windows' script block for this one run only.</p>\n"
+        f"<pre>{escape(_WINDOWS_RUN_COMMAND)}</pre>\n"
+        "<p>If you saved the file somewhere other than Downloads, or "
+        "your browser named it <code>setup-windows (1).ps1</code>, change "
+        "the path to match.</p>\n"
+        "<p><strong>macOS / Linux:</strong> open Terminal, paste this, and "
+        "press Enter.</p>\n"
+        f"<pre>{escape(_POSIX_RUN_COMMAND)}</pre>"
+    )
+
+
 def _setup_download_links() -> str:
     """The download links, built from SETUP_SCRIPTS so a route and its link
     cannot drift apart. Relative hrefs on purpose: they are correct
@@ -2014,7 +2054,7 @@ def _setup_download_links() -> str:
         f"&mdash; saves as <code>{escape(spec.download_filename)}</code></li>"
         for spec in SETUP_SCRIPTS.values()
     )
-    return f"<ul>\n{items}\n</ul>"
+    return f"<ul>\n{items}\n</ul>\n{_setup_run_instructions()}"
 
 
 def render_intro(email: str, config: Config, active: bool) -> str:
@@ -2088,8 +2128,11 @@ machine.</p>
 {_setup_download_links()}
 {script_note}
 <p>Prefer to do it by hand, or the script stopped and told you to? Install
-Continue as above, then put this into <code>~/.continue/config.yaml</code>
-(on Windows, <code>%USERPROFILE%\\.continue\\config.yaml</code>), replacing
+Continue as above. Then, in VS Code, open the Continue panel, click the
+config name at the top (it may say <em>Local Assistant</em>), and click the
+gear next to it &mdash; that opens the config file Continue is really
+using (normally <code>~/.continue/config.yaml</code>; on Windows,
+<code>%USERPROFILE%\\.continue\\config.yaml</code>). Put this in it, replacing
 &lt;your key&gt; with the key {"shown below" if active else "this page will show once your key is activated"}.
 Full instructions: <a href="{ONBOARDING_URL}">the onboarding README</a>.</p>
 <pre>{_manual_config_block()}</pre>

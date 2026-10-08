@@ -112,7 +112,7 @@ run_setup() { # $1=home  $2=api key (optional, defaults to DUMMY_KEY)
   # these, and CI additionally points the hostname at 127.0.0.1 in
   # /etc/hosts. The script treats an unreachable endpoint as non-fatal.
   set +e
-  RUN_OUT="$(HOME="$h" \
+  RUN_OUT="$(env ${RUN_ENV:-} HOME="$h" \
              http_proxy='http://127.0.0.1:9' https_proxy='http://127.0.0.1:9' \
              ALL_PROXY='http://127.0.0.1:9' \
              bash "$SCRIPT_UNDER_TEST" "$key" 2>&1)"
@@ -287,6 +287,57 @@ models:
   - name: Second
     provider: openai
 EOF
+}
+
+# A config written by the EARLIER version of the script: the third entry
+# says `roles: [agent]`, which is not a Continue role. Students who ran that
+# version today have exactly this file.
+fixture_old_agent_role() { cat <<FIXEOF
+schema: v1
+models:
+  - name: Claude Sonnet 4
+    provider: anthropic
+    apiKey: sk-ant-ALREADY-HERE
+    roles: [chat, edit]
+  - name: UA MIS Local (Chat)
+    provider: openai
+    model: qwen3.8-27b
+    apiBase: https://local-llm.uamishub.com/v1
+    apiKey: '${DUMMY_KEY}'
+    roles: [chat]
+    defaultCompletionOptions:
+      maxTokens: 4000
+    requestOptions:
+      extraBodyProperties:
+        chat_template_kwargs:
+          enable_thinking: false
+
+  - name: UA MIS Local (Edit)
+    provider: openai
+    model: qwen3.8-27b
+    apiBase: https://local-llm.uamishub.com/v1
+    apiKey: '${DUMMY_KEY}'
+    roles: [edit, apply]
+    defaultCompletionOptions:
+      maxTokens: 400
+    requestOptions:
+      extraBodyProperties:
+        chat_template_kwargs:
+          enable_thinking: false
+
+  - name: UA MIS Local (Agent)
+    provider: openai
+    model: qwen3.8-27b
+    apiBase: https://local-llm.uamishub.com/v1
+    apiKey: '${DUMMY_KEY}'
+    roles: [agent]
+    defaultCompletionOptions:
+      maxTokens: 8000
+    requestOptions:
+      extraBodyProperties:
+        chat_template_kwargs:
+          enable_thinking: false
+FIXEOF
 }
 
 # ---------------------------------------------------------------------------
@@ -504,6 +555,157 @@ run_suite() {
   assert_eq "exit" "exits 0 with a doubly-hostile embedded key" 0 "$RUN_EXIT"
   assert_structure "$RUN_CONFIG" --key "$hostile" --expect-count 3
 
+  # --- S17..S23: WHICH config file does Continue read? ------------------
+  # Continue has no precedence between config files: ~/.continue/config.yaml
+  # and every *.yaml under ~/.continue/{agents,assistants,configs} are
+  # separate profiles, and the student picks one in the UI (remembered in
+  # ~/.continue/index/globalContext.json). With one candidate we edit it; with
+  # several we must NOT guess -- see setup-macos-linux.sh section 3a.
+  stop_and_untouched() { # $1=home  $2=sha before  (assertions shared by S17-S19)
+    assert_true "exit" "stops with a non-zero exit when the right config is ambiguous" \
+                "$([ "$RUN_EXIT" -ne 0 ] && echo 0 || echo 1)" "exit was $RUN_EXIT"
+    assert_eq "untouched" "leaves config.yaml byte-identical" "$2" "$(sha "$1/.continue/config.yaml")"
+    assert_eq "no-backup" "does not leave a stray backup behind" 0 "$(count_backups "$1")"
+    case "$RUN_OUT" in
+      *'<YOUR_KEY>'*) pass "handoff" "prints a hand-editable block with a key placeholder" ;;
+      *) fail "handoff" "prints a hand-editable block with a key placeholder" "$RUN_OUT" ;;
+    esac
+    case "$RUN_OUT" in
+      *"gear"*) pass "instructions" "tells the student how to open the config Continue is using" ;;
+      *) fail "instructions" "tells the student how to open the config Continue is using" "$RUN_OUT" ;;
+    esac
+    no_key_leak
+  }
+
+  scenario='S17-agents-file-present'
+  h="$(new_home)"; fixture_2space | seed_yaml "$h"
+  mkdir -p "$h/.continue/agents"; printf 'name: Other\nschema: v1\nmodels: []\n' > "$h/.continue/agents/other.yaml"
+  s0="$(sha "$h/.continue/config.yaml")"; a0="$(sha "$h/.continue/agents/other.yaml")"
+  run_setup "$h"
+  stop_and_untouched "$h" "$s0"
+  assert_eq "agents-untouched" "does not touch the agents file either" "$a0" "$(sha "$h/.continue/agents/other.yaml")"
+  case "$RUN_OUT" in
+    *"agents/other.yaml"*) pass "lists-candidates" "names the competing file so the student can see it" ;;
+    *) fail "lists-candidates" "names the competing file so the student can see it" "$RUN_OUT" ;;
+  esac
+
+  scenario='S18-assistants-yml-no-main'
+  h="$(new_home)"; mkdir -p "$h/.continue/assistants"
+  printf 'name: A\nschema: v1\n' > "$h/.continue/assistants/a.yml"
+  run_setup "$h"
+  assert_true "exit" "stops when the only file is an assistants/*.yml (Continue would also recreate a main config)" \
+              "$([ "$RUN_EXIT" -ne 0 ] && echo 0 || echo 1)" "exit was $RUN_EXIT"
+  assert_true "no-main-created" "does not create config.yaml" \
+              "$([ ! -f "$h/.continue/config.yaml" ] && echo 0 || echo 1)"
+
+  scenario='S19-selected-profile-is-a-file'
+  h="$(new_home)"; fixture_2space | seed_yaml "$h"
+  mkdir -p "$h/.continue/index"
+  cat > "$h/.continue/index/globalContext.json" <<'JSONEOF'
+{
+  "lastSelectedProfileForWorkspace": {
+    "file:///home/s/proj": "file:///home/s/proj/.continue/agents/mine.yaml"
+  }
+}
+JSONEOF
+  s0="$(sha "$h/.continue/config.yaml")"
+  run_setup "$h"
+  stop_and_untouched "$h" "$s0"
+
+  scenario='S20-selected-profile-local-is-fine'
+  h="$(new_home)"; fixture_2space | seed_yaml "$h"
+  mkdir -p "$h/.continue/index"
+  cat > "$h/.continue/index/globalContext.json" <<'JSONEOF'
+{
+  "indexingPaused": false,
+  "lastSelectedProfileForWorkspace": {
+    "file:///home/s/proj": "local",
+    "file:///home/s/other": "local"
+  },
+  "lastSelectedOrgIdForWorkspace": {
+    "file:///home/s/proj": "some-org"
+  }
+}
+JSONEOF
+  run_setup "$h"
+  assert_eq "exit" "edits the main config when every remembered selection is the main config" 0 "$RUN_EXIT"
+  assert_structure "$RUN_CONFIG" --key "$DUMMY_KEY" --expect-count 4 \
+      --preserved-name 'Claude Sonnet 4' --preserved-key 'sk-ant-ALREADY-HERE'
+
+  scenario='S21-nonconfig-files-ignored'
+  h="$(new_home)"; fixture_2space | seed_yaml "$h"
+  mkdir -p "$h/.continue/agents" "$h/.continue/index"
+  printf '# notes\n' > "$h/.continue/agents/README.md"
+  printf '{ "lastSelectedProfileForWorkspace": {} }\n' > "$h/.continue/index/globalContext.json"
+  run_setup "$h"
+  assert_eq "exit" "a README in agents/ and an empty selection map do not block the edit" 0 "$RUN_EXIT"
+  assert_structure "$RUN_CONFIG" --key "$DUMMY_KEY" --expect-count 4
+
+  scenario='S22-continue-global-dir'
+  h="$(new_home)"; other="$(new_home)/elsewhere"
+  mkdir -p "$other"; fixture_2space > "$other/config.yaml"
+  RUN_ENV="CONTINUE_GLOBAL_DIR=$other" run_setup "$h"
+  assert_eq "exit" "exits 0 with CONTINUE_GLOBAL_DIR set" 0 "$RUN_EXIT"
+  assert_true "edited-the-right-dir" "edits the config Continue reads, not ~/.continue" \
+              "$([ ! -e "$h/.continue/config.yaml" ] && echo 0 || echo 1)" "wrote under HOME anyway"
+  assert_structure "$other/config.yaml" --key "$DUMMY_KEY" --expect-count 4 \
+      --preserved-name 'Claude Sonnet 4' --preserved-key 'sk-ant-ALREADY-HERE'
+
+  # --- S23: repair a config written by the earlier, broken script --------
+  scenario='S23-repair-old-agent-role'
+  h="$(new_home)"; fixture_old_agent_role | seed_yaml "$h"
+  before="$(cat "$h/.continue/config.yaml")"
+  run_setup "$h"
+  assert_eq "exit" "exits 0 when repairing" 0 "$RUN_EXIT"
+  assert_structure "$RUN_CONFIG" --key "$DUMMY_KEY" --expect-count 4 \
+      --preserved-name 'Claude Sonnet 4' --preserved-key 'sk-ant-ALREADY-HERE'
+  assert_eq "backup-made" "the repair is preceded by a backup" 1 "$(count_backups "$h")"
+  bak="$(ls -1 "$h/.continue/"config.yaml.bak-* 2>/dev/null | head -n1)"
+  if [ -n "$bak" ]; then
+    assert_eq "backup-content" "the backup is the broken original, byte for byte" "$before" "$(cat "$bak")"
+  fi
+  s0="$(sha "$RUN_CONFIG")"
+  run_setup "$h"
+  assert_eq "idempotent" "re-running after the repair changes nothing" "$s0" "$(sha "$RUN_CONFIG")"
+  assert_eq "no-second-backup" "re-running after the repair writes no further backup" 1 "$(count_backups "$h")"
+
+  # The repair must not touch somebody ELSE's entry that happens to say agent.
+  scenario='S23b-repair-leaves-other-entries'
+  h="$(new_home)"
+  { fixture_old_agent_role; printf '  - name: Someone Elses\n    provider: openai\n    roles: [agent]\n'; } | seed_yaml "$h"
+  run_setup "$h"
+  assert_eq "exit" "exits 0" 0 "$RUN_EXIT"
+  assert_eq "other-untouched" "an unrelated entry's roles line is left alone" 1 \
+            "$(grep -c '^    roles: \[agent\]$' "$RUN_CONFIG")"
+
+  # --- S24: the validity check itself must fail on a bad role ------------
+  # The trap this suite exists to avoid: a test that merely asserts the new
+  # literal passes against ANY future regression to a different invalid
+  # value. Feed the structural asserter configs with invalid roles and
+  # require it to FAIL, for the specific assertion.
+  scenario='S24-asserter-rejects-invalid-roles'
+  for badrole in agent subagent-x tool Chat; do
+    bad="${WORKROOT}/bad-${badrole}.yaml"
+    fixture_old_agent_role | sed "s/roles: \[agent\]/roles: [${badrole}]/" > "$bad"
+    set +e
+    out="$("$PYTHON" "$ASSERTER" "$bad" --scenario "$scenario" --key "$DUMMY_KEY" 2>&1)"
+    rc=$?
+    set -e
+    if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q "^FAILID: ${scenario}/valid-roles$"; then
+      pass "rejects-${badrole}" "asserter fails on roles: [${badrole}]"
+    else
+      fail "rejects-${badrole}" "asserter fails on roles: [${badrole}]" "rc=$rc"
+    fi
+  done
+  bad="${WORKROOT}/bad-cap.yaml"
+  fixture_old_agent_role | awk '{ print } /roles: \[agent\]/ { print "    capabilities: [agent_mode]" }' > "$bad"
+  set +e; out="$("$PYTHON" "$ASSERTER" "$bad" --scenario "$scenario" --key "$DUMMY_KEY" 2>&1)"; rc=$?; set -e
+  if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q "^FAILID: ${scenario}/valid-capabilities$"; then
+    pass "rejects-bad-capability" "asserter fails on capabilities: [agent_mode]"
+  else
+    fail "rejects-bad-capability" "asserter fails on capabilities: [agent_mode]" "rc=$rc"
+  fi
+
   printf '\n%d passed, %d failed.\n' "$pass_count" "$failures"
   [ "$failures" -eq 0 ] || return 1
   return 0
@@ -535,7 +737,10 @@ mutation_ids() {
     'M4-clobber-existing-entries'       '/preserved-entry$' ; printf '%s\t%s\n' \
     'M5-drop-apply-role-from-edit'      '/roles-UAMISLocalEdit$' ; printf '%s\t%s\n' \
     'M6-unquote-the-apikey'             '^S14-yaml-hostile-key/apikey-' ; printf '%s\t%s\n' \
-    'M7-ignore-the-embedded-key'        '^S1[56]-portal-embedded'
+    'M7-ignore-the-embedded-key'        '^S1[56]-portal-embedded' ; printf '%s\t%s\n' \
+    'M8-regress-agent-role'             '/valid-roles$' ; printf '%s\t%s\n' \
+    'M9-never-detect-ambiguity'         '^S1[79]-.*/untouched$' ; printf '%s\t%s\n' \
+    'M10-drop-tool-use'                 '/toolusecap-UAMISLocalAgent$'
 }
 
 mutation_why() {
@@ -546,6 +751,9 @@ mutation_why() {
     M4-*) echo "Data loss: the merge stops emitting the lines after the models: line, so a student's existing provider is silently deleted. Valid YAML, our entries all correct." ;;
     M5-*) echo 'Role regression: the Edit entry stops declaring apply, so Continue offers no model for Apply. Valid YAML.' ;;
     M6-*) echo 'Silent truncation: the apiKey scalar goes back to being unquoted, so a key containing " #" is cut off at the comment marker. Valid YAML, wrong key, opaque 401.' ;;
+    M8-*) echo 'The original defect: the third entry goes back to an invalid role. Must trip the independent valid-roles check, not just a literal compare.' ;;
+    M9-*) echo 'Guessing: ambiguity detection is disabled, so with several candidate configs the script edits one anyway and may leave the student with a setup Continue never reads.' ;;
+    M10-*) echo 'Agent mode silently lost: the Agent entry stops declaring tool_use, so Continue never offers agent mode on it. Valid YAML, valid roles.' ;;
     M7-*) echo "Portal regression: API_KEY stops falling back to EMBEDDED_KEY, so a portal-served script ignores the key the portal put in it and prompts the student instead -- the exact step the portal exists to remove." ;;
   esac
 }
@@ -586,6 +794,19 @@ XEOF
 API_KEY="${1:-${EMBEDDED_KEY}}"
 XEOF
     ;;
+    M8-*) cat <<'XEOF'
+  printf '%sroles: [chat]\n' "${cont_indent}"
+  printf '%s# "agent" is NOT a Continue role (the valid ones are chat,\n' "${cont_indent}"
+XEOF
+    ;;
+    M9-*) cat <<'XEOF'
+if [ -n "${extra_configs}" ] || [ -n "${selected_other}" ]; then
+XEOF
+    ;;
+    M10-*) cat <<'XEOF'
+  printf '%s  - tool_use\n' "${cont_indent}"
+XEOF
+    ;;
   esac
 }
 
@@ -617,6 +838,19 @@ XEOF
     ;;
     M7-*) cat <<'XEOF'
 API_KEY="${1:-}"
+XEOF
+    ;;
+    M8-*) cat <<'XEOF'
+  printf '%sroles: [agent]\n' "${cont_indent}"
+  printf '%s# "agent" is NOT a Continue role (the valid ones are chat,\n' "${cont_indent}"
+XEOF
+    ;;
+    M9-*) cat <<'XEOF'
+if false; then
+XEOF
+    ;;
+    M10-*) cat <<'XEOF'
+  printf '%s  - chat_only\n' "${cont_indent}"
 XEOF
     ;;
   esac

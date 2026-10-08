@@ -35,15 +35,22 @@ bash ~/Downloads/setup-macos-linux.sh
 
 ### Windows
 
-Open PowerShell and run:
+Open **PowerShell** from the Start menu (a normal window — *not*
+"Run as administrator"), paste this, and press Enter:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\Downloads\setup-windows.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\Downloads\setup-windows.ps1"
 ```
 
-The `-ExecutionPolicy Bypass` part is important — see [PowerShell won't
-run the script](#powershell-wont-run-the-script-execution-policy) below
-for why, and don't skip it.
+Don't double-click the file, and don't run `.\setup-windows.ps1` on its
+own: Windows refuses a downloaded script that way, and it does so
+*before* the script can run a single line, so the script cannot explain
+the refusal itself. The command above waives that check for this one run
+only — no administrator rights, nothing on your machine is changed. The
+same command is shown, ready to copy, on the keys portal page under the
+download links. See [PowerShell won't run the
+script](#powershell-wont-run-the-script-execution-policy) for what the
+errors look like and why.
 
 > **Use a browser, not `curl` or `Invoke-WebRequest`.** The portal is
 > behind Cloudflare Access, so a command-line download gets the sign-in
@@ -61,14 +68,21 @@ tells you to do something by hand (it does this on purpose rather than
 guessing when your setup looks unusual — see
 [Why the script might refuse to touch your file](#why-the-script-might-refuse-to-touch-your-file)).
 
-1. **Find or create the Continue config folder.**
-   - macOS/Linux: `~/.continue`
-   - Windows: `%USERPROFILE%\.continue` (usually
-     `C:\Users\<you>\.continue`)
+1. **Open the config file Continue is actually using.** In VS Code, open
+   the Continue panel in the sidebar, click the config name at the top
+   (it may say *Local Assistant*), then click the **gear** next to it.
+   That opens the file in use. It is normally
+   - macOS/Linux: `~/.continue/config.yaml`
+   - Windows: `%USERPROFILE%\.continue\config.yaml` (usually
+     `C:\Users\<you>\.continue\config.yaml`)
 
-   If it doesn't exist, create it.
+   but Continue can keep several configs and you may have picked a
+   different one — see [Which config file does Continue
+   read?](#which-config-file-does-continue-read). If the gear takes you
+   to a different file, edit *that* one. If the file doesn't exist yet,
+   create it.
 
-2. **Find or create `config.yaml` inside that folder.**
+2. **Work in that file.**
 
    If a `config.yaml` already exists, **open it and keep everything
    that's already in it** — you're adding to it, not replacing it. Make
@@ -120,7 +134,9 @@ guessing when your setup looks unusual — see
        model: qwen3.8-27b
        apiBase: https://local-llm.uamishub.com/v1
        apiKey: <your key>
-       roles: [agent]
+       roles: [chat]
+       capabilities:
+         - tool_use
        defaultCompletionOptions:
          maxTokens: 8000
        requestOptions:
@@ -135,9 +151,16 @@ guessing when your setup looks unusual — see
    entry — so chat (which should give you a full explanation), edit/apply
    (which should just make the change, fast), and agent (which needs the
    most room for multi-step work) each get their own entry with a limit
-   sized for that job. You'll still only see one option in each place you
-   pick a model (the chat panel, an inline edit, agent mode) — Continue
-   only offers the models that declare that role.
+   sized for that job.
+
+   **Agent mode** is not a role. Continue turns it on for a *chat* model
+   that declares `capabilities: [tool_use]`, which is what the third
+   entry does (this server really does support tool calling). That means
+   "UA MIS Local (Chat)" and "UA MIS Local (Agent)" both appear in the
+   chat model picker — choose **(Chat)** for questions and **(Agent)**
+   when you switch the panel to Agent mode. `agent` is not a valid value
+   for `roles:`; if you see `roles: [agent]` anywhere, Continue will
+   reject the config.
 
    All three also turn the model's internal "thinking" off
    (`chat_template_kwargs.enable_thinking: false`) — a measured
@@ -204,16 +227,37 @@ above — it's only used for that one convenience step.
 
 ### PowerShell won't run the script (execution policy)
 
-Windows blocks running `.ps1` scripts by default. You don't need to
-(and shouldn't) permanently change your system's execution policy just
-to run this one script. Instead, run it with a one-time override:
+Windows blocks downloaded `.ps1` scripts in two separate ways, and both
+happen **before any of the script runs** — which is why the script can't
+tell you about them itself:
+
+| What you see | Cause |
+| --- | --- |
+| `running scripts is disabled on this system` | The default execution policy (`Restricted`) refuses all script files. |
+| `is not digitally signed` / `cannot be loaded` / a security-warning prompt | The file came from a browser, so it carries a "Mark of the Web" flag, and the `RemoteSigned` policy refuses flagged, unsigned files. |
+
+The fix for both is the same, and needs no administrator rights: start
+the script with the policy waived **for that one process**:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\setup-windows.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\Downloads\setup-windows.ps1"
 ```
 
-This only affects that single invocation — it does not weaken security
-for anything else on your machine.
+(If you saved it elsewhere, or your browser named it
+`setup-windows (1).ps1`, change the path to match. In `cmd.exe` rather
+than PowerShell, write `%USERPROFILE%` instead of `$env:USERPROFILE`.)
+
+The override lives and dies with that single command. It does not change
+any setting on your machine — **please don't run `Set-ExecutionPolicy`**
+(especially not at `LocalMachine` or `CurrentUser` scope) to get around
+this; that is a permanent change and isn't needed. Once the script is
+running it also removes the "downloaded from the internet" flag from its
+own file.
+
+If it is still refused with a message mentioning *Group Policy* (a
+university-managed machine can pin the policy above what a command-line
+flag can override), use the [fully manual path](#the-fully-manual-path-works-even-if-the-script-fails)
+instead — it needs no script.
 
 ### The Continue sidebar shows nothing / doesn't show "UA MIS Local"
 
@@ -221,8 +265,9 @@ Almost always this means VS Code needs a **full restart**, not just a
 reload. Quit VS Code completely (all windows) and reopen it. Continue
 only reads `config.yaml` on startup.
 
-If it still doesn't show up, open `config.yaml` (see paths above) and
-check:
+If it still doesn't show up, open the config Continue is using (the
+gear, as in the manual steps — see also [Which config file does Continue
+read?](#which-config-file-does-continue-read)) and check:
 - The file is valid YAML (consistent indentation, no stray tabs).
 - All three `UA MIS Local (...)` blocks are actually inside the
   `models:` list, not floating outside it.
@@ -257,6 +302,43 @@ are seeing, ask your course instructor.
 
 ---
 
+## Which config file does Continue read?
+
+Not necessarily `~/.continue/config.yaml`. Continue does **not** merge
+config files and has **no precedence order** between them — each one is a
+separate *profile*, and you choose which is active in the Continue panel
+(the config name at the top, "Local Assistant" in some versions). The
+candidates are:
+
+- `~/.continue/config.yaml` — the "main" config, listed first, and the
+  one used if you never picked anything;
+- every `*.yaml` / `*.yml` under `~/.continue/agents/`,
+  `~/.continue/assistants/` and `~/.continue/configs/`;
+- the same three folders under `.continue/` inside an open project.
+
+Your choice is remembered per project in `~/.continue/index/globalContext.json`.
+(If you set the `CONTINUE_GLOBAL_DIR` environment variable, Continue uses
+that folder instead of `~/.continue`; the script honours it too.)
+
+**What the script does.** If the only candidate is `config.yaml`, it
+edits that. If it finds any other candidate, or Continue has remembered
+that you picked a different one, it **stops, changes nothing, and tells
+you what to do** (click the config name, then the gear, and paste the
+block it prints) — because editing the wrong file would look like it
+worked and do nothing.
+
+*How this was established:* from Continue's source
+(`core/config/ConfigHandler.ts` → `getLocalProfiles()`,
+`core/config/profile/LocalProfileLoader.ts`,
+`core/util/paths.ts`), not from its documentation, which doesn't
+describe it (see the upstream issues
+[#8484](https://github.com/continuedev/continue/issues/8484) and
+[#5817](https://github.com/continuedev/continue/issues/5817), both closed
+unanswered). Checked against the `main` branch as of 2026-07-20. A
+Continue release older than that may behave differently.
+
+---
+
 ## Why the script might refuse to touch your file
 
 You may already use Continue with other models (a personal API key, a
@@ -265,7 +347,8 @@ it always backs up your existing `config.yaml` before changing anything
 (as `config.yaml.bak-<timestamp>`, printed to your screen), and it will
 **stop and tell you to add the entry by hand** instead of guessing if
 your file's `models:` section is in a format it doesn't recognize (for
-example, written all on one line instead of as a list). This is meant
+example, written all on one line instead of as a list), or if it can't
+tell which of several Continue configs you are using. This is meant
 to protect a setup you already have working — losing that would be
 worse than the script doing nothing. If it stops, follow the message it
 prints, or use the fully manual path above.

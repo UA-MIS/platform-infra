@@ -924,7 +924,9 @@ def test_render_page_active_shows_key_and_continue_config(app_module):
     # completion options apply per model block, not per role).
     assert "roles: [chat]" in html
     assert "roles: [edit, apply]" in html
-    assert "roles: [agent]" in html
+    # "agent" is not a Continue role; agent mode = chat + tool_use.
+    assert "roles: [agent]" not in html
+    assert "- tool_use" in html
     assert "Regenerate" in html
     assert app_module.ONBOARDING_URL in html
 
@@ -942,10 +944,72 @@ def test_manual_config_block_thinking_off_on_all_three_entries(app_module):
     assert block.count("enable_thinking: false") == 3
 
 
+# Every `roles:` value Continue accepts (https://docs.continue.dev/reference).
+# A fixed list, deliberately NOT derived from app.py or the onboarding
+# scripts: a config naming any other role is rejected by Continue whole.
+CONTINUE_VALID_ROLES = {
+    "chat", "autocomplete", "embed", "rerank", "edit", "apply", "summarize",
+}
+
+
+def _manual_block_models(app_module):
+    import yaml
+
+    return yaml.safe_load(app_module._manual_config_block("sk-test"))["models"]
+
+
+def test_manual_config_block_uses_only_roles_continue_accepts(app_module):
+    """The bug: the block said `roles: [agent]`. "agent" is not a Continue
+    role, so a student pasting it by hand got a config Continue rejects.
+    Asserts the INVARIANT (every role is in Continue's valid set), not the
+    current literal, so a regression to any other invalid role also fails."""
+    models = _manual_block_models(app_module)
+    bad = [(m["name"], r) for m in models for r in m.get("roles", [])
+           if r not in CONTINUE_VALID_ROLES]
+    assert bad == []
+    names = [m["name"] for m in models]
+    assert len(names) == len(set(names))
+    assert "autocomplete" not in [r for m in models for r in m["roles"]]
+
+
+def test_manual_config_block_agent_entry_declares_tool_use(app_module):
+    models = {m["name"]: m for m in _manual_block_models(app_module)}
+    agent = models["UA MIS Local (Agent)"]
+    assert agent["roles"] == ["chat"]
+    assert agent["capabilities"] == ["tool_use"]
+    assert agent["defaultCompletionOptions"]["maxTokens"] == 8000
+    # Only the Agent entry opts into tool use.
+    assert "capabilities" not in models["UA MIS Local (Chat)"]
+    assert "capabilities" not in models["UA MIS Local (Edit)"]
+
+
+def test_manual_config_block_enable_thinking_is_boolean_false_everywhere(app_module):
+    for m in _manual_block_models(app_module):
+        v = m["requestOptions"]["extraBodyProperties"]["chat_template_kwargs"][
+            "enable_thinking"
+        ]
+        assert v is False, (m["name"], v)
+
+
+def test_render_page_explains_how_to_run_a_blocked_windows_script(app_module):
+    """A browser-downloaded .ps1 is refused by Windows (execution policy +
+    Mark-of-the-Web) before any of its code runs, so only this page can say
+    what to do. Must offer a process-scope, no-elevation command and must
+    NOT tell students to weaken the machine-wide policy."""
+    html = app_module.render_page("x@ua.edu", "sk-k", True, app_module.CONFIG)
+    assert "-ExecutionPolicy Bypass" in html
+    assert "setup-windows.ps1" in html
+    assert "Set-ExecutionPolicy" not in html
+    assert "Run as administrator" in html  # ...as the thing NOT to do
+    pending = app_module.render_page("x@ua.edu", "sk-k", False, app_module.CONFIG)
+    assert "-ExecutionPolicy Bypass" in pending
+
+
 def test_render_page_active_roles_include_agent(app_module):
-    """Regression guard for the team-lead brief: the plan's own snippet
-    and the onboarding/ scripts still say [chat, edit, apply] -- agent
-    tool calling now works on vLLM, so the portal must include "agent".
+    """Regression guard for the team-lead brief: agent tool calling works
+    on vLLM, so the portal must still offer agent mode -- as a chat entry
+    declaring `capabilities: [tool_use]`, NOT as `roles: [agent]`, which is
+    not a Continue role (corrected 2026-10-08).
 
     2026-09-30: updated for the three-entry shape -- the OLD assertion
     (`"agent" in html.split("roles:")[1].splitlines()[0]`) checked only
@@ -956,7 +1020,9 @@ def test_render_page_active_roles_include_agent(app_module):
     is only one "roles:" line in the whole page."""
     config = app_module.CONFIG
     html = app_module.render_page("x@ua.edu", "sk-k", True, config)
-    assert "roles: [agent]" in html
+    assert "roles: [agent]" not in html
+    assert "UA MIS Local (Agent)" in html
+    assert "tool_use" in html
 
 
 def test_render_page_links_to_onboarding_scripts_both_states(app_module):
@@ -1127,7 +1193,8 @@ def test_index_active_user_sees_key_and_config(
     assert "sk-active-key" in resp.text
     assert "roles: [chat]" in resp.text
     assert "roles: [edit, apply]" in resp.text
-    assert "roles: [agent]" in resp.text
+    assert "roles: [agent]" not in resp.text
+    assert "- tool_use" in resp.text
 
 
 def test_index_unrecognized_cached_key_reissues_instead_of_500(
@@ -4053,7 +4120,10 @@ def test_served_macos_script_actually_configures_continue(
     # portal's shell quoting AND the script's YAML quoting, into every
     # entry.
     assert [m["apiKey"] for m in models] == [key, key, key]
-    assert [m["roles"] for m in models] == [["chat"], ["edit", "apply"], ["agent"]]
+    assert [m["roles"] for m in models] == [["chat"], ["edit", "apply"], ["chat"]]
+    assert [m.get("capabilities") for m in models] == [None, None, ["tool_use"]]
+    for m in models:
+        assert set(m["roles"]) <= CONTINUE_VALID_ROLES
 
 
 def test_substitution_survives_a_crlf_checkout(app_module):
