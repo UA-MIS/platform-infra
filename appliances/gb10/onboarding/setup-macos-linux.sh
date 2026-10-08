@@ -3,10 +3,7 @@
 # UA MIS Local LLM — Continue (VS Code) setup for macOS and Linux.
 #
 # What this does:
-#   1. Finds the Continue config your Continue extension actually loads
-#      (normally ~/.continue/config.yaml). If Continue could be using
-#      more than one config file on this computer, it stops and tells
-#      you exactly what to do by hand instead of guessing.
+#   1. Finds your Continue config (~/.continue/config.yaml).
 #   2. Backs it up (never overwrites it).
 #   3. Adds the "UA MIS Local" model entry, without touching any other
 #      model you already have configured.
@@ -50,11 +47,7 @@ MODEL_ID="qwen3.8-27b"
 # duplicated; MODEL_ENDPOINT above is hardcoded for the same reason.
 KEYS_PORTAL="https://local-llm-keys.uamishub.com"
 
-# Continue itself honours CONTINUE_GLOBAL_DIR (core/util/paths.ts in the
-# Continue source) in place of ~/.continue, so we must too -- editing
-# ~/.continue when Continue reads somewhere else is the same
-# "edited a file Continue never reads" defect as the one below.
-CONTINUE_DIR="${CONTINUE_GLOBAL_DIR:-${HOME}/.continue}"
+CONTINUE_DIR="${HOME}/.continue"
 CONFIG_YAML="${CONTINUE_DIR}/config.yaml"
 CONFIG_JSON="${CONTINUE_DIR}/config.json"
 
@@ -165,7 +158,7 @@ build_block() {
   # Three separate model entries, not one, because Continue's
   # defaultCompletionOptions/requestOptions apply per MODEL block, not
   # per role within a shared block — there is no way to give chat, edit,
-  # apply, and agent different maxTokens values on a single entry (see
+  # apply, and agent-mode chat different maxTokens values on a single entry (see
   # https://docs.continue.dev/reference, 2026-09-30). All three point at
   # the exact same backend model; only the role assignment and
   # completion options differ. Continue only offers each role a choice
@@ -292,93 +285,6 @@ build_block() {
 # 3. Create fresh, or merge into existing, config.yaml.
 # ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# 3a. Which config does Continue actually load?  (verified against the
-#     Continue source, core/config/ConfigHandler.ts getLocalProfiles(); see
-#     onboarding/README.md "Which config file does Continue read?")
-#
-# Continue does NOT merge config files and has no precedence between them.
-# Every candidate is a separate PROFILE:
-#   * the "main" config, ~/.continue/config.yaml, always first;
-#   * one more profile per *.yaml / *.yml under ~/.continue/agents/,
-#     ~/.continue/assistants/ and ~/.continue/configs/ (and the same three
-#     folders under .continue/ in the open workspace);
-# and the active one is whichever the student last picked in the Continue
-# panel -- remembered per workspace in ~/.continue/index/globalContext.json
-# (profile id "local" = the main config; anything else = a file path). Only
-# when nothing was ever picked does Continue fall back to the main config.
-#
-# So with exactly one candidate there is nothing to guess, and we edit it.
-# With more than one we cannot know which the student sees, and editing the
-# wrong one leaves them with a working-looking setup that does nothing --
-# so we stop and hand over the block, as every other unusual-setup path in
-# this script does. Workspace-level .continue/ folders live inside projects
-# this script cannot see; the globalContext.json check below is what
-# catches a student who has one selected.
-# ---------------------------------------------------------------------------
-
-extra_configs=""
-for sub in agents assistants configs; do
-  [ -d "${CONTINUE_DIR}/${sub}" ] || continue
-  found="$(find "${CONTINUE_DIR}/${sub}" -type f \( -name '*.yaml' -o -name '*.yml' \) 2>/dev/null | sort)"
-  if [ -n "${found}" ]; then
-    extra_configs="${extra_configs}${found}
-"
-  fi
-done
-
-# Profile ids other than "local" recorded as selected in some workspace.
-# globalContext.json is pretty-printed JSON written by Continue; awk is
-# used because jq/python are not guaranteed on a student's machine.
-selected_other=""
-GLOBAL_CONTEXT="${CONTINUE_DIR}/index/globalContext.json"
-if [ -f "${GLOBAL_CONTEXT}" ]; then
-  selected_other="$(awk '
-    /"lastSelectedProfileForWorkspace"[[:space:]]*:/ { inblk = ($0 !~ /}/); next }
-    inblk && /^[[:space:]]*}/ { inblk = 0 }
-    inblk && /"[[:space:]]*:[[:space:]]*"/ {
-      line = $0
-      sub(/^.*"[[:space:]]*:[[:space:]]*"/, "", line)
-      sub(/".*$/, "", line)
-      if (line != "local" && line != "") print line
-    }
-  ' "${GLOBAL_CONTEXT}" 2>/dev/null | sort -u)"
-fi
-
-if [ -n "${extra_configs}" ] || [ -n "${selected_other}" ]; then
-  hr
-  log "I can't tell which Continue config your Continue extension is using,"
-  log "so I have changed NOTHING."
-  log ""
-  log "Continue can keep several separate configs. I found:"
-  log "  - ${CONFIG_YAML}  (Continue's main config)"
-  if [ -n "${extra_configs}" ]; then
-    printf '%s' "${extra_configs}" | while IFS= read -r f; do
-      [ -n "${f}" ] && log "  - ${f}"
-    done
-  fi
-  if [ -n "${selected_other}" ]; then
-    log "  - and Continue has remembered a different config as selected:"
-    printf '%s\n' "${selected_other}" | while IFS= read -r f; do
-      [ -n "${f}" ] && log "      ${f}"
-    done
-  fi
-  log ""
-  log "What to do (about two minutes):"
-  log "  1. In VS Code, open the Continue panel in the sidebar."
-  log "  2. At the top of the panel, click the config / assistant name"
-  log "     (it may say 'Local Assistant'), then click the gear icon next"
-  log "     to the one that is selected. That opens the config file Continue"
-  log "     is really using."
-  log "  3. Under its 'models:' list, paste the block below. If there is no"
-  log "     'models:' line, add one first, as 'models:' on its own line."
-  log "  4. Replace <YOUR_KEY> with your key, save, and restart VS Code."
-  log ""
-  build_block "  " "<YOUR_KEY>"
-  hr
-  exit 1
-fi
-
 mkdir -p "${CONTINUE_DIR}" || fail "Could not create ${CONTINUE_DIR}"
 
 if [ ! -f "${CONFIG_YAML}" ]; then
@@ -402,39 +308,6 @@ else
     log "If you want to update the key, edit that file's apiKey line by hand,"
     log "or delete the existing 'UA MIS Local' block and re-run this script."
     hr
-
-    # Repair for an earlier version of this script, which wrote
-    # `roles: [agent]` on the "UA MIS Local (Agent)" entry. "agent" is not
-    # a Continue role, so Continue rejects the config. Fix only that exact
-    # line, only inside our own entry, and only after a backup.
-    if awk '
-         /^[[:space:]]*-[[:space:]]+name:/ { ours = ($0 ~ /UA MIS Local \(Agent\)/) }
-         ours && /^[[:space:]]*roles:[[:space:]]*\[[[:space:]]*agent[[:space:]]*\][[:space:]]*(#.*)?$/ { found = 1 }
-         END { exit(found ? 0 : 1) }
-       ' "${CONFIG_YAML}"; then
-      backup_path="${CONFIG_YAML}.bak-$(date +%Y%m%d-%H%M%S)"
-      cp "${CONFIG_YAML}" "${backup_path}" || fail "Could not back up ${CONFIG_YAML}"
-      fixed_tmp="${CONFIG_YAML}.tmp-$$"
-      awk '
-        /^[[:space:]]*-[[:space:]]+name:/ { ours = ($0 ~ /UA MIS Local \(Agent\)/) }
-        ours && /^[[:space:]]*roles:[[:space:]]*\[[[:space:]]*agent[[:space:]]*\][[:space:]]*(#.*)?$/ {
-          ind = $0; sub(/roles:.*$/, "", ind)
-          print ind "roles: [chat]"
-          print ind "capabilities:"
-          print ind "  - tool_use"
-          next
-        }
-        { print }
-      ' "${CONFIG_YAML}" > "${fixed_tmp}" \
-        && cat "${fixed_tmp}" > "${CONFIG_YAML}" \
-        || { rm -f "${fixed_tmp}"; fail "Could not rewrite ${CONFIG_YAML} (your original is untouched at ${backup_path})"; }
-      rm -f "${fixed_tmp}"
-      log "Your 'UA MIS Local (Agent)' entry used an invalid role ('agent'),"
-      log "which stops Continue from loading the config. It is fixed now."
-      log "Backed up the previous version to:"
-      log "  ${backup_path}"
-      hr
-    fi
   else
     # Read the file into an array, preserving lines exactly.
     lines=()

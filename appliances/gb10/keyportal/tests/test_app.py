@@ -950,59 +950,94 @@ def test_manual_config_block_thinking_off_on_all_three_entries(app_module):
 CONTINUE_VALID_ROLES = {
     "chat", "autocomplete", "embed", "rerank", "edit", "apply", "summarize",
 }
+CONTINUE_VALID_CAPABILITIES = {"tool_use", "image_input"}
 
 
-def _manual_block_models(app_module):
+def _block_models(app_module, key=None):
     import yaml
 
-    return yaml.safe_load(app_module._manual_config_block("sk-test"))["models"]
+    return yaml.safe_load(app_module._manual_config_block(key))["models"]
 
 
-def test_manual_config_block_uses_only_roles_continue_accepts(app_module):
-    """The bug: the block said `roles: [agent]`. "agent" is not a Continue
-    role, so a student pasting it by hand got a config Continue rejects.
+def test_config_block_uses_only_roles_continue_accepts(app_module):
+    """The bug: the block said `roles: [agent]`, which Continue rejects.
     Asserts the INVARIANT (every role is in Continue's valid set), not the
-    current literal, so a regression to any other invalid role also fails."""
-    models = _manual_block_models(app_module)
-    bad = [(m["name"], r) for m in models for r in m.get("roles", [])
-           if r not in CONTINUE_VALID_ROLES]
-    assert bad == []
-    names = [m["name"] for m in models]
-    assert len(names) == len(set(names))
-    assert "autocomplete" not in [r for m in models for r in m["roles"]]
+    current literal, so a regression to ANY other invalid role also fails."""
+    for key in (None, "sk-real"):
+        models = _block_models(app_module, key)
+        bad = [(m["name"], r) for m in models for r in m.get("roles", [])
+               if r not in CONTINUE_VALID_ROLES]
+        assert bad == []
+        badcap = [(m["name"], c) for m in models for c in m.get("capabilities", [])
+                  if c not in CONTINUE_VALID_CAPABILITIES]
+        assert badcap == []
+        names = [m["name"] for m in models]
+        assert len(names) == len(set(names))
+        assert "autocomplete" not in [r for m in models for r in m["roles"]]
 
 
-def test_manual_config_block_agent_entry_declares_tool_use(app_module):
-    models = {m["name"]: m for m in _manual_block_models(app_module)}
+def test_config_block_validity_check_rejects_bad_roles(app_module, monkeypatch):
+    """Guards the guard: the invariant above must actually fail on a bad
+    role, whatever the bad value is."""
+    import yaml
+
+    real = app_module._manual_config_block()
+    for bad in ("agent", "subagent-x", "tool", "Chat"):
+        models = yaml.safe_load(real.replace("roles: [chat]\n    # \"agent\"", f"roles: [{bad}]\n    # \"agent\"", 1))["models"]
+        assert any(r not in CONTINUE_VALID_ROLES for m in models for r in m["roles"]), bad
+
+
+def test_config_block_agent_entry_declares_tool_use(app_module):
+    models = {m["name"]: m for m in _block_models(app_module, "sk-real")}
     agent = models["UA MIS Local (Agent)"]
     assert agent["roles"] == ["chat"]
     assert agent["capabilities"] == ["tool_use"]
     assert agent["defaultCompletionOptions"]["maxTokens"] == 8000
-    # Only the Agent entry opts into tool use.
     assert "capabilities" not in models["UA MIS Local (Chat)"]
     assert "capabilities" not in models["UA MIS Local (Edit)"]
 
 
-def test_manual_config_block_enable_thinking_is_boolean_false_everywhere(app_module):
-    for m in _manual_block_models(app_module):
+def test_config_block_enable_thinking_is_boolean_false_everywhere(app_module):
+    for m in _block_models(app_module, "sk-real"):
         v = m["requestOptions"]["extraBodyProperties"]["chat_template_kwargs"][
             "enable_thinking"
         ]
         assert v is False, (m["name"], v)
 
 
-def test_render_page_explains_how_to_run_a_blocked_windows_script(app_module):
-    """A browser-downloaded .ps1 is refused by Windows (execution policy +
-    Mark-of-the-Web) before any of its code runs, so only this page can say
-    what to do. Must offer a process-scope, no-elevation command and must
-    NOT tell students to weaken the machine-wide policy."""
-    html = app_module.render_page("x@ua.edu", "sk-k", True, app_module.CONFIG)
-    assert "-ExecutionPolicy Bypass" in html
-    assert "setup-windows.ps1" in html
-    assert "Set-ExecutionPolicy" not in html
-    assert "Run as administrator" in html  # ...as the thing NOT to do
-    pending = app_module.render_page("x@ua.edu", "sk-k", False, app_module.CONFIG)
-    assert "-ExecutionPolicy Bypass" in pending
+@pytest.mark.parametrize("key", ["sk-plain", "sk-abc #hash def: ghi 'jkl", "sk-a\\b$c"])
+def test_config_block_substitutes_the_key_exactly_in_every_entry(app_module, key):
+    models = _block_models(app_module, key)
+    assert [m["apiKey"] for m in models] == [key, key, key]
+
+
+@pytest.mark.parametrize("bad", ["", "   ", "sk-a\nmodels: evil", "sk-a\x00"])
+def test_config_block_refuses_empty_or_control_char_key(app_module, bad):
+    with pytest.raises(ValueError):
+        app_module._manual_config_block(bad)
+
+
+def test_active_page_has_personalized_copyable_block(app_module):
+    key = "sk-it's #1: key"
+    html = app_module.render_page("x@ua.edu", key, True, app_module.CONFIG)
+    from html import escape, unescape
+    import re as _re
+
+    m = _re.search(r'<pre id="cfg-block">(.*?)</pre>', html, _re.S)
+    assert m, "config block <pre> missing"
+    block_text = unescape(m.group(1))
+    assert block_text == app_module._manual_config_block(key)
+    assert "Copy config block" in html and "cfg-block" in html
+    # Instructions name the merge, not the overwrite.
+    assert "underneath it" in html and "paste over the file" in html
+    assert "gear" in html
+
+
+def test_pending_page_block_has_placeholder_and_never_the_key(app_module):
+    html = app_module.render_page("x@ua.edu", "sk-secret-pending", False, app_module.CONFIG)
+    assert "sk-secret-pending" not in html
+    assert "&lt;your key&gt;" in html
+    assert "Copy config block" not in html
 
 
 def test_render_page_active_roles_include_agent(app_module):
@@ -4122,8 +4157,11 @@ def test_served_macos_script_actually_configures_continue(
     assert [m["apiKey"] for m in models] == [key, key, key]
     assert [m["roles"] for m in models] == [["chat"], ["edit", "apply"], ["chat"]]
     assert [m.get("capabilities") for m in models] == [None, None, ["tool_use"]]
-    for m in models:
-        assert set(m["roles"]) <= CONTINUE_VALID_ROLES
+    # PARITY: the downloadable script and the portal page's copy-paste block
+    # are two implementations (the script is a standalone file and cannot
+    # import app.py). They must produce the same models, key included --
+    # this is what stops them drifting apart again.
+    assert models == yaml.safe_load(app_module._manual_config_block(key))["models"]
 
 
 def test_substitution_survives_a_crlf_checkout(app_module):
@@ -4190,19 +4228,16 @@ def test_no_route_is_lost_to_disabling_the_docs(app_module):
     assert not paths & {"/docs", "/redoc", "/openapi.json"}
 
 
-def test_pending_page_does_not_send_a_student_back_for_a_config_block(
+def test_pending_page_tells_a_student_what_to_do_while_waiting(
     app_module, client, mocker, fake_response
 ):
-    """The pending banner used to promise "come back to this same page ...
-    and you'll see the config.yaml block to paste". That was accurate when
-    pasting WAS the path; now that the download carries the key, it points
-    a waiting student at the fallback as though it were the main route, and
-    invites a second trip here that buys them nothing -- the script they
-    can already run handles the promotion on its own.
-
-    Asserts the misleading instruction is gone AND that the reassurance it
-    carried survived, since "you don't need to do anything else" is the
-    part a pending student actually needs."""
+    """History: this test used to assert the banner did NOT send a pending
+    student back for a config block, because the downloaded script (which
+    carried the key) was the main route and a second trip bought them
+    nothing. 2026-10-08: copy-paste of the block is now THE route, and a
+    pending student's key is deliberately not shown, so the banner must say
+    plainly to reload once activated -- and must still carry the
+    reassurance that nothing needs doing or regenerating in the meantime."""
     email = "pendingcopy@crimson.ua.edu"
     mocker.patch.object(app_module, "verify_access_jwt", return_value=email)
     with mocker_seed_cache(app_module, app_module.CONFIG, email, "sk-pending-copy"):
@@ -4217,11 +4252,9 @@ def test_pending_page_does_not_send_a_student_back_for_a_config_block(
     assert resp.status_code == 200
 
     pending_block = resp.text.split('<div class="pending">', 1)[1]
-    assert "come back to this same page" not in pending_block
-    assert "block to paste" not in pending_block
-    # The reassurance, and the run-it-now invitation, must still be there.
     assert "do not need to" in pending_block
-    assert "run the setup script above right now" in pending_block
+    assert "reload this page" in pending_block
+    assert "sk-pending-copy" not in resp.text
 
 
 def test_load_setup_scripts_actually_validates_what_it_loads(

@@ -3,10 +3,7 @@
   UA MIS Local LLM -- Continue (VS Code) setup for Windows.
 
 .DESCRIPTION
-  1. Finds the Continue config your Continue extension actually loads
-     (normally %USERPROFILE%\.continue\config.yaml). If Continue could be
-     using more than one config file on this computer, it stops and tells
-     you exactly what to do by hand instead of guessing.
+  1. Finds your Continue config (%USERPROFILE%\.continue\config.yaml).
   2. Backs it up (never overwrites it).
   3. Adds the "UA MIS Local" model entry, without touching any other
      model you already have configured.
@@ -28,27 +25,11 @@
   type. If you got this file from git instead, pass -ApiKey, or run it
   with no arguments and it will prompt (hidden input).
 
-  RUNNING IT -- READ THIS IF WINDOWS REFUSES
-  Windows blocks downloaded .ps1 files two ways: the default execution
-  policy refuses to run scripts at all ("running scripts is disabled on
-  this system"), and a file downloaded in a browser carries a
-  Mark-of-the-Web flag that RemoteSigned also refuses ("is not digitally
-  signed"). The script cannot report either one itself -- Windows refuses
-  BEFORE any line of it runs -- so the way in is to start it with the
-  policy waived for that one process only. That needs no administrator
-  rights and changes no setting on your machine. Paste this into a normal
-  (not "Run as administrator") PowerShell window:
-
-    powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\Downloads\setup-windows.ps1"
-
-  Do NOT run Set-ExecutionPolicy to "fix" this; that changes your
-  machine's security setting permanently and is not needed.
+.EXAMPLE
+  powershell -ExecutionPolicy Bypass -File .\setup-windows.ps1
 
 .EXAMPLE
-  powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\Downloads\setup-windows.ps1"
-
-.EXAMPLE
-  powershell -NoProfile -ExecutionPolicy Bypass -File .\setup-windows.ps1 -ApiKey "YOUR_KEY_HERE"
+  powershell -ExecutionPolicy Bypass -File .\setup-windows.ps1 -ApiKey "YOUR_KEY_HERE"
 #>
 
 param(
@@ -74,13 +55,7 @@ $ModelId       = "qwen3.8-27b"
 # $ModelEndpoint above is hardcoded for the same reason.
 $KeysPortal    = "https://local-llm-keys.uamishub.com"
 
-# Continue itself honours CONTINUE_GLOBAL_DIR (core/util/paths.ts in the
-# Continue source) in place of %USERPROFILE%\.continue, so we must too.
-if ($env:CONTINUE_GLOBAL_DIR) {
-    $ContinueDir = $env:CONTINUE_GLOBAL_DIR
-} else {
-    $ContinueDir = Join-Path $env:USERPROFILE ".continue"
-}
+$ContinueDir  = Join-Path $env:USERPROFILE ".continue"
 $ConfigYaml   = Join-Path $ContinueDir "config.yaml"
 $ConfigJson   = Join-Path $ContinueDir "config.json"
 
@@ -90,22 +65,6 @@ function Write-Hr { Write-Host "------------------------------------------------
 Write-Hr
 Write-Line "UA MIS Local LLM -- Continue setup"
 Write-Hr
-
-# If this file was downloaded in a browser it carries a Mark-of-the-Web
-# (an NTFS "Zone.Identifier" stream) that makes every later plain run of it
-# fail the RemoteSigned check. Being here means THIS run got past that
-# (policy waived for the process), so clear the flag from the file itself:
-# it is the student's own file, Unblock-File needs no elevation, and it
-# changes no machine setting. Best-effort and silent on failure; skipped
-# when there is no file (piped in) or off Windows (the CI leg on Linux).
-if ($PSCommandPath -and ($env:OS -eq 'Windows_NT')) {
-    try {
-        if (Get-Item -LiteralPath $PSCommandPath -Stream 'Zone.Identifier' -ErrorAction SilentlyContinue) {
-            Unblock-File -LiteralPath $PSCommandPath -ErrorAction Stop
-            Write-Line "(Removed the download 'blocked' flag from this file.)"
-        }
-    } catch { }
-}
 
 # ---------------------------------------------------------------------------
 # 0. Get the API key first (before touching any files).
@@ -333,82 +292,6 @@ function Write-Utf8NoBom {
 # 3. Create fresh, or merge into existing, config.yaml.
 # ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# 3a. Which config does Continue actually load?  (verified against the
-#     Continue source, core/config/ConfigHandler.ts getLocalProfiles(); see
-#     onboarding/README.md "Which config file does Continue read?")
-#
-# Continue does NOT merge config files and has no precedence between them.
-# Every candidate is a separate PROFILE: the main config
-# (.continue\config.yaml, always first) plus one per *.yaml / *.yml under
-# .continue\agents, .continue\assistants and .continue\configs (and the
-# same three folders under .continue in the open workspace). The active one
-# is whichever the student last picked in the Continue panel, remembered
-# per workspace in .continue\index\globalContext.json (profile id "local" =
-# the main config; anything else = a file path). Only if nothing was ever
-# picked does Continue fall back to the main config.
-#
-# Exactly one candidate -> nothing to guess, edit it. More than one -> we
-# cannot know which the student sees, and editing the wrong one leaves a
-# working-looking setup that does nothing, so stop and hand over the block.
-# Workspace-level folders live in projects this script cannot see; the
-# globalContext.json check is what catches a student who has one selected.
-# ---------------------------------------------------------------------------
-
-$extraConfigs = @()
-foreach ($sub in @('agents', 'assistants', 'configs')) {
-    $d = Join-Path $ContinueDir $sub
-    if (Test-Path -LiteralPath $d -PathType Container) {
-        $extraConfigs += @(Get-ChildItem -LiteralPath $d -Recurse -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Extension -eq '.yaml' -or $_.Extension -eq '.yml' } |
-            ForEach-Object { $_.FullName })
-    }
-}
-
-# Profile ids other than "local" recorded as selected in some workspace.
-$selectedOther = @()
-$globalContext = Join-Path (Join-Path $ContinueDir 'index') 'globalContext.json'
-if (Test-Path -LiteralPath $globalContext) {
-    try {
-        $ctx = Get-Content -LiteralPath $globalContext -Raw | ConvertFrom-Json
-        if ($ctx -and $ctx.lastSelectedProfileForWorkspace) {
-            foreach ($prop in $ctx.lastSelectedProfileForWorkspace.PSObject.Properties) {
-                if ($prop.Value -and ([string]$prop.Value -ne 'local')) {
-                    $selectedOther += [string]$prop.Value
-                }
-            }
-        }
-    } catch { }
-}
-
-if (($extraConfigs.Count -gt 0) -or ($selectedOther.Count -gt 0)) {
-    Write-Hr
-    Write-Line "I can't tell which Continue config your Continue extension is using,"
-    Write-Line "so I have changed NOTHING."
-    Write-Line ""
-    Write-Line "Continue can keep several separate configs. I found:"
-    Write-Line "  - $ConfigYaml  (Continue's main config)"
-    foreach ($f in ($extraConfigs | Sort-Object -Unique)) { Write-Line "  - $f" }
-    if ($selectedOther.Count -gt 0) {
-        Write-Line "  - and Continue has remembered a different config as selected:"
-        foreach ($f in ($selectedOther | Sort-Object -Unique)) { Write-Line "      $f" }
-    }
-    Write-Line ""
-    Write-Line "What to do (about two minutes):"
-    Write-Line "  1. In VS Code, open the Continue panel in the sidebar."
-    Write-Line "  2. At the top of the panel, click the config / assistant name"
-    Write-Line "     (it may say 'Local Assistant'), then click the gear icon next"
-    Write-Line "     to the one that is selected. That opens the config file Continue"
-    Write-Line "     is really using."
-    Write-Line "  3. Under its 'models:' list, paste the block below. If there is no"
-    Write-Line "     'models:' line, add one first, as 'models:' on its own line."
-    Write-Line "  4. Replace <YOUR_KEY> with your key, save, and restart VS Code."
-    Write-Line ""
-    (Build-Block -DashIndent "  " -KeyToPrint "<YOUR_KEY>") | ForEach-Object { Write-Line $_ }
-    Write-Hr
-    exit 1
-}
-
 New-Item -ItemType Directory -Force -Path $ContinueDir | Out-Null
 
 if (-not (Test-Path $ConfigYaml)) {
@@ -431,37 +314,6 @@ else {
         Write-Line "If you want to update the key, edit that file's apiKey line by hand,"
         Write-Line "or delete the existing 'UA MIS Local' block and re-run this script."
         Write-Hr
-
-        # Repair for an earlier version of this script, which wrote
-        # `roles: [agent]` on the "UA MIS Local (Agent)" entry. "agent" is
-        # not a Continue role, so Continue rejects the config. Fix only that
-        # exact line, only inside our own entry, and only after a backup.
-        $repaired = New-Object System.Collections.Generic.List[string]
-        $inOurs = $false
-        $needsRepair = $false
-        foreach ($ln in @(Get-Content -LiteralPath $ConfigYaml)) {
-            if ($ln -match '^\s*-\s+name:') { $inOurs = ($ln -match 'UA MIS Local \(Agent\)') }
-            if ($inOurs -and ($ln -match '^(\s*)roles:\s*\[\s*agent\s*\]\s*(#.*)?$')) {
-                $ind = $Matches[1]
-                $repaired.Add("${ind}roles: [chat]")
-                $repaired.Add("${ind}capabilities:")
-                $repaired.Add("${ind}  - tool_use")
-                $needsRepair = $true
-            } else {
-                $repaired.Add($ln)
-            }
-        }
-        if ($needsRepair) {
-            $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
-            $backupPath = "$ConfigYaml.bak-$timestamp"
-            Copy-Item -Path $ConfigYaml -Destination $backupPath -Force
-            Write-Utf8NoBom -Path $ConfigYaml -Lines $repaired.ToArray()
-            Write-Line "Your 'UA MIS Local (Agent)' entry used an invalid role ('agent'),"
-            Write-Line "which stops Continue from loading the config. It is fixed now."
-            Write-Line "Backed up the previous version to:"
-            Write-Line "  $backupPath"
-            Write-Hr
-        }
     }
     else {
         $lines = @(Get-Content -Path $ConfigYaml)
