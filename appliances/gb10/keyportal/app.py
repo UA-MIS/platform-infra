@@ -1913,15 +1913,34 @@ a { color: #7a1526; }
 """
 
 
-def _manual_config_block(api_key_placeholder: str = "&lt;your key&gt;") -> str:
-    """The single source for the config block this portal shows,
-    whether the visitor has a real key yet or not -- called with a
-    placeholder for the pending/beginner-facing copy shown to EVERY
-    visitor, and with the visitor's real key for the personalized block
-    shown once they are active (see render_page(), which calls this
-    same function with `key` instead of maintaining its own separate
-    template -- the two rendering the SAME shape by construction, not by
-    two hand-kept-in-sync copies, is what this refactor exists for).
+_KEY_PLACEHOLDER = "<your key>"
+
+
+def _yaml_single_quote(value: str) -> str:
+    """A YAML single-quoted scalar: no escape sequences are interpreted, the
+    only character needing escape is ' (doubled). Same rule, same reason, as
+    the onboarding scripts' apiKey: unquoted, a key containing " #" or ": "
+    is silently truncated or mis-parsed."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _manual_config_block(api_key: Optional[str] = None) -> str:
+    """THE source of truth for the Continue config block this portal shows.
+
+    Returns RAW YAML (not HTML) -- callers escape() it for display and put
+    the unescaped text in front of the Copy button. `api_key=None` renders
+    the `<your key>` placeholder (pending visitors, who are never shown
+    their key); a real key is substituted as a quoted YAML scalar.
+    An EMPTY or control-character key raises instead of rendering: a block
+    with a blank apiKey looks fine, pastes fine, and 401s with nothing to
+    tell the student why.
+
+    There is one generator here for the page. The onboarding scripts
+    (setup-macos-linux.sh / setup-windows.ps1) are separate files because
+    they are downloaded standalone, so they CANNOT import this; they are
+    pinned to this function by a parity test in tests/test_app.py that runs
+    the real script and compares the parsed models. If you change the block,
+    change all three, and the test says if you missed one.
 
     2026-09-30: three separate model entries, not one, for the same
     reason onboarding/setup-macos-linux.sh's build_block() and
@@ -1942,7 +1961,14 @@ def _manual_config_block(api_key_placeholder: str = "&lt;your key&gt;") -> str:
     worth the wait (off 41/54 vs xhigh 39/54, within noise; low tracked
     off) -- off is the evidence-based default everywhere now.
     """
-    key = api_key_placeholder
+    if api_key is None:
+        key = _yaml_single_quote(_KEY_PLACEHOLDER)
+    else:
+        if not api_key.strip():
+            raise ValueError("refusing to render a Continue config with an empty key")
+        if _KEY_FORBIDDEN_CHARS_RE.search(api_key):
+            raise ValueError("refusing to render a Continue config with a control character in the key")
+        key = _yaml_single_quote(api_key)
     return f"""models:
   - name: UA MIS Local (Chat)
     provider: openai  # "openai" here means the OpenAI-compatible API
@@ -2010,40 +2036,6 @@ def _manual_config_block(api_key_placeholder: str = "&lt;your key&gt;") -> str:
     # keystroke."""
 
 
-# What a Windows student pastes into a normal PowerShell window. Process-scope
-# only: it waives the execution policy for this ONE run (no elevation, no
-# persistent setting changed) and also gets past the browser's
-# Mark-of-the-Web, which RemoteSigned would otherwise refuse. Kept out of
-# the f-string below because it contains backslashes. Mirrors the header of
-# onboarding/setup-windows.ps1 -- keep both in step.
-_WINDOWS_RUN_COMMAND = (
-    'powershell -NoProfile -ExecutionPolicy Bypass -File '
-    '"$env:USERPROFILE\\Downloads\\setup-windows.ps1"'
-)
-_POSIX_RUN_COMMAND = 'bash ~/Downloads/setup-macos-linux.sh'
-
-
-def _setup_run_instructions() -> str:
-    """How to RUN the downloaded script. The Windows half matters: a
-    browser-downloaded .ps1 is refused by default (execution policy and the
-    Mark-of-the-Web) BEFORE any of its code runs, so the script cannot
-    explain the refusal itself -- this page is the only place that can."""
-    return (
-        "<p><strong>Windows:</strong> open <em>PowerShell</em> from the Start "
-        "menu (a normal window &mdash; <em>not</em> &quot;Run as "
-        "administrator&quot;), paste this, and press Enter. Don't "
-        "double-click the file, and don't change any PowerShell settings: "
-        "this waives Windows' script block for this one run only.</p>\n"
-        f"<pre>{escape(_WINDOWS_RUN_COMMAND)}</pre>\n"
-        "<p>If you saved the file somewhere other than Downloads, or "
-        "your browser named it <code>setup-windows (1).ps1</code>, change "
-        "the path to match.</p>\n"
-        "<p><strong>macOS / Linux:</strong> open Terminal, paste this, and "
-        "press Enter.</p>\n"
-        f"<pre>{escape(_POSIX_RUN_COMMAND)}</pre>"
-    )
-
-
 def _setup_download_links() -> str:
     """The download links, built from SETUP_SCRIPTS so a route and its link
     cannot drift apart. Relative hrefs on purpose: they are correct
@@ -2054,10 +2046,12 @@ def _setup_download_links() -> str:
         f"&mdash; saves as <code>{escape(spec.download_filename)}</code></li>"
         for spec in SETUP_SCRIPTS.values()
     )
-    return f"<ul>\n{items}\n</ul>\n{_setup_run_instructions()}"
+    return f"<ul>\n{items}\n</ul>"
 
 
-def render_intro(email: str, config: Config, active: bool) -> str:
+def render_intro(
+    email: str, config: Config, active: bool, key: Optional[str] = None
+) -> str:
     """The student-landing-page content, shown above the key section in
     BOTH the pending and active states (D-<team-lead-brief>, 2026-09-29):
     what this is, how to use it, honest performance expectations, the
@@ -2095,22 +2089,26 @@ def render_intro(email: str, config: Config, active: bool) -> str:
     saying so in three places instead: the caveat below, the pending
     banner in render_page(), and the script's own verification step.
     """
+    block_html = escape(_manual_config_block(key if active else None))
     if active:
-        script_note = (
-            "<p>The download already contains <strong>your own key</strong> "
-            "&mdash; there is nothing to copy and nothing to paste. Run the "
-            "file you downloaded and it does steps 2 and 3 for you.</p>"
+        block_note = (
+            "<p>This block already has <strong>your own key</strong> in "
+            "it. Use the button to copy it, then follow the steps above.</p>"
+        )
+        copy_button = (
+            '<button type="button" onclick="navigator.clipboard.writeText('
+            "document.getElementById('cfg-block').textContent)\">"
+            "Copy config block</button>"
         )
     else:
-        script_note = (
-            "<p>The download already contains <strong>your own key</strong> "
-            "&mdash; there is nothing to copy and nothing to paste. You can "
-            "run it now even though your key is <strong>not activated "
-            "yet</strong> (see below): it sets VS Code up correctly, and it "
-            "will finish by telling you the key is not active yet. Once you "
-            "are added to a course team it starts working on its own &mdash; "
-            "you will not need to run this again or get a new key.</p>"
+        block_note = (
+            "<p>Your key is <strong>not activated yet</strong> (see below), so "
+            "this page does not show it and the block below has a "
+            "<code>&lt;your key&gt;</code> placeholder. Once you are added "
+            "to a course team, reload this page: the block will have your key "
+            "in it, ready to copy.</p>"
         )
+        copy_button = ""
     return f"""<h1>UA MIS Local LLM</h1>
 <p>Signed in as <strong>{email}</strong>.</p>
 <section class="intro">
@@ -2123,19 +2121,41 @@ machine.</p>
 <ol>
 <li>Install the free <strong>Continue</strong> extension in VS Code
 (Extensions panel &rarr; search &quot;Continue&quot; &rarr; Install).</li>
-<li>Download the setup script for your machine and run it:</li>
+<li>Open the config file Continue is actually using. In the Continue
+panel, click the agent/assistant selector above the chat box (it may read
+<em>Local Assistant</em> or <em>Local Config</em>), hover the one that is
+selected, and click the <strong>gear</strong> icon next to it. The file
+opens in VS Code. (Or: Continue&rsquo;s settings &rarr; <em>Configs</em>
+&rarr; the gear labelled &ldquo;Open configuration&rdquo;.) Labels vary a
+little between Continue versions.</li>
+<li>Find the line <code>models:</code> in that file and paste the block
+below <strong>underneath it, as more items in the list</strong>, keeping
+whatever models are already there. Do <strong>not</strong> select-all and
+paste over the file. If there is no <code>models:</code> line, paste the
+whole block, including its first line <code>models:</code>, at the end of
+the file, and if the file lists models as <code>models: []</code>, delete
+the <code>[]</code> first. Keep the indentation exactly as shown.</li>
+<li>Save, then fully quit and reopen VS Code.</li>
 </ol>
+{block_note}
+<pre id="cfg-block">{block_html}</pre>
+{copy_button}
+<p>Already added an earlier &ldquo;UA MIS Local&rdquo; block, or Continue
+shows a config error? Delete the old <code>UA MIS Local (...)</code> entries
+first, so you do not end up with two sets. (An earlier version of this page
+used a role called <code>agent</code>, which Continue rejects.)</p>
+<p>Full details and troubleshooting: <a href="{ONBOARDING_URL}">the onboarding README</a>.</p>
+
+<details>
+<summary>Optional: use a setup script instead (macOS / Linux)</summary>
+<p>The script makes the same edit for you. On Windows this is
+<strong>not recommended</strong>: PowerShell blocks downloaded scripts by
+default, so use the steps above instead.</p>
 {_setup_download_links()}
-{script_note}
-<p>Prefer to do it by hand, or the script stopped and told you to? Install
-Continue as above. Then, in VS Code, open the Continue panel, click the
-config name at the top (it may say <em>Local Assistant</em>), and click the
-gear next to it &mdash; that opens the config file Continue is really
-using (normally <code>~/.continue/config.yaml</code>; on Windows,
-<code>%USERPROFILE%\\.continue\\config.yaml</code>). Put this in it, replacing
-&lt;your key&gt; with the key {"shown below" if active else "this page will show once your key is activated"}.
-Full instructions: <a href="{ONBOARDING_URL}">the onboarding README</a>.</p>
-<pre>{_manual_config_block()}</pre>
+<p>Download with this page open in your browser (a command-line download
+gets a sign-in page, not the script), then run it: <code>bash
+~/Downloads/setup-macos-linux.sh</code>.</p>
+</details>
 
 <h2>What to expect</h2>
 <p>This one machine serves the whole MIS program -- it is not a
@@ -2160,7 +2180,7 @@ _PAGE_HEAD = """<meta charset="utf-8">
 
 
 def render_page(email: str, key: str, active: bool, config: Config) -> str:
-    intro = render_intro(email, config, active)
+    intro = render_intro(email, config, active, key if active else None)
     head = _PAGE_HEAD.format(style=_STYLE)
     if not active:
         return f"""<!doctype html>
@@ -2173,32 +2193,25 @@ def render_page(email: str, key: str, active: bool, config: Config) -> str:
 <p>You do not need to do anything else right now, and you do not need to
 regenerate anything. The key you already have is the one that will work
 -- nothing about it changes when you're added.</p>
-<p><strong>You can run the setup script above right now</strong>, before
-you're activated. It already has your key in it. It will set VS Code up
-correctly and then finish by telling you the key isn't active yet --
-that's this same message, not a second problem. Once you're added to a
-team it starts working on its own: no re-running the script, no new key,
-nothing to come back here for.</p>
+<p>When you're added to a team, reload this page: the config block above
+will then have your key in it, ready to copy and paste. (The macOS/Linux
+setup script, if you use it, already has your key in it and can be run now;
+it will finish by telling you the key isn't active yet &mdash; that's this
+same message, not a second problem.)</p>
 </div>
 </body></html>"""
-    # 2026-09-30: reuses _manual_config_block() itself, with the
-    # visitor's real key, instead of maintaining a second, separately
-    # hand-kept-in-sync template -- that second copy is exactly how
-    # this route drifted out of sync with the onboarding scripts'
-    # three-entry redesign in the first place (0c4a93f touched
-    # onboarding/ only; this file's OWN copy was never updated because
-    # nothing forced the two to match). One function, two callers.
-    config_snippet = _manual_config_block(key)
+    # The config block (with this visitor's real key) is rendered inside
+    # render_intro() from _manual_config_block() -- one function, so the
+    # page cannot carry a second, drifting copy. This section only shows
+    # the key itself.
     return f"""<!doctype html>
 <html><head>{head}</head>
 <body>
 {intro}
 <h2>Your key</h2>
 <p>Your LiteLLM key:</p>
-<pre id="key">{key}</pre>
+<pre id="key">{escape(key)}</pre>
 <button type="button" onclick="navigator.clipboard.writeText(document.getElementById('key').textContent)">Copy key</button>
-<p>Paste this into <code>~/.continue/config.yaml</code>:</p>
-<pre>{config_snippet}</pre>
 <form method="post" action="/regenerate">
 <button type="submit">Regenerate key (invalidates the one above)</button>
 </form>
