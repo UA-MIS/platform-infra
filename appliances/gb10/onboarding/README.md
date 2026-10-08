@@ -9,12 +9,15 @@ You need: VS Code, the **Continue** extension (Extensions panel → search
 <https://local-llm-keys.uamishub.com>. The portal issues your key the first
 time you visit it — there is nobody to ask and nothing to request.
 
-> **Used the old setup script, or an older version of this page?**
-> Delete **every** existing `UA MIS Local (...)` entry from your config
-> first, then paste the current block. An earlier version used a role called
-> `agent`, which Continue rejects — your config then fails to load (you may
-> see a config error in the Continue panel). Pasting the current block over
-> the old entries fixes it. The setup scripts have been retired.
+> **Already pasted a block, or used the old setup script?**
+> Delete **every** existing entry named `UA MIS Local (Chat)`,
+> `UA MIS Local (Agent)` or `UA MIS Local (Edit)` (anything starting
+> `UA MIS Local`) from your config first, then paste the current block. The
+> current block is just two entries, `UA MIS Local` and `UA MIS Local (Edit)`;
+> leftovers would give you a duplicate chat model in the picker. An earlier
+> version also used a role called `agent`, which Continue rejects — your config
+> then fails to load (you may see a config error in the Continue panel).
+> The setup scripts have been retired.
 
 ## Steps
 
@@ -41,14 +44,14 @@ time you visit it — there is nobody to ask and nothing to request.
      models:
      - name: My Old Model
        provider: anthropic
-       - name: UA MIS Local (Chat)
+       - name: UA MIS Local
          provider: openai
 
      # RIGHT (same column)
      models:
      - name: My Old Model
        provider: anthropic
-     - name: UA MIS Local (Chat)
+     - name: UA MIS Local
        provider: openai
      ```
 
@@ -56,9 +59,8 @@ time you visit it — there is nobody to ask and nothing to request.
    - No `models:` line at all? Add `models:` on its own line first.
    - `models: []`? Change it to just `models:`.
 4. Save, then **fully quit and reopen VS Code** (not just reload the window).
-5. Open the Continue panel. "UA MIS Local (Chat)" and "UA MIS Local (Agent)"
-   are in the chat model picker — pick **(Chat)** for questions and
-   **(Agent)** when you switch the panel to Agent mode. "(Edit)" is used for
+5. Open the Continue panel. **"UA MIS Local"** is the model to pick, in both
+   Chat mode and Agent mode. "UA MIS Local (Edit)" is used automatically for
    inline edits.
 
 Because the gear opens the file Continue itself loads, there is no question of
@@ -73,26 +75,20 @@ again — it migrates you to the YAML format.
 ## What the block is
 
 ```yaml
-- name: UA MIS Local (Chat)
+- name: UA MIS Local (Edit)
   provider: openai            # the OpenAI-compatible API protocol, not OpenAI
   model: qwen3.8-27b
   apiBase: https://local-llm.uamishub.com/v1
   apiKey: '<your key>'
-  roles: [chat]
+  roles: [edit, apply]
   defaultCompletionOptions:
-    maxTokens: 4000
+    maxTokens: 400
   requestOptions:
     extraBodyProperties:
       chat_template_kwargs:
         enable_thinking: false
 
-- name: UA MIS Local (Edit)
-  ...
-  roles: [edit, apply]
-  defaultCompletionOptions:
-    maxTokens: 400
-
-- name: UA MIS Local (Agent)
+- name: UA MIS Local
   ...
   roles: [chat]
   capabilities:
@@ -104,14 +100,19 @@ again — it migrates you to the YAML format.
 (`...` stands for the same provider/model/apiBase/apiKey/requestOptions lines;
 copy the real block from the portal rather than from here.)
 
-- **Three entries for one model, on purpose.** Continue sets response-length
-  limits per whole model entry, not per role, so chat, edit/apply and agent
-  work each get their own entry with a limit sized for the job.
+- **Two entries for one model, on purpose.** Continue sets response-length
+  limits per whole model entry, not per role, so edit/apply (small and fast:
+  400 tokens) needs its own entry apart from chat (8000).
+- **One chat entry serves Chat and Agent mode.** Continue attaches tools per
+  *mode*, not per model: Chat mode sends no tools, Agent mode all of them. So
+  `capabilities: [tool_use]` costs nothing in Chat mode and just makes the model
+  usable in Agent mode. There used to be a separate "UA MIS Local (Chat)" entry;
+  it was strictly a subset of this one and only added a pointless extra choice
+  to the picker, so it was removed. Please do not add it back.
 - **Agent mode is not a role.** `agent` is not a valid value for `roles:` — a
-  config that says `roles: [agent]` is rejected. Continue turns Agent mode on
-  for a *chat* model that declares `capabilities: [tool_use]`, which is what the
-  third entry does (this server supports tool calling).
-- **Thinking is off** (`enable_thinking: false`) on all three: a measured
+  config that says `roles: [agent]` is rejected. Agent mode comes from a *chat*
+  model declaring `capabilities: [tool_use]` (this server supports tool calling).
+- **Thinking is off** (`enable_thinking: false`) on both: a measured
   single-turn comparison found no quality difference worth the wait.
 - **No `autocomplete` role** on purpose: GitHub Copilot Free already does inline
   completion, and this shared GPU should not answer every keystroke.
@@ -134,13 +135,14 @@ your key, it starts working on its own — nothing to redo.)
 Almost always VS Code needs a **full restart** (quit every window and reopen);
 Continue reads its config on startup. If it still does not show up, open the
 config via the gear (step 2) and check that the file is valid YAML (consistent
-indentation, no tabs), that all three `UA MIS Local (...)` entries are inside
+indentation, no tabs), that both `UA MIS Local` entries are inside
 the `models:` list, and that you edited the file the **gear** opened.
 
 ### Continue shows a config error
 
 Most often an old `UA MIS Local (Agent)` entry with `roles: [agent]`. Delete
-every `UA MIS Local (...)` entry and paste the current block.
+every entry starting `UA MIS Local` (`UA MIS Local (Chat)`, `UA MIS Local (Agent)`,
+`UA MIS Local (Edit)`) and paste the current block.
 
 ### Sanity-check your key
 
