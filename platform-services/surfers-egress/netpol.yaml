@@ -1,0 +1,100 @@
+# ============================================================================
+# surfers — egress to ONE external Railway Postgres (tokaido.proxy.rlwy.net:11553).
+# ============================================================================
+# ⚠ THIS IS THE PLATFORM'S FIRST NON-443 EGRESS RULE. Every other tenant egress
+# hole is HTTPS :443 only (the Composition's allow-egress-external-https-default,
+# ida-llm-egress, the ARC runners). This is a PRECEDENT, not routine. Do not copy
+# it for the next tenant without reading why it exists and what it costs.
+#
+# WHAT / WHY. surfers-staging and surfers-prod set UA_DATABASE_URL to a Railway
+# Postgres. Without this rule the connection times out and POST /api/chat 500s
+# with `relation "ua.terms" does not exist` (the app falls back to its own
+# database, which has no `ua` schema). Owner-approved. The Composition opens :443
+# only, deliberately, with no per-tenant port list — hence a platform-project
+# policy here rather than a claim field.
+#
+# SCOPE (do not widen): surfers-staging + surfers-prod ONLY (surfers-dev has a
+# local `ua` schema and needs nothing); TCP 11553 ONLY; the single address
+# 66.33.22.222/32 ONLY. No 0.0.0.0/0, no port range, no except-list (a /32 has
+# nothing to subtract).
+#
+# HOW IT COMPOSES. NetworkPolicy allow-rules are a UNION. The Composition owns
+# default-deny-all, allow-ingress-traefik-and-intra-ns,
+# allow-egress-dns-and-intra-ns and allow-egress-external-https-default; this
+# adds one more egress-only allow. The object name is deliberately DISTINCT
+# (`allow-egress-railway-ua-db`) from every Composition-rendered name so ArgoCD
+# and Crossplane never own the same object (the 2026-07-09 apply-fight). Net
+# effect for a pod in these namespaces: DNS + intra-namespace + db-tier + public
+# :443 (as before) PLUS TCP 11553 to 66.33.22.222 — nothing else.
+#
+# ⚠ FAILURE MODE — READ THIS FIRST WHEN PROD BREAKS. An ipBlock pins an IP
+# ADDRESS, not a hostname. tokaido.proxy.rlwy.net is a Railway TCP proxy name; if
+# Railway re-points it, this rule silently stops matching and prod fails with the
+# same opaque timeout. NOTHING WILL TELL YOU: no policy error, nothing
+# OutOfSync, nothing red in ArgoCD. The only symptom is the app's:
+#   POST /api/chat -> 500, `relation "ua.terms" does not exist`
+# One-line check (run from anywhere; compare against the CIDR below):
+#   getent ahostsv4 tokaido.proxy.rlwy.net
+# If the address differs from 66.33.22.222, update BOTH cidr fields in this file.
+# Resolved 2026-10-15 22:07 UTC -> 66.33.22.222 (three consecutive lookups by the
+# requester earlier the same day agreed). That is a single point-in-time
+# observation, not a Railway guarantee of stability.
+#
+# ALTERNATIVES CONSIDERED AND REJECTED — do not redo this analysis:
+#   1. Load the 232 MB `ua` schema into the tenant's own Postgres (what
+#      surfers-dev already does). Removes the external dependency, the IP-drift
+#      risk and this precedent entirely. Owner chose to keep Railway. If the
+#      drift failure above ever bites, THIS is the recommended exit.
+#   2. Cilium `toFQDNs` (CiliumNetworkPolicy). Survives IP rotation because it
+#      follows DNS. Not used: ZERO policies on this platform use toFQDNs (10
+#      CiliumNetworkPolicies exist, none FQDN-based), and it needs DNS-proxy
+#      visibility to be configured and proven. Not something to introduce
+#      during an unblock. It is the right FUTURE option if this rule must stay.
+#
+# SECURITY NOTE. Any pod in these two namespaces (not just the app's) can open a
+# TCP connection to that address:port; there is no pod selector because every
+# other egress policy here is namespace-wide too. The credential is the real gate.
+# ============================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-railway-ua-db
+  namespace: surfers-staging
+  labels:
+    platform.capstone/team: surfers
+    platform.capstone/semester: "2026-fall"
+    platform.capstone/env: staging
+    platform.capstone/component: tenant
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 66.33.22.222/32   # tokaido.proxy.rlwy.net — see header re: rotation
+      ports:
+        - protocol: TCP
+          port: 11553
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-railway-ua-db
+  namespace: surfers-prod
+  labels:
+    platform.capstone/team: surfers
+    platform.capstone/semester: "2026-fall"
+    platform.capstone/env: prod
+    platform.capstone/component: tenant
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 66.33.22.222/32   # tokaido.proxy.rlwy.net — see header re: rotation
+      ports:
+        - protocol: TCP
+          port: 11553

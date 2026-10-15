@@ -1,0 +1,27 @@
+# surfers scoped egress to a Railway Postgres — rendered by the platform-services
+# directory generator (applicationsets/platform-services-appset.yaml) into
+# Application `platform-svc-surfers-egress`, project `platform`. The generator
+# globs platform-services/*, so this directory IS the registration; no appset
+# edit is needed.
+#
+# The appset template's destination namespace is kube-system, but every resource
+# here declares its OWN metadata.namespace (surfers-staging, surfers-prod) and the
+# platform AppProject permits namespace '*', so they land correctly.
+#
+# Modelled on ida-llm-egress (Synced/Healthy). Do NOT use crimson-copies-egress
+# as a model: its Application has been OutOfSync/Missing since 2026-09-03.
+#
+# ORDERING: the namespaces are created by the CapstoneTenant Composition (claim
+# tenants/_claims/surfers-surfer.yaml), not here. On a from-scratch apply this
+# Application may briefly fail to sync ("namespace not found") until Crossplane
+# reconciles the claim; the appset's retry + selfHeal settles it.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - netpol.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: tenant
+    includeSelectors: false
