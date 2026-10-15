@@ -1,0 +1,20 @@
+# Container-tenant claim for the Crimson Copies VM -> Kubernetes migration (PR 4 of the guide).
+# This is a SECOND claim, separate from tenants/_vm-claims/ss-evan-and-emily-ss-evan-and-emily.yaml,
+# which is the VM's inert ledger marker and is NOT changed by this PR.
+apiVersion: platform.capstone.uamishub.com/v1alpha1
+kind: CapstoneTenant
+metadata:
+  name: ss-evan-and-emily-ss-evan-and-emily
+  labels:
+    platform.capstone/team: "ss-evan-and-emily"
+    platform.capstone/semester: "2026-fall"
+    platform.capstone/component: tenant
+spec:
+  team: "ss-evan-and-emily"
+  appName: "ss-evan-and-emily"
+  semester: "2026-fall"
+  githubTeam: "ss-evan-and-emily"
+  port: 8080
+  previewEnabled: false
+  domain: "capstone.uamishub.com"
+  database: "mysql"
