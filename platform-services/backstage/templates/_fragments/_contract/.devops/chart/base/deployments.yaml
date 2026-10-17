@@ -161,6 +161,18 @@ spec:
               done
               echo "[migrate] FAILED after 3 attempts - the app container will NOT start."
               exit 1
+{%- if c.kind == 'backend' %}
+          # Same whole-Secret mapping as the app container (see the long note there). The
+          # comment below already says the migrator "needs the same DSN and the same app
+          # secret (a framework may read it while booting its config)" — that reasoning covers
+          # the team's OWN sealed keys too. A Django `manage.py migrate` boots the settings
+          # module, so a sealed SECRET_KEY / DJANGO_SECRET_KEY has to be present here, not just
+          # in the app container.
+          envFrom:
+            - secretRef:
+                name: ${{ values.appName }}-secret
+                optional: true
+{%- endif %}
           env:
             # MIRRORS the app container's env below. The migrator needs the same DSN and the
             # same app secret (a framework may read it while booting its config).
@@ -221,6 +233,38 @@ spec:
           ports:
             - name: http
               containerPort: ${{ c.port }}
+{%- if c.kind == 'backend' %}
+          # EVERY key a team adds in The Process "Secrets" tab reaches this container
+          # automatically, as an env var of the same name. Nothing in the tenant's chart has
+          # to change when they add one — which is the entire point of mapping the Secret
+          # with envFrom instead of listing keys by name.
+          #
+          # WHY THIS EXISTS (incident, 2026-10, tenant `surfers`): the chart used to map
+          # ONLY the explicit `env` entries below. A team sealed 8 keys; all 8 reached Vault
+          # and all 8 reached the Kubernetes Secret (the ExternalSecret uses dataFrom/extract
+          # precisely so it needs no per-key edit) — and then stopped, because the Deployment
+          # named only APP_SECRET. Their app's two main endpoints 500'd on an empty API key
+          # while the pods stayed Ready and /healthz stayed green. The ExternalSecret half of
+          # this bug class was fixed earlier; this is the other half, one layer down.
+          #
+          # SCOPE: `c.kind == 'backend'` only (CATEGORY_KIND maps backend/fullstack/mobile/
+          # blank -> 'backend', frontend/static -> 'frontend'). A frontend/static component is
+          # deliberately EXCLUDED: it would otherwise receive every API key and admin token in
+          # the tenant's Secret for no benefit. Single-component web apps (fullstack, blank)
+          # are kind 'backend', so they are covered. Same guard idiom as the DATABASE_URL
+          # gating in the react-express skeleton.
+          #
+          # ADDITIVE ONLY: the explicit `env` entries below are intentionally left in place, so
+          # no already-deployed tenant loses an env var it has today. Where a name appears in
+          # both, the explicit entry wins (see the DATABASE_URL note below).
+          #
+          # optional: true preserves M4 zero-config: a fresh repo with nothing in Vault (hence
+          # no `<appName>-secret` Secret at all) still starts.
+          envFrom:
+            - secretRef:
+                name: ${{ values.appName }}-secret
+                optional: true
+{%- endif %}
           env:
             # Container port — single source is this component's `port` in components.yaml.
             - name: PORT
@@ -245,6 +289,15 @@ spec:
             # Either way optional:true so a fresh repo with nothing in Vault still starts (the
             # backend degrades to a clear "DATABASE_URL not set" error on the data routes,
             # /healthz stays green — M4 zero-config). NEVER commit creds to git. This env is
+            #
+            # PRECEDENCE — this explicit entry deliberately OVERRIDES the envFrom above. In
+            # auto-DB mode the DSN must come from `<appName>-db`, but a team can also type a
+            # DATABASE_URL into the Secrets tab, which puts that name in `<appName>-secret`
+            # too. The Kubernetes API contract for envFrom resolves this: "Values defined by
+            # an Env with a duplicate key will take precedence." So the provisioned DSN wins
+            # and the Secrets-tab copy is ignored. This is not theoretical — tenant `surfers`
+            # has a localhost dev DSN sitting in that key, and dropping this entry in favour
+            # of envFrom would have pointed the app at its own pod.
             # rendered ONLY for components that declare needsDb: true.
             - name: DATABASE_URL
               valueFrom:
