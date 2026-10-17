@@ -96,6 +96,10 @@ REQUIRED = [
     "platform-services/backstage/templates/vm-app/skeleton-vm/.github/workflows/build-and-push.yaml",
     # The portal's own image build.
     ".github/workflows/backstage-process-build-push.yaml",
+    # Platform guards whose own `run:` shell decides pass/fail. A shell-parse error in
+    # one of these does not break a build — it breaks a CHECK, which fails in the
+    # direction that looks like "nothing is wrong".
+    ".github/workflows/tenant-onboarding-reconcile.yaml",
 ]
 
 EXPR = re.compile(r"\$\{\{[^}]*\}\}")
