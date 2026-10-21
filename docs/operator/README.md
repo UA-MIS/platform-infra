@@ -76,6 +76,12 @@ The kubeconfig, talosconfig, the **age private key** (`~/.config/sops/age/keys.t
 and the Talos secrets (`talsecret.sops.yaml` / `talenv.sops.yaml`, **not in git**) all
 belong in the **handoff vault** — see [OPERATIONS §5](../OPERATIONS-AND-HANDOFF.md#5-continuance).
 
+> **Kubernetes access is also available identity-based**, via the Tailscale
+> operator's API-server proxy: `tailscale configure kubeconfig capstone-apiserver`
+> gets a `labmx`-team maintainer cluster-admin with no kubeconfig file to copy or
+> revoke — the cert-based `talos-kubeconfig` above remains the break-glass fallback
+> for when the cluster itself is down. → **[tailscale-operator-access.md](tailscale-operator-access.md)**.
+
 > Workstation shell is **fish**: `export VAR=value` silently fails — use `set -x VAR value`.
 
 ---
@@ -221,6 +227,7 @@ These are **live-verified** weak spots a successor should close:
 | [in-cluster-db-tier-runbook.md](in-cluster-db-tier-runbook.md) | The in-cluster CNPG/MariaDB tier — Vault wiring + the pg_dump/mysqldump cutover from `ua-mis-db-1` and the bundled per-app subcharts |
 | [vm-path-harbor-provisioner.md](vm-path-harbor-provisioner.md) | KubeVirt VM scaffolder wiring |
 | [vm-ssh-cloudflare-access.md](vm-ssh-cloudflare-access.md) | VM tenant SSH via Cloudflare Tunnel — per-tenant dashboard checklist + connect commands |
+| [tailscale-operator-access.md](tailscale-operator-access.md) | Kubernetes access via the Tailscale operator's API-server proxy (auth mode) — revocable, identity-based cluster-admin ahead of handoff; the break-glass cert fallback |
 | [multi-cluster.md](multi-cluster.md) | Multi-cluster scaffolding (ApplicationSet cluster generator, inert until a 2nd cluster is registered) |
 | [platform-services/lab-hosting/README.md](https://github.com/UA-MIS/platform-infra/blob/main/platform-services/lab-hosting/README.md) | Lab-hosting layer (slidedeck's `hosted` labs) — public per-student apps at `<lab-slug>-<username>.uamishub.com`, separate/lighter than the tenant model |
 | [gotchas-and-lessons.md](gotchas-and-lessons.md) | Process-layer war stories |

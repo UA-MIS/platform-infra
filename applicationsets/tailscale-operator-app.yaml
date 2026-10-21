@@ -1,0 +1,83 @@
+# Tailscale Kubernetes operator (identity-based cluster access, ahead of the
+# graduating-owner handoff — docs/operator/tailscale-operator-access.md). Client
+# certs have no CRL (only CA rotation revokes them), so every copied kubeconfig
+# handed to a maintainer is permanent access; this operator's API-server proxy
+# in AUTH mode (platform-services/tailscale-operator/proxygroup.yaml) makes
+# cluster-admin a function of tailnet + GitHub-team membership instead —
+# add/remove from the `labmx` team and access starts/stops immediately, no
+# kubeconfig to hand over or claw back.
+#
+# Helm-source Application, deploy method A (D-022/D-028, same pattern as Harbor/
+# ARC/Traefik/...): pinned chart + the chart repo added to the `platform`
+# AppProject sourceRepos allowlist (bootstrap/platform-appproject.yaml in this
+# PR — ⚠ INSTALL-OWNED, reaches the live AppProject only via `make bootstrap`/
+# `make bootstrap-reapply`).
+#
+# Chart: tailscale-operator 1.102.4 (pinned). Verified by `helm template` that
+# this chart installs its own tailscale.com/v1alpha1 CRDs (ProxyGroup,
+# Connector, DNSConfig, ...) via Helm's special `crds/` chart directory — no
+# separate CRD Application is needed (unlike e.g. spire-crds/spire, which ARE
+# split because the spire chart does not bundle its CRDs).
+#
+# `oauth` is deliberately left EMPTY here: setting `oauth.clientId`/`clientSecret`
+# would put the Tailscale OAuth client secret in git. Leaving it unset makes the
+# chart's own oauth-secret.yaml template a no-op, and the operator Deployment
+# falls back to reading a pre-existing Secret named `operator-oauth` (hardcoded
+# name in the chart, not derived from releaseName) — that Secret is produced by
+# an ExternalSecret from Vault instead
+# (platform-services/tailscale-operator/externalsecret-oauth.yaml). Until an
+# operator creates the OAuth client + seeds Vault (both documented in
+# docs/operator/tailscale-operator-access.md), the operator pod sits
+# ContainerCreating on the missing volume — not a CrashLoop, not a danger, and
+# not blocking anything else in the cluster.
+#
+# `apiServerProxyConfig.allowImpersonation: "true"` is the ONE values-level
+# switch AUTH mode needs from this chart (confirmed against the chart's own
+# apiserverproxy-rbac.yaml template): it grants the impersonation ClusterRole
+# (impersonate on users/groups) to the ProxyGroup's `kube-apiserver-auth-proxy`
+# ServiceAccount. The ProxyGroup CR itself
+# (platform-services/tailscale-operator/proxygroup.yaml) is what actually turns
+# the proxy on in `mode: auth` — this Helm release only installs the operator
+# that watches for it.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-tailscale-operator
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://pkgs.tailscale.com/helmcharts   # PINNED chart repo (sourceRepos allowlist)
+    chart: tailscale-operator
+    targetRevision: 1.102.4                           # pinned chart version; no ^/~/latest
+    helm:
+      releaseName: operator   # chart default; the oauth Secret name (operator-oauth) is hardcoded to this regardless
+      values: |
+        # Single small cluster (3 CP + Debian workers) — one operator replica is
+        # fine; it is not on the API-server proxy's own data path (the ProxyGroup
+        # Deployment is what actually serves proxied kubectl traffic, and that
+        # runs its own replicas — see proxygroup.yaml).
+        replicaCount: 1
+
+        # Do NOT set oauth.clientId/clientSecret here — see the file header.
+        oauth: {}
+
+        apiServerProxyConfig:
+          allowImpersonation: "true"   # grants the proxy ServiceAccount impersonate RBAC (auth mode requirement)
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: tailscale
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true   # dedicated `tailscale` namespace; no companion namespace.yaml elsewhere
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }

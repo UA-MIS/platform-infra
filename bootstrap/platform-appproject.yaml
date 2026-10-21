@@ -231,6 +231,15 @@ spec:
     # VERIFY (the AppProject is bootstrap-managed, not GitOps-reconciled) or
     # platform-descheduler will InvalidSpecError "repo not permitted".
     - https://kubernetes-sigs.github.io/descheduler/       # Descheduler (platform-descheduler Application)
+    # Tailscale Kubernetes operator (identity-based cluster access, replacing
+    # copied-kubeconfig access ahead of the graduating-owner handoff): the
+    # official Tailscale Helm chart repo. ONE named source, chart version pinned
+    # in the Application (tailscale-operator @ 1.102.4). ⚠ INSTALL-OWNED (same as
+    # every add above): reaches the live `platform` AppProject only via `make
+    # bootstrap`/`make bootstrap-reapply` + VERIFY (the AppProject is
+    # bootstrap-managed, not GitOps-reconciled) or platform-tailscale-operator
+    # will InvalidSpecError "repo not permitted".
+    - https://pkgs.tailscale.com/helmcharts                 # Tailscale operator (platform-tailscale-operator Application)
     # Reloader (FIX-9/D-065, env-injection race, applicationsets/reloader-app.yaml): the
     # official stakater Helm chart repo. ONE named source, chart version pinned in the
     # Application (reloader @ 2.2.16). Watches tenant Secrets and rolls the annotated
