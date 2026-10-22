@@ -80,7 +80,8 @@ data:
       # THIS is the pod whose CPU is bounded only by the namespace LimitRange default
       # limit (arc-runners-defaults, now 8 cores; this template deliberately sets NO CPU
       # of its own so the LimitRange stays the single control point; memory is limited
-      # explicitly, see resources below), so it is the highest-risk pod for an automatic control-plane fallback: n1-n3
+      # explicitly, see resources below), so it is the highest-risk pod for an
+      # automatic control-plane fallback: n1-n3
       # run etcd, and Talos control-plane nodes have exactly ONE writable partition (`/var`)
       # — the SAME partition/disk the CI work volume uses
       # (platform-services/local-path-provisioner/configmap.yaml: /dev/nvme0n1p4 on n1).
@@ -143,10 +144,10 @@ data:
               # bounded only by the arc-runners-defaults LimitRange default limit (8
               # cores; this template deliberately sets no CPU so the LimitRange stays
               # the single control point; memory is limited explicitly, see resources
-              # below) — heavy, high-CPU build I/O landing on etcd's disk risks destabilizing the
-              # CONTROL PLANE, not just slowing a build. n2 is also a known thermal
-              # outlier (~88-91C, pending a repaste). A loud queue when no vetted node
-              # is free is the safer failure than a silent etcd-latency risk. An
+              # below) — heavy, high-CPU build I/O landing on etcd's disk risks
+              # destabilizing the CONTROL PLANE, not just slowing a build. n2 is also a
+              # known thermal outlier (~88-91C, pending a repaste). A loud queue when no
+              # vetted node is free is the safer failure than a silent etcd-latency risk. An
               # operator who judges a genuine emergency justifies the risk anyway can
               # apply this label to a control-plane node themselves — an explicit,
               # in-the-moment decision, never an automatic fallback.
