@@ -30,7 +30,7 @@
 #     already-tuned `$job` memory limit (platform-services/arc/hook-template.yaml —
 #     6Gi previously OOM-killed a real node_modules build, PR #329/#334), so a
 #     tenant build gets the SAME ceiling a ua-mis build already relies on instead of
-#     a fresh, unvalidated number. 4 CPU gives Kaniko's compress/snapshot phase
+#     a fresh, unvalidated number. (CPU since raised to 8 — see the value below.) Originally 4 CPU gave Kaniko's compress/snapshot phase
 #     headroom without letting one build pod claim a whole node (16 vCPU on the
 #     smallest node) uncontested.
 #
@@ -53,5 +53,9 @@ spec:
         cpu: "500m"
         memory: "1Gi"
       default:
-        cpu: "4"
+        # 8 CPU (raised from 4, 2026-10-22: builds were CPU-throttled, ida-llm Kaniko ~99% of
+        # limit): workers are 16-core, builds are confined to w1/w2, CPU limits already
+        # oversubscribe safely (compressible), and requests stay 500m so the 20-core
+        # requests quota is untouched. Applies at admission only: running pods keep 4.
+        cpu: "8"
         memory: "8Gi"

@@ -77,12 +77,14 @@ data:
       # small for a 4Gi/8Gi build).
       #
       # ── NO AUTOMATIC control-plane fallback (revised 2026-09-09, after review) ──
-      # THIS is the pod whose CPU is UNBOUNDED (only memory is limited, see resources
-      # below), so it is the highest-risk pod for an automatic control-plane fallback: n1-n3
+      # THIS is the pod whose CPU is bounded only by the namespace LimitRange default
+      # limit (arc-runners-defaults, now 8 cores; this template deliberately sets NO CPU
+      # of its own so the LimitRange stays the single control point; memory is limited
+      # explicitly, see resources below), so it is the highest-risk pod for an automatic control-plane fallback: n1-n3
       # run etcd, and Talos control-plane nodes have exactly ONE writable partition (`/var`)
       # — the SAME partition/disk the CI work volume uses
       # (platform-services/local-path-provisioner/configmap.yaml: /dev/nvme0n1p4 on n1).
-      # Unbounded-CPU build I/O sharing a disk with etcd's fsync-sensitive writes risks
+      # High-CPU build I/O sharing a disk with etcd's fsync-sensitive writes risks
       # destabilizing the control plane, not just slowing a build — and n2 is a known
       # thermal outlier (~88-91C, pending a repaste). A loud GitHub Actions queue beats a
       # silent etcd-latency risk. Full rationale: applicationsets/arc-runner-scaleset-app.yaml.
@@ -138,8 +140,10 @@ data:
               # AUTOMATIC candidate set: n1-n3 run etcd off the SAME writable /var
               # partition the CI work volume uses (local-path-provisioner/
               # configmap.yaml — /dev/nvme0n1p4 on n1), and this container's CPU is
-              # UNBOUNDED (only memory is limited, see resources below) — heavy,
-              # unbounded-CPU build I/O landing on etcd's disk risks destabilizing the
+              # bounded only by the arc-runners-defaults LimitRange default limit (8
+              # cores; this template deliberately sets no CPU so the LimitRange stays
+              # the single control point; memory is limited explicitly, see resources
+              # below) — heavy, high-CPU build I/O landing on etcd's disk risks destabilizing the
               # CONTROL PLANE, not just slowing a build. n2 is also a known thermal
               # outlier (~88-91C, pending a repaste). A loud queue when no vetted node
               # is free is the safer failure than a silent etcd-latency risk. An
