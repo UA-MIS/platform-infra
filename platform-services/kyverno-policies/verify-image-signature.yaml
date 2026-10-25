@@ -52,6 +52,17 @@
 # Kyverno requires to be false whenever failureAction is Audit) until tenant
 # images adopt cosign signing; flip both back to Enforce/true together once
 # they do.
+#
+# SEC-043: registry credential. Without imageRegistryCredentials, Kyverno hits
+# every Harbor project ANONYMOUSLY to fetch the manifest/signature and gets
+# `401 UNAUTHORIZED` — recorded in the PolicyReport as a verification failure
+# indistinguishable from "genuinely unsigned", which is useless noise for
+# deciding when Enforce is realistic. `harbor-kyverno-verify` (kyverno ns) is a
+# Harbor SYSTEM-level, PULL-ONLY robot (namespace "*" — every project, no push
+# anywhere — least privilege for a verifier that only ever reads) delivered via
+# Vault+ESO (platform-services/kyverno/externalsecret-harbor-verify.yaml), never
+# in git. Plain secret name = Kyverno's "look in my own namespace" default, no
+# cross-namespace RBAC needed.
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
@@ -100,6 +111,9 @@ spec:
           # (+ mutateDigest: true) once tenant images are signed.
           failureAction: Audit
           mutateDigest: false
+          imageRegistryCredentials:
+            secrets:
+              - harbor-kyverno-verify
           attestors:
             - entries:
                 - keyless:
