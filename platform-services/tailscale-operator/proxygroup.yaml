@@ -1,0 +1,39 @@
+# ProxyGroup — turns on the Kubernetes API-server proxy in AUTH mode (identity-
+# based access over the tailnet, replacing copied-kubeconfig client-cert access).
+# Docs: https://tailscale.com/docs/kubernetes-operator/api-server-access/setup-api-over-tailscale
+#
+# `type: kube-apiserver` + `kubeAPIServer.mode: auth` is the current (ProxyGroup
+# CRD) shape for this feature — it supersedes the older single-replica
+# `apiServerProxyConfig.mode=true` Helm-values toggle, which is legacy/noauth-only
+# and is NOT set in applicationsets/tailscale-operator-app.yaml.
+#
+# AUTH mode (vs. the default noauth mode) means the proxy impersonates the
+# CALLER's tailnet identity on every request (Impersonate-User /
+# Impersonate-Group headers) instead of always presenting the operator's own
+# ServiceAccount — this is the entire point: `kubectl auth whoami` through this
+# proxy returns the person, not `admin`, and access maps 1:1 onto tailnet/ACL
+# membership (docs/operator/tailscale-operator-access.md).
+#
+# `replicas: 2` for availability — this proxy is now the primary access path for
+# day-to-day kubectl; losing the sole replica while a maintainer is mid-incident
+# would be a bad time to also lose access. It does NOT touch the API server
+# itself (no control-plane config, no restart of tenant workloads) — it is an
+# ordinary in-cluster Deployment terminating an ordinary tailnet Service.
+#
+# The `tailscale.com/v1alpha1` CRDs this depends on come from the Helm chart
+# itself (applicationsets/tailscale-operator-app.yaml, chart version 1.102.4 —
+# ships its own crds/, verified by rendering it), which syncs at wave 0. This
+# object carries an explicit wave "1" so it never races that CRD registration.
+apiVersion: tailscale.com/v1alpha1
+kind: ProxyGroup
+metadata:
+  name: capstone-apiserver
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    platform.capstone/component: platform
+spec:
+  type: kube-apiserver
+  replicas: 2
+  kubeAPIServer:
+    mode: auth

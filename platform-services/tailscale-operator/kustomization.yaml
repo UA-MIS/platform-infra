@@ -1,0 +1,37 @@
+# Tailscale Kubernetes operator — cluster-side wiring for the API-server proxy
+# in AUTH mode (docs/operator/tailscale-operator-access.md). Rendered by the
+# dedicated applicationsets/tailscale-operator-resources-app.yaml (sync-wave 1 —
+# after the Helm operator app, applicationsets/tailscale-operator-app.yaml,
+# creates the `tailscale` namespace AND the tailscale.com/v1alpha1 CRDs, at wave
+# 0). Excluded from the generic platform-services-appset glob for exactly that
+# reason (see the exclude entry there) — do not let the glob also pick up this
+# directory.
+#
+# NOTE: the tailscale-operator CRDs (ProxyGroup, Connector, DNSConfig, ...) are
+# NOT vendored here. The published Helm chart installs them itself via Helm's
+# special `crds/` chart directory (verified by rendering the chart: `helm
+# template tailscale/tailscale-operator --version 1.102.4` emits 8
+# CustomResourceDefinition objects even though the chart's `templates/`
+# directory — a separate, templated location — has no crds subfolder). ArgoCD's
+# Helm-source Application renders the FULL chart (including `crds/`) on every
+# sync, unlike the plain `helm upgrade` CLI's one-time-only CRD install, so this
+# is kept in sync going forward without a manual vendoring step here.
+#
+# Resource ordering INSIDE this one Application:
+#   - externalsecret-oauth.yaml: implicit wave 0 (needs only the namespace,
+#     already created by the wave-0 Helm app).
+#   - proxygroup.yaml + clusterrolebindings.yaml: explicit wave "1" — the
+#     ProxyGroup CR needs its own CRD (from the wave-0 Helm app) registered
+#     first.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - externalsecret-oauth.yaml
+  - proxygroup.yaml
+  - clusterrolebindings.yaml
+
+labels:
+  - pairs:
+      platform.capstone/component: platform
+    includeSelectors: false
