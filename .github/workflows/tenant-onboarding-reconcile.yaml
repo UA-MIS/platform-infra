@@ -1,0 +1,139 @@
+# Tenant onboarding reconciliation — every provisioned tenant must be VISIBLE to the portal.
+#
+# ── WHAT THIS CATCHES THAT NOTHING ELSE DOES ─────────────────────────────────
+# A tenant can have a committed claim, provisioned namespaces, synced ArgoCD apps,
+# a serving app and a happy `portal-tenants-refresh`, and STILL be invisible in the
+# portal — because the Secrets tab enumerates the Backstage CATALOG, and the catalog
+# only ingests app repos carrying the `capstone-tenant` GitHub topic. The scaffolder
+# applies that topic; a hand-written claim does not. On 2026-10-07 four of ten
+# tenants were in that state and nothing had detected it.
+#
+# Every individual component was healthy. The defect lived in the SEAM between
+# "provisioned" and "discoverable", and nothing owned that seam. This does.
+#
+# ── WHY THE LIVE SCAN IS NOT ON `pull_request` ────────────────────────────────
+# Reading another repo's topics needs an org-wide installation token. This repo has
+# a deliberate posture about that (see ci-fleet-drift-report.yaml's header): a PR
+# branch can edit the workflow that consumes the secret, so PRs do not get the
+# org-wide credential. We follow it rather than carve an exception.
+#
+# ⚠ THE HONEST COST, stated rather than buried: this is therefore a MERGE-time gate,
+# not a PR-time one. A PR adding a hand-written claim goes green and the failure
+# lands on the `push: main` run minutes later. That is a real latency, accepted
+# knowingly — it is seconds-to-minutes versus the two WEEKS the `surfers` case ran
+# undetected, and it costs no widening of the credential blast radius. What a PR
+# *does* get is the hermetic test suite (`make validate`, no network, no secrets),
+# which proves the check still fails on the inputs it is supposed to fail on.
+#
+# ── ALERTING ─────────────────────────────────────────────────────────────────
+# As with the fleet drift report: no pushgateway, no cluster writes, so the alert IS
+# the failing scheduled/push run plus the job summary. `--json` is the seam if these
+# numbers are ever wanted as a Prometheus series.
+name: tenant-onboarding-reconcile
+
+on:
+  push:
+    branches: [main]
+    # The merge-time gate: any change to the authoritative tenant record re-checks it.
+    paths:
+      - "tenants/_claims/**"
+      - "tenants/_vm-claims/**"
+      - "hack/tenant-onboarding-reconcile.py"
+      - ".github/workflows/tenant-onboarding-reconcile.yaml"
+  schedule:
+    # Daily. Catches drift this repo cannot see from its own contents: a topic stripped
+    # by a half-finished teardown, a tenant repo renamed or archived out from under a
+    # live claim, a catalog-info.yaml deleted by a student.
+    - cron: "20 6 * * *"
+  workflow_dispatch:
+  pull_request:
+    # Credential-free self-check only — see the header. Validates the CHECK, never the fleet.
+    #
+    # The claims paths are here deliberately, even though no live scan runs on a PR: a
+    # change to the CLAIM SCHEMA is exactly what silently invalidates this check's
+    # assumptions about where `team`/`appName` live, and the hermetic suite asserts those
+    # assumptions. A schema PR therefore re-proves the check before it can merge.
+    paths:
+      - "hack/tenant-onboarding-reconcile.py"
+      - "hack/tenant-onboarding-reconcile.test.sh"
+      - ".github/workflows/tenant-onboarding-reconcile.yaml"
+      - "tenants/_claims/**"
+      - "tenants/_vm-claims/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tenant-onboarding-reconcile
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Self-test the check (hermetic — no network, no credentials)
+        # Runs on EVERY trigger, including the live ones. The check's own correctness is
+        # a precondition for believing its verdict, so it is verified before the verdict
+        # is produced rather than only on the PR that last touched it.
+        run: |
+          set -euo pipefail
+          python3 -m py_compile hack/tenant-onboarding-reconcile.py
+          python3 hack/tenant-onboarding-reconcile.py --help >/dev/null
+          bash hack/tenant-onboarding-reconcile.test.sh
+
+      - name: Mint a READ-ONLY org-wide installation token
+        # Not on pull_request: a PR branch does not get the org-wide credential, and
+        # skipping the mint (rather than letting it fail) is what keeps the PR path
+        # working. Reuses the same read-only App as ci-fleet-drift-report — do NOT
+        # substitute APP_ID (platform-infra-only) or ua-mis-backstage (SEC-037).
+        if: ${{ github.event_name != 'pull_request' }}
+        id: apptoken
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ secrets.FLEET_READ_APP_ID }}
+          private-key: ${{ secrets.FLEET_READ_APP_PRIVATE_KEY }}
+          owner: UA-MIS
+          permission-contents: read
+          permission-metadata: read
+
+      - name: Reconcile claims against portal discovery preconditions
+        if: ${{ github.event_name != 'pull_request' }}
+        id: run
+        env:
+          GH_TOKEN: ${{ steps.apptoken.outputs.token }}
+        run: |
+          set -uo pipefail
+          python3 hack/tenant-onboarding-reconcile.py | tee /tmp/reconcile.txt
+          echo "rc=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish to the job summary
+        if: ${{ always() && github.event_name != 'pull_request' }}
+        run: |
+          {
+            echo '## Tenant onboarding reconciliation'
+            echo '```'
+            cat /tmp/reconcile.txt 2>/dev/null || echo '(no output produced)'
+            echo '```'
+            echo '_Checks the PRECONDITIONS for catalog ingestion (topic + catalog-info +'
+            echo 'owner). A pass is NOT proof the catalog holds these Components._'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail on findings, and fail LOUDER when the check could not run
+        # rc 0 = clean · 1 = findings · 2 = could not be trusted.
+        # 2 is distinguished deliberately: "could not run" must never be quietly
+        # equivalent to "clean" — a check that reports clean when it cannot see
+        # manufactures the exact false assurance this one exists to remove.
+        if: ${{ always() && github.event_name != 'pull_request' }}
+        run: |
+          rc="${{ steps.run.outputs.rc }}"
+          case "$rc" in
+            0) echo "clean — every claimed tenant is discoverable by the catalog" ;;
+            1) echo "::error::Tenant(s) are provisioned but INVISIBLE to the portal — see the job summary."; exit 1 ;;
+            2) echo "::error::The reconciliation COULD NOT RUN and its result is not \
+          trustworthy (claim enumeration, token, or an API response it refused to \
+          interpret). This is NOT a clean platform — treat it as an outage of the \
+          check itself."; exit 1 ;;
+            *) echo "::error::Unexpected exit code '$rc' from the reconciliation."; exit 1 ;;
+          esac

@@ -13,6 +13,50 @@ ESO plumbing, env/preview ApplicationSets).
 **No onboarding PR. No human merge. No operator `make` steps.** The bar (ADR-031):
 *a human creates a project in Backstage → it just works.*
 
+## ⚠ Writing a claim BY HAND does not onboard a tenant
+
+Committing a claim file here provisions the tenant's **infrastructure** — and nothing
+else. The scaffolder does several things the claim does not, and a hand-written claim
+skips every one of them silently. Two of those omissions are invisible: the tenant comes
+up healthy, serves traffic, syncs green in ArgoCD, and appears in `portal-tenants`, while
+being **completely absent from the portal**.
+
+If you add a claim here by hand, you own these steps too:
+
+1. **Apply the `capstone-tenant` GitHub topic to the app repo.**
+   ```
+   gh api -X PUT repos/UA-MIS/<appName>/topics -f names[]=capstone-tenant
+   ```
+   The catalog's `github.tenants` provider (`app-config.production.yaml`,
+   `filters.topic.include`) ingests **only** topic-tagged repos. No topic → no catalog
+   `Component` → the portal's Secrets tab cannot list the tenant, because that tab
+   enumerates the catalog (`sealCore.ts:1385`), not Vault and not `portal-tenants`.
+   The templates do this at `topics: ['capstone-tenant']`
+   (`new-project/template.yaml`, `vm-app/template.yaml`).
+
+2. **Ensure the app repo has a `catalog-info.yaml` on its default branch**, declaring
+   `kind: Component` with `spec.owner: group:default/<team>`. The topic only tells the
+   provider *where to look*; this is what it reads. The owner must be the **team** group
+   slug — the portal derives both the tenant's Vault path (`vaultPathFor`,
+   `sealCore.ts:221`) and its per-tenant authorization (`sealCore.ts:826`) from it, so an
+   owner that disagrees with `spec.team` points the Secrets tab at a Vault path no
+   ExternalSecret reads. Note the app name and team name legitimately differ
+   (`surfer`/`surfers`, `curb-web`/`curb`) — it is the **team** that goes here.
+
+3. **Seed the per-env Vault `app` objects**, which the scaffolder does via
+   `capstone:seed-vault-app-objects`. Without them, `dataFrom.extract` has no object to
+   read: under `deletionPolicy: Retain` the ExternalSecret reports `SecretSyncedError`,
+   and under `Delete` it reports `Ready=True`/`SecretDeleted` — healthy-looking and
+   equally broken. Note only 2 of 9 templates call this step, and **no** template can
+   adopt an existing repo, so there is currently no portal path to bring a
+   hand-onboarded tenant up to spec.
+
+`hack/tenant-onboarding-reconcile.py` enforces 1 and 2 for every claim in this directory
+and in `tenants/_vm-claims/` — on merge to `main` and daily. It deliberately enumerates
+from the **claims** rather than from the topic, because the topic is the thing that goes
+missing: a check that enumerated by topic (as `ci-fleet-drift-report.py` does, correctly,
+for its own purpose) cannot see a tenant that lacks one.
+
 ## This is the onboarding ledger
 
 - **Onboard:** the scaffold commits `team-app.yaml` here → tenant stands up.
