@@ -50,6 +50,7 @@ import {
   ScmIntegrations,
 } from '@backstage/integration';
 import { Octokit } from '@octokit/rest';
+import { parse as parseYaml } from 'yaml';
 import { sealSecretPermission } from './permissions';
 import { VaultClient, type VaultClientConfig } from './vaultClient';
 
@@ -222,13 +223,88 @@ function vaultPathFor(teamSlug: string, env: string): string {
   return `tenants/${teamSlug}/${env}/app`;
 }
 
+/** The tenant repo's declared promotion contract (read for its per-env `overlay` dirs). */
+const PROMOTION_YAML_PATH = '.devops/promotion.yaml';
+
+/** Where a resolved overlay ExternalSecret path came from — surfaced in the not-found error. */
+export interface OverlayEsLocation {
+  path: string;
+  source: string;
+}
+
+/**
+ * Per-env overlay dirs declared in the tenant's own `.devops/promotion.yaml`
+ * (`environments.<env>.overlay`). Best-effort by design: a missing, unparseable, or oddly shaped
+ * file yields `{}` so every env falls back to the global `overlaysDir` default (tenants that work
+ * today keep working). The file is repo-owned, so a declared dir is only accepted when it is a
+ * plain relative path with no `..` segments; anything else is ignored (falls back).
+ */
+async function readPromotionOverlays(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  ref: string | undefined,
+): Promise<Record<string, string>> {
+  const text = await getFileContent(octokit, owner, repo, ref, PROMOTION_YAML_PATH);
+  if (text === undefined) {
+    return {};
+  }
+  let doc: unknown;
+  try {
+    doc = parseYaml(text);
+  } catch {
+    return {};
+  }
+  const envs = (doc as { environments?: unknown } | null)?.environments;
+  if (!envs || typeof envs !== 'object') {
+    return {};
+  }
+  const out: Record<string, string> = {};
+  for (const [env, v] of Object.entries(envs as Record<string, unknown>)) {
+    const overlay = (v as { overlay?: unknown } | null)?.overlay;
+    if (typeof overlay !== 'string') {
+      continue;
+    }
+    const dir = overlay.trim().replace(/\/+$/, '');
+    if (
+      dir === '' ||
+      dir.startsWith('/') ||
+      dir.includes('\\') ||
+      dir.split('/').some(seg => seg === '..' || seg === '')
+    ) {
+      continue;
+    }
+    out[env] = dir;
+  }
+  return out;
+}
+
 /**
  * The path of the per-env overlay ExternalSecret the M4 scaffolder ships — the file the Secrets
  * tab upserts data[] entries into. It is ALREADY a kustomization resource in the overlay, so we
  * never touch kustomization.yaml and never escape the kustomize root (M4 contract / #106).
+ *
+ * Resolved PER ENVIRONMENT: the tenant's `promotion.yaml` `environments.<env>.overlay` wins when
+ * present (a VM->k8s migrating app can have dev/staging under `chart-k8s/` while prod is still
+ * under `chart/`); otherwise the global `<overlaysDir>/<env>` default. `overlayEsFile` is
+ * appended to whichever directory won.
  */
-function overlayEsPath(cfg: SecretsConfig, env: string): string {
-  return `${cfg.overlaysDir}/${env}/${cfg.overlayEsFile}`;
+function overlayEsPath(
+  cfg: SecretsConfig,
+  env: string,
+  promotionOverlays: Record<string, string> = {},
+): OverlayEsLocation {
+  const declared = promotionOverlays[env];
+  if (declared) {
+    return {
+      path: `${declared}/${cfg.overlayEsFile}`,
+      source: `${PROMOTION_YAML_PATH} environments.${env}.overlay`,
+    };
+  }
+  return {
+    path: `${cfg.overlaysDir}/${env}/${cfg.overlayEsFile}`,
+    source: `default (capstone.secrets.overlaysDir; no overlay for "${env}" in ${PROMOTION_YAML_PATH})`,
+  };
 }
 
 /**
@@ -1107,13 +1183,19 @@ export async function sealAndPublish(
   //    before any Vault write or git side effect if some env isn't an M4 tenant overlay).
   const vaultKeyByEnv: Record<string, string> = {};
   const baseContentByEnv: Record<string, string> = {};
+  const promotionOverlays = await readPromotionOverlays(octokit, owner, repo, baseBranch);
+  const esPathByEnv: Record<string, string> = {};
   for (const env of envs) {
-    const esPath = overlayEsPath(cfg, env);
+    const { path: esPath, source } = overlayEsPath(cfg, env, promotionOverlays);
+    esPathByEnv[env] = esPath;
     const existing = await getFileContent(octokit, owner, repo, baseBranch, esPath);
     if (existing === undefined) {
       throw new NotFoundError(
-        `Expected the scaffolded ExternalSecret at ${esPath} in ${entityRef}; not found. ` +
-          `Only apps scaffolded with the capstone template (M4) support the Secrets tab.`,
+        `Could not find the ${env} ExternalSecret at ${esPath} in ${entityRef} ` +
+          `(path taken from ${source}). Check that this file exists on the default branch; ` +
+          `if the app's overlays moved, update environments.${env}.overlay in ` +
+          `${PROMOTION_YAML_PATH}. The Secrets tab needs the capstone template's ` +
+          `${cfg.overlayEsFile} in that overlay directory.`,
       );
     }
     vaultKeyByEnv[env] = esVaultKey(existing, teamSlug, env, esPath);
@@ -1144,7 +1226,7 @@ export async function sealAndPublish(
   //    overwrites a concurrent writer's change with a payload computed from a stale read.
   let anyWrite = false;
   for (const env of envs) {
-    const esPath = overlayEsPath(cfg, env);
+    const esPath = esPathByEnv[env];
     const wrote = await casUpdateFile(
       octokit,
       owner,
@@ -1224,8 +1306,9 @@ export async function listSecrets(
   // here. Each key's last-updated is that file's last commit date.
   const summaries: SecretSummary[] = [];
   const environments: EnvironmentSummary[] = [];
+  const promotionOverlays = await readPromotionOverlays(octokit, owner, repo, undefined);
   for (const env of ['dev', 'staging', 'prod']) {
-    const esPath = overlayEsPath(cfg, env);
+    const { path: esPath } = overlayEsPath(cfg, env, promotionOverlays);
     const text = await getFileContent(octokit, owner, repo, undefined, esPath);
     if (text === undefined) {
       continue; // no overlay for this env -> the env genuinely does not exist for this app
@@ -1471,8 +1554,9 @@ export async function deleteSecret(
   //    created/reset). Scoped to `env`: this loop used to run over every environment, which
   //    is what made a single click destroy production (see DeleteRequest.env).
   const envEntries: Array<{ env: string; esPath: string; existing: string }> = [];
+  const promotionOverlays = await readPromotionOverlays(octokit, owner, repo, baseBranch);
   for (const env of [targetEnv]) {
-    const esPath = overlayEsPath(cfg, env);
+    const { path: esPath } = overlayEsPath(cfg, env, promotionOverlays);
     const existing = await getFileContent(octokit, owner, repo, baseBranch, esPath);
     if (existing && declaredKeys(existing).includes(key)) {
       // Validate the declared destination HERE, in the read-only pass, so a tampered file in

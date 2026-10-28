@@ -1261,3 +1261,147 @@ describe('declared-keys annotation: delete path', () => {
     expect(vaultDeleteCalls).toEqual([]);
   });
 });
+
+/*
+ * Per-tenant overlay resolution (VM -> k8s migration path).
+ *
+ * The overlay dir comes from the tenant's own `.devops/promotion.yaml`
+ * (`environments.<env>.overlay`), PER ENVIRONMENT, and falls back to the global
+ * `overlaysDir/<env>` default when promotion.yaml is absent / unparseable / silent on that env.
+ */
+describe('overlay resolution from promotion.yaml', () => {
+  const ES_FILE = 'app-secret.externalsecret.yaml';
+  const K8S = (env: string) => `.devops/chart-k8s/overlays/${env}/${ES_FILE}`;
+  const VM = (env: string) => `.devops/chart/overlays/${env}/${ES_FILE}`;
+
+  /** Serve a promotion.yaml body (or none) plus ES files at exact paths; 404 for the rest. */
+  function serve(promotion: string | undefined, esByPath: Record<string, string>) {
+    octokitCalls.getContent.mockImplementation(async (opts: any) => {
+      const body =
+        opts.path === '.devops/promotion.yaml' ? promotion : esByPath[opts.path];
+      if (body !== undefined) {
+        return {
+          data: { sha: `sha-${opts.path}`, content: Buffer.from(body, 'utf8').toString('base64') },
+        } as any;
+      }
+      const e = new Error('Not Found') as Error & { status: number };
+      e.status = 404;
+      throw e;
+    });
+  }
+
+  const PROMOTION_MIGRATING = [
+    'environments:',
+    '  dev:     { overlay: ".devops/chart-k8s/overlays/dev" }',
+    '  staging: { overlay: ".devops/chart-k8s/overlays/staging" }',
+    '  prod:    { overlay: ".devops/chart/overlays/prod" }',
+    '',
+  ].join('\n');
+
+  const seal = (envs: string[]) =>
+    sealAndPublish(makeDeps([OWNER_GROUP]), {
+      credentials: CREDS,
+      entityRef: TARGET_REF,
+      key: 'API_KEY',
+      value: 'v',
+      envs,
+    });
+
+  it('seals into the overlay promotion.yaml declares (not the global default)', async () => {
+    serve(PROMOTION_MIGRATING, { [K8S('dev')]: shippedEs('dev') });
+    await seal(['dev']);
+    const written = writtenFiles();
+    expect(Object.keys(written)).toEqual([K8S('dev')]);
+    expect(written[K8S('dev')]).toContain('API_KEY');
+  });
+
+  it('resolves PER ENV: dev/staging under chart-k8s, prod still under chart', async () => {
+    serve(PROMOTION_MIGRATING, {
+      [K8S('dev')]: shippedEs('dev'),
+      [K8S('staging')]: shippedEs('staging'),
+      [VM('prod')]: shippedEs('prod'),
+    });
+    await seal(['dev', 'staging', 'prod']);
+    expect(Object.keys(writtenFiles()).sort()).toEqual(
+      [K8S('dev'), K8S('staging'), VM('prod')].sort(),
+    );
+  });
+
+  it('falls back to overlaysDir when promotion.yaml is missing', async () => {
+    serve(undefined, { [VM('dev')]: shippedEs('dev') });
+    await seal(['dev']);
+    expect(Object.keys(writtenFiles())).toEqual([VM('dev')]);
+  });
+
+  it('falls back when promotion.yaml is unparseable', async () => {
+    serve('environments: [unclosed', { [VM('dev')]: shippedEs('dev') });
+    await seal(['dev']);
+    expect(Object.keys(writtenFiles())).toEqual([VM('dev')]);
+  });
+
+  it('falls back for an env promotion.yaml does not give an overlay for', async () => {
+    serve('environments:\n  dev: { overlay: ".devops/chart-k8s/overlays/dev" }\n', {
+      [K8S('dev')]: shippedEs('dev'),
+      [VM('prod')]: shippedEs('prod'),
+    });
+    await seal(['dev', 'prod']);
+    expect(Object.keys(writtenFiles()).sort()).toEqual([K8S('dev'), VM('prod')].sort());
+  });
+
+  it('ignores an overlay that is absolute or escapes with ".." (falls back)', async () => {
+    serve(
+      'environments:\n  dev: { overlay: "../other/overlays/dev" }\n  prod: { overlay: "/etc/x" }\n',
+      { [VM('dev')]: shippedEs('dev'), [VM('prod')]: shippedEs('prod') },
+    );
+    await seal(['dev', 'prod']);
+    expect(Object.keys(writtenFiles()).sort()).toEqual([VM('dev'), VM('prod')].sort());
+  });
+
+  it('listSecrets reads each env from its own declared overlay', async () => {
+    serve(PROMOTION_MIGRATING, {
+      [K8S('dev')]: shippedEs('dev', ['DEV_ONLY']),
+      [VM('prod')]: shippedEs('prod', ['PROD_ONLY']),
+    });
+    const { secrets, environments } = await listSecrets(makeDeps([OWNER_GROUP]), {
+      credentials: CREDS,
+      entityRef: TARGET_REF,
+    });
+    expect(secrets.map(s => `${s.env}:${s.key}`).sort()).toEqual([
+      'dev:DEV_ONLY',
+      'dev:app-secret',
+      'prod:PROD_ONLY',
+      'prod:app-secret',
+    ]);
+    expect(environments.map(e => e.env).sort()).toEqual(['dev', 'prod']);
+  });
+
+  it('deleteSecret finds the key under the declared overlay', async () => {
+    serve(PROMOTION_MIGRATING, { [K8S('dev')]: shippedEs('dev', ['GONE']) });
+    await deleteSecret(makeDeps([OWNER_GROUP]), {
+      credentials: CREDS,
+      entityRef: TARGET_REF,
+      key: 'GONE',
+      env: 'dev',
+    });
+    expect(Object.keys(writtenFiles())).toEqual([K8S('dev')]);
+  });
+
+  it('not-found error names the tried path and its source (promotion.yaml)', async () => {
+    serve(PROMOTION_MIGRATING, {}); // declared dev overlay has no ES file
+    const err = await seal(['dev']).catch((e: unknown) => e);
+    if (!(err instanceof Error)) throw new Error('expected a rejection');
+    expect(err).toBeInstanceOf(NotFoundError);
+    expect(err.message).toContain(K8S('dev'));
+    expect(err.message).toContain('.devops/promotion.yaml environments.dev.overlay');
+    expect(err.message).not.toContain('Only apps scaffolded');
+    expect(vaultSetCalls).toEqual([]);
+  });
+
+  it('not-found error names the config default as the source when no promotion.yaml', async () => {
+    serve(undefined, {});
+    const err = await seal(['dev']).catch((e: unknown) => e);
+    if (!(err instanceof Error)) throw new Error('expected a rejection');
+    expect(err.message).toContain(VM('dev'));
+    expect(err.message).toContain('default (capstone.secrets.overlaysDir');
+  });
+});
