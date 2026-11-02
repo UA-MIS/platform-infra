@@ -44,7 +44,7 @@ spec:
     # 20Gi (vs capstone-pg's 10Gi): this cluster hosts MANY small tenant databases
     # (dev/staging/prod × every team that picks `host-postgres`), not two fixed
     # app DBs. Still small — application metadata, not blobs. Bump deliberately.
-    size: 20Gi
+    size: 30Gi   # expanded live 2026-11-02 during the WAL-pin incident; git reconciled to match
 
   affinity:
     enablePodAntiAffinity: true
@@ -71,6 +71,27 @@ spec:
                 app.kubernetes.io/name: vault
                 component: server
             topologyKey: kubernetes.io/hostname
+
+  # WAL retention ceiling for replication slots. CNPG creates one physical slot
+  # per replica; at PostgreSQL's default (-1, unlimited) an UNAVAILABLE replica's
+  # slot pins WAL forever. On 2026-11-02 the two slots belonging to instances on
+  # the dead w1/n3 nodes had pinned 19GB of WAL into capstone-tenant-pg's 20Gi
+  # PVC -> "Detected low-disk space condition" -> CNPG refused to start Postgres
+  # -> every tenant database went down with it (13 agile boards, Backstage,
+  # ida-llm). pg_wal was 19G against a 905M base.
+  #
+  # Nothing in the archiving signals showed this: ContinuousArchiving and
+  # LastBackupSucceeded were both True and archive_status/*.ready was 0. The WAL
+  # was PINNED, not queued. Diagnose with pg_replication_slots (active=f +
+  # wal_status=extended), never with pg_stat_archiver.
+  #
+  # 8GB is several times the steady-state WAL footprint, so a replica can be down
+  # for hours and still catch up incrementally; one that is down for days has its
+  # slot invalidated (wal_status=lost) and re-bootstraps from a base backup -- a
+  # sub-second operation at this data size, and far cheaper than filling the disk.
+  postgresql:
+    parameters:
+      max_slot_wal_keep_size: 8GB
 
   resources:
     requests:
