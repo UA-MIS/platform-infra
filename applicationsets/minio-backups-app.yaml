@@ -45,25 +45,6 @@ spec:
         replicas: 1
         drivesPerNode: 1
 
-        # Pin the image to our Harbor mirror. The chart default is
-        # quay.io/minio/minio, and as of 2026-10 anonymous pulls of minio/minio
-        # 401 on quay.io AND docker.io (dl.min.io returns 410 Gone) -- the
-        # distribution lockdown. ArgoCD kept recreating a ReplicaSet on the chart
-        # default that could never pull, which is what silently killed CNPG WAL
-        # archiving for three days. base-images/minio/minio is the mirror we
-        # control; it is the exact reference minio-backups and every tenant
-        # object-store already run.
-        image:
-          repository: harbor.capstone.uamishub.com/base-images/minio/minio
-          tag: RELEASE.2025-09-07T16-13-09Z
-          pullPolicy: IfNotPresent
-
-        # NOTE: mcImage is deliberately NOT pinned here -- minio/mc has NO Harbor
-        # mirror yet (0 tags), so there is nothing valid to point at. The chart's
-        # post-install policy/user job therefore still pulls quay.io/minio/mc and
-        # will fail on a cold cluster. Mirroring mc is tracked separately; it is a
-        # DR-time landmine, not a steady-state one (the job only runs on install).
-
         existingSecret: minio-root-credentials   # platform-services/db-tier/externalsecrets.yaml
 
         persistence:
