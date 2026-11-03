@@ -15,7 +15,7 @@
 # declare a limit (k8s quota admission requires it once a resource is quota'd),
 # which would break unmodified upstream ARC listener/runner pods that only set
 # requests. Gating on requests (what the scheduler actually admits against) plus
-# the LimitRange's per-container default limit (4 CPU / 8Gi, arc-runners-defaults)
+# the LimitRange's per-container default limit (8 CPU / 8Gi, arc-runners-defaults)
 # gets the same "nothing unbounded" outcome without that requirement.
 #
 # ARITHMETIC (per concurrent CI job, containerMode:kubernetes, steps run

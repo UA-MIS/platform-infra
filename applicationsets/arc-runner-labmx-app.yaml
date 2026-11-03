@@ -241,7 +241,8 @@ spec:
                     # OPT-IN EMERGENCY escape hatch — NOT set anywhere by default. NO
                     # automatic control-plane fallback (2026-09-09, after review): n1-n3
                     # run etcd off the SAME writable /var partition the CI work volume
-                    # uses, and the build triple's CPU is UNBOUNDED — see
+                    # uses, and the build triple's CPU is bounded only by the
+                    # arc-runners-defaults LimitRange default limit (8 cores) — see
                     # applicationsets/arc-runner-scaleset-app.yaml for the full
                     # rationale. An operator applies this label by hand during a
                     # genuine incident.

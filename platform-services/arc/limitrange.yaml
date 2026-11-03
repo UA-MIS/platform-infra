@@ -26,13 +26,14 @@
 #     the aggregate ceiling is real. Matches the CPU the org-wide hook-template's
 #     `$job` container was implicitly getting (it declares memory only; before this
 #     LimitRange existed, an unset CPU request meant "0" — i.e. also uncounted).
-#   default (limit) 4 CPU / 8Gi — 8Gi mirrors the org-wide hook-template's existing,
+#   default (limit) 8 CPU / 8Gi — 8Gi mirrors the org-wide hook-template's existing,
 #     already-tuned `$job` memory limit (platform-services/arc/hook-template.yaml —
 #     6Gi previously OOM-killed a real node_modules build, PR #329/#334), so a
 #     tenant build gets the SAME ceiling a ua-mis build already relies on instead of
-#     a fresh, unvalidated number. (CPU since raised to 8 — see the value below.) Originally 4 CPU gave Kaniko's compress/snapshot phase
-#     headroom without letting one build pod claim a whole node (16 vCPU on the
-#     smallest node) uncontested.
+#     a fresh, unvalidated number. CPU was originally 4 and was raised to 8 on
+#     2026-10-22 once builds proved CPU-throttled; 8 still gives Kaniko's
+#     compress/snapshot phase headroom without letting one build pod claim a whole
+#     node (16 vCPU on the smallest node) uncontested.
 #
 # Applies namespace-wide (Container type, no per-workload override needed): the
 # runner pod itself already declares explicit resources in every scale-set spec

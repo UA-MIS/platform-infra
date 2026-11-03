@@ -1720,10 +1720,12 @@ spec:
                             # hand-applied label) OR capstone.io/ci-build-emergency=true (an
                             # OPT-IN, incident-only escape hatch — NOT set anywhere by default).
                             # NO automatic control-plane fallback (2026-09-09, after review): THIS
-                            # is the pod whose CPU is UNBOUNDED (only memory is limited), and n1-n3
+                            # is the pod whose CPU is bounded only by the arc-runners-defaults
+                            # LimitRange default limit (8 cores; no CPU is set here on purpose,
+                            # memory is limited), and n1-n3
                             # run etcd off the SAME writable /var partition the CI work volume uses
                             # (platform-services/local-path-provisioner/configmap.yaml —
-                            # /dev/nvme0n1p4 on n1) — heavy unbounded-CPU build I/O sharing a disk
+                            # /dev/nvme0n1p4 on n1) — heavy high-CPU build I/O sharing a disk
                             # with etcd's fsync-sensitive writes risks destabilizing the control
                             # plane, not just slowing a build; n2 is also a known thermal outlier
                             # (~88-91C, pending a repaste). Full rationale:
@@ -2057,7 +2059,8 @@ spec:
                                   #
                                   # NO automatic control-plane fallback (2026-09-09, after review):
                                   # n1-n3 run etcd off the SAME writable /var partition the CI work
-                                  # volume uses, and the build triple's CPU is UNBOUNDED — heavy I/O
+                                  # volume uses, and the build triple's CPU is bounded only by the
+                                  # arc-runners-defaults LimitRange default limit (8 cores) — heavy I/O
                                   # there risks destabilizing the control plane, not just slowing a
                                   # build (n2 is also a thermal outlier, ~88-91C, pending a repaste).
                                   # Full rationale: applicationsets/arc-runner-scaleset-app.yaml. An

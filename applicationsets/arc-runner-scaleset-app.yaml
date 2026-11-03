@@ -245,9 +245,11 @@ spec:
             # REJECTED: n1-n3 run etcd, and Talos control-plane nodes have exactly ONE
             # writable partition (`/var`) — the SAME partition + disk the CI work volume
             # uses (platform-services/local-path-provisioner/configmap.yaml: verified live,
-            # /dev/nvme0n1p4 on n1). The Kaniko build container's CPU is UNBOUNDED (only
-            # memory is limited — platform-services/arc/hook-template.yaml resources). Heavy,
-            # unbounded-CPU build I/O sharing a disk with etcd's fsync-sensitive writes risks
+            # /dev/nvme0n1p4 on n1). The Kaniko build container's CPU is bounded only by the
+            # arc-runners-defaults LimitRange default limit (8 cores; the hook templates set
+            # no CPU of their own — platform-services/arc/limitrange.yaml), and memory is
+            # limited explicitly (platform-services/arc/hook-template.yaml resources). Heavy,
+            # high-CPU build I/O sharing a disk with etcd's fsync-sensitive writes risks
             # destabilizing the CONTROL PLANE, not just slowing a build — and n2 is a known
             # thermal outlier (~88-91C, pending a repaste) on top of that. "CI queues loudly"
             # is a strictly better failure than "an already-degraded worker pool silently
@@ -326,8 +328,10 @@ spec:
                     # control-plane nodes from the AUTOMATIC candidate set: n1-n3 run
                     # etcd off the SAME writable /var partition the CI work volume uses
                     # (local-path-provisioner/configmap.yaml — /dev/nvme0n1p4 on n1),
-                    # and the Kaniko build container's CPU is UNBOUNDED (only memory is
-                    # limited) — heavy, unbounded-CPU build I/O landing on etcd's disk
+                    # and the Kaniko build container's CPU is bounded only by the
+                    # arc-runners-defaults LimitRange default limit (8 cores; no CPU is set
+                    # here on purpose, memory is limited explicitly) — heavy, high-CPU
+                    # build I/O landing on etcd's disk
                     # risks destabilizing the CONTROL PLANE, not just slowing a build.
                     # n2 is also a known thermal outlier (~88-91C, pending a repaste). A
                     # loud queue when no vetted node is free is the safer failure than a
@@ -485,8 +489,9 @@ spec:
                   # ~4.5Gi free — it also hosts backstage/dex/db-tier) so a 2nd heavy build
                   # waits for laptop-01 rather than co-packing; db1 still takes lighter
                   # tenant builds when it has room. CPU is unchanged — memory is the fix;
-                  # the runner is not CPU-bound and the Kaniko step-pod keeps its
-                  # (unbounded) CPU so builds are not throttled.
+                  # the runner is not CPU-bound and the Kaniko step-pod keeps its CPU
+                  # limit from the arc-runners-defaults LimitRange (8 cores, no CPU set
+                  # on the hook template) so builds are not throttled.
                   requests: { cpu: "250m", memory: "1Gi" }
                   limits:   { cpu: "2",    memory: "8Gi" }
             volumes:

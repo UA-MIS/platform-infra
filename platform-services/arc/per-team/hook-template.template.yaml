@@ -41,8 +41,9 @@ data:
       # failures inside Kaniko builds. Required set = ci-build=true (TODAY: only
       # capstone-w2, a LIVE-ONLY hand-applied label) OR capstone.io/ci-build-emergency=true
       # (an OPT-IN, incident-only escape hatch — NOT set anywhere by default; no automatic
-      # control-plane fallback, since n1-n3 run etcd off the same disk this pod's unbounded
-      # CPU would hammer — see applicationsets/arc-runner-scaleset-app.yaml) — NEVER the
+      # control-plane fallback, since n1-n3 run etcd off the same disk this pod's heavy
+      # build CPU/IO would hammer (its CPU is bounded only by the arc-runners-defaults
+      # LimitRange default limit) — see applicationsets/arc-runner-scaleset-app.yaml) — NEVER the
       # 8GiB Mac workers (too small for a 4Gi/8Gi build). REVERSIBLE: `kubectl label node
       # capstone-w1 capstone.io/ci-build=true --overwrite` once its NIC is fixed restores
       # 2-node capacity, no YAML change.
@@ -69,7 +70,9 @@ data:
               # OPT-IN EMERGENCY escape hatch — NOT set anywhere by default. NO automatic
               # control-plane fallback (2026-09-09, after review): n1-n3 run etcd off the
               # SAME writable /var partition the CI work volume uses, and this container's
-              # CPU is UNBOUNDED — see applicationsets/arc-runner-scaleset-app.yaml and
+              # CPU is bounded only by the arc-runners-defaults LimitRange default limit
+              # (8 cores; no CPU is set here on purpose) — see
+              # applicationsets/arc-runner-scaleset-app.yaml and
               # platform-services/arc/hook-template.yaml for the full rationale. An operator
               # applies this label by hand during a genuine incident.
               - matchExpressions:

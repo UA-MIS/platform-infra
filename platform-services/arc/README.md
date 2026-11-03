@@ -104,7 +104,9 @@ manifest in this repo sets it. If it is ever removed from every build-pool node
 automatically — relabel a fast node promptly. There is deliberately **no
 automatic control-plane fallback**: `capstone-n1/n2/n3` run etcd off the same
 writable `/var` partition the CI work volume uses, the Kaniko build container's
-CPU is unbounded, and `capstone-n2` is a known thermal outlier (~88–91°C,
+CPU is bounded only by the `arc-runners-defaults` LimitRange default
+limit (8 cores; the hook templates set no CPU of their own), and `capstone-n2` is
+a known thermal outlier (~88–91°C,
 pending a repaste) — heavy build I/O there risks destabilizing the control
 plane, not just slowing a build. `capstone.io/ci-build-emergency=true` is an
 **opt-in-only** escape hatch (never set by default) an operator can apply to
