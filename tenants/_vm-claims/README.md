@@ -15,6 +15,24 @@ through the portal but not de-provisionable (violating the "no `kubectl` for dev
 principle). This ledger closes that gap: `listTenants` also reads `_vm-claims/`, and each
 marker carries the metadata + the `teardownPath` the teardown PR removes.
 
+## The same blind spot, on the discovery side
+
+This ledger exists because VM tenants were invisible to **teardown**. They are subject to
+the identical failure on the **discovery** side: `vm-app/template.yaml` applies the
+`capstone-tenant` topic exactly as the container templates do, and without it the catalog
+never ingests the repo and the portal cannot see the tenant — healthy, serving, and
+absent. On 2026-10-07 two of the three VM tenants here were in that state.
+
+So `hack/tenant-onboarding-reconcile.py` reads **this directory as well as**
+`tenants/_claims/`, and its `CLAIM_SOURCES` entry is what makes VM tenants covered rather
+than silently skipped. The first draft read only `_claims/` and printed a clean result over
+all three VM tenants — if a third tenant kind is ever added, add it to `CLAIM_SOURCES` or
+the check will be confidently wrong rather than merely incomplete (it raises on an
+unrecognised `kind` for exactly this reason).
+
+Note the schema difference the check has to account for: VM ledgers keep `team`/`appName`
+at the **top level**, while `CapstoneTenant` claims nest them under `spec:`.
+
 ## Inert by construction
 
 `_vm-claims` is underscore-prefixed, so **every** tenant generator skips it:
