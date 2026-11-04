@@ -9,21 +9,9 @@
 # slidedeck there is no ExternalSecret: no server-side component, no database,
 # no secrets to materialize from Vault.
 #
-# ⚠ STILL MISSING: sealedsecret-pull.yaml (the sealed Harbor image-pull robot),
-# which the siblings both carry. The `public-slides-pull` robot was created in
-# Harbor, but its one-time token was not captured, and Harbor v2.15's API no
-# longer lists project-scoped robots in a way that let it be deleted and
-# re-minted non-interactively. Until this is added the pod will
-# ImagePullBackOff on the private Harbor repo. To finish:
-#
-#   1. Harbor UI -> Projects -> public-slides -> Robot Accounts
-#      -> delete `public-slides-pull`
-#   2. make harbor-robot NAME=public-slides ENV=prod PULL_NS=public-slides \
-#        TARGET=real-talos KUBE_CONTEXT=admin@capstone \
-#        > platform-services/public-slides/sealedsecret-pull.yaml
-#   3. add `- sealedsecret-pull.yaml` to the resources list below, and commit
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
+  - sealedsecret-pull.yaml
   - application.yaml
