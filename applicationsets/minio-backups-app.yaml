@@ -45,6 +45,22 @@ spec:
         replicas: 1
         drivesPerNode: 1
 
+        # Chart default `image.repository`/`image.tag` is quay.io/minio/minio,
+        # which now gates the whole repo for anonymous pulls (401, confirmed
+        # 2026-11-01 — this is what caused the 3-day db-tier/minio-backups
+        # outage). Override to the Harbor mirror, same tag already proven
+        # running elsewhere in-cluster (platform-services/minio/statefulset.yaml).
+        image:
+          repository: harbor.capstone.uamishub.com/base-images/minio/minio
+          tag: RELEASE.2025-09-07T16-13-09Z
+
+        # NOTE: this chart also runs a post-install `mc` job (bucket/policy/
+        # user provisioning) on `mcImage`, chart default quay.io/minio/mc —
+        # ALSO 401s anonymous pull now (confirmed same date), but no Harbor
+        # base-images mirror exists yet for minio/mc (checked: repository
+        # exists, zero tags). Left on the chart default rather than guessing
+        # at an unmirrored image; see PR description for the follow-up.
+
         existingSecret: minio-root-credentials   # platform-services/db-tier/externalsecrets.yaml
 
         persistence:

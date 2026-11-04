@@ -7,9 +7,12 @@
 # manifests match the existing raw-manifest platform-services pattern used by
 # Dex/cloudflared/vault-unsealer.
 #
-# Image: quay.io/minio/minio (NOT docker.io — sidesteps the documented Docker Hub
-# anonymous-pull rate-limit gotcha, same reasoning as the Ceph image pin). Pinned
-# to a confirmed-current stable RELEASE tag; bump deliberately.
+# Image: harbor.capstone.uamishub.com/base-images/minio/minio (NOT quay.io or
+# docker.io — both now require authentication for minio/minio: quay.io gates
+# the whole repo (401 on anonymous pull, confirmed 2026-11-01) and Docker Hub
+# 401s the same way, so the Harbor base-images mirror is the source of truth,
+# not an upstream passthrough). Pinned to a confirmed-current stable RELEASE
+# tag; bump deliberately.
 #
 # StatefulSet (not Deployment) gives it a stable network identity
 # (minio-0.minio.minio.svc) even though replicas is fixed at 1 — matches the
@@ -81,7 +84,7 @@ spec:
               mountPath: /data
       containers:
         - name: minio
-          image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+          image: harbor.capstone.uamishub.com/base-images/minio/minio:RELEASE.2025-09-07T16-13-09Z
           imagePullPolicy: IfNotPresent
           args:
             - server
