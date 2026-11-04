@@ -1,0 +1,17 @@
+# platform-services/public-slides — the PLATFORM-owned prerequisites for the
+# externally-sourced `public-slides` app: a public, unauthenticated static
+# reveal.js slide host at public-slides.capstone.uamishub.com.
+#
+# Same split as slidedeck and ida-slides: the workload manifests (namespace +
+# deployment + service + ingress + netpol) live in the SEPARATE app repo
+# (github.com/UA-MIS/public-slides, path deploy) and are synced by the nested
+# `public-slides` Application below — NOT here. Like ida-slides and unlike
+# slidedeck there is no ExternalSecret: no server-side component, no database,
+# no secrets to materialize from Vault.
+#
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - sealedsecret-pull.yaml
+  - application.yaml

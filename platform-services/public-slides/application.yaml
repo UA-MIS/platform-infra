@@ -1,0 +1,47 @@
+# ArgoCD Application — GitOps-manages the public-slides workload from its OWN
+# repo (github.com/UA-MIS/public-slides), the same external-repo pattern as
+# `slidedeck` and `ida-slides` (see those siblings' application.yaml).
+#
+# public-slides is a static nginx site: no server-side app, no database, no
+# secrets. The only platform-side prerequisites are this Application and the
+# sibling sealed Harbor pull-robot secret (sealedsecret-pull.yaml, same dir).
+#
+# ⚠ This host is PUBLIC and UNAUTHENTICATED by design — its ingress carries no
+# oauth2-proxy middleware and the app has no sign-in. That is the point of the
+# site, not an oversight. Anything that needs a gate belongs on
+# slides.uamishub.com (UA-MIS/slidedeck) instead.
+#
+# The `platform` AppProject's sourceRepos must allow
+# github.com/UA-MIS/public-slides (bootstrap/platform-appproject.yaml). That is
+# a bootstrap-only object: if the existing UA-MIS wildcard entry doesn't already
+# cover it, run `make bootstrap-reapply` after merge or this Application
+# InvalidSpecErrors with "repo not permitted".
+#
+# Applied indirectly: the platform-services directory generator emits
+# `platform-svc-public-slides` over this dir (app-of-apps). CreateNamespace=true
+# so the ns exists for the workload; the sibling SealedSecret retries until then.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: public-slides
+  namespace: argocd
+  labels:
+    platform.capstone/component: platform
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/UA-MIS/public-slides
+    targetRevision: main
+    path: deploy
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: public-slides
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff: { duration: 5s, factor: 2, maxDuration: 3m }
