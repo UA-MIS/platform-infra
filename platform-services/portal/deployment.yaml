@@ -23,6 +23,14 @@ metadata:
   labels:
     platform.capstone/component: platform
     app.kubernetes.io/name: portal
+  annotations:
+    # Do not remove: portal-site is mounted via subPath (index.html, internal.html,
+    # default.conf), and kubelet never updates subPath ConfigMap mounts in place.
+    # Without this, a merged change updates the ConfigMap, ArgoCD shows Synced/Healthy,
+    # and the running pods keep serving the old content indefinitely. Targeted form on
+    # purpose (not reloader auto): portal-tenants is a whole-volume mount that already
+    # updates live and is rewritten regularly, so it must not trigger restarts.
+    configmap.reloader.stakater.com/reload: portal-site
 spec:
   replicas: 2
   selector:
