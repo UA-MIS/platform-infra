@@ -165,6 +165,14 @@ spec:
               done
               echo "[migrate] FAILED after 3 attempts - the app container will NOT start."
               exit 1
+{%- if c.kind == 'backend' %}
+          # MIRRORS base/deployments.yaml's migrator envFrom — a framework that boots its
+          # settings during `migrate` (Django) needs the team's sealed keys here too.
+          envFrom:
+            - secretRef:
+                name: ${{ values.appName }}-secret
+                optional: true
+{%- endif %}
           env:
             # MIRRORS the app container's env below. The migrator needs the same DSN and the
             # same app secret (a framework may read it while booting its config).
@@ -225,6 +233,20 @@ spec:
           ports:
             - name: http
               containerPort: ${{ c.port }}
+{%- if c.kind == 'backend' %}
+          # MIRRORS base/deployments.yaml — map the WHOLE tenant Secret, so every key a team
+          # seals via The Process "Secrets" tab reaches this container without a chart edit.
+          # See the long rationale in base/deployments.yaml (incident, 2026-10, tenant
+          # `surfers`). THIS FILE MATTERS INDEPENDENTLY: the prod overlay $patch:deletes the
+          # base Deployment and substitutes this Rollout, so a fix applied only to
+          # base/deployments.yaml would leave PROD still mapping one hand-listed key.
+          # Scoped to kind 'backend' and purely additive, same as the base. optional:true
+          # keeps a fresh tenant with nothing in Vault starting.
+          envFrom:
+            - secretRef:
+                name: ${{ values.appName }}-secret
+                optional: true
+{%- endif %}
           env:
             # Container port — single source is this component's `port` in components.yaml.
             - name: PORT
@@ -239,6 +261,11 @@ spec:
                   optional: true
 {%- if c.needsDb %}
             # DATABASE_URL — same source selection as base/deployments.yaml (ADR-033):
+            #
+            # PRECEDENCE — this explicit entry deliberately OVERRIDES the envFrom above, so
+            # the provisioned DSN wins over any DATABASE_URL a team typed into the Secrets
+            # tab. Kubernetes API contract for envFrom: "Values defined by an Env with a
+            # duplicate key will take precedence." Same reasoning as base/deployments.yaml.
             # auto-DB (mysql|postgres) -> `<appName>-db`; bring-your-own -> `<appName>-secret`.
             - name: DATABASE_URL
               valueFrom:
