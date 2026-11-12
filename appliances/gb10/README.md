@@ -9,8 +9,8 @@ Application that reconciles this directory: **there isn't one, on purpose.**
 
 ## What this is
 
-A ten-service appliance serving `local-llm.uamishub.com`: vLLM
-(Qwen3.8-27B-NVFP4, MTP speculative decoding) behind a LiteLLM proxy
+A ten-service appliance serving `local-llm.uamishub.com`: **Ollama**
+(`qwen3.8:27b-mtp-q4_K_M`) behind a LiteLLM proxy
 (Postgres-backed, owns authorization/Teams/keys), fronted by a Cloudflare
 Tunnel + Access (gates on `email ends with @crimson.ua.edu` OR
 `email ends with @ua.edu` — students and faculty/staff respectively),
@@ -38,6 +38,40 @@ host-native means the recovery path never shares a failure domain with the
 thing it recovers. **Do not "clean this up" by moving it into compose** —
 see Task 3 of the implementation plan for the full rationale.
 
+## ⚠ It serves OLLAMA now, not vLLM (2026-10-24)
+
+The model is served by **`ollama.service` on the host** — not by a container in
+this compose file, and not by vLLM. `gb10-vllm` is `Exited(137)`, kept but
+stopped so a rollback is `docker start gb10-vllm` plus restoring a backup of
+`litellm-config.yaml`.
+
+Probed 2026-11-12: ollama **0.34.4**, `qwen3.8:27b-mtp-q4_K_M`, 27.3B params,
+context 262144, Q4_K_M, ~19 GB resident, `100% GPU`.
+
+Two consequences worth knowing before you touch anything:
+
+* **`OLLAMA_HOST` is mandatory for the CLI, and `127.0.0.1` does NOT work.**
+  Ollama is bound to the tailnet address only:
+  `OLLAMA_HOST=100.103.27.65:11434 ollama ps`.
+* **Ollama has NO authentication.** Anything that reaches `:11434` bypasses
+  LiteLLM's keys, teams, budgets and quota entirely, and appears in no spend
+  record. Clients must always go through LiteLLM.
+* **`ollama_chat/` (not `openai/`) is required** in `litellm-config.yaml`:
+  `drop_params: true` strips `think` and `num_ctx` from a generic `openai/`
+  passthrough, which leaves thinking on and defaults the window to the model
+  maximum — a ~16 GiB f16 KV cache, layers spilled to CPU, ~7.8 tok/s.
+  `ollama ps` showing anything but `100% GPU` is the tell.
+
+## Other things that run on this box
+
+* **`appliances/gb10/ida-llm/`** — the ida-llm benchmark harness, a **separate
+  compose project** (`name: ida-llm`) with its own git reconciler. Separate on
+  purpose: this appliance's unit runs `up -d --remove-orphans`, and a second
+  project means neither stack can reap or break the other. See that
+  directory's README.
+* **`jupyter`** (`:8888`) and host listeners on `:8188` / `:11000` are present
+  but undocumented — noted here so the next reader does not assume a free port.
+
 ## Deploying / redeploying
 
 ```bash
@@ -47,11 +81,18 @@ sudo systemctl restart gb10-appliance  # full stack restart (~7min for vLLM to w
 docker compose logs -f litellm         # tail one service
 ```
 
-## Changing vLLM settings (capacity — requires the 7-minute reload)
+## Changing model settings (capacity)
 
-Edit the `vllm` service `command:` block in `docker-compose.yml`, then
-`sudo systemctl restart gb10-appliance`. This is a planned, deliberate
-change — never do it mid-class to handle a traffic spike.
+The model is served by host Ollama, so the knobs are in
+`litellm-config.yaml`'s `litellm_params` (`num_ctx`, `think`, `keep_alive`) and
+in `ollama.service` — **not** in the `vllm` service block, which is stopped.
+After editing the config: `docker compose ... restart litellm` (seconds, not
+the old 7-minute vLLM reload). Still a planned, deliberate change — never do it
+mid-class to handle a traffic spike.
+
+⚠ `max_input_tokens + max_output_tokens` must sum to `num_ctx`
+(253952 + 8192 = 262144). They once read 24576 + 8192 for nine days while the
+window was 262144, silently capping every request at ~24k.
 
 ## Changing concurrency limits (policy — live, no restart)
 

@@ -1,0 +1,20 @@
+# appliances/gb10/ida-llm/deploy/ida-llm-reconcile.service
+#
+# One reconcile pass. Started by ida-llm-reconcile.timer; also useful by hand:
+#   sudo systemctl start ida-llm-reconcile && journalctl -u ida-llm-reconcile -f
+[Unit]
+Description=Reconcile the ida-llm stack to its tracked git ref
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/gb10-appliance-repo/appliances/gb10/ida-llm
+ExecStart=/opt/gb10-appliance-repo/appliances/gb10/ida-llm/reconcile.sh
+# Long enough for a cold arm64 build of both images plus a readiness wait.
+TimeoutStartSec=2700
+# ⚠ NO `Restart=`. A oneshot that failed has already either rolled back or
+# deliberately stopped for inspection; restarting it on a loop would re-run
+# builds and migrations against a box that is already telling you something is
+# wrong. The timer provides the next attempt.

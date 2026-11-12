@@ -1,0 +1,398 @@
+# appliances/gb10/ida-llm/docker-compose.yml
+#
+# The ida-llm benchmark harness, running on the GB10 appliance.
+#
+# ── THIS IS A SEPARATE COMPOSE PROJECT, DELIBERATELY ─────────────────────────
+# `name: ida-llm`, not `gb10-appliance`. The appliance's systemd unit runs
+#   docker compose ... up -d --remove-orphans
+# and `--remove-orphans` deletes containers that belong to THAT project and are
+# no longer in THAT file. Two projects means the appliance's reconcile can never
+# reap ida-llm's containers, and -- the direction that actually matters -- a
+# broken ida-llm config can never take down `gb10-litellm`, which is what
+# students in MIS 221/321/421/521 authenticate against. Separate project =
+# separate failure domain. Do not merge this into the appliance compose file.
+#
+# ── EVERY SERVICE NAME IS PREFIXED `ida-`, AND THAT IS LOAD-BEARING ──────────
+# These containers join the appliance's network (`appliance`, below) so they can
+# reach LiteLLM. On that shared network the appliance's own service aliases --
+# `postgres`, `litellm`, `grafana`, `prometheus` ... -- already resolve. A
+# service called `postgres` here would put TWO `postgres` aliases on one
+# container's resolver, and `DATABASE_URL=postgresql://...@postgres/...` could
+# silently resolve to LiteLLM's keys/teams/spend database instead of ours.
+# Prefixing removes the ambiguity by construction. Never add an unprefixed
+# service to this file.
+#
+# ── WHY THERE IS NO MinIO HERE ───────────────────────────────────────────────
+# The chart runs MinIO on a PVC. On this box it cannot run at all: the only
+# surviving MinIO source is Harbor's `base-images/minio/minio` mirror, and that
+# image is **amd64** (verified 2026-11-12) while this box is aarch64. quay.io
+# and docker.io now 401 for minio/minio, `dl.min.io` is 410 Gone, and `mc` has
+# no mirror anywhere. Rather than invent a source, this stack uses the app's own
+# first-class `IDA_ARTIFACT_BACKEND=local` (`ida_core.artifacts.LocalArtifactStore`,
+# path-traversal-guarded) on a shared volume. On a single box the filesystem IS
+# the object store; MinIO existed in-cluster to put an S3 API in front of ceph.
+#
+# ── WHY A SECOND POSTGRES ────────────────────────────────────────────────────
+# The box already runs `gb10-postgres`, but it is **16.15**, and the cluster
+# tenant database this stack has to receive is **17.9**. A 17 -> 16 dump/restore
+# is a downgrade and is not supported. A dedicated 17 instance also keeps an
+# ida-llm disk-fill or a bad migration away from the LiteLLM database that gates
+# student access to the model.
+#
+# ── RUN IT THE WAY THE UNIT DOES ─────────────────────────────────────────────
+#   docker compose --env-file .env --env-file versions.env <cmd>
+# BOTH --env-file flags are mandatory; image digests live in versions.env. Omit
+# one and interpolation silently yields empty image refs. Do not redirect stderr
+# while debugging: compose reports interpolation problems there.
+name: ida-llm
+
+# ── Secrets are referenced, never defaulted ──────────────────────────────────
+# `${VAR:?...}` makes compose REFUSE to render with the variable unset, so a
+# missing secret is a loud failure at `config`/`up` time rather than a container
+# that boots and serves wrong results while reporting healthy. This is the same
+# fail-loudly stance as the chart's non-`optional` secretKeyRefs.
+x-python-env: &python-env
+  # The platform's UNPREFIXED names wherever the cluster supplies one, so this
+  # stack exercises the same code path the cluster does (see the chart's
+  # ida-llm-config ConfigMap).
+  LOG_LEVEL: "info"
+  HOST: "0.0.0.0"
+  REDIS_URL: "redis://ida-redis:6379/0"
+  API_URL: "http://ida-api:8000"
+  DATABASE_URL: "postgresql://ida:${IDA_DB_PASSWORD:?set IDA_DB_PASSWORD in .env}@ida-db:5432/ida"
+
+  # Artifacts: local filesystem, NOT S3. `MINIO_BUCKET` is still the variable
+  # the app reads for the bucket name (AliasChoices IDA_S3_BUCKET/MINIO_BUCKET);
+  # under the local backend it is simply the subdirectory name.
+  IDA_ARTIFACT_BACKEND: "local"
+  IDA_ARTIFACT_LOCAL_ROOT: "/data/artifacts"
+  MINIO_BUCKET: "run-artifacts"
+
+  IDA_MODELS_FILE: "/app/models.yaml"
+  IDA_TASKS_DIR: "/app/tasks"
+
+  # PROD SHAPE. Empty mock URL + hide the stub, exactly as chart base carries
+  # it. The `mock` profile below overrides this for a deliberate debug session.
+  MOCK_MODEL_BASE_URL: ""
+  IDA_PUBLIC_HIDE_TAGS: "mock"
+
+  # The judge (chart base sets this too). Spends money PER CRITERION on
+  # subjective samples -- it grades runs a human starts; it starts nothing.
+  IDA_JUDGE_MODEL_KEY: "luna"
+
+  # ── THE RELOCATION SEAM ────────────────────────────────────────────────────
+  # models.yaml carries `base_url_env: LOCAL_LLM_BASE_URL` with the public
+  # Cloudflare hostname as its literal fallback. Setting it here routes the
+  # harness to LiteLLM over the appliance's own docker network instead --
+  # verified reachable and auth-gated (HTTP 401) from a container on
+  # `gb10-appliance_default`, 2026-11-12.
+  #
+  # ⚠ LiteLLM, NOT OLLAMA. Ollama on :11434 has NO authentication, so pointing
+  # this at the host would bypass keys, teams, budgets and per-team quota
+  # entirely. LiteLLM is the metered, attributed front door. Use a virtual key
+  # minted for ida-llm's own team (see README) -- never the master key.
+  LOCAL_LLM_BASE_URL: "http://litellm:4000/v1"
+
+  # ── RUN-EXECUTION AUTH: ARMED, as in prod ──────────────────────────────────
+  # The prod overlay sets IDA_AUTH_MODE=token so `POST /runs`, which spends real
+  # provider money, needs a bearer token. Reads stay anonymous (the public
+  # results view IS the product). The api REFUSES to start with mode=token and
+  # no tokens, so a half-configured stack fails readiness instead of serving
+  # without the control -- which is why IDA_AUTH_TOKENS uses `:?` below.
+  IDA_AUTH_MODE: "token"
+  IDA_AUTH_TOKENS: "${IDA_AUTH_TOKENS:?set IDA_AUTH_TOKENS in .env (prod arms token auth)}"
+
+  # Provider keys. Sourced by hand from secret/tenants/ida-llm/prod/app; there
+  # is no Vault/ESO on this box. OPENAI_API_KEY is scoped to `luna` with a $25
+  # HARD CAP -- testing only, not a budget.
+  LOCAL_LLM_API_KEY: "${LOCAL_LLM_API_KEY:?set LOCAL_LLM_API_KEY in .env (the LiteLLM virtual key)}"
+  OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+  ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+
+services:
+  # ── datastores ─────────────────────────────────────────────────────────────
+  ida-db:
+    image: ${IDA_POSTGRES_DIGEST:?set IDA_POSTGRES_DIGEST in versions.env}
+    container_name: ida-llm-db
+    environment:
+      POSTGRES_USER: ida
+      POSTGRES_PASSWORD: ${IDA_DB_PASSWORD:?set IDA_DB_PASSWORD in .env}
+      POSTGRES_DB: ida
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    # Loopback only. Published at all so the owner can pg_dump/psql and so the
+    # reconciler's pre-migration backup can run from the host without exec'ing
+    # into the container.
+    ports:
+      - "127.0.0.1:${IDA_DB_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ida -d ida"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    networks: [default]
+    restart: unless-stopped
+
+  ida-redis:
+    image: ${IDA_REDIS_DIGEST:?set IDA_REDIS_DIGEST in versions.env}
+    container_name: ida-llm-redis
+    # `--appendonly yes --dir /data`, matching the chart's StatefulSet args.
+    # The queue is work-in-progress state, not a system of record, but losing it
+    # mid-benchmark abandons claimed items -- so it is persisted.
+    command: ["redis-server", "--appendonly", "yes", "--dir", "/data"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    networks: [default]
+    restart: unless-stopped
+
+  # ── one-shot: make the artifact volume writable by the image's non-root uid ─
+  # The compose equivalent of the chart's `fsGroup: 1000` on the object-store
+  # pod. A fresh NAMED VOLUME is created root-owned, and every app image here
+  # runs as 65532:65532 (Dockerfile.python and frontend/Dockerfile both
+  # `USER 65532:65532`), so `LocalArtifactStore.ensure_bucket()`'s mkdir would
+  # fail with EACCES on first boot. This runs as root exactly once, chowns, and
+  # exits; everything downstream waits for it to succeed.
+  ida-init:
+    # The app image, run as root for this one step. Not a third image to pin:
+    # it is already required by every service below, and using it keeps the
+    # "what runs here" list to exactly postgres + redis + the two app images.
+    image: ${IDA_PYTHON_IMAGE:?set IDA_PYTHON_IMAGE in versions.env}
+    container_name: ida-llm-init
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - 'mkdir -p /data/artifacts && chown -R 65532:65532 /data && echo "artifact volume ready (owner 65532)"'
+    volumes:
+      - artifacts:/data
+    networks: [default]
+    restart: "no"
+
+  # ── schema: Alembic, from the SAME image as the api ────────────────────────
+  # ⚠ `alembic upgrade head`, NOT scripts/bootstrap.py. The repo-root
+  # docker-compose.yml uses bootstrap.py, which calls `bootstrap_schema()`
+  # (metadata create_all) -- fine for a throwaway dev database, WRONG here: it
+  # would leave this box's schema on a different lineage from the cluster's and
+  # from `alembic_version`, so a later real migration would fail or silently
+  # skip. The chart runs Alembic as an initContainer from this same image
+  # precisely so schema and code cannot diverge; this service preserves that
+  # property. Idempotent: applied revisions are recorded in alembic_version, so
+  # re-running on every reconcile is a no-op after the first.
+  ida-migrate:
+    image: ${IDA_PYTHON_IMAGE:?set IDA_PYTHON_IMAGE in versions.env}
+    container_name: ida-llm-migrate
+    working_dir: /app
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      DATABASE_URL: "postgresql://ida:${IDA_DB_PASSWORD:?set IDA_DB_PASSWORD in .env}@ida-db:5432/ida"
+    depends_on:
+      ida-db: {condition: service_healthy}
+    networks: [default]
+    restart: "no"
+
+  # ── the api ────────────────────────────────────────────────────────────────
+  ida-api:
+    image: ${IDA_PYTHON_IMAGE:?set IDA_PYTHON_IMAGE in versions.env}
+    container_name: ida-llm-api
+    command: ["ida-api"]
+    environment:
+      <<: *python-env
+      PORT: "8000"
+    # Loopback only, mirroring the chart: the api has NO public route in ANY
+    # environment. The frontend reaches it over the compose network; nothing
+    # else should reach it at all.
+    ports:
+      - "127.0.0.1:${IDA_API_PORT:-8001}:8000"
+    volumes:
+      - artifacts:/data
+    depends_on:
+      ida-init: {condition: service_completed_successfully}
+      ida-migrate: {condition: service_completed_successfully}
+      ida-redis: {condition: service_healthy}
+    healthcheck:
+      # /readyz DOES check the database, /healthz does not -- the chart's split,
+      # kept. Compose has no separate liveness/readiness, and for a single-box
+      # deployment the useful signal is "can it serve", so /readyz it is.
+      test:
+        ["CMD", "python", "-c",
+         "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/readyz').status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    # BOTH networks: `default` for our own services, `appliance` to reach
+    # `litellm:4000`. Verified reachable (HTTP 401) from a container on
+    # gb10-appliance_default, 2026-11-12.
+    networks: [default, appliance]
+    restart: unless-stopped
+
+  # ── the queue workers ──────────────────────────────────────────────────────
+  ida-runner:
+    image: ${IDA_PYTHON_IMAGE:?set IDA_PYTHON_IMAGE in versions.env}
+    command: ["ida-runner"]
+    environment: *python-env
+    volumes:
+      - artifacts:/data
+    depends_on:
+      ida-init: {condition: service_completed_successfully}
+      ida-migrate: {condition: service_completed_successfully}
+      ida-redis: {condition: service_healthy}
+    # A worker mid-benchmark should finish its item. The code stops claiming new
+    # work on SIGTERM; this is the time it gets (chart parity).
+    stop_grace_period: 60s
+    # NO healthcheck, deliberately -- same reasoning as the chart's "NO Service
+    # and NO HTTP probes". This is a BLPOP queue consumer; the process being up
+    # IS its liveness, which docker already tracks. An exec probe would add
+    # failure modes without adding information.
+    #
+    # ⚠ NO container_name: a container_name makes `--scale` impossible
+    # ("can't set container_name and ida-runner as container name must be
+    # unique"). Scale with: docker compose ... up -d --scale ida-runner=2
+    # BOTH networks: `default` for our own services, `appliance` to reach
+    # `litellm:4000`. Verified reachable (HTTP 401) from a container on
+    # gb10-appliance_default, 2026-11-12.
+    networks: [default, appliance]
+    restart: unless-stopped
+
+  # ── the public UI ──────────────────────────────────────────────────────────
+  ida-frontend:
+    image: ${IDA_FRONTEND_IMAGE:?set IDA_FRONTEND_IMAGE in versions.env}
+    container_name: ida-llm-frontend
+    environment:
+      # Server-side only. There is deliberately no NEXT_PUBLIC_* equivalent:
+      # the browser can never reach the api, and NEXT_PUBLIC_* is inlined at
+      # BUILD time while one image serves every environment.
+      API_URL: "http://ida-api:8000"
+      PORT: "3000"
+      # Next's standalone server reads HOSTNAME (not HOST) for its bind address.
+      HOSTNAME: "0.0.0.0"
+      LOG_LEVEL: "info"
+    # ⚠ HOST PORT IS 3100, NOT 3000. `gb10-grafana` already publishes
+    # 127.0.0.1:3000 on this box. Default bind is loopback; set
+    # IDA_FRONTEND_BIND=100.103.27.65 in .env to expose it on the tailnet.
+    ports:
+      - "${IDA_FRONTEND_BIND:-127.0.0.1}:${IDA_FRONTEND_PORT:-3100}:3000"
+    depends_on:
+      ida-api: {condition: service_healthy}
+    healthcheck:
+      test:
+        ["CMD", "node", "-e",
+         "require('http').get('http://localhost:3000/api/healthz',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    networks: [default]
+    restart: unless-stopped
+
+  # ── the credit/hardware safety switch: OFF in this (prod-shaped) stack ─────
+  # `profiles: [mock]` means it does not start with a plain `up`. Bring it up
+  # for a same-shape debugging session with:
+  #   docker compose ... --profile mock up -d ida-mock-model
+  # and point MOCK_MODEL_BASE_URL at http://ida-mock-model:8000/v1 yourself.
+  # It is NOT wired in by default because a mock quietly answering here would
+  # invalidate every stored result, exactly as the chart's `replicas: 0` says.
+  ida-mock-model:
+    image: ${IDA_PYTHON_IMAGE:?set IDA_PYTHON_IMAGE in versions.env}
+    container_name: ida-llm-mock-model
+    profiles: [mock]
+    command: ["ida-mock-model"]
+    environment:
+      PORT: "8000"
+      MOCK_MODEL_ID: mock-echo-1
+      MOCK_LATENCY_MS: "25"
+      MOCK_FAIL_EVERY: "0"
+    healthcheck:
+      test:
+        ["CMD", "python", "-c",
+         "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks: [default]
+    restart: unless-stopped
+
+  # ── the three nightly sweeps: PRESENT, AND DELIBERATELY NOT SCHEDULED ──────
+  # In the cluster these are CronJobs with `suspend: true` in chart BASE, which
+  # is D-43: they are the only unattended surface that can spend real provider
+  # credits, and the judge bills PER CRITERION. All three are confirmed
+  # SUSPEND=True live in dev, staging and prod (verified 2026-11-12), and
+  # .devops/ci/chart-render.test.sh asserts that suspension.
+  #
+  # So: NO systemd timer is shipped for these, on purpose. They exist here as
+  # `profiles: [sweeps]` one-shots a human can fire deliberately:
+  #   docker compose ... --profile sweeps run --rm ida-sweep-rebenchmark
+  # Scheduling them is a separate, costed decision -- do the arithmetic in
+  # docs/calibration.md first, and re-enable in the cluster chart too if the
+  # answer is yes, so the two deployments do not disagree about whether
+  # continuous benchmarking is on.
+  ida-sweep-rebenchmark:
+    image: ${IDA_PYTHON_IMAGE:?set IDA_PYTHON_IMAGE in versions.env}
+    profiles: [sweeps]
+    command: ["ida-sweep", "rebenchmark"]
+    environment: *python-env
+    volumes:
+      - artifacts:/data
+    depends_on:
+      ida-redis: {condition: service_healthy}
+    # BOTH networks: `default` for our own services, `appliance` to reach
+    # `litellm:4000`. Verified reachable (HTTP 401) from a container on
+    # gb10-appliance_default, 2026-11-12.
+    networks: [default, appliance]
+    restart: "no"
+
+  ida-sweep-model-sweep:
+    image: ${IDA_PYTHON_IMAGE:?set IDA_PYTHON_IMAGE in versions.env}
+    profiles: [sweeps]
+    command: ["ida-sweep", "model-sweep"]
+    environment: *python-env
+    volumes:
+      - artifacts:/data
+    depends_on:
+      ida-redis: {condition: service_healthy}
+    # BOTH networks: `default` for our own services, `appliance` to reach
+    # `litellm:4000`. Verified reachable (HTTP 401) from a container on
+    # gb10-appliance_default, 2026-11-12.
+    networks: [default, appliance]
+    restart: "no"
+
+  ida-sweep-judge-calibration:
+    image: ${IDA_PYTHON_IMAGE:?set IDA_PYTHON_IMAGE in versions.env}
+    profiles: [sweeps]
+    command: ["ida-sweep", "judge-calibration"]
+    environment: *python-env
+    volumes:
+      - artifacts:/data
+    depends_on:
+      ida-redis: {condition: service_healthy}
+    # BOTH networks: `default` for our own services, `appliance` to reach
+    # `litellm:4000`. Verified reachable (HTTP 401) from a container on
+    # gb10-appliance_default, 2026-11-12.
+    networks: [default, appliance]
+    restart: "no"
+
+networks:
+  # The project's own private network (compose creates `ida-llm_default`).
+  default:
+    name: ida-llm_default
+
+  # The appliance's EXISTING network, joined read-only in the sense that this
+  # file does not define it -- `external: true` means compose fails loudly if
+  # the appliance stack has never been up, rather than silently creating an
+  # empty network where `litellm` resolves to nothing.
+  appliance:
+    name: gb10-appliance_default
+    external: true
+
+volumes:
+  db-data:
+  redis-data:
+  # Run artifacts: transcripts, judge outputs, eval logs. The on-box replacement
+  # for the 10Gi `ida-llm-object-store` PVC. NOT backed by ceph and NOT covered
+  # by Velero -- see README § Backups for what covers it instead.
+  artifacts:
