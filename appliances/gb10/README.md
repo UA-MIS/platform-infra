@@ -60,7 +60,10 @@ Two consequences worth knowing before you touch anything:
   `drop_params: true` strips `think` and `num_ctx` from a generic `openai/`
   passthrough, which leaves thinking on and defaults the window to the model
   maximum — a ~16 GiB f16 KV cache, layers spilled to CPU, ~7.8 tok/s.
-  `ollama ps` showing anything but `100% GPU` is the tell.
+  `OLLAMA_HOST=100.103.27.65:11434 ollama ps` showing anything but `100% GPU`
+  is the tell — and note the variable again, because a bare `ollama ps` prints
+  an empty table, which reads as "no model loaded" rather than as "you asked
+  the wrong address".
 
 ## Other things that run on this box
 

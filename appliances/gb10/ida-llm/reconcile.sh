@@ -354,7 +354,14 @@ check_model_route() {
     200) log "model route ok: a real completion returned 200" ;;
     000) warn "model route timed out after ${MODEL_TIMEOUT}s (code 000). The shared
 model may be cold or busy; NOT failing the deploy for a dependency this stack
-does not own. Re-check with: docker logs gb10-litellm; ollama ps" ;;
+does not own. Re-check with:
+  docker logs gb10-litellm
+  OLLAMA_HOST=100.103.27.65:11434 ollama ps
+⚠ OLLAMA_HOST is NOT optional there. Ollama is bound to the tailnet address
+only, and the CLI defaults to 127.0.0.1 -- so a bare \`ollama ps\` prints an
+EMPTY table and reads as 'no model loaded' when the model is in fact resident.
+Absence looking like an answer, same shape as a hung probe looking like a slow
+one." ;;
     4*)  die "model route returned HTTP ${code} -- that is OUR configuration, not a
 busy model. Check LOCAL_LLM_API_KEY (is it a valid LiteLLM virtual key?),
 LOCAL_LLM_BASE_URL, and that the alias qwen3.8-27b still exists in
