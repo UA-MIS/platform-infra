@@ -45,7 +45,7 @@ trap 'rm -rf "$ROOT"' EXIT
 # A sandbox per case: real origin + clone, stub bin, stack dir.
 new_sandbox() {
   local w="$ROOT/case-$1"
-  mkdir -p "$w/bin" "$w/stack/state"
+  mkdir -p "$w/bin" "$w/stack/state" "$w/textfile"
   (
     set -e
     git init --quiet --bare --initial-branch=main "$w/origin.git"
@@ -129,6 +129,7 @@ run_reconcile() { # run_reconcile <sandbox> [extra env assignments...]
     export IDA_REPO_DIR="$w/repo" IDA_REPO_URL="$w/origin.git"
     export IDA_APPLIANCE_REPO="$w/appliance-repo"
     export IDA_STATE_DIR="$w/stack/state"
+    export IDA_TEXTFILE_DIR="$w/textfile"
     export IDA_ENV_FILE="$w/stack/.env" IDA_VERSIONS_FILE="$w/stack/versions.env"
     export IDA_COMPOSE_FILE="$w/stack/docker-compose.yml"
     export IDA_READY_TIMEOUT=10 IDA_MODEL_TIMEOUT=2
@@ -397,6 +398,42 @@ if grep -q 'Authorization: Bearer' "$RECONCILE" && grep -q -- '-H @-' "$RECONCIL
 else fail "the LiteLLM key is passed to curl via stdin, never on the command line"; fi
 check "no 'echo \$LOCAL_LLM_API_KEY'-style leak in the script" "0" \
   "$(grep -cE '(echo|printf)[^|]*\$(\{)?LOCAL_LLM_API_KEY' "$RECONCILE")"
+
+# ── 16. reconcile metrics are PUBLISHED where Prometheus can see them ──────
+# They used to be written to state/, which gb10-node-exporter does not read --
+# metrics that exist and are scraped by nobody. The appliance now mounts
+# textfile-metrics/ into the exporter (and prometheus.yml already scrapes it),
+# so this asserts the file lands THERE, parses, and carries the staleness gauge
+# that makes "the reconciler died" detectable at all.
+w="$(new_sandbox 16)"
+( cd "$w/repo" && git reset --hard --quiet HEAD~1 )
+run_reconcile "$w" >/dev/null
+PROM="$w/textfile/ida-llm-reconcile.prom"
+if [ -f "$PROM" ]; then
+  pass "metrics are written to the textfile dir node-exporter actually reads"
+else
+  fail "metrics are written to the textfile dir node-exporter actually reads" \
+       "$(ls -R "$w/textfile" "$w/stack/state" 2>/dev/null | head -8)"
+fi
+check "the ok gauge reads 1 after a successful reconcile" "1" \
+  "$(awk '/^ida_llm_reconcile_ok /{print $2}' "$PROM" 2>/dev/null)"
+if awk '/^ida_llm_reconcile_last_run_timestamp_seconds /{exit ($2+0 > 1700000000)?0:1}' "$PROM" 2>/dev/null; then
+  pass "a last-run timestamp is published (so staleness, not just failure, can alert)"
+else
+  fail "a last-run timestamp is published" "$(cat "$PROM" 2>/dev/null)"
+fi
+check "no .tmp file is left behind (the write is atomic)" "0" \
+  "$(ls "$w/textfile"/*.tmp 2>/dev/null | wc -l | tr -d ' ')"
+check "every published line is a comment or a metric (parses cleanly)" "0" \
+  "$(grep -cvE '^(#|[a-z_]+ [0-9.]+$)' "$PROM" 2>/dev/null || true)"
+
+# ── 17. a failed reconcile publishes ok=0, not silence ─────────────────────
+# Silence is indistinguishable from "never ran". A failure has to SAY so.
+w="$(new_sandbox 17)"
+( cd "$w/repo" && git reset --hard --quiet HEAD~1 )
+run_reconcile "$w" FAKE_READY_EXIT=22 >/dev/null
+check "a failed deploy publishes ok=0 rather than nothing" "0" \
+  "$(awk '/^ida_llm_reconcile_ok /{print $2}' "$w/textfile/ida-llm-reconcile.prom" 2>/dev/null)"
 
 echo
 echo "═══ compose + env contract ═══"

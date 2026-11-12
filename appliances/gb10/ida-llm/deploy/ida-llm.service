@@ -26,9 +26,14 @@ WorkingDirectory=/opt/gb10-appliance-repo/appliances/gb10/ida-llm
 ExecStart=/usr/bin/docker compose --env-file .env --env-file versions.env up -d --remove-orphans
 ExecStop=/usr/bin/docker compose --env-file .env --env-file versions.env down
 # Images may need building on first start (see reconcile.sh: this box is arm64
-# and the promoted images are amd64, so they are built here). A Next.js build on
-# 20 ARM cores is minutes, not seconds.
-TimeoutStartSec=1800
+# and the promoted images are amd64, so they are built here).
+#
+# MEASURED on the box 2026-11-12, not guessed: python 22s, frontend 43s, both
+# CPU-capped to 10 of 20 cores. A cold start that must also pull the two base
+# images (~400 MB) adds a couple of minutes. 600s is ~8x the measured warm case
+# and still fails fast enough to be useful -- the previous 1800s came from
+# before the build had ever been run.
+TimeoutStartSec=600
 Restart=no
 
 [Install]

@@ -12,8 +12,13 @@ Wants=network-online.target
 Type=oneshot
 WorkingDirectory=/opt/gb10-appliance-repo/appliances/gb10/ida-llm
 ExecStart=/opt/gb10-appliance-repo/appliances/gb10/ida-llm/reconcile.sh
-# Long enough for a cold arm64 build of both images plus a readiness wait.
-TimeoutStartSec=2700
+# Long enough for a cold arm64 build of both images plus a readiness wait, with
+# headroom -- but not so long that a wedged build sits unnoticed for most of an
+# hour. MEASURED 2026-11-12: 65s for both builds warm, CPU-capped to half the
+# box; the readiness gate adds up to IDA_READY_TIMEOUT (180s default) and the
+# model probe up to IDA_MODEL_TIMEOUT (120s). 900s covers a cold build plus
+# both gates with room to spare. Was 2700s before the build had ever been run.
+TimeoutStartSec=900
 # ⚠ NO `Restart=`. A oneshot that failed has already either rolled back or
 # deliberately stopped for inspection; restarting it on a loop would re-run
 # builds and migrations against a box that is already telling you something is

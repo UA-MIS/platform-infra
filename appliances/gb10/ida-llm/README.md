@@ -249,12 +249,38 @@ three things that made the cluster tenant recoverable.
 
 ## Observability
 
-The appliance's Prometheus scrapes the appliance's own services. This stack is
-**not scraped yet**. `reconcile.sh` writes `state/reconcile.prom` in Prometheus
-textfile format, but **nothing reads it**: `gb10-node-exporter` runs without
-`--collector.textfile.directory`. Wiring it up is a two-line change to the
-appliance compose file (add the flag, mount the directory). Until that lands,
-the file is for humans and `journalctl` — **do not describe it as monitoring.**
+The reconciler publishes its own metrics, and they **are** scraped:
+
+| Metric | Meaning |
+|---|---|
+| `ida_llm_reconcile_ok` | 1 if the last reconcile succeeded, 0 if it failed |
+| `ida_llm_reconcile_last_run_timestamp_seconds` | when it last ran at all |
+
+`reconcile.sh` writes `../textfile-metrics/ida-llm-reconcile.prom`, which the
+appliance mounts read-only into `gb10-node-exporter`
+(`--collector.textfile.directory`). `prometheus.yml` already scrapes
+`node-exporter:9100`, so there is **no scrape-config change** — the metrics
+arrive under that job.
+
+**⚠ Alert on the AGE of the timestamp, not on `..._ok`.** If this script stops
+running entirely, `..._ok` keeps serving its last value forever, which is
+indistinguishable from a healthy constant. The failure that actually happens is
+"the reconciler died", and it is silent by default. Something like:
+
+```
+time() - ida_llm_reconcile_last_run_timestamp_seconds > 3600
+```
+
+(the timer fires every 10 minutes, so an hour is six missed runs).
+
+Writes are atomic (`.tmp` then `mv`) because node-exporter re-reads the
+directory on every scrape and a half-written file is a parse error that discards
+the **whole** textfile batch, not just this file.
+
+**Not covered:** the stack's own application metrics. The chart had a
+`ServiceMonitor` on the runner's `:9100`; adding a scrape job for `ida-runner`
+is a follow-up, not done here. Say "the reconciler is monitored", not "the stack
+is monitored".
 
 ## Tests
 

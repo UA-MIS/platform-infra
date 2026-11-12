@@ -52,6 +52,10 @@ VERSIONS_FILE="${IDA_VERSIONS_FILE:-$HERE/versions.env}"
 COMPOSE_FILE="${IDA_COMPOSE_FILE:-$HERE/docker-compose.yml}"
 APPLIANCE_REPO="${IDA_APPLIANCE_REPO:-/opt/gb10-appliance-repo}"
 LOCK_FILE="${IDA_LOCK_FILE:-$STATE_DIR/reconcile.lock}"
+# Where node-exporter's textfile collector reads from. The appliance mounts
+# this directory read-only into gb10-node-exporter, and gb10-prometheus already
+# scrapes that exporter -- so writing here is the whole publish path.
+TEXTFILE_DIR="${IDA_TEXTFILE_DIR:-$HERE/../textfile-metrics}"
 # Seconds to wait for the api to become ready before rolling back.
 READY_TIMEOUT="${IDA_READY_TIMEOUT:-180}"
 # Seconds to wait for a real chat completion. Generous: a cold Ollama reload is
@@ -361,20 +365,40 @@ litellm-config.yaml." ;;
 
 write_status() {
   local state="$1" sha="$2" note="${3:-}"
-  # Prometheus textfile format. ⚠ NOT SCRAPED TODAY: gb10-node-exporter runs
-  # without --collector.textfile.directory, so nothing reads this yet. It is
-  # written anyway because it is the right shape, and because `systemctl status`
-  # and a human both benefit. Wiring it up is a two-line appliance change (add
-  # the flag + mount this dir) -- see README § Observability. Do not describe
-  # this as monitoring until that change lands.
-  cat > "$STATE_DIR/reconcile.prom" <<EOF
+  local ok; ok=$([ "$state" = "ok" ] && echo 1 || echo 0)
+
+  # Prometheus textfile format, published through gb10-node-exporter's
+  # --collector.textfile.directory (enabled in the appliance compose file
+  # 2026-11-12). gb10-prometheus already scrapes that exporter, so no
+  # scrape-config change is involved.
+  #
+  # ⚠ WRITTEN ATOMICALLY (.tmp then mv). node-exporter re-reads this directory
+  # on EVERY scrape, and a half-written file is a parse error that discards the
+  # whole textfile batch -- not just this file. The temp file is in the same
+  # directory so the mv is a rename, not a copy.
+  #
+  # ⚠ THE TIMESTAMP GAUGE IS THE POINT. If this script stops running entirely,
+  # `ida_llm_reconcile_ok` keeps serving its last value forever, which is
+  # indistinguishable from a healthy constant. Alert on the AGE of
+  # `..._last_run_timestamp_seconds`, not on the ok gauge -- a reconciler that
+  # died is the failure that actually happens, and it is silent by default.
+  if [ -d "$TEXTFILE_DIR" ] && [ -w "$TEXTFILE_DIR" ]; then
+    local tmp="$TEXTFILE_DIR/ida-llm-reconcile.prom.tmp"
+    cat > "$tmp" <<EOF
 # HELP ida_llm_reconcile_last_run_timestamp_seconds Unix time of the last reconcile attempt.
 # TYPE ida_llm_reconcile_last_run_timestamp_seconds gauge
 ida_llm_reconcile_last_run_timestamp_seconds $(date +%s)
 # HELP ida_llm_reconcile_ok Whether the last reconcile succeeded (1) or failed (0).
 # TYPE ida_llm_reconcile_ok gauge
-ida_llm_reconcile_ok $([ "$state" = "ok" ] && echo 1 || echo 0)
+ida_llm_reconcile_ok ${ok}
 EOF
+    mv "$tmp" "$TEXTFILE_DIR/ida-llm-reconcile.prom"
+  else
+    warn "textfile dir $TEXTFILE_DIR is missing or not writable -- reconcile
+metrics will NOT reach Prometheus. (Creating it is enough; the appliance mounts
+it read-only into gb10-node-exporter.)"
+  fi
+
   printf '%s state=%s sha=%s %s\n' "$(date -Is)" "$state" "$sha" "$note" \
     >> "$STATE_DIR/reconcile.log"
 }
