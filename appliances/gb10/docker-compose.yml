@@ -183,10 +183,26 @@ services:
       - "--path.sysfs=/host/sys"
       - "--path.rootfs=/host/root"
       - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
+      # TEXTFILE COLLECTOR. Lets anything on this box publish Prometheus
+      # metrics by writing a *.prom file -- no listener, no scrape-config
+      # change (prometheus.yml already scrapes node-exporter:9100, so these
+      # metrics arrive under that job automatically).
+      #
+      # Added 2026-11-12 because `appliances/gb10/ida-llm/reconcile.sh` was
+      # WRITING metrics that nothing read. A reconciler whose own success or
+      # failure is invisible is how a stale deploy survives unnoticed for
+      # days; "we emit metrics" and "someone can see them" are different
+      # claims, and only the second one is monitoring.
+      #
+      # Inert when the directory is empty, so this is safe to land before
+      # anything writes to it.
+      - "--collector.textfile.directory=/host/textfile"
     volumes:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
       - /:/host/root:ro
+      # Read-only: this is a publish-to-Prometheus channel, not shared state.
+      - ./textfile-metrics:/host/textfile:ro
     ports:
       - "127.0.0.1:9100:9100"
     restart: unless-stopped
