@@ -101,8 +101,15 @@ EOF
   # plain exit status, the completion probe is an HTTP code via -w.
   cat > "$w/bin/curl" <<'EOF'
 #!/usr/bin/env bash
-cat >/dev/null 2>&1 || true   # drain the -H @- header on stdin
 args="$*"
+# DRAIN STDIN ONLY FOR THE HEADER-ON-STDIN CALL. An unconditional `cat` here
+# blocks FOREVER on the readiness probe, which passes no stdin: the stub then
+# inherits the runner's stdin and waits for an EOF that never comes. That hung
+# the suite SILENTLY instead of failing it -- a stub that makes the code under
+# test look stuck is worse than no stub at all.
+case "$args" in
+  *"-H @-"*) cat >/dev/null 2>&1 || true ;;
+esac
 echo "curl $args" >> "$CURL_LOG"
 case "$args" in
   *readyz*)           exit "${FAKE_READY_EXIT:-0}" ;;
@@ -126,7 +133,10 @@ run_reconcile() { # run_reconcile <sandbox> [extra env assignments...]
     export IDA_COMPOSE_FILE="$w/stack/docker-compose.yml"
     export IDA_READY_TIMEOUT=10 IDA_MODEL_TIMEOUT=2
     for kv in "$@"; do export "$kv"; done
-    ./reconcile.sh
+    # stdin from /dev/null: belt-and-braces alongside the curl stub's
+    # conditional drain. Nothing under test should ever read stdin, and a stub
+    # that blocks on it hangs the suite instead of failing it.
+    ./reconcile.sh < /dev/null
   ) > "$w/out.log" 2>&1
   echo $?
 }
@@ -248,6 +258,50 @@ wait $holder 2>/dev/null
 if [ "$rc" = "0" ] && grep -q "another reconcile holds the lock" "$w/out.log"; then
   pass "a concurrent run exits 0 without acting (not a spurious failure)"
 else fail "a concurrent run exits 0 without acting" "rc=$rc" "$(tail -2 "$w/out.log")"; fi
+
+# ── 7b. it builds the commit it RECONCILED TO, not a tip that moved ────────
+# The build context is a DIRECTORY, so if anything moves HEAD between the fetch
+# and the build, docker builds different source and tags it with this SHA -- an
+# image whose name is a lie. Under build-on-the-box the tag IS the provenance
+# (there is no signed registry digest behind it), so that is worse than a failed
+# deploy.
+#
+# Simulated faithfully: `backup_database` calls `compose ps` BEFORE
+# `resolve_images`, so a stub that rewinds HEAD on its first invocation lands
+# exactly in the window the guard protects.
+w="$(new_sandbox 7b)"
+( cd "$w/repo" && git reset --hard --quiet HEAD~1 )
+cat > "$w/bin/docker" <<EOF
+#!/usr/bin/env bash
+echo "docker \$*" >> "\$DOCKER_LOG"
+git -C "$w/repo" reset --hard --quiet HEAD~1 2>/dev/null || true
+exit 0
+EOF
+chmod +x "$w/bin/docker"
+rc=$(run_reconcile "$w")
+if [ "$rc" != "0" ] && grep -q "refusing to build" "$w/out.log"; then
+  pass "a HEAD that moves mid-run aborts before anything is built"
+else
+  fail "a HEAD that moves mid-run aborts before anything is built" "rc=$rc" "$(tail -3 "$w/out.log")"
+fi
+# `grep -c` prints "0" AND exits 1 when there are no matches, so a
+# `|| echo 0` fallback would append a SECOND zero and the comparison would
+# fail against the literal "0". Assign, then default on failure.
+builds=$(grep -c 'docker build' "$w/docker.log" 2>/dev/null) || builds=0
+check "...and NO image was built with a SHA it does not contain" "0" "$builds"
+
+# ── 7c. the images it DOES build are tagged with the reconciled short SHA ──
+w="$(new_sandbox 7c)"
+( cd "$w/repo" && git reset --hard --quiet HEAD~1 )
+target7c="$(git -C "$w/repo" rev-parse origin/main)"
+run_reconcile "$w" >/dev/null
+for img in ida-llm-python-app ida-llm-frontend; do
+  if grep -q -- "-t ${img}:${target7c:0:12} " "$w/docker.log"; then
+    pass "$img is tagged with the reconciled commit (${target7c:0:12})"
+  else
+    fail "$img is tagged with the reconciled commit" "$(grep 'docker build' "$w/docker.log")"
+  fi
+done
 
 echo
 echo "═══ reconcile.sh: migrations, readiness, rollback ═══"

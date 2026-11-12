@@ -192,8 +192,25 @@ hand."
 
 # Build (or pull) the images for a commit and write them into versions.env.
 resolve_images() {
-  local sha="$1" short="${1:0:12}"
+  local sha="$1"
+  local short="${sha:0:12}"
   local py="ida-llm-python-app:${short}" fe="ida-llm-frontend:${short}"
+
+  # ⚠ BUILD THE COMMIT WE RECONCILED TO, NEVER "WHATEVER THE TREE IS NOW".
+  # `target` was resolved from origin/<ref> once, near the top of this run, and
+  # the build context below is a DIRECTORY -- so if anything moved HEAD in
+  # between (a concurrent operator, a second fetch, a branch tip that advanced),
+  # docker would happily build different source and tag it with this SHA. That
+  # produces an image whose name is a lie, which is far worse than a failed
+  # deploy: the whole point of build-on-the-box is that the tag IS the
+  # provenance, now that there is no signed registry digest behind it.
+  local head
+  head="$(git -C "$REPO_DIR" rev-parse HEAD)"
+  if [ "$head" != "$sha" ]; then
+    die "refusing to build: $REPO_DIR is at ${head:0:12} but this run reconciled
+to ${sha:0:12}. Something moved HEAD mid-run. Nothing has been built or
+deployed; re-run once the tree is settled."
+  fi
 
   if [ "$IMAGE_SOURCE" = "build" ]; then
     # ⚠ BUILT HERE, ON PURPOSE AND OUT OF NECESSITY. Every promoted Harbor image

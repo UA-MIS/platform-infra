@@ -173,6 +173,45 @@ config is wrong and fails the deploy; a **timeout** means the shared model is
 cold or busy serving a class, which this stack neither caused nor can fix, so it
 warns and continues.
 
+### What is deployed right now?
+
+```bash
+curl -s http://127.0.0.1:3100/api/version | python3 -m json.tool
+```
+
+```json
+{ "frontend": { "label": "9b6ca79abc12", "identified": true },
+  "api":      { "reachable": true, "version": "1.0.1", "gitSha": "9b6ca79abc12…" },
+  "consistent": true }
+```
+
+This endpoint exists because **building on the box removes the one thing a
+promoted Harbor digest gave us for free**: an answer to "what is running" that
+does not require logging in. The frontend is the only published surface here (the
+api is loopback-bound in every environment), so it carries the answer.
+
+It reports **both** images deliberately — they are built as a pair from one
+commit, so the failure worth seeing is them *disagreeing*: a half-applied deploy,
+or a rollback that moved one tag and not the other. `consistent` is `null`, never
+`false`, when it cannot tell (api unreachable, or a build with no `IDA_VERSION`):
+not knowing must not look like a mismatch.
+
+Deliberately **not** part of `/api/healthz`, which is the liveness path probed
+every 10 s and must not do network I/O — folding them together would let a brief
+api blip restart the frontend.
+
+The reconciler also guarantees the other half of this: it asserts
+`git rev-parse HEAD == <reconciled target>` **before building**, and aborts
+without building anything if they differ. The build context is a directory, so a
+tip that moved mid-run would otherwise produce an image tagged with a SHA whose
+source it does not contain — and under build-on-the-box the tag *is* the
+provenance.
+
+```bash
+# what the reconciler last successfully deployed
+cat state/last-good-sha
+```
+
 ### Why not bare `main`
 
 `IDA_GIT_REF` defaults to `main`, but on a box with no staging environment in
