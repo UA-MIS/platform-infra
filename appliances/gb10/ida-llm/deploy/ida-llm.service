@@ -1,0 +1,40 @@
+# appliances/gb10/ida-llm/deploy/ida-llm.service
+#
+# The ida-llm compose stack. Modelled on gb10-appliance.service, with the same
+# BOTH-env-files invocation, and deliberately NO ordering relationship to
+# gb10-appliance.service.
+#
+# ⚠ WHY NO `After=gb10-appliance.service`. This stack's api and runner join the
+# appliance's docker network to reach `litellm:4000`, so it does LOGICALLY
+# depend on it -- but expressing that as a systemd ordering would mean a failure
+# in the appliance unit blocks this one, and a `Requires=` would mean restarting
+# the appliance restarts this too. The dependency is handled where it belongs
+# instead: `networks: appliance: external: true` makes compose fail loudly and
+# immediately if that network does not exist, and `restart: unless-stopped`
+# recovers the containers once it does. The student-facing appliance must never
+# be made more fragile by something that depends on it.
+[Unit]
+Description=ida-llm benchmark harness (docker compose)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/gb10-appliance-repo/appliances/gb10/ida-llm
+ExecStart=/usr/bin/docker compose --env-file .env --env-file versions.env up -d --remove-orphans
+ExecStop=/usr/bin/docker compose --env-file .env --env-file versions.env down
+# Images may need building on first start (see reconcile.sh: this box is arm64
+# and the promoted images are amd64, so they are built here).
+#
+# MEASURED on the box 2026-11-12, not guessed: python 22s, frontend 43s, both
+# CPU-capped to 10 of 20 cores. A cold start that must also pull the two base
+# images (~400 MB) adds a couple of minutes. 600s is ~8x the measured warm case
+# and still fails fast enough to be useful -- the previous 1800s came from
+# before the build had ever been run.
+TimeoutStartSec=600
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

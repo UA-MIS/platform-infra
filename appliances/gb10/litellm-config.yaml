@@ -1,53 +1,51 @@
 model_list:
-  # The raw backend model, talking to vLLM directly over the shared
-  # network namespace with litellm. ungraded's key is pinned to exactly
-  # this name — see Task 8 — and it never resolves through the router.
+  # 2026-10-24: switched from vLLM to Ollama. Same model_name aliases, so no
+  # client, key, or Continue config changes. vLLM container is stopped but not
+  # removed -- rollback is: docker start gb10-vllm, then restore a backup of
+  # this file and restart litellm.
+  #
+  # ollama_chat/ (not openai/) is REQUIRED: drop_params:true strips 
+  # and  from a generic openai/ passthrough, so thinking stayed on
+  # and num_ctx silently defaulted to the model max (which allocates a 16 GiB
+  # f16 KV cache and spills layers to CPU at ~7.8 tok/s). Measured 2026-10-24.
+  #
+  # num_ctx 262144 keeps the previously advertised window, costing ~16 GiB of
+  # KV. With vLLM stopped there is ~121 GiB free, so this is affordable.
+  # max_input_tokens + max_output_tokens must still sum to num_ctx:
+  #   253952 + 8192 = 262144.
   - model_name: qwen3.8-27b-base
     litellm_params:
-      model: openai/Inferact/Qwen3.8-27B-NVFP4
-      api_base: http://vllm:8000/v1
-      api_key: "not-needed"
+      model: ollama_chat/qwen3.8:27b-mtp-q4_K_M
+      api_base: http://100.103.27.65:11434
+      think: false
+      num_ctx: 262144
+      keep_alive: -1
     model_info:
       mode: chat
-      # max_tokens in model_info is the max OUTPUT tokens, NOT the context
-      # window. Setting it to the full 32768 (= vLLM --max-model-len) made
-      # LiteLLM compute available input as 32768-32768=0 and reject every
-      # request with ContextWindowExceededError. Split it explicitly.
-      max_input_tokens: 24576
+      max_input_tokens: 253952
       max_output_tokens: 8192
 
-  # The public alias students/Continue actually call. Round-3 decision
-  # (2026-09-30): this used to route through auto_router/complexity_router
-  # in shadow mode (log-don't-route -- every tier resolved to the SAME
-  # base model, so there was never a second model to actually route to,
-  # only a heuristic score (D8) getting logged). Removed: confirmed live,
-  # by direct A/B against vLLM, that the router silently dropped
-  # max_tokens/max_completion_tokens specifically through this alias --
-  # a `stop` sequence passed through the identical alias correctly,
-  # which isolates this to the router, not a general parameter-
-  # forwarding bug. That defeated per-role Continue maxTokens
-  # (appliances/gb10/onboarding/) entirely: the config looked correct
-  # but had zero effect on student-visible latency. The router's own
-  # motivating premise didn't hold up under measurement either --
-  # reasoning off beat reasoning xhigh on both pass rate and speed, and
-  # the apparent case for model-switching turned out to be a prompt-
-  # context artifact -- so it was already a feature looking for a
-  # justification before it turned out to actively break the one
-  # control that matters for student latency. Points directly at the
-  # base model now, identically to qwen3.8-27b-base above (same
-  # backend, same model_info) -- there is no router to lose D8's
-  # heuristic scorer or its logging FROM; both are simply gone.
   - model_name: qwen3.8-27b
     litellm_params:
-      model: openai/Inferact/Qwen3.8-27B-NVFP4
-      api_base: http://vllm:8000/v1
-      api_key: "not-needed"
+      model: ollama_chat/qwen3.8:27b-mtp-q4_K_M
+      api_base: http://100.103.27.65:11434
+      think: false
+      num_ctx: 262144
+      keep_alive: -1
     model_info:
       mode: chat
-      # Same split as qwen3.8-27b-base above, same reason: max_tokens in
-      # model_info is max OUTPUT tokens, not the context window.
-      max_input_tokens: 24576
+      max_input_tokens: 253952
       max_output_tokens: 8192
+
+  # Embeddings. NOTE the provider prefix: ollama/ NOT ollama_chat/.
+  # ollama_chat is chat-only and /v1/embeddings against it fails with
+  # "Unmapped LLM provider for this endpoint". 768-dimension vectors.
+  - model_name: nomic-embed-text
+    litellm_params:
+      model: ollama/nomic-embed-text
+      api_base: http://100.103.27.65:11434
+    model_info:
+      mode: embedding
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY

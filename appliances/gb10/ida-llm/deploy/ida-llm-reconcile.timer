@@ -1,0 +1,24 @@
+# appliances/gb10/ida-llm/deploy/ida-llm-reconcile.timer
+[Unit]
+Description=Periodically reconcile the ida-llm stack to its tracked git ref
+# Without this, `systemctl disable --now` leaves the timer unit enabled-but-dead
+# in a way that is easy to misread as "off".
+Requires=ida-llm-reconcile.service
+
+[Timer]
+# Every 10 minutes, 3 minutes after boot.
+#
+# ⚠ RandomizedDelaySec matters here even with ONE box: the fetch goes to
+# github.com and the builds pull from Docker Hub (Harbor's base-images mirror is
+# amd64-only, so it cannot serve this box). A fixed schedule puts every retry on
+# the same second of the same minute, which is the shape that turns a rate limit
+# into a permanent failure rather than a transient one.
+OnBootSec=3min
+OnUnitActiveSec=10min
+RandomizedDelaySec=90
+# Catch up after the box has been off, rather than waiting a full interval.
+Persistent=true
+Unit=ida-llm-reconcile.service
+
+[Install]
+WantedBy=timers.target
