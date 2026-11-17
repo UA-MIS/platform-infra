@@ -205,6 +205,25 @@ data:
           - https://team-404-agile.capstone.uamishub.com/api/auth/callback
           # ── END GENERATED team board redirect URIs ──
 
+      # IDA-LLM admin console (UA-MIS/ida-llm, frontend /admin). Same broker, no
+      # new GitHub OAuth app. AuthZ is the app's: it admits only `UA-MIS:ida-llm`
+      # (IDA_ADMIN_GROUPS in the app ConfigMap), read from the `groups` claim the
+      # github connector emits with teamNameField: slug.
+      #
+      # ONE client for prod/staging/dev (AD-14 in ida-llm's admin-console design):
+      # Dex has no wildcard redirect URIs and preview hosts carry the PR number,
+      # so previews deliberately have NO admin console. The app's AUTH_URL per
+      # overlay must equal the host below exactly; change the two together when
+      # the deployment moves hosts. The localhost entry is for `next dev`.
+      - id: ida-llm
+        name: IDA-LLM Admin
+        secretEnv: IDA_LLM_CLIENT_SECRET
+        redirectURIs:
+          - https://ida-llm.capstone.uamishub.com/api/auth/callback/dex
+          - https://ida-llm-staging.capstone.uamishub.com/api/auth/callback/dex
+          - https://ida-llm-dev.capstone.uamishub.com/api/auth/callback/dex
+          - http://localhost:3000/api/auth/callback/dex
+
     oauth2:
       # Skip the per-login "approve this app" screen — these are first-party
       # platform clients, not third-party. Smooth SSO UX.

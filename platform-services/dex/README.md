@@ -180,6 +180,33 @@ kubectl -n dex rollout restart deploy/dex
 kubectl -n monitoring rollout restart deploy/kube-prometheus-stack-grafana
 ```
 
+## IDA-LLM admin console static client
+
+`configmap.yaml` registers an `ida-llm` staticClient for the IDA-LLM admin
+console (`UA-MIS/ida-llm`, frontend `/admin`, Auth.js). One client serves prod,
+staging and dev (Dex has no wildcard redirect URIs; PR previews have no admin
+console). Redirect URIs are `<AUTH_URL>/api/auth/callback/dex` for the three
+overlay hosts plus `http://localhost:3000` for `next dev`. Authorization is the
+app's: it admits only `UA-MIS:ida-llm` from the `groups` claim.
+
+The `ida-llm-client-secret` key of `dex-github` is the SAME value as
+`AUTH_DEX_SECRET` in Vault at `secret/tenants/ida-llm/{dev,staging,prod}/app`.
+Rotate both together (a mismatch fails sign-in at the token exchange with an
+opaque OIDC error). The env in `deployment.yaml` is `optional: true` until the
+key is sealed in; drop `optional` afterwards, as for the other clients. To
+rotate, merge-seal just that key (keeps every other key intact):
+
+```bash
+NEW_SECRET=$(openssl rand -hex 32)
+kubectl create secret generic dex-github --namespace dex \
+    --from-literal=ida-llm-client-secret="$NEW_SECRET" --dry-run=client -o yaml \
+  | kubeseal --controller-namespace kube-system \
+      --controller-name sealed-secrets-controller --format yaml \
+      --merge-into platform-services/dex/sealedsecret.yaml
+# then `vault kv patch secret/tenants/ida-llm/<env>/app AUTH_DEX_SECRET=...` x3,
+# commit on a branch + PR, and after sync: kubectl -n dex rollout restart deploy/dex
+```
+
 ## Validate
 
 ```bash
