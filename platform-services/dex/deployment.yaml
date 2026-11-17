@@ -127,6 +127,15 @@ spec:
                 secretKeyRef:
                   name: dex-github
                   key: agile-board-client-secret
+            # IDA-LLM admin console static-client secret. The SAME value is seeded
+            # into Vault as secret/tenants/ida-llm/<env>/app AUTH_DEX_SECRET for
+            # dev, staging and prod (one client). Rotate both together.
+            - name: IDA_LLM_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: dex-github
+                  key: ida-llm-client-secret
+                  optional: true
           volumeMounts:
             - name: config
               mountPath: /etc/dex
